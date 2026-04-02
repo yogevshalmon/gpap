@@ -1,0 +1,7 @@
+c Unit propagation chain: setting x1=T forces x2=T forces x3=T
+c (x1 OR x2), (~x1 OR x2), (~x2 OR x3), (~x2 OR x4)
+p cnf 4 4
+1 2 0
+-1 2 0
+-2 3 0
+-2 4 0

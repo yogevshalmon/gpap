@@ -1,0 +1,7 @@
+c Simple 3-variable, 4-clause formula
+c (~x1 OR x2), (x1 OR ~x2 OR x3), (~x1 OR ~x2), (~x3)
+p cnf 3 4
+-1 2 0
+1 -2 3 0
+-1 -2 0
+-3 0
