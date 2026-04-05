@@ -15,7 +15,7 @@ import torch
 sys.path.insert(0, ".")
 from gpap.clsdata.cnf_formula import CnfFormula
 from gpap.clsdata.occ_list import ext_lit_to_lit_index
-from gpap.solver.bcp_engine import BCPEngine
+from gpap.solver.bcp_engine import BCPEngine, make_assumption_tensor
 from gpap.solver.external_solver import ExternalSolver
 
 
@@ -41,9 +41,12 @@ def generate_random_assumptions(
     return result
 
 
-def to_lit_indices(assumptions_dimacs: list[list[int]]) -> list[list[int]]:
-    """Convert DIMACS literal lists to internal literal-index lists for GPAP."""
-    return [[ext_lit_to_lit_index(l) for l in batch] for batch in assumptions_dimacs]
+def to_assumption_tensor(
+    assumptions_dimacs: list[list[int]], device: torch.device
+) -> torch.Tensor:
+    """Convert DIMACS literal lists to a padded (K, L) tensor for BCPEngine. Setup cost only."""
+    lit_indices = [[ext_lit_to_lit_index(l) for l in batch] for batch in assumptions_dimacs]
+    return make_assumption_tensor(lit_indices, device)
 
 
 # ---------------------------------------------------------------------------
@@ -61,31 +64,36 @@ def profile_gpap(
     formula = CnfFormula(device)
     formula.parse_cnf_file(cnf_path)
 
-    assumptions_idx = to_lit_indices(assumptions_dimacs)
+    # Build padded tensor once — outside any timed section
+    assumptions_tensor = to_assumption_tensor(assumptions_dimacs, device)
 
-    def run_once():
-        engine = BCPEngine(formula)
-        engine.init_state(num_batches=K)
-        engine.apply_assumptions_bulk(assumptions_idx)
+    def run_once(engine=None):
+        engine.apply_assumptions_bulk(assumptions_tensor)
         engine.propagate()
-        return engine
+        # return engine
 
     for _ in range(num_warmup):
-        run_once()
+        engine = BCPEngine(formula)
+        engine.init_state(num_batches=K)
+        # engine.apply_assumptions_bulk(assumptions_tensor)
+        run_once(engine=engine)
 
     times_ms = []
     for _ in range(num_runs):
+        engine = BCPEngine(formula)
+        engine.init_state(num_batches=K)
+        # engine.apply_assumptions_bulk(assumptions_tensor)
         if device.type == "cuda":
             torch.cuda.synchronize()
         t0 = time.perf_counter()
-        eng = run_once()
+        run_once(engine=engine)
         if device.type == "cuda":
             torch.cuda.synchronize()
         times_ms.append((time.perf_counter() - t0) * 1000.0)
 
     t = torch.tensor(times_ms)
-    conflict_results = eng.conflict.tolist()
-    avg_prop = eng.num_propagated.float().mean().item()
+    conflict_results = engine.conflict.tolist()
+    avg_prop = engine.num_propagated.float().mean().item()
 
     return {
         "mean_ms": t.mean().item(),
@@ -95,6 +103,7 @@ def profile_gpap(
         "conflict": conflict_results,        # list[bool], length K
         "avg_propagations": avg_prop,
         "conflict_rate": sum(conflict_results) / K,
+        "bcp_rounds": engine._bcp_rounds,
     }
 
 
@@ -110,19 +119,14 @@ def profile_external(
     K = len(assumptions_dimacs)
     ext = ExternalSolver(cnf_path)
 
-    def run_once():
-        conflicts = []
-        for batch_lits in assumptions_dimacs:
-            is_conflict, _ = ext.propagate_assumptions(batch_lits)
-            conflicts.append(is_conflict)
-        return conflicts
-
-    # No warmup: MinisatGH spins up fresh each call, warmup doesn't help
+    # Use propagate_many so the CNF is bootstrapped once per run, not once per batch.
+    # Internal solver time excludes even that single bootstrap cost.
     times_ms = []
     for _ in range(num_runs):
-        t0 = time.perf_counter()
-        conflict_results = run_once()
-        times_ms.append((time.perf_counter() - t0) * 1000.0)
+        conflict_results, prop_list, solve_s = ext.propagate_many(assumptions_dimacs)
+        times_ms.append(solve_s * 1000.0)
+
+    avg_propagations = sum(len(p) for p in prop_list) / K
 
     t = torch.tensor(times_ms)
     return {
@@ -132,6 +136,7 @@ def profile_external(
         "max_ms": t.max().item(),
         "conflict": conflict_results,        # list[bool], length K
         "conflict_rate": sum(conflict_results) / K,
+        "avg_propagations": avg_propagations,
     }
 
 
@@ -191,14 +196,16 @@ def main():
     print(f"  GPAP  : {gpap['mean_ms']:8.2f} ± {gpap['std_ms']:.2f} ms  "
           f"[{gpap['min_ms']:.2f}, {gpap['max_ms']:.2f}]  "
           f"conflict rate={gpap['conflict_rate']:.2%}  "
-          f"avg props={gpap['avg_propagations']:.1f}")
+          f"avg props={gpap['avg_propagations']:.1f}"
+          f"  BCP rounds={gpap['bcp_rounds']}")
 
     # --- External solver ---
     print(f"Running external solver (PySAT MinisatGH, {args.K} serial calls per run)...")
     ext = profile_external(args.cnf, assumptions, args.runs)
     print(f"  PySAT : {ext['mean_ms']:8.2f} ± {ext['std_ms']:.2f} ms  "
           f"[{ext['min_ms']:.2f}, {ext['max_ms']:.2f}]  "
-          f"conflict rate={ext['conflict_rate']:.2%}")
+          f"conflict rate={ext['conflict_rate']:.2%}  "
+          f"avg props={ext['avg_propagations']:.1f}")
 
     # --- Speedup ---
     speedup = ext["mean_ms"] / gpap["mean_ms"]

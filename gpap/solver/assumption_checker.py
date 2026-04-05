@@ -2,7 +2,7 @@ import torch
 
 from gpap.clsdata.cnf_formula import CnfFormula
 from gpap.clsdata.occ_list import ext_lit_to_lit_index, lit_index_to_var
-from gpap.solver.bcp_engine import BCPEngine
+from gpap.solver.bcp_engine import BCPEngine, make_assumption_tensor
 from gpap.utils.sat_def import ext_assumptions
 
 
@@ -48,18 +48,18 @@ class AssumptionChecker:
         """
         K = len(assumptions)
 
-        # convert external literals to literal indices
-        assumptions_lit_indices = []
-        for assg in assumptions:
-            lit_indices = [ext_lit_to_lit_index(lit) for lit in assg]
-            assumptions_lit_indices.append(lit_indices)
+        # convert external literals to literal indices, then to padded tensor (setup cost)
+        assumptions_lit_indices = [
+            [ext_lit_to_lit_index(lit) for lit in assg] for assg in assumptions
+        ]
+        assum_tensor = make_assumption_tensor(assumptions_lit_indices, self._device)
 
         # create BCP engine and init state
         engine = BCPEngine(self._formula)
         engine.init_state(num_batches=K)
 
         # apply assumptions
-        engine.apply_assumptions_bulk(assumptions_lit_indices)
+        engine.apply_assumptions_bulk(assum_tensor)
 
         # run BCP if requested
         if propagate:
@@ -91,14 +91,15 @@ class AssumptionChecker:
             for v in range(N):
                 val = assumptions[k, v].item()
                 if val == 1:
-                    lit_indices.append(2 * v)       # positive literal
+                    lit_indices.append(2 * v)
                 elif val == -1:
-                    lit_indices.append(2 * v + 1)   # negative literal
+                    lit_indices.append(2 * v + 1)
             assumptions_lit_indices.append(lit_indices)
+        assum_tensor = make_assumption_tensor(assumptions_lit_indices, self._device)
 
         engine = BCPEngine(self._formula)
         engine.init_state(num_batches=K)
-        engine.apply_assumptions_bulk(assumptions_lit_indices)
+        engine.apply_assumptions_bulk(assum_tensor)
 
         if propagate:
             engine.propagate()

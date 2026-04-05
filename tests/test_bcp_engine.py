@@ -4,7 +4,7 @@ import pytest
 
 from gpap.clsdata.cnf_formula import CnfFormula
 from gpap.clsdata.occ_list import ext_lit_to_lit_index
-from gpap.solver.bcp_engine import BCPEngine
+from gpap.solver.bcp_engine import BCPEngine, make_assumption_tensor
 
 TEST_DATA_DIR = os.path.join(os.path.dirname(__file__), "test_data")
 
@@ -18,6 +18,9 @@ class TestBCPEngine:
         engine.init_state(num_batches=num_batches)
         return engine
 
+    def _assum(self, list_of_lists):
+        return make_assumption_tensor(list_of_lists, torch.device("cpu"))
+
     def test_init_state(self):
         engine = self._make_engine([[1, 2], [-1, 3]], num_vars=3, num_batches=2)
         assert engine.sat_count.shape == (2, 2)
@@ -30,7 +33,7 @@ class TestBCPEngine:
         engine = self._make_engine([[1, 2], [-1, 3]], num_vars=3, num_batches=1)
 
         # assume x1=TRUE (lit_idx=0)
-        engine.apply_assumptions_bulk([[ext_lit_to_lit_index(1)]])
+        engine.apply_assumptions_bulk(self._assum([[ext_lit_to_lit_index(1)]]))
 
         # x1 TRUE -> ~x1 falsified -> clause 1 (~x1 OR x3) loses one lit
         # sat_count[0,0] should still be 2 (x1 is in clause 0 but occ[0] = clauses with ~x1 = clause 1)
@@ -45,7 +48,7 @@ class TestBCPEngine:
         engine = self._make_engine([[1], [-1]], num_vars=1, num_batches=1)
 
         # assume x1=TRUE: clause 1 (~x1) becomes conflict (sat_count -> 0)
-        engine.apply_assumptions_bulk([[ext_lit_to_lit_index(1)]])
+        engine.apply_assumptions_bulk(self._assum([[ext_lit_to_lit_index(1)]]))
 
         # after assumption: sat_count[0,1] should be 0 (conflict)
         assert engine.sat_count[0, 1].item() == 0
@@ -55,7 +58,7 @@ class TestBCPEngine:
         engine = self._make_engine([[-1, 2], [-2, 3]], num_vars=3, num_batches=1)
 
         # assume x1=TRUE
-        engine.apply_assumptions_bulk([[ext_lit_to_lit_index(1)]])
+        engine.apply_assumptions_bulk(self._assum([[ext_lit_to_lit_index(1)]]))
 
         # after assumption: clause 0 has ~x1 falsified -> sat_count=1, lit_sum=x2(idx=2)
         assert engine.sat_count[0, 0].item() == 1
@@ -76,7 +79,7 @@ class TestBCPEngine:
         engine = self._make_engine([[1, 2], [-1], [-2]], num_vars=2, num_batches=1)
 
         # assume x1=FALSE (lit_idx=1, ~x1 TRUE)
-        engine.apply_assumptions_bulk([[ext_lit_to_lit_index(-1)]])
+        engine.apply_assumptions_bulk(self._assum([[ext_lit_to_lit_index(-1)]]))
 
         conflict = engine.propagate()
         assert conflict[0].item() == True
@@ -86,10 +89,10 @@ class TestBCPEngine:
         engine = self._make_engine([[1, 2], [-1, 2]], num_vars=2, num_batches=2)
 
         # batch 0: x2=TRUE, batch 1: x2=FALSE
-        engine.apply_assumptions_bulk([
+        engine.apply_assumptions_bulk(self._assum([
             [ext_lit_to_lit_index(2)],   # x2=TRUE
             [ext_lit_to_lit_index(-2)],  # x2=FALSE
-        ])
+        ]))
 
         conflict = engine.propagate()
 
@@ -122,7 +125,7 @@ class TestBCPEngine:
         # assume x1=FALSE: clause 0 loses x1 -> unit: x2 forced
         # then x2=TRUE: occ[2] = clauses with ~x2 = clauses 2,3 lose ~x2
         # clause 2 becomes unit: x3 forced. clause 3 becomes unit: x4 forced.
-        engine.apply_assumptions_bulk([[ext_lit_to_lit_index(-1)]])
+        engine.apply_assumptions_bulk(self._assum([[ext_lit_to_lit_index(-1)]]))
         conflict = engine.propagate()
 
         assert conflict[0].item() == False
@@ -142,7 +145,7 @@ class TestBCPEngine:
         # After assumptions, clause 1 has sat_count=1, lit_sum = x2's idx
         # But x2 is already TRUE -> should skip, not propagate
         engine = self._make_engine([[1, 2], [-1, 2]], num_vars=2, num_batches=1)
-        engine.apply_assumptions_bulk([[ext_lit_to_lit_index(1), ext_lit_to_lit_index(2)]])
+        engine.apply_assumptions_bulk(self._assum([[ext_lit_to_lit_index(1), ext_lit_to_lit_index(2)]]))
         conflict = engine.propagate()
 
         assert conflict[0].item() == False
