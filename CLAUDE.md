@@ -46,10 +46,10 @@ benchmarks/                # benchmark data (placeholder)
 ## Running Tests
 
 ```bash
-PYTHONPATH=. python3 -m pytest tests/ -v
+PYTHONPATH=. .venv/bin/python -m pytest tests/ -v
 ```
 
-Uses the GPSS venv at `/home/yshalmon/git/GPSS/.venv/` which has torch and pytest.
+Uses the local venv at `.venv/` with dependencies from `requirements.txt` (torch, python-sat, tqdm, pytest).
 
 ## What's Reused from GPSS
 
