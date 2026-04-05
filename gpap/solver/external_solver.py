@@ -76,8 +76,32 @@ class ExternalSolver():
             assumptions: list of DIMACS literals to assume
 
         Returns:
-            (is_conflict, propagated_lits): bool and list of propagated literals
+            (is_conflict, propagated_lits, solve_time_s): conflict flag, propagated
+            literals, and internal solver time in seconds (excludes bootstrap overhead).
         """
-        with MinisatGH(bootstrap_with=self.cnf) as solver:
+        with MinisatGH(bootstrap_with=self.cnf, use_timer=True) as solver:
             st, propagated = solver.propagate(assumptions=assumptions)
-            return (not st, propagated)
+            return (not st, propagated, solver.time())
+
+    def propagate_many(self, assumptions_list: list[list[int]]) -> tuple:
+        """Run unit propagation for multiple assumption sets using a single solver instance.
+
+        The formula is bootstrapped once, avoiding repeated CNF loading overhead.
+
+        Args:
+            assumptions_list: list of K assumption sets (each a list of DIMACS literals)
+
+        Returns:
+            (conflicts, propagated_list, total_solve_time_s): list of conflict bools,
+            list of propagated-literal lists, and total internal solver time in seconds.
+        """
+        conflicts = []
+        propagated_list = []
+        total_time_s = 0.0
+        with MinisatGH(bootstrap_with=self.cnf, use_timer=True) as solver:
+            for assumptions in assumptions_list:
+                st, propagated = solver.propagate(assumptions=assumptions)
+                conflicts.append(not st)
+                propagated_list.append(propagated)
+                total_time_s += solver.time()
+        return conflicts, propagated_list, total_time_s
