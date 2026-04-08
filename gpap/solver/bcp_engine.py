@@ -111,10 +111,10 @@ class BCPEngine:
         if P == 0:
             return
 
-        # CSR lookup for all P literals at once — .long() required (occ_offsets is int32)
-        starts  = occ.occ_offsets[lit_ids].long()      # (P,)
-        ends    = occ.occ_offsets[lit_ids + 1].long()  # (P,)
-        lengths = ends - starts                         # (P,) may include zeros
+        # CSR lookup for all P literals at once (occ arrays are int64)
+        starts  = occ.occ_offsets[lit_ids]              # (P,)
+        ends    = occ.occ_offsets[lit_ids + 1]          # (P,)
+        lengths = ends - starts                          # (P,) may include zeros
 
         total = lengths.sum().item()
         if total > 0:
@@ -128,10 +128,10 @@ class BCPEngine:
             flat_range  = torch.arange(total, dtype=torch.long, device=self._device)
             local_off   = flat_range - cum.repeat_interleave(lengths)
             csi         = starts.repeat_interleave(lengths) + local_off
-            exp_clauses = occ.occ_clauses[csi].long()   # (total,) clause indices
+            exp_clauses = occ.occ_clauses[csi]           # (total,) clause indices
 
             # Flat 1D index into (K, M)
-            flat_idx = exp_batches * M + exp_clauses    # (total,) int64
+            flat_idx = exp_batches * M + exp_clauses     # (total,) int64
 
             # Scatter-subtract 1 from sat_count (int32)
             neg_ones = torch.full((total,), -1, dtype=torch.int32, device=self._device)
@@ -170,6 +170,7 @@ class BCPEngine:
                     continue
                 self._apply_literal(lit_idx, batch_mask)
 
+    @torch.inference_mode()
     def apply_assumptions_bulk(self, assumptions: torch.Tensor):
         """Apply assumptions in bulk using scatter operations for better GPU performance.
 
@@ -219,6 +220,7 @@ class BCPEngine:
         if pairs.size(0) > 0:
             self._bulk_propagate_lits(pairs[:, 0], pairs[:, 1])
 
+    @torch.inference_mode()
     def propagate(self) -> torch.Tensor:
         """Run BCP to fixpoint for all active batches.
 
@@ -230,50 +232,60 @@ class BCPEngine:
 
         while True:
             self._bcp_rounds += 1
-            # (A) Conflict detection — vectorized
-            conflict_mask = (self._sat_count == 0) & self._active.unsqueeze(1)
-            batch_has_conflict = conflict_mask.any(dim=1)
-            self._conflict |= batch_has_conflict & self._active
-            self._active &= ~batch_has_conflict
 
-            # (B) Unit detection — vectorized
-            unit_mask = (self._sat_count == 1) & self._active.unsqueeze(1)
-            if not unit_mask.any():
+            # (A) Fused conflict + unit detection — single (K, M) scan
+            low_mask = (self._sat_count <= 1) & self._active.unsqueeze(1)
+            if not low_mask.any():
                 break
 
-            unit_pairs  = torch.nonzero(unit_mask)                            # (U, 2)
+            low_pairs = low_mask.nonzero()  # (U+C, 2) — all interesting cells
+            sc_vals = self._sat_count[low_pairs[:, 0], low_pairs[:, 1]]
+
+            # Conflicts: sat_count == 0
+            is_conflict = sc_vals == 0
+            if is_conflict.any():
+                conflict_batches = low_pairs[is_conflict, 0]
+                self._conflict[conflict_batches] = True   # idempotent for duplicates
+                self._active[conflict_batches] = False
+
+            # Units: sat_count == 1
+            is_unit = sc_vals == 1
+            if not is_unit.any():
+                break
+
+            unit_pairs  = low_pairs[is_unit]                                  # (U, 2)
             batch_ids   = unit_pairs[:, 0]                                    # (U,) int64
             forced_lits = self._lit_sum[batch_ids, unit_pairs[:, 1]].long()  # (U,) int64
 
-            # (C) Vectorized filter
+            # (B) Vectorized filter
             neg_forced       = forced_lits ^ 1
             is_active        = self._active[batch_ids]
             is_new           = self._assignment[batch_ids, forced_lits] == 0
             is_contradiction = self._assignment[batch_ids, neg_forced]  == 1
 
-            # (D) Mark batches where negation already in assignment as conflicted
+            # (C) Mark batches where negation already in assignment as conflicted
             contra_mask = is_active & is_contradiction
             if contra_mask.any():
                 self._conflict[batch_ids[contra_mask]] = True
                 self._active[batch_ids[contra_mask]]   = False
 
-            # (E) Candidates: active, not yet assigned, no existing contradiction
+            # (D) Candidates: active, not yet assigned, no existing contradiction
             to_prop = is_active & is_new & ~is_contradiction
             if not to_prop.any():
                 break
             prop_batches = batch_ids[to_prop]
             prop_lits    = forced_lits[to_prop]
 
-            # (F+G) Build prop bitmap — idempotent, deduplicates duplicates from step E.
-            # Then detect intra-round contradictions (both polarities forced in one batch).
+            # (E) Build prop bitmap — idempotent, deduplicates from step D.
+            # Then detect intra-round contradictions (both polarities forced).
             self._tmp_prop.fill_(False)
             self._tmp_prop[prop_batches, prop_lits] = True
-            intra_conflict = (self._tmp_prop[:, 0::2] & self._tmp_prop[:, 1::2]).any(dim=1) & self._active
+            # Contiguous view (K, N, 2) avoids strided access for conflict check
+            intra_conflict = self._tmp_prop.view(K, N, 2).all(dim=2).any(dim=1) & self._active
             if intra_conflict.any():
-                conflict_idxs = torch.where(intra_conflict)[0]
-                self._conflict[conflict_idxs] = True
-                self._active[conflict_idxs]   = False
-                self._tmp_prop[conflict_idxs] = False  # clear conflicted rows
+                self._conflict[intra_conflict] = True
+                self._active[intra_conflict]   = False
+                self._tmp_prop[intra_conflict] = False
 
             # Extract deduplicated (batch, lit) pairs from bitmap
             prop_pairs = self._tmp_prop.nonzero()  # (P', 2), inherently unique
@@ -282,10 +294,10 @@ class BCPEngine:
             prop_batches = prop_pairs[:, 0]
             prop_lits    = prop_pairs[:, 1]
 
-            # (H) Bulk update sat_count, lit_sum, assignment
+            # (F) Bulk update sat_count, lit_sum, assignment
             self._bulk_propagate_lits(prop_batches, prop_lits)
 
-            # (I) Per-batch propagation count
+            # (G) Per-batch propagation count
             ones = torch.ones(prop_batches.size(0), dtype=torch.int32, device=self._device)
             self._num_propagated.scatter_add_(0, prop_batches, ones)
 

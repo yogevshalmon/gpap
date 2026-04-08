@@ -67,8 +67,8 @@ class OccurrenceList:
             all_clauses.extend(cls_list)
             offsets.append(len(all_clauses))
 
-        occ._occ_offsets = torch.tensor(offsets, dtype=torch.int32, device=device)
-        occ._occ_clauses = torch.tensor(all_clauses, dtype=torch.int32, device=device) if all_clauses else torch.empty(0, dtype=torch.int32, device=device)
+        occ._occ_offsets = torch.tensor(offsets, dtype=torch.int64, device=device)
+        occ._occ_clauses = torch.tensor(all_clauses, dtype=torch.int64, device=device) if all_clauses else torch.empty(0, dtype=torch.int64, device=device)
 
         return occ
 
