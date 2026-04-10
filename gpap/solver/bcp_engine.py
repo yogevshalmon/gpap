@@ -73,9 +73,6 @@ class BCPEngine:
         # track number of propagated literals per batch
         self._num_propagated = torch.zeros(K, dtype=torch.int32, device=self._device)
 
-        # pre-allocated workspace for propagation round (avoids per-iteration allocation)
-        self._tmp_prop = torch.zeros(K, 2 * N, dtype=torch.bool, device=self._device)
-
         # Frontier: (batch, clause) pairs whose sat_count was just decremented.
         # propagate() reads frontier_batches/clauses and replaces them each round.
         # Seeded here with clauses already at unit/conflict in the original formula.
@@ -264,7 +261,6 @@ class BCPEngine:
         Returns:
             conflict: (K,) boolean tensor, True if batch has a conflict
         """
-        K = self._sat_count.size(0)
         N = self._num_vars
 
         frontier_b = self._frontier_batches
@@ -316,20 +312,28 @@ class BCPEngine:
             prop_batches = unit_b[to_prop]
             prop_lits    = forced_lits[to_prop]
 
-            # --- Bitmap dedup + intra-round contradiction check (E) ---
-            self._tmp_prop.fill_(False)
-            self._tmp_prop[prop_batches, prop_lits] = True
-            intra_conflict = self._tmp_prop.view(K, N, 2).all(dim=2).any(dim=1) & self._active
-            if intra_conflict.any():
-                self._conflict[intra_conflict] = True
-                self._active[intra_conflict]   = False
-                self._tmp_prop[intra_conflict] = False
-            prop_pairs = self._tmp_prop.nonzero()
-            if prop_pairs.numel() == 0:
-                break
+            # --- Sparse dedup + intra-round contradiction check (E) ---
+            # Encode (batch, lit) as a flat scalar; torch.unique deduplicates cheaply
+            two_N = 2 * N
+            flat_unique = torch.unique(prop_batches * two_N + prop_lits)  # sorted, deduped
+            prop_batches = flat_unique.div(two_N, rounding_mode='floor')
+            prop_lits    = flat_unique % two_N
 
-            prop_batches = prop_pairs[:, 0]
-            prop_lits    = prop_pairs[:, 1]
+            # Intra-round conflict: same batch has both l and ~l queued
+            flat_neg = prop_batches * two_N + (prop_lits ^ 1)
+            intra_mask = torch.isin(flat_neg, flat_unique)
+            if intra_mask.any():
+                bad = torch.unique(prop_batches[intra_mask])
+                bad = bad[self._active[bad]]
+                if bad.numel() > 0:
+                    self._conflict[bad] = True
+                    self._active[bad]   = False
+                    keep = ~torch.isin(prop_batches, bad)
+                    prop_batches = prop_batches[keep]
+                    prop_lits    = prop_lits[keep]
+
+            if prop_batches.numel() == 0:
+                break
 
             # --- Propagate; next frontier = clauses whose sat_count just changed (F) ---
             frontier_b, frontier_c = self._bulk_propagate_lits(prop_batches, prop_lits)
@@ -351,7 +355,6 @@ class BCPEngine:
             conflict: (K,) boolean tensor
             summary:  dict[step_name -> {total_ms, mean_ms, n}]
         """
-        K = self._sat_count.size(0)
         N = self._num_vars
         device = self._device
         is_cuda = device.type == "cuda"
@@ -368,7 +371,7 @@ class BCPEngine:
             "sc_gather":       [],  # sat_count[fb, fc] gather
             "conflict":        [],  # sat==0 detection + mark
             "unit_filter":     [],  # B/C/D: forced-lit gather + active/new/contra filter
-            "bitmap":          [],  # E: tmp_prop fill + intra-conflict + nonzero dedup
+            "sparse_dedup":    [],  # E: unique encode + intra-conflict (sparse, no bitmap)
             "csr_lookup":      [],  # CSR occ_offsets slice + lengths
             "expand":          [],  # repeat_interleave + segment-offset + flat_idx
             "scatter_sat":     [],  # scatter_add_ on sat_count
@@ -427,20 +430,25 @@ class BCPEngine:
             prop_lits    = forced_lits[to_prop]
 
             t0 = ts()
-            self._tmp_prop.fill_(False)
-            self._tmp_prop[prop_batches, prop_lits] = True
-            intra_conflict = self._tmp_prop.view(K, N, 2).all(dim=2).any(dim=1) & self._active
-            if intra_conflict.any():
-                self._conflict[intra_conflict] = True
-                self._active[intra_conflict]   = False
-                self._tmp_prop[intra_conflict] = False
-            prop_pairs = self._tmp_prop.nonzero()
-            steps["bitmap"].append(ts() - t0)
-            if prop_pairs.numel() == 0:
+            two_N = 2 * N
+            flat_unique = torch.unique(prop_batches * two_N + prop_lits)
+            prop_batches = flat_unique.div(two_N, rounding_mode='floor')
+            prop_lits    = flat_unique % two_N
+            flat_neg = prop_batches * two_N + (prop_lits ^ 1)
+            intra_mask = torch.isin(flat_neg, flat_unique)
+            if intra_mask.any():
+                bad = torch.unique(prop_batches[intra_mask])
+                bad = bad[self._active[bad]]
+                if bad.numel() > 0:
+                    self._conflict[bad] = True
+                    self._active[bad]   = False
+                    keep = ~torch.isin(prop_batches, bad)
+                    prop_batches = prop_batches[keep]
+                    prop_lits    = prop_lits[keep]
+            steps["sparse_dedup"].append(ts() - t0)
+            if prop_batches.numel() == 0:
                 break
 
-            prop_batches = prop_pairs[:, 0]
-            prop_lits    = prop_pairs[:, 1]
             P = prop_batches.size(0)
 
             # Inlined _bulk_propagate_lits with sub-step timing

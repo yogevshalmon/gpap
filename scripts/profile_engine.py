@@ -129,7 +129,7 @@ _PROPAGATE_STEPS = [
     ("sc_gather       (sat_count[fb,fc] read)",     ["sc_gather"]),
     ("conflict        (sat==0 detect + mark)",      ["conflict"]),
     ("unit_filter     (B/C/D forced-lit filter)",   ["unit_filter"]),
-    ("bitmap          (E: fill + intra + nonzero)", ["bitmap"]),
+    ("sparse_dedup    (E: unique + intra-conflict)", ["sparse_dedup"]),
     ("csr_lookup      (occ_offsets slice)",         ["csr_lookup"]),
     ("expand          (repeat_interleave + csi)",   ["expand"]),
     ("scatter_sat     (scatter_add sat_count)",     ["scatter_sat"]),
