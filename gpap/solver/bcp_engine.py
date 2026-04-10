@@ -1,3 +1,5 @@
+import time
+
 import torch
 
 from gpap.clsdata.cnf_formula import CnfFormula
@@ -37,6 +39,9 @@ class BCPEngine:
 
     Conflict: sat_count == 0
     Unit: sat_count == 1, remaining literal = lit_sum value
+
+    Propagation uses a frontier of (batch, clause) pairs whose sat_count was just
+    decremented, avoiding a full (K, M) scan each round.
     """
 
     def __init__(self, formula: CnfFormula):
@@ -71,6 +76,20 @@ class BCPEngine:
         # pre-allocated workspace for propagation round (avoids per-iteration allocation)
         self._tmp_prop = torch.zeros(K, 2 * N, dtype=torch.bool, device=self._device)
 
+        # Frontier: (batch, clause) pairs whose sat_count was just decremented.
+        # propagate() reads frontier_batches/clauses and replaces them each round.
+        # Seeded here with clauses already at unit/conflict in the original formula.
+        init_unit_cls = (self._formula.clause_sizes <= 1).nonzero(as_tuple=False).view(-1)
+        if init_unit_cls.numel() > 0:
+            self._frontier_batches = (
+                torch.arange(K, device=self._device)
+                .unsqueeze(1).expand(-1, init_unit_cls.numel()).reshape(-1)
+            )
+            self._frontier_clauses = init_unit_cls.unsqueeze(0).expand(K, -1).reshape(-1)
+        else:
+            self._frontier_batches = torch.empty(0, dtype=torch.long, device=self._device)
+            self._frontier_clauses = torch.empty(0, dtype=torch.long, device=self._device)
+
     def _apply_literal(self, lit_index: int, batch_mask: torch.Tensor):
         """Set literal lit_index TRUE for batches where batch_mask is True.
         Update sat_count and lit_sum for affected clauses.
@@ -99,8 +118,14 @@ class BCPEngine:
         # mark literal as TRUE in assignment
         self._assignment[batch_indices, lit_index] = 1
 
-    def _bulk_propagate_lits(self, batch_ids: torch.Tensor, lit_ids: torch.Tensor) -> None:
-        """Bulk-propagate literals: update sat_count, lit_sum, and assignment for all (batch, lit) pairs.
+    def _bulk_propagate_lits(
+        self, batch_ids: torch.Tensor, lit_ids: torch.Tensor
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        """Bulk-propagate literals: update sat_count, lit_sum, and assignment.
+
+        Returns (frontier_batches, frontier_clauses): the (batch, clause) pairs whose
+        sat_count was just decremented. Pass these as the next round's frontier so
+        propagate() only checks cells that actually changed.
 
         batch_ids: (P,) int64 — unique (batch, lit) pairs, all active, none already assigned
         lit_ids:   (P,) int64
@@ -108,20 +133,21 @@ class BCPEngine:
         occ = self._formula.occ_list
         M = self._num_clauses
         P = batch_ids.size(0)
+        _empty = torch.empty(0, dtype=torch.long, device=self._device)
         if P == 0:
-            return
+            return _empty, _empty
 
-        # CSR lookup for all P literals at once (occ arrays are int64)
-        starts  = occ.occ_offsets[lit_ids]              # (P,)
-        ends    = occ.occ_offsets[lit_ids + 1]          # (P,)
-        lengths = ends - starts                          # (P,) may include zeros
+        # CSR lookup for all P literals at once
+        starts  = occ.occ_offsets[lit_ids]          # (P,)
+        ends    = occ.occ_offsets[lit_ids + 1]       # (P,)
+        lengths = ends - starts                       # (P,) — may include zeros
+        total   = lengths.sum().item()               # CPU sync: necessary scalar transfer
 
-        total = lengths.sum().item()
         if total > 0:
             # Expand batch_ids to one entry per occ hit
             exp_batches = batch_ids.repeat_interleave(lengths)  # (total,)
 
-            # Segment-offset trick: local_off[j] = position of j within its group
+            # Segment-offset trick: local_off[j] = position of j within its segment
             cum = torch.zeros(P, dtype=torch.long, device=self._device)
             if P > 1:
                 cum[1:] = lengths[:-1].cumsum(0)
@@ -130,20 +156,23 @@ class BCPEngine:
             csi         = starts.repeat_interleave(lengths) + local_off
             exp_clauses = occ.occ_clauses[csi]           # (total,) clause indices
 
-            # Flat 1D index into (K, M)
-            flat_idx = exp_batches * M + exp_clauses     # (total,) int64
+            # Flat 1D index into (K, M) for scatter operations
+            flat_idx = exp_batches * M + exp_clauses     # (total,)
 
-            # Scatter-subtract 1 from sat_count (int32)
+            # Decrement sat_count for all affected (batch, clause) pairs
             neg_ones = torch.full((total,), -1, dtype=torch.int32, device=self._device)
             self._sat_count.view(-1).scatter_add_(0, flat_idx, neg_ones)
 
-            # Scatter-subtract neg_lit from lit_sum (int32)
-            neg_lits     = (lit_ids ^ 1).to(torch.int32)               # (P,) XOR flips bit 0
-            exp_neg_lits = (-neg_lits).repeat_interleave(lengths)       # (total,) int32
+            # Subtract neg_lit from lit_sum for all affected pairs
+            neg_lits     = (lit_ids ^ 1).to(torch.int32)           # (P,) XOR flips bit 0
+            exp_neg_lits = (-neg_lits).repeat_interleave(lengths)   # (total,)
             self._lit_sum.view(-1).scatter_add_(0, flat_idx, exp_neg_lits)
 
-        # Mark literals as TRUE
+            self._assignment[batch_ids, lit_ids] = 1
+            return exp_batches, exp_clauses
+
         self._assignment[batch_ids, lit_ids] = 1
+        return _empty, _empty
 
     def apply_assumptions(self, assumptions_lit_indices: list[list[int]]):
         """Apply assumption sets. assumptions_lit_indices[k] is a list of literal indices for batch k.
@@ -174,6 +203,9 @@ class BCPEngine:
     def apply_assumptions_bulk(self, assumptions: torch.Tensor):
         """Apply assumptions in bulk using scatter operations for better GPU performance.
 
+        Populates the frontier with affected (batch, clause) pairs so propagate()
+        only checks cells that were modified.
+
         Args:
             assumptions: (K, L) int64 tensor. Each row is one batch's literals;
                          -1 = padding. Build with make_assumption_tensor() outside
@@ -199,7 +231,6 @@ class BCPEngine:
         assum_mat[batch_ids, lit_ids] = True
 
         # Intra-batch contradiction: same batch assumes both l and ~l for some variable
-        # Even cols = positive polarity, odd cols = negative polarity
         intra_conflict = (assum_mat[:, 0::2] & assum_mat[:, 1::2]).any(dim=1) & self._active
 
         # Contradiction against existing assignment: assume l but ~l already TRUE
@@ -212,17 +243,23 @@ class BCPEngine:
         self._conflict |= new_conflicts
         self._active   &= ~new_conflicts
 
-        # Get unique (batch, lit) pairs for still-active batches (assum_mat.nonzero() deduplicates)
+        # Get unique (batch, lit) pairs for still-active batches
         pairs = assum_mat.nonzero()           # (total_unique, 2) int64
         valid = self._active[pairs[:, 0]]
         pairs = pairs[valid]
 
         if pairs.size(0) > 0:
-            self._bulk_propagate_lits(pairs[:, 0], pairs[:, 1])
+            new_b, new_c = self._bulk_propagate_lits(pairs[:, 0], pairs[:, 1])
+            if new_b.numel() > 0:
+                self._frontier_batches = torch.cat([self._frontier_batches, new_b])
+                self._frontier_clauses = torch.cat([self._frontier_clauses, new_c])
 
     @torch.inference_mode()
     def propagate(self) -> torch.Tensor:
         """Run BCP to fixpoint for all active batches.
+
+        Uses a frontier of (batch, clause) pairs updated each round — only checks
+        cells whose sat_count changed, avoiding a full (K, M) scan.
 
         Returns:
             conflict: (K,) boolean tensor, True if batch has a conflict
@@ -230,78 +267,235 @@ class BCPEngine:
         K = self._sat_count.size(0)
         N = self._num_vars
 
-        while True:
+        frontier_b = self._frontier_batches
+        frontier_c = self._frontier_clauses
+
+        while frontier_b.numel() > 0:
             self._bcp_rounds += 1
 
-            # (A) Fused conflict + unit detection — single (K, M) scan
-            low_mask = (self._sat_count <= 1) & self._active.unsqueeze(1)
-            if not low_mask.any():
+            # --- Filter frontier to active batches ---
+            active_mask = self._active[frontier_b]
+            if not active_mask.any():
                 break
+            fb = frontier_b[active_mask]
+            fc = frontier_c[active_mask]
 
-            low_pairs = low_mask.nonzero()  # (U+C, 2) — all interesting cells
-            sc_vals = self._sat_count[low_pairs[:, 0], low_pairs[:, 1]]
+            # --- Gather sat_count at frontier positions ---
+            sc_vals = self._sat_count[fb, fc]
 
-            # Conflicts: sat_count == 0
+            # --- Conflicts: sat_count == 0 ---
             is_conflict = sc_vals == 0
             if is_conflict.any():
-                conflict_batches = low_pairs[is_conflict, 0]
-                self._conflict[conflict_batches] = True   # idempotent for duplicates
-                self._active[conflict_batches] = False
+                self._conflict[fb[is_conflict]] = True
+                self._active[fb[is_conflict]]   = False
 
-            # Units: sat_count == 1
-            is_unit = sc_vals == 1
+            # --- Units: sat_count == 1 for still-active batches ---
+            is_unit = (sc_vals == 1) & self._active[fb]
             if not is_unit.any():
                 break
 
-            unit_pairs  = low_pairs[is_unit]                                  # (U, 2)
-            batch_ids   = unit_pairs[:, 0]                                    # (U,) int64
-            forced_lits = self._lit_sum[batch_ids, unit_pairs[:, 1]].long()  # (U,) int64
+            unit_b      = fb[is_unit]
+            unit_c      = fc[is_unit]
+            forced_lits = self._lit_sum[unit_b, unit_c].long()
 
-            # (B) Vectorized filter
+            # --- Vectorized filter (B/C/D) ---
             neg_forced       = forced_lits ^ 1
-            is_active        = self._active[batch_ids]
-            is_new           = self._assignment[batch_ids, forced_lits] == 0
-            is_contradiction = self._assignment[batch_ids, neg_forced]  == 1
+            is_active        = self._active[unit_b]
+            is_new           = self._assignment[unit_b, forced_lits] == 0
+            is_contradiction = self._assignment[unit_b, neg_forced]  == 1
 
-            # (C) Mark batches where negation already in assignment as conflicted
             contra_mask = is_active & is_contradiction
             if contra_mask.any():
-                self._conflict[batch_ids[contra_mask]] = True
-                self._active[batch_ids[contra_mask]]   = False
+                self._conflict[unit_b[contra_mask]] = True
+                self._active[unit_b[contra_mask]]   = False
 
-            # (D) Candidates: active, not yet assigned, no existing contradiction
             to_prop = is_active & is_new & ~is_contradiction
             if not to_prop.any():
                 break
-            prop_batches = batch_ids[to_prop]
+
+            prop_batches = unit_b[to_prop]
             prop_lits    = forced_lits[to_prop]
 
-            # (E) Build prop bitmap — idempotent, deduplicates from step D.
-            # Then detect intra-round contradictions (both polarities forced).
+            # --- Bitmap dedup + intra-round contradiction check (E) ---
             self._tmp_prop.fill_(False)
             self._tmp_prop[prop_batches, prop_lits] = True
-            # Contiguous view (K, N, 2) avoids strided access for conflict check
             intra_conflict = self._tmp_prop.view(K, N, 2).all(dim=2).any(dim=1) & self._active
             if intra_conflict.any():
                 self._conflict[intra_conflict] = True
                 self._active[intra_conflict]   = False
                 self._tmp_prop[intra_conflict] = False
-
-            # Extract deduplicated (batch, lit) pairs from bitmap
-            prop_pairs = self._tmp_prop.nonzero()  # (P', 2), inherently unique
+            prop_pairs = self._tmp_prop.nonzero()
             if prop_pairs.numel() == 0:
                 break
+
             prop_batches = prop_pairs[:, 0]
             prop_lits    = prop_pairs[:, 1]
 
-            # (F) Bulk update sat_count, lit_sum, assignment
-            self._bulk_propagate_lits(prop_batches, prop_lits)
+            # --- Propagate; next frontier = clauses whose sat_count just changed (F) ---
+            frontier_b, frontier_c = self._bulk_propagate_lits(prop_batches, prop_lits)
 
-            # (G) Per-batch propagation count
+            # --- Per-batch propagation count (G) ---
             ones = torch.ones(prop_batches.size(0), dtype=torch.int32, device=self._device)
             self._num_propagated.scatter_add_(0, prop_batches, ones)
 
         return self._conflict
+
+    @torch.inference_mode()
+    def propagate_profiled(self) -> tuple[torch.Tensor, dict]:
+        """Like propagate() but with per-step, per-round timing.
+
+        Inlines _bulk_propagate_lits to expose sub-step costs.
+        Use only for profiling — sync overhead inflates wall time.
+
+        Returns:
+            conflict: (K,) boolean tensor
+            summary:  dict[step_name -> {total_ms, mean_ms, n}]
+        """
+        K = self._sat_count.size(0)
+        N = self._num_vars
+        device = self._device
+        is_cuda = device.type == "cuda"
+        occ = self._formula.occ_list
+        M = self._num_clauses
+
+        def ts() -> float:
+            if is_cuda:
+                torch.cuda.synchronize()
+            return time.perf_counter()
+
+        steps: dict[str, list[float]] = {
+            "frontier_filter": [],  # active-mask filter on frontier
+            "sc_gather":       [],  # sat_count[fb, fc] gather
+            "conflict":        [],  # sat==0 detection + mark
+            "unit_filter":     [],  # B/C/D: forced-lit gather + active/new/contra filter
+            "bitmap":          [],  # E: tmp_prop fill + intra-conflict + nonzero dedup
+            "csr_lookup":      [],  # CSR occ_offsets slice + lengths
+            "expand":          [],  # repeat_interleave + segment-offset + flat_idx
+            "scatter_sat":     [],  # scatter_add_ on sat_count
+            "scatter_lit":     [],  # scatter_add_ on lit_sum
+            "assign":          [],  # assignment write + num_propagated scatter_add
+        }
+
+        frontier_b = self._frontier_batches
+        frontier_c = self._frontier_clauses
+
+        while frontier_b.numel() > 0:
+            self._bcp_rounds += 1
+
+            t0 = ts()
+            active_mask = self._active[frontier_b]
+            any_active = active_mask.any().item()
+            steps["frontier_filter"].append(ts() - t0)
+            if not any_active:
+                break
+            fb = frontier_b[active_mask]
+            fc = frontier_c[active_mask]
+
+            t0 = ts()
+            sc_vals = self._sat_count[fb, fc]
+            steps["sc_gather"].append(ts() - t0)
+
+            t0 = ts()
+            is_conflict = sc_vals == 0
+            if is_conflict.any():
+                self._conflict[fb[is_conflict]] = True
+                self._active[fb[is_conflict]]   = False
+            steps["conflict"].append(ts() - t0)
+
+            t0 = ts()
+            is_unit = (sc_vals == 1) & self._active[fb]
+            if not is_unit.any():
+                steps["unit_filter"].append(ts() - t0)
+                break
+            unit_b      = fb[is_unit]
+            unit_c      = fc[is_unit]
+            forced_lits = self._lit_sum[unit_b, unit_c].long()
+            neg_forced       = forced_lits ^ 1
+            is_active        = self._active[unit_b]
+            is_new           = self._assignment[unit_b, forced_lits] == 0
+            is_contradiction = self._assignment[unit_b, neg_forced]  == 1
+            contra_mask = is_active & is_contradiction
+            if contra_mask.any():
+                self._conflict[unit_b[contra_mask]] = True
+                self._active[unit_b[contra_mask]]   = False
+            to_prop = is_active & is_new & ~is_contradiction
+            steps["unit_filter"].append(ts() - t0)
+            if not to_prop.any():
+                break
+
+            prop_batches = unit_b[to_prop]
+            prop_lits    = forced_lits[to_prop]
+
+            t0 = ts()
+            self._tmp_prop.fill_(False)
+            self._tmp_prop[prop_batches, prop_lits] = True
+            intra_conflict = self._tmp_prop.view(K, N, 2).all(dim=2).any(dim=1) & self._active
+            if intra_conflict.any():
+                self._conflict[intra_conflict] = True
+                self._active[intra_conflict]   = False
+                self._tmp_prop[intra_conflict] = False
+            prop_pairs = self._tmp_prop.nonzero()
+            steps["bitmap"].append(ts() - t0)
+            if prop_pairs.numel() == 0:
+                break
+
+            prop_batches = prop_pairs[:, 0]
+            prop_lits    = prop_pairs[:, 1]
+            P = prop_batches.size(0)
+
+            # Inlined _bulk_propagate_lits with sub-step timing
+            t0 = ts()
+            starts  = occ.occ_offsets[prop_lits]
+            ends    = occ.occ_offsets[prop_lits + 1]
+            lengths = ends - starts
+            total   = lengths.sum().item()          # CPU sync: necessary scalar transfer
+            steps["csr_lookup"].append(ts() - t0)
+
+            if total > 0:
+                t0 = ts()
+                exp_batches = prop_batches.repeat_interleave(lengths)
+                cum = torch.zeros(P, dtype=torch.long, device=device)
+                if P > 1:
+                    cum[1:] = lengths[:-1].cumsum(0)
+                flat_range  = torch.arange(total, dtype=torch.long, device=device)
+                local_off   = flat_range - cum.repeat_interleave(lengths)
+                csi         = starts.repeat_interleave(lengths) + local_off
+                exp_clauses = occ.occ_clauses[csi]
+                flat_idx    = exp_batches * M + exp_clauses
+                steps["expand"].append(ts() - t0)
+
+                t0 = ts()
+                neg_ones = torch.full((total,), -1, dtype=torch.int32, device=device)
+                self._sat_count.view(-1).scatter_add_(0, flat_idx, neg_ones)
+                steps["scatter_sat"].append(ts() - t0)
+
+                t0 = ts()
+                neg_lits     = (prop_lits ^ 1).to(torch.int32)
+                exp_neg_lits = (-neg_lits).repeat_interleave(lengths)
+                self._lit_sum.view(-1).scatter_add_(0, flat_idx, exp_neg_lits)
+                steps["scatter_lit"].append(ts() - t0)
+
+                frontier_b, frontier_c = exp_batches, exp_clauses
+            else:
+                steps["expand"].append(0.0)
+                steps["scatter_sat"].append(0.0)
+                steps["scatter_lit"].append(0.0)
+                _empty = torch.empty(0, dtype=torch.long, device=device)
+                frontier_b, frontier_c = _empty, _empty
+
+            t0 = ts()
+            self._assignment[prop_batches, prop_lits] = 1
+            ones = torch.ones(P, dtype=torch.int32, device=device)
+            self._num_propagated.scatter_add_(0, prop_batches, ones)
+            steps["assign"].append(ts() - t0)
+
+        def summarize(times: list[float]) -> dict:
+            if not times:
+                return {"total_ms": 0.0, "mean_ms": 0.0, "n": 0}
+            ms = [t * 1e3 for t in times]
+            return {"total_ms": sum(ms), "mean_ms": sum(ms) / len(ms), "n": len(ms)}
+
+        return self._conflict, {k: summarize(v) for k, v in steps.items()}
 
     @property
     def conflict(self) -> torch.Tensor:
