@@ -73,6 +73,9 @@ class BCPEngine:
         # track number of propagated literals per batch
         self._num_propagated = torch.zeros(K, dtype=torch.int32, device=self._device)
 
+        # track which batches hit the round limit before reaching fixpoint/conflict
+        self._timed_out = torch.zeros(K, dtype=torch.bool, device=self._device)
+
         # Frontier: (batch, clause) pairs whose sat_count was just decremented.
         # propagate() reads frontier_batches/clauses and replaces them each round.
         # Seeded here with clauses already at unit/conflict in the original formula.
@@ -252,11 +255,16 @@ class BCPEngine:
                 self._frontier_clauses = torch.cat([self._frontier_clauses, new_c])
 
     @torch.inference_mode()
-    def propagate(self) -> torch.Tensor:
-        """Run BCP to fixpoint for all active batches.
+    def propagate(self, max_rounds: int | None = None) -> torch.Tensor:
+        """Run BCP to fixpoint (or up to max_rounds) for all active batches.
 
         Uses a frontier of (batch, clause) pairs updated each round — only checks
         cells whose sat_count changed, avoiding a full (K, M) scan.
+
+        Args:
+            max_rounds: stop after this many rounds even if not at fixpoint.
+                        Batches still in the frontier are marked in self._timed_out.
+                        None (default) runs to completion.
 
         Returns:
             conflict: (K,) boolean tensor, True if batch has a conflict
@@ -265,9 +273,19 @@ class BCPEngine:
 
         frontier_b = self._frontier_batches
         frontier_c = self._frontier_clauses
+        round_count = 0
 
         while frontier_b.numel() > 0:
             self._bcp_rounds += 1
+            round_count += 1
+
+            if max_rounds is not None and round_count > max_rounds:
+                # Mark batches still active in this frontier as timed out
+                in_flight = torch.unique(frontier_b)
+                still_active = in_flight[self._active[in_flight]]
+                if still_active.numel() > 0:
+                    self._timed_out[still_active] = True
+                break
 
             # --- Filter frontier to active batches ---
             active_mask = self._active[frontier_b]
@@ -520,6 +538,11 @@ class BCPEngine:
     @property
     def num_propagated(self) -> torch.Tensor:
         return self._num_propagated
+
+    @property
+    def timed_out(self) -> torch.Tensor:
+        """(K,) bool — True if batch hit the round limit before reaching fixpoint/conflict."""
+        return self._timed_out
 
     @property
     def sat_count(self) -> torch.Tensor:

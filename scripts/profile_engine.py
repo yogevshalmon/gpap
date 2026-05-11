@@ -64,6 +64,7 @@ def profile_gpap(
     device: torch.device,
     num_warmup: int,
     num_runs: int,
+    max_rounds: int | None = None,
 ) -> dict:
     K = len(assumptions_dimacs)
     formula = CnfFormula(device)
@@ -76,7 +77,7 @@ def profile_gpap(
         _sync(device); t0 = time.perf_counter()
         engine.apply_assumptions_bulk(assumptions_tensor)
         _sync(device); t1 = time.perf_counter()
-        engine.propagate()
+        engine.propagate(max_rounds=max_rounds)
         _sync(device); t2 = time.perf_counter()
         return (t1 - t0) * 1e3, (t2 - t1) * 1e3
 
@@ -101,6 +102,7 @@ def profile_gpap(
 
     conflict_results = engine.conflict.tolist()
     avg_prop = engine.num_propagated.float().mean().item()
+    completion_rate = (~engine.timed_out).float().mean().item()
 
     return {
         "mean_ms":           tt.mean().item(),
@@ -116,6 +118,7 @@ def profile_gpap(
         "conflict_rate":     sum(conflict_results) / K,
         "bcp_rounds_mean":   tr.mean().item(),
         "bcp_rounds_std":    tr.std().item(),
+        "completion_rate":   completion_rate,
     }
 
 
