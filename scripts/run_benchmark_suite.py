@@ -52,6 +52,9 @@ def _run_instance(
     verify: bool,
     override_l: int | None = None,
     max_rounds: int | None = None,
+    soft_stop_frac: float | None = None,
+    min_rounds: int = 0,
+    skip_k1: bool = False,
 ) -> dict:
     path = entry["path"]
     K = entry["K"]
@@ -60,11 +63,8 @@ def _run_instance(
 
     assumptions = generate_random_assumptions(N, K, L, seed)
 
-    # K=1 baseline for GPU parallelism speedup
-    k1 = profile_gpap(path, assumptions[:1], device, warmup, max(runs, 3), max_rounds=max_rounds)
-    result = profile_gpap(path, assumptions, device, warmup, runs, max_rounds=max_rounds)
-
-    gpu_speedup = (k1["mean_ms"] * K) / result["mean_ms"] if result["mean_ms"] > 0 else 0.0
+    result = profile_gpap(path, assumptions, device, warmup, runs, max_rounds=max_rounds,
+                          soft_stop_frac=soft_stop_frac, min_rounds=min_rounds)
 
     out = {
         **entry,
@@ -74,10 +74,15 @@ def _run_instance(
         "bcp_rounds_mean":  round(result["bcp_rounds_mean"], 2),
         "conflict_rate":    round(result["conflict_rate"], 4),
         "avg_propagations": round(result["avg_propagations"], 2),
-        "speedup_vs_k1":    round(gpu_speedup, 2),
-        "k1_mean_ms":       round(k1["mean_ms"], 3),
         "completion_rate":  round(result["completion_rate"], 4),
     }
+
+    if not skip_k1:
+        k1 = profile_gpap(path, assumptions[:1], device, warmup, max(runs, 3), max_rounds=max_rounds,
+                          soft_stop_frac=soft_stop_frac, min_rounds=min_rounds)
+        gpu_speedup = (k1["mean_ms"] * K) / result["mean_ms"] if result["mean_ms"] > 0 else 0.0
+        out["speedup_vs_k1"] = round(gpu_speedup, 2)
+        out["k1_mean_ms"]    = round(k1["mean_ms"], 3)
 
     if not no_external:
         # Run PySAT on min(K, cap) batches, extrapolate to K for apples-to-apples comparison.
@@ -101,6 +106,7 @@ def _run_instance(
 
 def _print_table(results: list[dict]) -> None:
     has_pysat    = any("speedup_vs_pysat" in r for r in results)
+    has_k1       = any("speedup_vs_k1"    in r for r in results)
     has_verify   = any("agreement_rate"   in r for r in results)
     has_capped   = any(r.get("completion_rate", 1.0) < 1.0 for r in results)
 
@@ -108,7 +114,9 @@ def _print_table(results: list[dict]) -> None:
             f"{'ms':>8} {'±':>6}")
     if has_pysat:
         cols += f" {'vs_pysat':>10}"
-    cols += f" {'vs_k1':>8} {'rounds':>7} {'conflict':>9}"
+    if has_k1:
+        cols += f" {'vs_k1':>8}"
+    cols += f" {'rounds':>7} {'conflict':>9}"
     if has_capped:
         cols += f" {'done%':>6}"
     if has_verify:
@@ -125,8 +133,10 @@ def _print_table(results: list[dict]) -> None:
         if has_pysat:
             vs_pysat = r.get("speedup_vs_pysat", float("nan"))
             line += f" {vs_pysat:>9.1f}x"
-        line += (f" {r['speedup_vs_k1']:>7.1f}x"
-                 f" {r['bcp_rounds_mean']:>7.1f}"
+        if has_k1:
+            vs_k1 = r.get("speedup_vs_k1", float("nan"))
+            line += f" {vs_k1:>7.1f}x"
+        line += (f" {r['bcp_rounds_mean']:>7.1f}"
                  f" {r['conflict_rate']:>8.1%}")
         if has_capped:
             done = r.get("completion_rate", 1.0)
@@ -186,6 +196,15 @@ def main():
     ap.add_argument("--max-rounds", type=int, default=None,
                     help="Cap BCP rounds per batch; incomplete batches are counted as non-finished "
                          "(completion_rate < 1). None = run to fixpoint (default)")
+    ap.add_argument("--soft-stop-frac", type=float, default=None,
+                    help="Soft cutoff: after --min-rounds, stop when a round's unique propagations "
+                         "drop below this fraction of peak work seen so far")
+    ap.add_argument("--min-rounds", type=int, default=0,
+                    help="Minimum rounds before --soft-stop-frac may trigger (default: 0)")
+    ap.add_argument("--limit", type=int, default=None,
+                    help="Only run the first N instances from the suite (for fast regression checks)")
+    ap.add_argument("--skip-k1", action="store_true",
+                    help="Skip the K=1 baseline run (drops speedup_vs_k1 metric, ~30%% faster)")
     args = ap.parse_args()
 
     device = (torch.device(args.device) if args.device
@@ -194,14 +213,19 @@ def main():
     with open(args.suite) as f:
         suite = json.load(f)
 
+    if args.limit is not None:
+        suite = suite[:args.limit]
+
     if args.output is None:
         args.output = f"benchmarks/results_{datetime.date.today():%Y%m%d}.json"
     os.makedirs(os.path.dirname(args.output) or ".", exist_ok=True)
 
     l_note = f"  L={args.override_l} (override)" if args.override_l is not None else ""
     r_note = f"  max_rounds={args.max_rounds}" if args.max_rounds is not None else ""
+    s_note = (f"  soft_stop_frac={args.soft_stop_frac}  min_rounds={args.min_rounds}"
+              if args.soft_stop_frac is not None else "")
     print(f"Running {len(suite)} instances  device={device}  "
-          f"warmup={args.warmup}  runs={args.runs}  seed={args.seed}{l_note}{r_note}")
+          f"warmup={args.warmup}  runs={args.runs}  seed={args.seed}{l_note}{r_note}{s_note}")
     if not args.no_external:
         print(f"  PySAT comparison enabled  pysat_k_cap={args.pysat_k_cap}"
               + ("  +agreement check" if args.verify else ""))
@@ -217,12 +241,15 @@ def main():
         try:
             r = _run_instance(entry, device, args.warmup, args.runs,
                               args.seed, args.no_external, args.pysat_k_cap, args.verify,
-                              override_l=args.override_l, max_rounds=args.max_rounds)
+                              override_l=args.override_l, max_rounds=args.max_rounds,
+                              soft_stop_frac=args.soft_stop_frac, min_rounds=args.min_rounds,
+                              skip_k1=args.skip_k1)
             results.append(r)
             status = f"{r['mean_ms']:.2f} ms"
             if "speedup_vs_pysat" in r:
                 status += f"  vs_pysat={r['speedup_vs_pysat']:.1f}x"
-            status += f"  vs_k1={r['speedup_vs_k1']:.1f}x"
+            if "speedup_vs_k1" in r:
+                status += f"  vs_k1={r['speedup_vs_k1']:.1f}x"
             done = r.get("completion_rate", 1.0)
             if done < 1.0:
                 status += f"  done={done:.1%}"

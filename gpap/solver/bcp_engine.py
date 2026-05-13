@@ -255,16 +255,27 @@ class BCPEngine:
                 self._frontier_clauses = torch.cat([self._frontier_clauses, new_c])
 
     @torch.inference_mode()
-    def propagate(self, max_rounds: int | None = None) -> torch.Tensor:
-        """Run BCP to fixpoint (or up to max_rounds) for all active batches.
+    def propagate(
+        self,
+        max_rounds: int | None = None,
+        soft_stop_frac: float | None = None,
+        min_rounds: int = 0,
+    ) -> torch.Tensor:
+        """Run BCP to fixpoint (or stop early) for all active batches.
 
         Uses a frontier of (batch, clause) pairs updated each round — only checks
         cells whose sat_count changed, avoiding a full (K, M) scan.
 
         Args:
-            max_rounds: stop after this many rounds even if not at fixpoint.
+            max_rounds: hard cap; stop after this many rounds even if not at fixpoint.
                         Batches still in the frontier are marked in self._timed_out.
-                        None (default) runs to completion.
+                        None (default) means no hard cap.
+            soft_stop_frac: after round_count >= min_rounds, stop when a round's
+                            useful work (unique propagations) drops below
+                            soft_stop_frac × peak observed work. None (default)
+                            disables the heuristic. Batches still in the frontier
+                            when triggered are marked in self._timed_out.
+            min_rounds: don't allow soft_stop_frac to trigger before this round.
 
         Returns:
             conflict: (K,) boolean tensor, True if batch has a conflict
@@ -274,6 +285,7 @@ class BCPEngine:
         frontier_b = self._frontier_batches
         frontier_c = self._frontier_clauses
         round_count = 0
+        peak_work   = 0
 
         while frontier_b.numel() > 0:
             self._bcp_rounds += 1
@@ -354,11 +366,26 @@ class BCPEngine:
                 break
 
             # --- Propagate; next frontier = clauses whose sat_count just changed (F) ---
+            this_round_work = prop_batches.numel()  # free: tensor metadata, no CUDA sync
             frontier_b, frontier_c = self._bulk_propagate_lits(prop_batches, prop_lits)
 
             # --- Per-batch propagation count (G) ---
             ones = torch.ones(prop_batches.size(0), dtype=torch.int32, device=self._device)
             self._num_propagated.scatter_add_(0, prop_batches, ones)
+
+            # --- Soft cutoff: stop when per-round work decays below soft_stop_frac × peak (H) ---
+            if this_round_work > peak_work:
+                peak_work = this_round_work
+            if (soft_stop_frac is not None
+                    and round_count >= min_rounds
+                    and peak_work > 0
+                    and this_round_work < soft_stop_frac * peak_work):
+                if frontier_b.numel() > 0:
+                    in_flight = torch.unique(frontier_b)
+                    still_active = in_flight[self._active[in_flight]]
+                    if still_active.numel() > 0:
+                        self._timed_out[still_active] = True
+                break
 
         return self._conflict
 

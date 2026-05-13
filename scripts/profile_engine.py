@@ -65,6 +65,8 @@ def profile_gpap(
     num_warmup: int,
     num_runs: int,
     max_rounds: int | None = None,
+    soft_stop_frac: float | None = None,
+    min_rounds: int = 0,
 ) -> dict:
     K = len(assumptions_dimacs)
     formula = CnfFormula(device)
@@ -77,7 +79,7 @@ def profile_gpap(
         _sync(device); t0 = time.perf_counter()
         engine.apply_assumptions_bulk(assumptions_tensor)
         _sync(device); t1 = time.perf_counter()
-        engine.propagate(max_rounds=max_rounds)
+        engine.propagate(max_rounds=max_rounds, soft_stop_frac=soft_stop_frac, min_rounds=min_rounds)
         _sync(device); t2 = time.perf_counter()
         return (t1 - t0) * 1e3, (t2 - t1) * 1e3
 
@@ -246,6 +248,9 @@ def run_k_sweep(
     num_warmup: int,
     num_runs: int,
     run_external: bool = True,
+    max_rounds: int | None = None,
+    soft_stop_frac: float | None = None,
+    min_rounds: int = 0,
 ) -> list[dict]:
     """Profile GPAP (and optionally PySAT) for each K in k_values.
 
@@ -254,7 +259,9 @@ def run_k_sweep(
     results = []
     for K in k_values:
         assumptions = all_assumptions[:K]
-        gpap = profile_gpap(cnf_path, assumptions, device, num_warmup, num_runs)
+        gpap = profile_gpap(cnf_path, assumptions, device, num_warmup, num_runs,
+                            max_rounds=max_rounds, soft_stop_frac=soft_stop_frac,
+                            min_rounds=min_rounds)
         entry = {
             "K":               K,
             "gpap_total_ms":   gpap["mean_ms"],
@@ -373,6 +380,13 @@ def main():
                     help="Skip PySAT in K sweep (much faster for large K)")
     ap.add_argument("--plot", default="k_sweep.png",
                     help="Output path for K-sweep plot (default: k_sweep.png)")
+    ap.add_argument("--max-rounds", type=int, default=None,
+                    help="Hard cap on BCP rounds; remaining batches tagged timed_out")
+    ap.add_argument("--soft-stop-frac", type=float, default=None,
+                    help="Soft cutoff: after --min-rounds, stop when a round's unique "
+                         "propagations drop below this fraction of peak work seen so far")
+    ap.add_argument("--min-rounds", type=int, default=0,
+                    help="Minimum rounds before --soft-stop-frac may trigger (default: 0)")
     args = ap.parse_args()
 
     device = torch.device(args.device) if args.device else \
@@ -383,8 +397,13 @@ def main():
     formula.parse_cnf_file(args.cnf)
 
     print(f"\nFormula : {args.cnf}  ({formula.num_vars} vars, {formula.num_clauses} clauses)")
+    cutoff_note = ""
+    if args.max_rounds is not None:
+        cutoff_note += f"  max_rounds={args.max_rounds}"
+    if args.soft_stop_frac is not None:
+        cutoff_note += f"  soft_stop_frac={args.soft_stop_frac}  min_rounds={args.min_rounds}"
     print(f"device={device}  assumptions/batch={args.assumptions}  "
-          f"warmup={args.warmup}  runs={args.runs}")
+          f"warmup={args.warmup}  runs={args.runs}{cutoff_note}")
 
     # ---- K sweep mode -------------------------------------------------------
     if args.K_values:
@@ -397,6 +416,8 @@ def main():
         results = run_k_sweep(
             args.cnf, all_assumptions, device, k_values,
             args.warmup, args.runs, run_external=not args.no_external,
+            max_rounds=args.max_rounds, soft_stop_frac=args.soft_stop_frac,
+            min_rounds=args.min_rounds,
         )
         plot_k_sweep(results, args.plot)
         return
@@ -410,7 +431,9 @@ def main():
 
     # --- GPAP ---
     print("Running GPAP engine...")
-    gpap = profile_gpap(args.cnf, assumptions, device, args.warmup, args.runs)
+    gpap = profile_gpap(args.cnf, assumptions, device, args.warmup, args.runs,
+                        max_rounds=args.max_rounds, soft_stop_frac=args.soft_stop_frac,
+                        min_rounds=args.min_rounds)
 
     assume_pct = 100 * gpap["assume_mean_ms"] / gpap["mean_ms"] if gpap["mean_ms"] else 0
     prop_pct   = 100 * gpap["prop_mean_ms"]   / gpap["mean_ms"] if gpap["mean_ms"] else 0
@@ -421,7 +444,8 @@ def main():
           f"({assume_pct:.1f}%)")
     print(f"  └ propagate              : {gpap['prop_mean_ms']:7.2f} ± {gpap['prop_std_ms']:.2f} ms  "
           f"({prop_pct:.1f}%)  BCP rounds={gpap['bcp_rounds_mean']:.1f}±{gpap['bcp_rounds_std']:.1f}")
-    print(f"  conflict rate={gpap['conflict_rate']:.2%}  avg props={gpap['avg_propagations']:.1f}")
+    print(f"  conflict rate={gpap['conflict_rate']:.2%}  avg props={gpap['avg_propagations']:.1f}"
+          f"  completion={gpap['completion_rate']:.2%}")
 
     profile_propagate_detail(args.cnf, assumptions, device, args.warmup)
 
