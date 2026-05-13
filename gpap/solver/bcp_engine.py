@@ -69,6 +69,9 @@ class BCPEngine:
 
         # track conflict result per batch
         self._conflict = torch.zeros(K, dtype=torch.bool, device=self._device)
+        
+        # track actual conflict (no-insta conflict that will cause subsumption) after round 1
+        self._real_conflict = torch.zeros(K, dtype=torch.bool, device=self._device)
 
         # track number of propagated literals per batch
         self._num_propagated = torch.zeros(K, dtype=torch.int32, device=self._device)
@@ -79,6 +82,41 @@ class BCPEngine:
         # Frontier: (batch, clause) pairs whose sat_count was just decremented.
         # propagate() reads frontier_batches/clauses and replaces them each round.
         # Seeded here with clauses already at unit/conflict in the original formula.
+        init_unit_cls = (self._formula.clause_sizes <= 1).nonzero(as_tuple=False).view(-1)
+        if init_unit_cls.numel() > 0:
+            self._frontier_batches = (
+                torch.arange(K, device=self._device)
+                .unsqueeze(1).expand(-1, init_unit_cls.numel()).reshape(-1)
+            )
+            self._frontier_clauses = init_unit_cls.unsqueeze(0).expand(K, -1).reshape(-1)
+        else:
+            self._frontier_batches = torch.empty(0, dtype=torch.long, device=self._device)
+            self._frontier_clauses = torch.empty(0, dtype=torch.long, device=self._device)
+
+    def reset_state(self, num_batches: int):
+        """Reset BCP state in-place, reusing existing tensor allocations.
+
+        After the first chunk, this is faster than init_state(): uses .copy_()/.zero_()
+        instead of allocating new (K, M) tensors. Falls back to init_state() when K changes
+        (e.g. last partial chunk) or when called before any init.
+        """
+        if not hasattr(self, '_sat_count') or self._sat_count.size(0) != num_batches:
+            self.init_state(num_batches)
+            return
+
+        K = num_batches
+        # In-place overwrite — no new allocations for sat_count/lit_sum/assignment
+        self._sat_count.copy_(self._formula.clause_sizes.unsqueeze(0).expand(K, -1))
+        self._lit_sum.copy_(self._formula.init_lit_sum.unsqueeze(0).expand(K, -1))
+        self._assignment.zero_()
+        self._active.fill_(True)
+        self._conflict.zero_()
+        self._real_conflict.zero_()
+        self._num_propagated.zero_()
+        self._timed_out.zero_()
+        self._bcp_rounds = 0
+
+        # Rebuild frontier for any unit/conflict clauses in the original formula
         init_unit_cls = (self._formula.clause_sizes <= 1).nonzero(as_tuple=False).view(-1)
         if init_unit_cls.numel() > 0:
             self._frontier_batches = (
@@ -314,6 +352,9 @@ class BCPEngine:
             if is_conflict.any():
                 self._conflict[fb[is_conflict]] = True
                 self._active[fb[is_conflict]]   = False
+                # check for actual conflict (not just insta-conflict from assumptions) after round 1
+                if round_count > 1:
+                    self._real_conflict[fb[is_conflict]] = True
 
             # --- Units: sat_count == 1 for still-active batches ---
             is_unit = (sc_vals == 1) & self._active[fb]
@@ -334,6 +375,9 @@ class BCPEngine:
             if contra_mask.any():
                 self._conflict[unit_b[contra_mask]] = True
                 self._active[unit_b[contra_mask]]   = False
+                # check for actual conflict (not just insta-conflict from assumptions) after round 1
+                if round_count > 1:
+                    self._real_conflict[unit_b[contra_mask]] = True
 
             to_prop = is_active & is_new & ~is_contradiction
             if not to_prop.any():
@@ -358,6 +402,7 @@ class BCPEngine:
                 if bad.numel() > 0:
                     self._conflict[bad] = True
                     self._active[bad]   = False
+                    self._real_conflict[bad] = True
                     keep = ~torch.isin(prop_batches, bad)
                     prop_batches = prop_batches[keep]
                     prop_lits    = prop_lits[keep]
@@ -553,6 +598,13 @@ class BCPEngine:
     @property
     def conflict(self) -> torch.Tensor:
         return self._conflict
+
+    @property
+    def real_conflict(self) -> torch.Tensor:
+        """(K,) bool — True only for BCP-derived conflicts (round_count > 1).
+        Excludes trivial conflicts where the assumption set directly violates an
+        existing clause without any propagation. Use this for clause learning."""
+        return self._real_conflict
 
     @property
     def assignment(self) -> torch.Tensor:

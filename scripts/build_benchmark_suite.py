@@ -81,6 +81,25 @@ def _parse_header(path: str):
     return None
 
 
+def compute_k_safe(M: int, N: int, gpu_mem_bytes: float, cap: int = 65536) -> int:
+    """Compute the largest K (batch size) that fits in gpu_mem_bytes for a formula with M clauses
+    and N variables.
+
+    Memory model (dominant term is M):
+      formula_bytes   = 8*M + 16*N + 8*total_lits_est  (one-time device allocation)
+      per_batch_bytes = 8*M + 2*N + 6                  (sat_count + lit_sum + assignment per batch)
+
+    Returns min(K_safe, cap), at least 1.
+    """
+    total_lits = int(_AVG_LITS_PER_CLAUSE * M)
+    formula_bytes = 8 * M + 16 * N + 8 * total_lits
+    per_batch_bytes = max(1, 8 * M + 2 * N + 6)
+    available = gpu_mem_bytes - formula_bytes
+    if available <= 0:
+        return 1
+    return max(1, min(int(available / per_batch_bytes), cap))
+
+
 def _compute_params(N: int, M: int, gpu_mem_bytes: float):
     """Return (K, L, K_safe, total_lits_est, est_mem_mb) or None if instance doesn't fit."""
     total_lits = int(_AVG_LITS_PER_CLAUSE * M)
@@ -92,10 +111,7 @@ def _compute_params(N: int, M: int, gpu_mem_bytes: float):
         return None
 
     K_safe = int(available / per_batch_bytes)
-    # Dynamic K: scales with available memory per instance.
-    # 65536 cap keeps benchmarks fast while giving enough parallelism to beat PySAT.
-    # The crossover (GPAP wins) is where K × pysat_per_batch_ms > gpap_total_ms.
-    K = max(1, min(K_safe, 65536))
+    K = compute_k_safe(M, N, gpu_mem_bytes, cap=65536)
     # L scales with log2(total_lits): captures both clause count and average clause size.
     # Gives more assumptions than log2(N) for small dense formulas, same cap for large ones.
     L = max(1, min(15, round(math.log2(max(total_lits, 2)))))

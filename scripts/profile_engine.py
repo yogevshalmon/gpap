@@ -41,6 +41,56 @@ def generate_random_assumptions(
     return result
 
 
+def count_all_pairs(num_vars: int) -> int:
+    """Total (±v1, ±v2) pairs with v1 < v2: C(N,2) × 4."""
+    return num_vars * (num_vars - 1) * 2
+
+
+def count_all_triplets(num_vars: int) -> int:
+    """Total (±v1, ±v2, ±v3) triplets with v1 < v2 < v3: C(N,3) × 8."""
+    return num_vars * (num_vars - 1) * (num_vars - 2) // 6 * 8
+
+
+def generate_all_pairs_chunks(num_vars: int, K: int):
+    """Yield chunks of ≤K assumption sets covering all (±v1, ±v2) pairs, v1 < v2.
+
+    No intra-batch contradictions by construction (v1 ≠ v2).
+    Total assumptions: count_all_pairs(num_vars).
+    """
+    chunk: list[list[int]] = []
+    for v1 in range(1, num_vars + 1):
+        for v2 in range(v1 + 1, num_vars + 1):
+            for p1 in (1, -1):
+                for p2 in (1, -1):
+                    chunk.append([p1 * v1, p2 * v2])
+                    if len(chunk) == K:
+                        yield chunk
+                        chunk = []
+    if chunk:
+        yield chunk
+
+
+def generate_all_triplets_chunks(num_vars: int, K: int):
+    """Yield chunks of ≤K assumption sets covering all (±v1, ±v2, ±v3) triplets, v1 < v2 < v3.
+
+    No intra-batch contradictions by construction (all three variables distinct).
+    Total assumptions: count_all_triplets(num_vars).
+    """
+    chunk: list[list[int]] = []
+    for v1 in range(1, num_vars + 1):
+        for v2 in range(v1 + 1, num_vars + 1):
+            for v3 in range(v2 + 1, num_vars + 1):
+                for p1 in (1, -1):
+                    for p2 in (1, -1):
+                        for p3 in (1, -1):
+                            chunk.append([p1 * v1, p2 * v2, p3 * v3])
+                            if len(chunk) == K:
+                                yield chunk
+                                chunk = []
+    if chunk:
+        yield chunk
+
+
 def to_assumption_tensor(
     assumptions_dimacs: list[list[int]], device: torch.device
 ) -> torch.Tensor:
