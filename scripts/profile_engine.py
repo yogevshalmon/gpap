@@ -91,6 +91,95 @@ def generate_all_triplets_chunks(num_vars: int, K: int):
         yield chunk
 
 
+def generate_random_assumptions_gpu(
+    num_vars: int, K: int, num_per_batch: int, device: torch.device, seed: int = 42
+) -> torch.Tensor:
+    """Generate a (K, L) int64 lit-index tensor directly on `device` — no Python loop.
+
+    With-replacement sampling of (variable, polarity) per slot. Duplicate variables
+    within a row are harmless: a repeated literal collapses, and a (v, -v) pair is a
+    trivial conflict filtered by real_conflict. lit_index = 2*var0 + polarity, matching
+    ext_lit_to_lit_index (positive -> even, negative -> odd).
+    """
+    g = torch.Generator(device=device).manual_seed(seed)
+    L = min(num_per_batch, num_vars)
+    var0 = torch.randint(0, num_vars, (K, L), generator=g, device=device)  # 0-based var
+    polarity = torch.randint(0, 2, (K, L), generator=g, device=device)     # 0=pos, 1=neg
+    return (2 * var0 + polarity).to(torch.long)
+
+
+def generate_all_pairs_chunks_gpu(num_vars: int, K: int, device: torch.device):
+    """Yield (≤K, 2) int64 lit-index tensors covering all (±v1, ±v2) pairs, v1 < v2.
+
+    Built on the GPU with an O(num_vars) Python loop over v1 only — each iteration
+    forms all (v2 > v1) × 4 polarity combos as tensors. Memory-safe (no K-sized list,
+    no full C(N,2) materialization). Total rows = count_all_pairs(num_vars).
+    """
+    pol = torch.tensor([[0, 0], [0, 1], [1, 0], [1, 1]], dtype=torch.long, device=device)
+    buf: list[torch.Tensor] = []
+    buf_rows = 0
+    for v1 in range(num_vars):  # 0-based variable index
+        n2 = num_vars - (v1 + 1)
+        if n2 == 0:
+            continue
+        v2 = torch.arange(v1 + 1, num_vars, dtype=torch.long, device=device)  # (n2,)
+        base = torch.empty((n2, 2), dtype=torch.long, device=device)
+        base[:, 0] = 2 * v1
+        base[:, 1] = 2 * v2
+        block = (base.unsqueeze(1) + pol.unsqueeze(0)).reshape(-1, 2)  # (4*n2, 2)
+        buf.append(block)
+        buf_rows += block.size(0)
+        if buf_rows >= K:
+            cat = torch.cat(buf, dim=0)
+            n_full = cat.size(0) // K
+            for c in range(n_full):
+                yield cat[c * K:(c + 1) * K]
+            rem = cat[n_full * K:]
+            buf = [rem] if rem.numel() else []
+            buf_rows = rem.size(0)
+    if buf_rows > 0:
+        yield torch.cat(buf, dim=0)
+
+
+def generate_all_triplets_chunks_gpu(num_vars: int, K: int, device: torch.device):
+    """Yield (≤K, 3) int64 lit-index tensors covering all (±v1, ±v2, ±v3) triplets, v1<v2<v3.
+
+    Built on the GPU with an O(num_vars) Python loop over v1 only — each iteration uses
+    torch.combinations to form all (v2 < v3) pairs from the remaining variables, then
+    expands by the 8 polarity combos. Memory-safe per v1 (no K-sized list). Total rows =
+    count_all_triplets(num_vars). Only practical for small N (see count_all_triplets).
+    """
+    pol = torch.tensor(
+        [[p1, p2, p3] for p1 in (0, 1) for p2 in (0, 1) for p3 in (0, 1)],
+        dtype=torch.long, device=device,
+    )  # (8, 3)
+    buf: list[torch.Tensor] = []
+    buf_rows = 0
+    for v1 in range(num_vars):  # 0-based variable index
+        rest = torch.arange(v1 + 1, num_vars, dtype=torch.long, device=device)
+        if rest.numel() < 2:
+            continue
+        pairs = torch.combinations(rest, 2)  # (C(m,2), 2): all (v2, v3), v2 < v3
+        n = pairs.size(0)
+        base = torch.empty((n, 3), dtype=torch.long, device=device)
+        base[:, 0] = 2 * v1
+        base[:, 1] = 2 * pairs[:, 0]
+        base[:, 2] = 2 * pairs[:, 1]
+        block = (base.unsqueeze(1) + pol.unsqueeze(0)).reshape(-1, 3)  # (8*n, 3)
+        buf.append(block)
+        buf_rows += block.size(0)
+        if buf_rows >= K:
+            cat = torch.cat(buf, dim=0)
+            n_full = cat.size(0) // K
+            for c in range(n_full):
+                yield cat[c * K:(c + 1) * K]
+            rem = cat[n_full * K:]
+            buf = [rem] if rem.numel() else []
+            buf_rows = rem.size(0)
+    if buf_rows > 0:
+        yield torch.cat(buf, dim=0)
+
+
 def to_assumption_tensor(
     assumptions_dimacs: list[list[int]], device: torch.device
 ) -> torch.Tensor:

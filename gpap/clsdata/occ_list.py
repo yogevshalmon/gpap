@@ -18,6 +18,14 @@ def lit_index_to_var(lit_index: int) -> int:
     return lit_index // 2
 
 
+def lit_index_to_ext_lit(lit_index: int) -> int:
+    """Inverse of ext_lit_to_lit_index: internal index -> DIMACS literal.
+    Even index -> +var, odd index -> -var (1-based variable).
+    """
+    var = lit_index // 2 + 1
+    return var if lit_index % 2 == 0 else -var
+
+
 def lit_index_negation(lit_index: int) -> int:
     """Negate a literal index: flip the last bit."""
     return lit_index ^ 1

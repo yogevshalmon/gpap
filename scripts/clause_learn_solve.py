@@ -3,18 +3,18 @@
 
 For each conflicting assumption set {a1, ..., aL}, the clause (¬a1 ∨ ... ∨ ¬aL)
 is entailed by the original formula (BCP proves {a1,...,aL} → conflict).
-Only non-trivial BCP-derived conflicts are learned (round_count > 1), so learned
-clauses are never subsumed by an already-existing clause.
+Only non-trivial BCP-derived conflicts are learned (round_count > 1, via
+engine.real_conflict), so learned clauses are never subsumed by an existing clause.
 
 Modes:
-  random   — K random assumption sets per round (default)
-  pairs    — exhaustive enumeration of all (±v1, ±v2) pairs, v1 < v2
+  random   — K random assumption sets per round (default), generated on-GPU
+  pairs    — exhaustive enumeration of all (±v1, ±v2) pairs, v1 < v2 (on-GPU)
   triplets — exhaustive enumeration of all (±v1, ±v2, ±v3) triplets, v1<v2<v3
 
-Workflow:
-  1. Solve the original CNF with kissat (plain baseline, optional)
-  2. Load formula ONCE; run GPAP in chunks → extract real_conflict clauses
-  3. Solve original + learned clauses with kissat → compare
+End-to-end timing: assumption generation, engine reset, and apply+propagate are
+timed separately, plus a true wall-clock for the whole learning loop — so the gap
+between GPU kernel time and real wall time is explicit. --compare-propagate adds a
+PySAT baseline over the same assumption sets.
 
 Usage:
     PYTHONPATH=. .venv/bin/python scripts/clause_learn_solve.py \\
@@ -35,17 +35,18 @@ from pysat.solvers import Solver
 
 sys.path.insert(0, ".")
 from gpap.clsdata.cnf_formula import CnfFormula
+from gpap.clsdata.occ_list import lit_index_to_ext_lit
 from gpap.solver.bcp_engine import BCPEngine
-from gpap.solver.clause_learner import extract_conflict_clauses
+from gpap.solver.clause_learner import extract_conflict_clauses_tensor
 from scripts.build_benchmark_suite import compute_k_safe
 from scripts.profile_engine import (
     count_all_pairs,
     count_all_triplets,
-    generate_all_pairs_chunks,
-    generate_all_triplets_chunks,
-    generate_random_assumptions,
-    to_assumption_tensor,
+    generate_all_pairs_chunks_gpu,
+    generate_all_triplets_chunks_gpu,
+    generate_random_assumptions_gpu,
 )
+from gpap.solver.external_solver import ExternalSolver
 
 _AVG_LITS_PER_CLAUSE = 4.0  # matches build_benchmark_suite default
 
@@ -63,36 +64,12 @@ def _solve(cnf: CNF, solver_name: str) -> tuple[str, float]:
     return ("SAT" if sat else "UNSAT"), (time.perf_counter() - t0) * 1e3
 
 
-def _run_gpap_chunk(
-    engine: BCPEngine,
-    assumptions_dimacs: list[list[int]],
-    device: torch.device,
-    max_rounds: int | None = None,
-    soft_stop_frac: float | None = None,
-    min_rounds: int = 0,
-    timed: bool = True,
-) -> tuple[list[bool], float]:
-    """One BCP pass using a pre-created engine.
+def _tensor_to_dimacs(t: torch.Tensor) -> list[list[int]]:
+    """Convert a (K, L) lit-index tensor to DIMACS assumption sets (−1 = padding).
 
-    Calls engine.reset_state() in-place (no re-allocation when K is unchanged).
-    Uses engine.real_conflict (round_count > 1 only) so learned clauses are never
-    subsumed by an existing clause.
-
-    Returns (real_conflict list, wall_ms). wall_ms is 0.0 when timed=False.
+    These are the *assumed* literals (not negated) — for feeding PySAT propagate.
     """
-    K = len(assumptions_dimacs)
-    assumptions_tensor = to_assumption_tensor(assumptions_dimacs, device)
-    engine.reset_state(K)           # in-place if K unchanged; init_state() only on K change
-    if timed:
-        _sync(device)
-    t0 = time.perf_counter()
-    engine.apply_assumptions_bulk(assumptions_tensor)
-    engine.propagate(max_rounds=max_rounds, soft_stop_frac=soft_stop_frac,
-                     min_rounds=min_rounds)
-    if timed:
-        _sync(device)
-    wall_ms = (time.perf_counter() - t0) * 1e3 if timed else 0.0
-    return engine.real_conflict.tolist(), wall_ms
+    return [[lit_index_to_ext_lit(i) for i in row if i >= 0] for row in t.cpu().tolist()]
 
 
 def _dedup_clauses(clauses: list[list[int]]) -> list[list[int]]:
@@ -135,6 +112,9 @@ def main():
                     help="Skip the plain-solve baseline")
     ap.add_argument("--no-solve", action="store_true",
                     help="Only learn clauses, skip the final augmented solve")
+    ap.add_argument("--compare-propagate", action="store_true",
+                    help="Run a PySAT propagate baseline over the SAME assumption sets "
+                         "and report sets/sec for GPAP vs PySAT (slow for large totals)")
     ap.add_argument("--max-rounds", type=int, default=None,
                     help="Hard cap on GPAP BCP rounds per chunk")
     ap.add_argument("--soft-stop-frac", type=float, default=None,
@@ -147,14 +127,14 @@ def main():
     device = (torch.device(args.device) if args.device
               else torch.device("cuda" if torch.cuda.is_available() else "cpu"))
 
-    # Load formula ONCE — immutable after this; BCPEngine.init_state() reuses it per chunk
+    # Load formula ONCE — immutable after this; BCPEngine reuses it per chunk
     formula = CnfFormula(device)
     formula.parse_cnf_file(args.cnf)
     N, M = formula.num_vars, formula.num_clauses
 
-    # K sizing
+    # K sizing: no cap when auto-computing — use full memory-safe K
     if args.auto_k:
-        K = compute_k_safe(M, N, _gpu_mem_bytes(device), cap=65536)
+        K = compute_k_safe(M, N, _gpu_mem_bytes(device), cap=None)
     else:
         K = args.K
 
@@ -170,19 +150,19 @@ def main():
     if cutoff:
         print(f"GPAP    :{cutoff}")
 
-    # Build the chunk generator and compute total_chunks for progress display
+    # Build the chunk generator (yields (K, L) GPU lit-index tensors) and total_chunks
     if args.mode == "random":
         def _random_gen():
             for i in range(args.rounds):
-                yield generate_random_assumptions(N, K, args.L, args.seed + i)
+                yield generate_random_assumptions_gpu(N, K, args.L, device, args.seed + i)
         chunk_gen = _random_gen()
         total_chunks = args.rounds
     elif args.mode == "pairs":
-        chunk_gen = generate_all_pairs_chunks(N, K)
+        chunk_gen = generate_all_pairs_chunks_gpu(N, K, device)
         total_chunks = math.ceil(count_all_pairs(N) / K)
         print(f"          total pairs: {count_all_pairs(N):,}  → {total_chunks} chunk(s)")
     else:  # triplets
-        chunk_gen = generate_all_triplets_chunks(N, K)
+        chunk_gen = generate_all_triplets_chunks_gpu(N, K, device)
         total_chunks = math.ceil(count_all_triplets(N) / K)
         print(f"          total triplets: {count_all_triplets(N):,}  → {total_chunks} chunk(s)")
     print()
@@ -198,47 +178,125 @@ def main():
     else:
         print("[1/3] Plain solve skipped  (--no-baseline)")
 
-    # --- Step 2: GPAP clause learning ---
+    # --- Step 2: GPAP clause learning (per-phase timing + true wall-clock) ---
     print(f"[2/3] GPAP clause learning ...")
     total_learned: list[list[int]] = []
-    total_gpap_ms = 0.0
+    t_gen = t_reset = t_prop = t_extract = 0.0
+    total_sets = 0
+    pysat_dimacs: list[list[int]] = []  # only populated with --compare-propagate
 
     # Single engine, reused across all chunks via reset_state() (no re-allocation)
     engine = BCPEngine(formula)
     warmed_up = False
 
-    for chunk_idx, chunk in enumerate(chunk_gen, 1):
-        if not warmed_up:
-            for _ in range(args.warmup):
-                _run_gpap_chunk(engine, chunk, device,
-                                max_rounds=args.max_rounds,
-                                soft_stop_frac=args.soft_stop_frac,
-                                min_rounds=args.min_rounds,
-                                timed=False)
-            warmed_up = True
+    gen_iter = iter(chunk_gen)
+    chunk_idx = 0
+    while True:
+        # --- phase: generation (next chunk → GPU tensor) ---
+        _sync(device); g0 = time.perf_counter()
+        try:
+            chunk_t = next(gen_iter)
+        except StopIteration:
+            break
+        _sync(device); t_gen += (time.perf_counter() - g0) * 1e3
+        chunk_idx += 1
+        K_chunk = chunk_t.size(0)
+        total_sets += K_chunk
 
-        conflicts, ms = _run_gpap_chunk(
-            engine, chunk, device,
-            max_rounds=args.max_rounds, soft_stop_frac=args.soft_stop_frac,
-            min_rounds=args.min_rounds,
-        )
-        raw = extract_conflict_clauses(chunk, conflicts)
+        # Warmup on the first chunk only (kernel caching) — excluded from every timer
+        if not warmed_up and args.warmup > 0:
+            for _ in range(args.warmup):
+                engine.reset_state(K_chunk)
+                engine.apply_assumptions_bulk(chunk_t)
+                engine.propagate(max_rounds=args.max_rounds,
+                                 soft_stop_frac=args.soft_stop_frac,
+                                 min_rounds=args.min_rounds)
+            _sync(device)
+        warmed_up = True
+
+        # --- phase: reset state (in-place when K unchanged) ---
+        _sync(device); r0 = time.perf_counter()
+        engine.reset_state(K_chunk)
+        _sync(device); t_reset += (time.perf_counter() - r0) * 1e3
+
+        # --- phase: apply assumptions + propagate ---
+        _sync(device); p0 = time.perf_counter()
+        engine.apply_assumptions_bulk(chunk_t)
+        engine.propagate(max_rounds=args.max_rounds, soft_stop_frac=args.soft_stop_frac,
+                         min_rounds=args.min_rounds)
+        _sync(device); ms = (time.perf_counter() - p0) * 1e3
+        t_prop += ms
+
+        # --- phase: extract learned clauses (includes the device→host transfer) ---
+        _sync(device); e0 = time.perf_counter()
+        raw = extract_conflict_clauses_tensor(chunk_t, engine.real_conflict)
+        _sync(device); t_extract += (time.perf_counter() - e0) * 1e3
         total_learned.extend(raw)
-        total_gpap_ms += ms
-        conflict_rate = sum(conflicts) / len(conflicts) if conflicts else 0.0
+        if args.compare_propagate:
+            pysat_dimacs.extend(_tensor_to_dimacs(chunk_t))
+
+        # len(raw) == #real_conflict rows (each conflicting row yields one clause),
+        # so this is the conflict rate without an extra GPU sync.
+        conflict_rate = len(raw) / K_chunk
         print(f"  [{chunk_idx:4d}/{total_chunks}] {ms:>7.0f} ms  "
               f"conflict={conflict_rate:.1%}  +{len(raw)} clauses  "
               f"(total: {len(total_learned):,})")
+
+    # Wall = sum of the explicitly-timed phases — warmup is never added to these,
+    # so this is the honest production cost (no benchmarking artifacts, no terminal I/O).
+    wall_total_ms = t_gen + t_reset + t_prop + t_extract
 
     learned = _dedup_clauses(total_learned)
     dup_dropped = len(total_learned) - len(learned)
     print(f"\n  Total learned: {len(total_learned):,}  →  {len(learned):,} unique"
           + (f"  ({dup_dropped:,} duplicates dropped)" if dup_dropped else ""))
-    print(f"  GPAP time: {total_gpap_ms:.1f} ms total  ({total_gpap_ms/total_chunks:.0f} ms/chunk avg)")
+    print(f"  Phase timing ({total_sets:,} assumption sets over {chunk_idx} chunk(s)):")
+    print(f"    generation : {t_gen:>9.1f} ms")
+    print(f"    reset      : {t_reset:>9.1f} ms")
+    print(f"    propagate  : {t_prop:>9.1f} ms  (GPU kernel)")
+    print(f"    extract    : {t_extract:>9.1f} ms  (device→host)")
+    print(f"    {'─' * 28}")
+    print(f"    GPAP wall  : {wall_total_ms:>9.1f} ms  "
+          f"({total_sets / (wall_total_ms / 1e3):,.0f} sets/s)")
+
+    # print the clauses if there aren't too many
+    print("\nLearned clauses:"
+          + ("  (omitted, too many)" if len(learned) > 20 else ""))
+    for c in learned[:20]:
+        print("  " + " ".join(str(lit) for lit in c))
+
+    # --- Optional: PySAT propagate baseline over the SAME assumption sets ---
+    if args.compare_propagate:
+        print(f"\nPySAT propagate baseline over the same {len(pysat_dimacs):,} sets ...",
+              end=" ", flush=True)
+        ext = ExternalSolver(args.cnf)
+        _, _, pysat_s = ext.propagate_many(pysat_dimacs)
+        pysat_ms = pysat_s * 1e3
+        print(f"→ {pysat_ms:.1f} ms")
+        gpap_wall_sps = total_sets / (wall_total_ms / 1e3) if wall_total_ms > 0 else float("inf")
+        pysat_sps = len(pysat_dimacs) / pysat_s if pysat_s > 0 else float("inf")
+        speedup = pysat_ms / wall_total_ms if wall_total_ms > 0 else float("inf")
+        print(f"  GPAP  : {gpap_wall_sps:>12,.0f} sets/s  (wall)")
+        print(f"  PySAT : {pysat_sps:>12,.0f} sets/s")
+        print(f"  GPAP wall speedup vs PySAT: {speedup:.1f}x")
 
     if not learned:
         print("\nNo non-trivial conflict clauses learned.")
         return
+
+    # validate the learned clauses with the external solver (sanity check)
+    print(f"\nValidating {len(learned):,} learned clauses (PySAT propagate) ...",
+          end=" ", flush=True)
+    external_solver = ExternalSolver(args.cnf)
+    for clause in learned:
+        # check that the clause is entailed by the original formula
+        # (i.e., that the negation of the clause is unsat under propagation)
+        assumptions = [-lit for lit in clause]  # assume the negation of the learned clause
+        res, _, _ = external_solver.propagate_assumptions(assumptions)
+        if not res:
+            print(f"\n  Clause {clause} failed validation! Expected conflict but got {res}")
+            return
+    print("OK (all entailed)")
 
     if args.no_solve:
         print("\n(--no-solve: skipping augmented solve)")
@@ -258,16 +316,17 @@ def main():
     print("=" * 58)
     if baseline_ms is not None:
         print(f"  Plain solve      : {baseline_ms:>9.1f} ms  [{result_plain}]")
-    print(f"  GPAP learning    : {total_gpap_ms:>9.1f} ms  (+{len(learned):,} clauses, "
+    print(f"  GPAP learning    : {wall_total_ms:>9.1f} ms wall  "
+          f"({t_prop:.1f} ms kernel)  (+{len(learned):,} clauses, "
           f"{M:,} → {M + len(learned):,})")
     print(f"  Augmented solve  : {aug_ms:>9.1f} ms  [{result_aug}]")
     if baseline_ms is not None:
-        total_ms = total_gpap_ms + aug_ms
+        total_ms = wall_total_ms + aug_ms
         solve_speedup = baseline_ms / aug_ms if aug_ms > 0 else float("inf")
         e2e_speedup = baseline_ms / total_ms if total_ms > 0 else float("inf")
         print(f"  {'─' * 48}")
         print(f"  Solve speedup    : {solve_speedup:>8.2f}x  (plain / augmented-only)")
-        print(f"  End-to-end       : {e2e_speedup:>8.2f}x  (plain / GPAP+augmented)")
+        print(f"  End-to-end       : {e2e_speedup:>8.2f}x  (plain / GPAP-wall + augmented)")
     print("=" * 58)
 
 

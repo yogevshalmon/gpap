@@ -338,29 +338,27 @@ class BCPEngine:
                 break
 
             # --- Filter frontier to active batches ---
+            # No .any() guard (which forces a CPU sync): empty masks make every op
+            # below a no-op, and the loop terminates at the prop_batches.numel() == 0
+            # break (.numel() is tensor metadata, free) or when the frontier empties.
             active_mask = self._active[frontier_b]
-            if not active_mask.any():
-                break
             fb = frontier_b[active_mask]
             fc = frontier_c[active_mask]
 
             # --- Gather sat_count at frontier positions ---
             sc_vals = self._sat_count[fb, fc]
 
-            # --- Conflicts: sat_count == 0 ---
+            # --- Conflicts: sat_count == 0 (unconditional; no-op when none) ---
             is_conflict = sc_vals == 0
-            if is_conflict.any():
-                self._conflict[fb[is_conflict]] = True
-                self._active[fb[is_conflict]]   = False
-                # check for actual conflict (not just insta-conflict from assumptions) after round 1
-                if round_count > 1:
-                    self._real_conflict[fb[is_conflict]] = True
+            conf_b = fb[is_conflict]
+            self._conflict[conf_b] = True
+            self._active[conf_b]   = False
+            # actual conflict (not just insta-conflict from assumptions) after round 1
+            if round_count > 1:
+                self._real_conflict[conf_b] = True
 
             # --- Units: sat_count == 1 for still-active batches ---
             is_unit = (sc_vals == 1) & self._active[fb]
-            if not is_unit.any():
-                break
-
             unit_b      = fb[is_unit]
             unit_c      = fc[is_unit]
             forced_lits = self._lit_sum[unit_b, unit_c].long()
@@ -372,17 +370,13 @@ class BCPEngine:
             is_contradiction = self._assignment[unit_b, neg_forced]  == 1
 
             contra_mask = is_active & is_contradiction
-            if contra_mask.any():
-                self._conflict[unit_b[contra_mask]] = True
-                self._active[unit_b[contra_mask]]   = False
-                # check for actual conflict (not just insta-conflict from assumptions) after round 1
-                if round_count > 1:
-                    self._real_conflict[unit_b[contra_mask]] = True
+            contra_b = unit_b[contra_mask]
+            self._conflict[contra_b] = True
+            self._active[contra_b]   = False
+            if round_count > 1:
+                self._real_conflict[contra_b] = True
 
             to_prop = is_active & is_new & ~is_contradiction
-            if not to_prop.any():
-                break
-
             prop_batches = unit_b[to_prop]
             prop_lits    = forced_lits[to_prop]
 
@@ -393,19 +387,20 @@ class BCPEngine:
             prop_batches = flat_unique.div(two_N, rounding_mode='floor')
             prop_lits    = flat_unique % two_N
 
-            # Intra-round conflict: same batch has both l and ~l queued
+            # Intra-round conflict: same batch has both l and ~l queued.
+            # Computed unconditionally; the bad.numel() guard (free) skips the work
+            # when there is no contradiction.
             flat_neg = prop_batches * two_N + (prop_lits ^ 1)
             intra_mask = torch.isin(flat_neg, flat_unique)
-            if intra_mask.any():
-                bad = torch.unique(prop_batches[intra_mask])
-                bad = bad[self._active[bad]]
-                if bad.numel() > 0:
-                    self._conflict[bad] = True
-                    self._active[bad]   = False
-                    self._real_conflict[bad] = True
-                    keep = ~torch.isin(prop_batches, bad)
-                    prop_batches = prop_batches[keep]
-                    prop_lits    = prop_lits[keep]
+            bad = torch.unique(prop_batches[intra_mask])
+            bad = bad[self._active[bad]]
+            if bad.numel() > 0:
+                self._conflict[bad] = True
+                self._active[bad]   = False
+                self._real_conflict[bad] = True
+                keep = ~torch.isin(prop_batches, bad)
+                prop_batches = prop_batches[keep]
+                prop_lits    = prop_lits[keep]
 
             if prop_batches.numel() == 0:
                 break

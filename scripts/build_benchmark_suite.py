@@ -81,7 +81,7 @@ def _parse_header(path: str):
     return None
 
 
-def compute_k_safe(M: int, N: int, gpu_mem_bytes: float, cap: int = 65536) -> int:
+def compute_k_safe(M: int, N: int, gpu_mem_bytes: float, cap: int | None = 65536) -> int:
     """Compute the largest K (batch size) that fits in gpu_mem_bytes for a formula with M clauses
     and N variables.
 
@@ -89,7 +89,10 @@ def compute_k_safe(M: int, N: int, gpu_mem_bytes: float, cap: int = 65536) -> in
       formula_bytes   = 8*M + 16*N + 8*total_lits_est  (one-time device allocation)
       per_batch_bytes = 8*M + 2*N + 6                  (sat_count + lit_sum + assignment per batch)
 
-    Returns min(K_safe, cap), at least 1.
+    cap: upper bound on returned K (default 65536 for benchmarks). Pass None for no cap
+         (clause learning, where larger K = fewer chunks = faster total time).
+
+    Returns min(K_safe, cap) if cap is set, else K_safe. At least 1.
     """
     total_lits = int(_AVG_LITS_PER_CLAUSE * M)
     formula_bytes = 8 * M + 16 * N + 8 * total_lits
@@ -97,7 +100,8 @@ def compute_k_safe(M: int, N: int, gpu_mem_bytes: float, cap: int = 65536) -> in
     available = gpu_mem_bytes - formula_bytes
     if available <= 0:
         return 1
-    return max(1, min(int(available / per_batch_bytes), cap))
+    k_safe = int(available / per_batch_bytes)
+    return max(1, k_safe if cap is None else min(k_safe, cap))
 
 
 def _compute_params(N: int, M: int, gpu_mem_bytes: float):
@@ -124,7 +128,8 @@ def _family(search_dir: str) -> str:
     return _FAMILY_ALIASES.get(base, base)
 
 
-def scan(search_dirs: list[str], gpu_mem_bytes: float, min_k: int):
+def scan(search_dirs: list[str], gpu_mem_bytes: float, min_k: int,
+         max_m: int | None = None):
     """Yield qualifying instance dicts from all search directories."""
     for search_dir in search_dirs:
         fam = _family(search_dir)
@@ -143,6 +148,8 @@ def scan(search_dirs: list[str], gpu_mem_bytes: float, min_k: int):
                     print(f"  [skip] no header: {path}", file=sys.stderr)
                     continue
                 N, M = header
+                if max_m is not None and M > max_m:
+                    continue
                 params = _compute_params(N, M, gpu_mem_bytes)
                 if params is None:
                     print(f"  [skip] too large for GPU: {path}", file=sys.stderr)
@@ -165,8 +172,10 @@ def scan(search_dirs: list[str], gpu_mem_bytes: float, min_k: int):
                 }
 
 
-def select(candidates: list[dict], tier: str) -> list[dict]:
-    """Apply tier-based per-family limits."""
+def select(candidates: list[dict], tier: str, no_limit: bool = False) -> list[dict]:
+    """Apply tier-based per-family limits. Pass no_limit=True to skip file-count caps."""
+    if no_limit:
+        return list(candidates)
     config = _TIER_CONFIG[tier]
     by_family: dict[str, list[dict]] = {}
     for c in candidates:
@@ -194,6 +203,11 @@ def main():
                     help="Skip instances where K_safe < this (default: 8)")
     ap.add_argument("--tier", choices=["fast", "full"], default="fast",
                     help="Selection tier: fast (~30 instances) or full (~200) (default: fast)")
+    ap.add_argument("--max-m", type=int, default=None,
+                    help="Only include instances with M <= this many clauses")
+    ap.add_argument("--no-limit", action="store_true",
+                    help="Skip per-family file-count caps from tier config (include everything "
+                         "that passes GPU memory and --min-k/--max-m filters)")
     args = ap.parse_args()
 
     gpu_bytes = args.gpu_mem_gb * 1e9
@@ -201,11 +215,12 @@ def main():
     if out_dir:
         os.makedirs(out_dir, exist_ok=True)
 
+    max_m_note = f"  max_M={args.max_m}" if args.max_m is not None else ""
     print(f"Scanning {len(args.dirs)} dir(s)  "
-          f"GPU={args.gpu_mem_gb:.1f} GB  min_K={args.min_k}  tier={args.tier}")
+          f"GPU={args.gpu_mem_gb:.1f} GB  min_K={args.min_k}  tier={args.tier}{max_m_note}")
 
-    candidates = list(scan(args.dirs, gpu_bytes, args.min_k))
-    suite = select(candidates, args.tier)
+    candidates = list(scan(args.dirs, gpu_bytes, args.min_k, max_m=args.max_m))
+    suite = select(candidates, args.tier, no_limit=args.no_limit)
 
     print(f"\n{'Family':<14} {'N':>8} {'M':>8} {'K':>6} {'L':>3} "
           f"{'mem_MB':>7} {'file_MB':>8}  path")
