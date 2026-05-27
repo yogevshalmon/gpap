@@ -66,7 +66,7 @@ class TestCnfFormula:
         assert formula.num_clauses == 4
         assert formula.clause_sizes.tolist() == [2, 3, 2, 1]
 
-        # lit_sum for each clause:
+        # init_lit_sum (sum of lit-indices) for each clause:
         # clause 0: ~x1(1) + x2(2) = 3
         # clause 1: x1(0) + ~x2(3) + x3(4) = 7
         # clause 2: ~x1(1) + ~x2(3) = 4

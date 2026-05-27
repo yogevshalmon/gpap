@@ -12,8 +12,8 @@ Instead of a clause matrix (like GPSS), GPAP uses:
 
 1. **Negated occurrence lists** (CSR format): `occ[l]` = clauses where `~l` appears. When literal `l` is set TRUE, `~l` is falsified in those clauses.
 2. **Two per-clause counters** (batched over K assumption sets):
-   - `sat_count (K, M)`: remaining non-falsified literals (init = clause_size). Decremented when a literal is falsified.
-   - `lit_sum (K, M)`: running sum of non-falsified literal indices (init = sum of all lit indices in clause). Subtracted when a literal is falsified.
+   - `sat_count (K, M)`: remaining non-falsified literals (init = clause_size). Decremented when a literal is falsified. dtype auto-selected: int8 if max clause size ≤ 127, int16 ≤ 32767, else int32.
+   - `lit_sum (K, M)`: running sum of non-falsified literal indices (init = sum of all lit indices in clause). Subtracted when a literal is falsified. No overflow in practice (int32 is sufficient for N ≤ 100K with typical clause sizes).
 3. **The sum trick**: when `sat_count == 1`, the remaining literal's index IS `lit_sum`. No clause scanning needed.
 4. **Conflict**: `sat_count == 0` (all literals falsified).
 
@@ -26,13 +26,15 @@ Instead of a clause matrix (like GPSS), GPAP uses:
 
 ### K (Batch Size) Memory Model
 
-`sat_count (K, M)` and `lit_sum (K, M)` are the dominant memory consumers (8 bytes/batch/clause combined). K is computed as:
+`sat_count (K, M)` (int8/int16) and `lit_sum (K, M)` (int32) are the dominant memory consumers (5 bytes/batch/clause for typical SAT with int8 sat_count). K is computed as:
 
 ```
 formula_bytes   = 8*M + 16*N + 8*total_lits_est   (one-time)
-per_batch_bytes = 8*M + 2*N + 6                   (per batch)
+per_batch_bytes = 5*M + 2*N + 3                   (per batch: sat_count int8 1B + lit_sum int32 4B + assign)
 K_safe = (gpu_mem * fraction - formula_bytes) / per_batch_bytes
 ```
+
+Memory gain vs original int32+int32 (8B/element): int8+int32 uses 5B = **1.6× K** at same GPU memory.
 
 Use `compute_k_safe(M, N, gpu_mem_bytes, cap=None)` from `scripts/build_benchmark_suite.py`.
 Pass `cap=None` for clause learning (maximize K); `cap=65536` for benchmarks (consistent timing).
@@ -45,7 +47,7 @@ gpap/
     occ_list.py            # OccurrenceList: CSR format, negated convention
     cnf_formula.py         # CnfFormula: DIMACS parser + clause_sizes + init_lit_sum
   solver/
-    bcp_engine.py          # BCPEngine: sat_count/lit_sum counters, BCP loop
+    bcp_engine.py          # BCPEngine: sat_count (int8/16)/lit_sum (int32) counters, BCP loop
     assumption_checker.py  # AssumptionChecker: high-level API
     external_solver.py     # PySAT/MinisatGH wrapper
     clause_learner.py      # extract_conflict_clauses(): conflict → learned clause

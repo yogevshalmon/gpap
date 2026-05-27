@@ -5,7 +5,7 @@ total_lits_est = AVG_LITS_PER_CLAUSE * M  (key driver for both K and L)
 
 K (batch size) is memory-bounded:
   formula_bytes   = 8*M + 16*N + 8*total_lits_est   (one-time device allocation)
-  per_batch_bytes = 8*M + 2*N + 6                   (BCPEngine per batch)
+  per_batch_bytes = 5*M + 2*N + 3                   (sat_count int8 1B + xor_sum int32 4B + assign per batch)
   K = min(floor((GPU_MEM - formula_bytes) / per_batch_bytes), 2048)
 
 L (assumptions per batch) = round(log2(total_lits_est)) — scales with formula complexity
@@ -87,7 +87,7 @@ def compute_k_safe(M: int, N: int, gpu_mem_bytes: float, cap: int | None = 65536
 
     Memory model (dominant term is M):
       formula_bytes   = 8*M + 16*N + 8*total_lits_est  (one-time device allocation)
-      per_batch_bytes = 8*M + 2*N + 6                  (sat_count + lit_sum + assignment per batch)
+      per_batch_bytes = 5*M + 2*N + 3                  (sat_count int8 1B + xor_sum int32 4B + assign per batch)
 
     cap: upper bound on returned K (default 65536 for benchmarks). Pass None for no cap
          (clause learning, where larger K = fewer chunks = faster total time).
@@ -96,7 +96,7 @@ def compute_k_safe(M: int, N: int, gpu_mem_bytes: float, cap: int | None = 65536
     """
     total_lits = int(_AVG_LITS_PER_CLAUSE * M)
     formula_bytes = 8 * M + 16 * N + 8 * total_lits
-    per_batch_bytes = max(1, 8 * M + 2 * N + 6)
+    per_batch_bytes = max(1, 5 * M + 2 * N + 3)
     available = gpu_mem_bytes - formula_bytes
     if available <= 0:
         return 1
@@ -108,7 +108,7 @@ def _compute_params(N: int, M: int, gpu_mem_bytes: float):
     """Return (K, L, K_safe, total_lits_est, est_mem_mb) or None if instance doesn't fit."""
     total_lits = int(_AVG_LITS_PER_CLAUSE * M)
     formula_bytes = 8 * M + 16 * N + 8 * total_lits
-    per_batch_bytes = max(1, 8 * M + 2 * N + 6)
+    per_batch_bytes = max(1, 5 * M + 2 * N + 3)
 
     available = gpu_mem_bytes - formula_bytes
     if available <= 0:

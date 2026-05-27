@@ -29,7 +29,8 @@ class BCPEngine:
 
     For K parallel assumption sets and M clauses, maintains:
     - sat_count (K, M): remaining non-falsified literals per clause (init = clause_sizes)
-    - lit_sum (K, M): running sum of non-falsified literal indices (init = init_lit_sum)
+                        dtype auto-selected: int8 if max_clause_size ≤ 127, int16 ≤ 32767, else int32
+    - lit_sum (K, M):   running sum of non-falsified literal indices (init = init_lit_sum, int32)
     - assignment (K, 2*N): 0 = unassigned, 1 = TRUE
 
     When literal l is set TRUE:
@@ -57,9 +58,18 @@ class BCPEngine:
         M = self._num_clauses
         N = self._num_vars
 
+        # auto-select sat_count dtype based on max clause size
+        max_cls = int(self._formula.clause_sizes.max().item())
+        if max_cls <= 127:
+            self._sat_count_dtype = torch.int8
+        elif max_cls <= 32767:
+            self._sat_count_dtype = torch.int16
+        else:
+            self._sat_count_dtype = torch.int32
+
         # clause counters: (K, M)
-        self._sat_count = self._formula.clause_sizes.unsqueeze(0).expand(K, -1).clone().to(torch.int32)
-        self._lit_sum = self._formula.init_lit_sum.unsqueeze(0).expand(K, -1).clone().to(torch.int32)
+        self._sat_count = self._formula.clause_sizes.unsqueeze(0).expand(K, -1).clone().to(self._sat_count_dtype)
+        self._lit_sum   = self._formula.init_lit_sum.unsqueeze(0).expand(K, -1).clone()  # int32
 
         # assignment: (K, 2*N), 0=unassigned, 1=TRUE
         self._assignment = torch.zeros((K, 2 * N), dtype=torch.int8, device=self._device)
@@ -106,7 +116,7 @@ class BCPEngine:
 
         K = num_batches
         # In-place overwrite — no new allocations for sat_count/lit_sum/assignment
-        self._sat_count.copy_(self._formula.clause_sizes.unsqueeze(0).expand(K, -1))
+        self._sat_count.copy_(self._formula.clause_sizes.unsqueeze(0).expand(K, -1).to(self._sat_count_dtype))
         self._lit_sum.copy_(self._formula.init_lit_sum.unsqueeze(0).expand(K, -1))
         self._assignment.zero_()
         self._active.fill_(True)
@@ -197,8 +207,8 @@ class BCPEngine:
             # Flat 1D index into (K, M) for scatter operations
             flat_idx = exp_batches * M + exp_clauses     # (total,)
 
-            # Decrement sat_count for all affected (batch, clause) pairs
-            neg_ones = torch.full((total,), -1, dtype=torch.int32, device=self._device)
+            # Decrement sat_count for all affected (batch, clause) pairs.
+            neg_ones = torch.full((total,), -1, dtype=self._sat_count_dtype, device=self._device)
             self._sat_count.view(-1).scatter_add_(0, flat_idx, neg_ones)
 
             # Subtract neg_lit from lit_sum for all affected pairs
@@ -558,7 +568,7 @@ class BCPEngine:
                 steps["expand"].append(ts() - t0)
 
                 t0 = ts()
-                neg_ones = torch.full((total,), -1, dtype=torch.int32, device=device)
+                neg_ones = torch.full((total,), -1, dtype=self._sat_count_dtype, device=device)
                 self._sat_count.view(-1).scatter_add_(0, flat_idx, neg_ones)
                 steps["scatter_sat"].append(ts() - t0)
 
