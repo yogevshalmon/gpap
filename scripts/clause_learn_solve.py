@@ -38,7 +38,7 @@ from gpap.clsdata.cnf_formula import CnfFormula
 from gpap.clsdata.occ_list import lit_index_to_ext_lit
 from gpap.solver.bcp_engine import BCPEngine
 from gpap.solver.clause_learner import extract_conflict_clauses_tensor
-from scripts.build_benchmark_suite import compute_k_safe
+from gpap.utils.gpu_budget import compute_k_safe, gpu_mem_available
 from scripts.profile_engine import (
     count_all_pairs,
     count_all_triplets,
@@ -82,10 +82,6 @@ def _dedup_clauses(clauses: list[list[int]]) -> list[list[int]]:
     return list(seen.values())
 
 
-def _gpu_mem_bytes(device: torch.device) -> float:
-    if device.type == "cuda":
-        return torch.cuda.get_device_properties(device).total_memory * 0.5
-    return 8.0e9  # conservative 8 GB for CPU
 
 
 def main():
@@ -134,7 +130,11 @@ def main():
 
     # K sizing: no cap when auto-computing — use full memory-safe K
     if args.auto_k:
-        K = compute_k_safe(M, N, _gpu_mem_bytes(device), cap=None)
+        max_cls    = int(formula.clause_sizes.max().item())
+        total_lits = int(formula.clause_sizes.sum().item())
+        K = compute_k_safe(M, N, gpu_mem_available(device), cap=None,
+                           max_clause_size=max_cls, total_lits=total_lits,
+                           deduct_formula=False)
     else:
         K = args.K
 

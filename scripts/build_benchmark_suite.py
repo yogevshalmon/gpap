@@ -3,9 +3,9 @@
 
 total_lits_est = AVG_LITS_PER_CLAUSE * M  (key driver for both K and L)
 
-K (batch size) is memory-bounded:
+K (batch size) is memory-bounded by peak allocation (static tensors + intermediates):
   formula_bytes   = 8*M + 16*N + 8*total_lits_est   (one-time device allocation)
-  per_batch_bytes = 5*M + 2*N + 3                   (sat_count int8 1B + xor_sum int32 4B + assign per batch)
+  per_batch_bytes = 6*M + 10*N + 3                  (static 5M+2N + reset temp M + apply temps 8N)
   K = min(floor((GPU_MEM - formula_bytes) / per_batch_bytes), 2048)
 
 L (assumptions per batch) = round(log2(total_lits_est)) — scales with formula complexity
@@ -25,8 +25,13 @@ import math
 import os
 import sys
 
-# Conservative estimate: average literals per clause for memory sizing
-_AVG_LITS_PER_CLAUSE = 4.0
+sys.path.insert(0, ".")
+from gpap.utils.gpu_budget import (
+    AVG_LITS_PER_CLAUSE as _AVG_LITS_PER_CLAUSE,
+    compute_k_safe,
+    formula_mem_bytes,
+    per_batch_mem_bytes,
+)
 
 # Per-tier selection limits: how many instances and max file size per family.
 # "_default" applies to any family not explicitly listed.
@@ -81,45 +86,22 @@ def _parse_header(path: str):
     return None
 
 
-def compute_k_safe(M: int, N: int, gpu_mem_bytes: float, cap: int | None = 65536) -> int:
-    """Compute the largest K (batch size) that fits in gpu_mem_bytes for a formula with M clauses
-    and N variables.
-
-    Memory model (dominant term is M):
-      formula_bytes   = 8*M + 16*N + 8*total_lits_est  (one-time device allocation)
-      per_batch_bytes = 5*M + 2*N + 3                  (sat_count int8 1B + xor_sum int32 4B + assign per batch)
-
-    cap: upper bound on returned K (default 65536 for benchmarks). Pass None for no cap
-         (clause learning, where larger K = fewer chunks = faster total time).
-
-    Returns min(K_safe, cap) if cap is set, else K_safe. At least 1.
-    """
-    total_lits = int(_AVG_LITS_PER_CLAUSE * M)
-    formula_bytes = 8 * M + 16 * N + 8 * total_lits
-    per_batch_bytes = max(1, 5 * M + 2 * N + 3)
-    available = gpu_mem_bytes - formula_bytes
-    if available <= 0:
-        return 1
-    k_safe = int(available / per_batch_bytes)
-    return max(1, k_safe if cap is None else min(k_safe, cap))
-
-
 def _compute_params(N: int, M: int, gpu_mem_bytes: float):
     """Return (K, L, K_safe, total_lits_est, est_mem_mb) or None if instance doesn't fit."""
     total_lits = int(_AVG_LITS_PER_CLAUSE * M)
-    formula_bytes = 8 * M + 16 * N + 8 * total_lits
-    per_batch_bytes = max(1, 5 * M + 2 * N + 3)
+    f_bytes = formula_mem_bytes(M, N)
+    p_bytes = per_batch_mem_bytes(M, N)
 
-    available = gpu_mem_bytes - formula_bytes
+    available = gpu_mem_bytes - f_bytes
     if available <= 0:
         return None
 
-    K_safe = int(available / per_batch_bytes)
+    K_safe = int(available / p_bytes)
     K = compute_k_safe(M, N, gpu_mem_bytes, cap=65536)
     # L scales with log2(total_lits): captures both clause count and average clause size.
     # Gives more assumptions than log2(N) for small dense formulas, same cap for large ones.
     L = max(1, min(15, round(math.log2(max(total_lits, 2)))))
-    est_mem_mb = (formula_bytes + K * per_batch_bytes) / 1e6
+    est_mem_mb = (f_bytes + K * p_bytes) / 1e6
     return K, L, K_safe, total_lits, est_mem_mb
 
 

@@ -26,17 +26,36 @@ Instead of a clause matrix (like GPSS), GPAP uses:
 
 ### K (Batch Size) Memory Model
 
-`sat_count (K, M)` (int8/int16) and `lit_sum (K, M)` (int32) are the dominant memory consumers (5 bytes/batch/clause for typical SAT with int8 sat_count). K is computed as:
+K is computed from peak GPU memory across three sequential phases:
 
 ```
-formula_bytes   = 8*M + 16*N + 8*total_lits_est   (one-time)
-per_batch_bytes = 5*M + 2*N + 3                   (per batch: sat_count int8 1B + lit_sum int32 4B + assign)
-K_safe = (gpu_mem * fraction - formula_bytes) / per_batch_bytes
+formula_bytes   = 8*M + 16*N + 8*total_lits_est      (one-time)
+per_batch_bytes = (sat_b+4)*M + 2*N                   (static: sat_count+lit_sum+assignment)
+                + max(8*N, 1000*total_lits//N) + 3    (peak phase: apply or propagate)
+K_safe = gpu_mem_available(device) / per_batch_bytes  (post-load: free already excludes formula)
 ```
 
-Memory gain vs original int32+int32 (8B/element): int8+int32 uses 5B = **1.6× K** at same GPU memory.
+Phase peaks (take the max — phases are sequential, not concurrent):
+- **apply_assumptions_bulk**: 4 simultaneous K×2N bool tensors → **+8N/batch**
+- **_bulk_propagate_lits**: 7 int64 + 2 int32 temporaries all of size
+  `total = K × P × avg_occ_length` per round (P ≈ 10 props/batch/round,
+  avg_occ_length = total_lits/N) → **+1000 × total_lits/N per batch**
+  (calibrated from goldb: 570 bytes/unit empirically; ×1.75 safety = 1000 for dense formulas)
+- **reset_state**: no K×M intermediate — dtype conversion done on M-element vector before
+  `expand()` (bcp_engine.py). Earlier `.expand().clone().to(dtype)` created full K×M int32 peak.
 
-Use `compute_k_safe(M, N, gpu_mem_bytes, cap=None)` from `scripts/build_benchmark_suite.py`.
+Which phase dominates:
+- `apply_peak > prop_peak` when `N² > 90 × total_lits` (sparse/large-N, e.g. goldb N=10316)
+- `prop_peak > apply_peak` when `N² < 90 × total_lits` (dense/small-N, e.g. sat24 N=450)
+
+Oversizing K causes tensors to spill to shared system RAM via PCIe (~12 GB/s vs ~200 GB/s VRAM).
+Diagnostic: reset time ~464 ms/chunk (spilled) vs ~27 ms/chunk (VRAM).
+Safety fraction: 0.75 (not 0.9) — WDDM/WSL2 reserves VRAM the CUDA driver can't see.
+
+Call `gpu_mem_available(device)` AFTER loading the formula, then pass `deduct_formula=False`:
+  `K = compute_k_safe(M, N, gpu_mem_available(device), ..., deduct_formula=False)`
+  `mem_get_info().free` already excludes the loaded formula, so no second deduction needed.
+Pass actual `formula.clause_sizes.sum()` as `total_lits` for accurate prop-peak estimation.
 Pass `cap=None` for clause learning (maximize K); `cap=65536` for benchmarks (consistent timing).
 
 ## Project Structure

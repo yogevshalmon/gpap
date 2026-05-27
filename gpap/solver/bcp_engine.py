@@ -68,7 +68,9 @@ class BCPEngine:
             self._sat_count_dtype = torch.int32
 
         # clause counters: (K, M)
-        self._sat_count = self._formula.clause_sizes.unsqueeze(0).expand(K, -1).clone().to(self._sat_count_dtype)
+        # Convert to target dtype on the M-element vector FIRST, then expand+clone — avoids
+        # materialising a K×M int32 intermediate before the int8/int16 conversion.
+        self._sat_count = self._formula.clause_sizes.to(self._sat_count_dtype).unsqueeze(0).expand(K, -1).clone()
         self._lit_sum   = self._formula.init_lit_sum.unsqueeze(0).expand(K, -1).clone()  # int32
 
         # assignment: (K, 2*N), 0=unassigned, 1=TRUE
@@ -115,8 +117,9 @@ class BCPEngine:
             return
 
         K = num_batches
-        # In-place overwrite — no new allocations for sat_count/lit_sum/assignment
-        self._sat_count.copy_(self._formula.clause_sizes.unsqueeze(0).expand(K, -1).to(self._sat_count_dtype))
+        # In-place overwrite — no new allocations for sat_count/lit_sum/assignment.
+        # Dtype conversion on the M-element vector before expand avoids materialising K×M temps.
+        self._sat_count.copy_(self._formula.clause_sizes.to(self._sat_count_dtype).unsqueeze(0).expand(K, -1))
         self._lit_sum.copy_(self._formula.init_lit_sum.unsqueeze(0).expand(K, -1))
         self._assignment.zero_()
         self._active.fill_(True)

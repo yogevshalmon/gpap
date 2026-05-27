@@ -6,6 +6,7 @@ Usage:
         --cnf tests/test_data/unit_prop_chain.cnf --K 50 --assumptions 2
 """
 import argparse
+import math
 import random
 import sys
 import time
@@ -16,7 +17,9 @@ sys.path.insert(0, ".")
 from gpap.clsdata.cnf_formula import CnfFormula
 from gpap.clsdata.occ_list import ext_lit_to_lit_index
 from gpap.solver.bcp_engine import BCPEngine, make_assumption_tensor
+from gpap.solver.clause_learner import extract_conflict_clauses_tensor
 from gpap.solver.external_solver import ExternalSolver
+from gpap.utils.gpu_budget import compute_k_safe, gpu_mem_available
 
 
 # ---------------------------------------------------------------------------
@@ -134,7 +137,9 @@ def generate_all_pairs_chunks_gpu(num_vars: int, K: int, device: torch.device):
             n_full = cat.size(0) // K
             for c in range(n_full):
                 yield cat[c * K:(c + 1) * K]
-            rem = cat[n_full * K:]
+            buf = []
+            rem = cat[n_full * K:].clone()
+            del cat
             buf = [rem] if rem.numel() else []
             buf_rows = rem.size(0)
     if buf_rows > 0:
@@ -144,38 +149,70 @@ def generate_all_pairs_chunks_gpu(num_vars: int, K: int, device: torch.device):
 def generate_all_triplets_chunks_gpu(num_vars: int, K: int, device: torch.device):
     """Yield (≤K, 3) int64 lit-index tensors covering all (±v1, ±v2, ±v3) triplets, v1<v2<v3.
 
-    Built on the GPU with an O(num_vars) Python loop over v1 only — each iteration uses
-    torch.combinations to form all (v2 < v3) pairs from the remaining variables, then
-    expands by the 8 polarity combos. Memory-safe per v1 (no K-sized list). Total rows =
-    count_all_triplets(num_vars). Only practical for small N (see count_all_triplets).
+    O(N) outer Python loop over v1. For each v1 the inner (v2, v3) body is vectorized on
+    GPU using torch.combinations when the resulting tensor fits in < 256 MB; otherwise falls
+    back to an O(N) inner v2 loop (needed for large N where torch.combinations per v1 would
+    create hundreds of MB). Threshold: N < ~2300.
+
+    This replaces the previous O(N²) Python loop (v1, v2 nested). For N=450: 450 outer
+    iterations instead of 101K; each iteration builds the full v1-slice on GPU at once.
+    Total rows = count_all_triplets(num_vars).
     """
+    _INNER_BYTES_LIMIT = 256 * 1024 * 1024  # 256 MB threshold for vectorised inner body
     pol = torch.tensor(
         [[p1, p2, p3] for p1 in (0, 1) for p2 in (0, 1) for p3 in (0, 1)],
         dtype=torch.long, device=device,
     )  # (8, 3)
     buf: list[torch.Tensor] = []
     buf_rows = 0
-    for v1 in range(num_vars):  # 0-based variable index
+
+    def _flush_buf():
+        nonlocal buf, buf_rows
+        cat = torch.cat(buf, dim=0)
+        buf = []
+        n_full = cat.size(0) // K
+        for c in range(n_full):
+            yield cat[c * K:(c + 1) * K]
+        rem = cat[n_full * K:].clone()
+        del cat
+        buf = [rem] if rem.numel() else []
+        buf_rows = rem.size(0)
+
+    for v1 in range(num_vars):
         rest = torch.arange(v1 + 1, num_vars, dtype=torch.long, device=device)
-        if rest.numel() < 2:
+        n2 = rest.numel()
+        if n2 < 2:
             continue
-        pairs = torch.combinations(rest, 2)  # (C(m,2), 2): all (v2, v3), v2 < v3
-        n = pairs.size(0)
-        base = torch.empty((n, 3), dtype=torch.long, device=device)
-        base[:, 0] = 2 * v1
-        base[:, 1] = 2 * pairs[:, 0]
-        base[:, 2] = 2 * pairs[:, 1]
-        block = (base.unsqueeze(1) + pol.unsqueeze(0)).reshape(-1, 3)  # (8*n, 3)
-        buf.append(block)
-        buf_rows += block.size(0)
-        if buf_rows >= K:
-            cat = torch.cat(buf, dim=0)
-            n_full = cat.size(0) // K
-            for c in range(n_full):
-                yield cat[c * K:(c + 1) * K]
-            rem = cat[n_full * K:]
-            buf = [rem] if rem.numel() else []
-            buf_rows = rem.size(0)
+        n_pairs = n2 * (n2 - 1) // 2
+        if n_pairs * 24 < _INNER_BYTES_LIMIT:
+            # Vectorised: build all (v2,v3) pairs for this v1 in one GPU call.
+            pairs = torch.combinations(rest, r=2)  # (n_pairs, 2)
+            base = torch.stack([
+                torch.full((n_pairs,), 2 * v1, dtype=torch.long, device=device),
+                2 * pairs[:, 0],
+                2 * pairs[:, 1],
+            ], dim=1)  # (n_pairs, 3)
+            block = (base.unsqueeze(1) + pol.unsqueeze(0)).reshape(-1, 3)
+            buf.append(block)
+            buf_rows += block.size(0)
+            if buf_rows >= K:
+                yield from _flush_buf()
+        else:
+            # Large N: inner v2 loop to keep per-iteration tensor size bounded.
+            for v2 in range(v1 + 1, num_vars):
+                n3 = num_vars - v2 - 1
+                if n3 == 0:
+                    continue
+                v3 = torch.arange(v2 + 1, num_vars, dtype=torch.long, device=device)
+                base = torch.empty((n3, 3), dtype=torch.long, device=device)
+                base[:, 0] = 2 * v1
+                base[:, 1] = 2 * v2
+                base[:, 2] = 2 * v3
+                block = (base.unsqueeze(1) + pol.unsqueeze(0)).reshape(-1, 3)
+                buf.append(block)
+                buf_rows += block.size(0)
+                if buf_rows >= K:
+                    yield from _flush_buf()
     if buf_rows > 0:
         yield torch.cat(buf, dim=0)
 
@@ -498,6 +535,214 @@ def plot_k_sweep(results: list[dict], output_path: str) -> None:
 
 
 # ---------------------------------------------------------------------------
+# End-to-end clause generation: GPU vs CPU sequential baseline
+# ---------------------------------------------------------------------------
+
+def run_e2e_gpu(
+    cnf_path: str,
+    mode: str,
+    K: int,
+    device: torch.device,
+    formula: "CnfFormula | None" = None,
+    num_warmup: int = 2,
+    max_rounds: int | None = None,
+    soft_stop_frac: float | None = None,
+    min_rounds: int = 0,
+    max_sets: int | None = None,
+) -> dict:
+    """Full GPAP pipeline over all pairs/triplets: generate chunks → reset → propagate → extract.
+
+    Returns timing dict plus per-phase peak GPU memory (CUDA only):
+      mem_static_gb   — memory_allocated after init_state (static tensors only)
+      peak_reset_gb   — max_memory_allocated during first reset_state
+      peak_apply_gb   — max_memory_allocated during first apply_assumptions_bulk
+      peak_prop_gb    — max_memory_allocated during first propagate (can be >> static)
+      peak_overall_gb — max_memory_allocated across the entire run (warmup excluded)
+    """
+    is_cuda = device.type == "cuda"
+
+    def _mem_gb() -> float:
+        return torch.cuda.memory_allocated(device) / 1e9 if is_cuda else 0.0
+
+    def _peak_gb() -> float:
+        return torch.cuda.max_memory_allocated(device) / 1e9 if is_cuda else 0.0
+
+    def _reset_peak():
+        if is_cuda:
+            torch.cuda.reset_peak_memory_stats(device)
+
+    if formula is None:
+        formula = CnfFormula(device)
+        formula.parse_cnf_file(cnf_path)
+    N = formula.num_vars
+
+    if mode == "pairs":
+        chunk_gen_fn = lambda: generate_all_pairs_chunks_gpu(N, K, device)
+    else:
+        chunk_gen_fn = lambda: generate_all_triplets_chunks_gpu(N, K, device)
+
+    engine = BCPEngine(formula)
+    warmed_up = False
+    t_gen = t_reset = t_apply = t_prop = t_extract = 0.0
+    total_sets = 0
+    n_chunks = 0
+    conflicts_found = 0
+
+    # Per-phase peak memory (first real chunk only, warmup excluded)
+    mem_static_gb = peak_reset_gb = peak_apply_gb = peak_prop_gb = 0.0
+
+    gen_iter = iter(chunk_gen_fn())
+    while True:
+        _sync(device); g0 = time.perf_counter()
+        try:
+            chunk_t = next(gen_iter)
+        except StopIteration:
+            break
+        _sync(device); t_gen += (time.perf_counter() - g0) * 1e3
+
+        K_chunk = chunk_t.size(0)
+        # Truncate the chunk to hit max_sets exactly on the last iteration
+        is_last = False
+        if max_sets is not None and total_sets + K_chunk >= max_sets:
+            chunk_t = chunk_t[:max_sets - total_sets]
+            K_chunk = chunk_t.size(0)
+            is_last = True
+
+        if not warmed_up and num_warmup > 0:
+            for _ in range(num_warmup):
+                engine.reset_state(K_chunk)
+                engine.apply_assumptions_bulk(chunk_t)
+                engine.propagate(max_rounds=max_rounds, soft_stop_frac=soft_stop_frac,
+                                 min_rounds=min_rounds)
+            _sync(device)
+            warmed_up = True
+
+        # --- phase: reset ---
+        _reset_peak()
+        _sync(device); r0 = time.perf_counter()
+        engine.reset_state(K_chunk)
+        _sync(device); t_reset += (time.perf_counter() - r0) * 1e3
+        if n_chunks == 0:
+            mem_static_gb = _mem_gb()
+            peak_reset_gb = _peak_gb()
+
+        # --- phase: apply ---
+        _reset_peak()
+        _sync(device); a0 = time.perf_counter()
+        engine.apply_assumptions_bulk(chunk_t)
+        _sync(device); t_apply += (time.perf_counter() - a0) * 1e3
+        if n_chunks == 0:
+            peak_apply_gb = _peak_gb()
+
+        # --- phase: propagate ---
+        _reset_peak()
+        _sync(device); p0 = time.perf_counter()
+        engine.propagate(max_rounds=max_rounds, soft_stop_frac=soft_stop_frac,
+                         min_rounds=min_rounds)
+        _sync(device); t_prop += (time.perf_counter() - p0) * 1e3
+        if n_chunks == 0:
+            peak_prop_gb = _peak_gb()
+
+        _reset_peak()
+
+        _sync(device); e0 = time.perf_counter()
+        raw = extract_conflict_clauses_tensor(chunk_t, engine.real_conflict)
+        _sync(device); t_extract += (time.perf_counter() - e0) * 1e3
+
+        conflicts_found += len(raw)
+        total_sets += K_chunk
+        n_chunks += 1
+        if is_last:
+            break
+
+    # Overall peak across entire run (warmup excluded — reset before first real chunk)
+    peak_overall_gb = max(peak_reset_gb, peak_apply_gb, peak_prop_gb)
+
+    wall_ms = t_gen + t_reset + t_apply + t_prop + t_extract
+    return {
+        "total_ms":        wall_ms,
+        "t_gen_ms":        t_gen,
+        "t_reset_ms":      t_reset,
+        "t_apply_ms":      t_apply,
+        "t_prop_ms":       t_prop,
+        "t_extract_ms":    t_extract,
+        "total_sets":      total_sets,
+        "n_chunks":        n_chunks,
+        "conflicts_found": conflicts_found,
+        "mem_static_gb":   mem_static_gb,
+        "peak_reset_gb":   peak_reset_gb,
+        "peak_apply_gb":   peak_apply_gb,
+        "peak_prop_gb":    peak_prop_gb,
+        "peak_overall_gb": peak_overall_gb,
+    }
+
+
+def run_e2e_cpu(
+    cnf_path: str,
+    mode: str,
+    num_vars: int,
+    max_sets: int | None = None,
+) -> dict:
+    """Sequential CPU baseline: iterate all pairs/triplets in a tight loop, single solver instance.
+
+    Bootstrap MinisatGH once, then call solver.propagate() for each assumption set reusing
+    the same buf list in-place — no new allocations in the hot loop.
+    """
+    from pysat.formula import CNF
+    from pysat.solvers import MinisatGH
+
+    class _Done(Exception):
+        pass
+
+    cnf = CNF(from_file=cnf_path)
+    conflicts_found = 0
+    total = 0
+
+    t0 = time.perf_counter()
+    try:
+        with MinisatGH(bootstrap_with=cnf) as solver:
+            if mode == "pairs":
+                buf = [0, 0]
+                for v1 in range(1, num_vars + 1):
+                    for v2 in range(v1 + 1, num_vars + 1):
+                        for p1 in (1, -1):
+                            for p2 in (1, -1):
+                                if max_sets is not None and total >= max_sets:
+                                    raise _Done
+                                buf[0] = p1 * v1
+                                buf[1] = p2 * v2
+                                st, _ = solver.propagate(assumptions=buf)
+                                if not st:
+                                    conflicts_found += 1
+                                total += 1
+            else:  # triplets
+                buf = [0, 0, 0]
+                for v1 in range(1, num_vars + 1):
+                    for v2 in range(v1 + 1, num_vars + 1):
+                        for v3 in range(v2 + 1, num_vars + 1):
+                            for p1 in (1, -1):
+                                for p2 in (1, -1):
+                                    for p3 in (1, -1):
+                                        if max_sets is not None and total >= max_sets:
+                                            raise _Done
+                                        buf[0] = p1 * v1
+                                        buf[1] = p2 * v2
+                                        buf[2] = p3 * v3
+                                        st, _ = solver.propagate(assumptions=buf)
+                                        if not st:
+                                            conflicts_found += 1
+                                        total += 1
+    except _Done:
+        pass
+    wall_ms = (time.perf_counter() - t0) * 1e3
+    return {
+        "total_ms":        wall_ms,
+        "total_sets":      total,
+        "conflicts_found": conflicts_found,
+    }
+
+
+# ---------------------------------------------------------------------------
 # Entry point
 # ---------------------------------------------------------------------------
 
@@ -526,6 +771,14 @@ def main():
                          "propagations drop below this fraction of peak work seen so far")
     ap.add_argument("--min-rounds", type=int, default=0,
                     help="Minimum rounds before --soft-stop-frac may trigger (default: 0)")
+    ap.add_argument("--e2e-mode", choices=["pairs", "triplets"], default=None,
+                    help="End-to-end mode: generate all pairs/triplets and compare GPU vs CPU")
+    ap.add_argument("--auto-k", action="store_true",
+                    help="Compute K from M, N and GPU memory (overrides --K; used in --e2e-mode)")
+    ap.add_argument("--e2e-max-sets", type=int, default=None,
+                    help="Limit total sets processed in --e2e-mode (sample first N sets)")
+    ap.add_argument("--e2e-no-cpu", action="store_true",
+                    help="Skip sequential CPU baseline in --e2e-mode (large N only)")
     args = ap.parse_args()
 
     device = torch.device(args.device) if args.device else \
@@ -543,6 +796,88 @@ def main():
         cutoff_note += f"  soft_stop_frac={args.soft_stop_frac}  min_rounds={args.min_rounds}"
     print(f"device={device}  assumptions/batch={args.assumptions}  "
           f"warmup={args.warmup}  runs={args.runs}{cutoff_note}")
+
+    # ---- End-to-end mode: all pairs / all triplets --------------------------
+    if args.e2e_mode:
+        N = formula.num_vars
+        mode = args.e2e_mode
+        if args.auto_k:
+            max_cls    = int(formula.clause_sizes.max().item())
+            total_lits = int(formula.clause_sizes.sum().item())
+            K = compute_k_safe(formula.num_clauses, N, gpu_mem_available(device), cap=None,
+                               max_clause_size=max_cls, total_lits=total_lits,
+                               deduct_formula=False)
+            k_note = f"K={K} (auto)"
+        else:
+            K = args.K
+            k_note = f"K={K}"
+        total_sets_full = count_all_pairs(N) if mode == "pairs" else count_all_triplets(N)
+        max_sets = args.e2e_max_sets
+        total_sets = min(total_sets_full, max_sets) if max_sets is not None else total_sets_full
+        n_chunks = math.ceil(total_sets / K)
+        sets_note = (f"{total_sets:,} / {total_sets_full:,} sets (capped)"
+                     if max_sets is not None else f"{total_sets:,} sets")
+        print(f"\nE2E {mode}  N={N}  {sets_note}  {k_note}  chunks={n_chunks}")
+
+        print("\nRunning GPU (GPAP) ...")
+        gpu = run_e2e_gpu(
+            args.cnf, mode, K, device,
+            formula=formula,
+            num_warmup=args.warmup,
+            max_rounds=args.max_rounds,
+            soft_stop_frac=args.soft_stop_frac,
+            min_rounds=args.min_rounds,
+            max_sets=max_sets,
+        )
+        gpu_sps = gpu["total_sets"] / (gpu["total_ms"] / 1e3) if gpu["total_ms"] else 0
+        w = gpu["total_ms"]
+        def _pct(ms): return f"{100*ms/w:.1f}%" if w else "—"
+
+        print(f"  GPU ─────────────────────────────────────────────────────")
+        print(f"    generation  : {gpu['t_gen_ms']:>9.1f} ms  {_pct(gpu['t_gen_ms']):>6}  (on-GPU tensor creation)")
+        print(f"    reset       : {gpu['t_reset_ms']:>9.1f} ms  {_pct(gpu['t_reset_ms']):>6}  ({gpu['n_chunks']} chunks × {gpu['t_reset_ms']/gpu['n_chunks']:.1f} ms/chunk)")
+        print(f"    apply       : {gpu['t_apply_ms']:>9.1f} ms  {_pct(gpu['t_apply_ms']):>6}")
+        print(f"    propagate   : {gpu['t_prop_ms']:>9.1f} ms  {_pct(gpu['t_prop_ms']):>6}  (BCP kernel)")
+        print(f"    extract     : {gpu['t_extract_ms']:>9.1f} ms  {_pct(gpu['t_extract_ms']):>6}  (device→host)")
+        print(f"    {'─'*55}")
+        print(f"    wall total  : {gpu['total_ms']:>9.1f} ms          {gpu_sps:,.0f} sets/s")
+        print(f"    conflicts   : {gpu['conflicts_found']:,}  ({gpu['conflicts_found']/gpu['total_sets']:.2%} conflict rate)")
+        if device.type == "cuda":
+            from gpap.utils.gpu_budget import formula_mem_bytes, per_batch_mem_bytes
+            M_formula = formula.num_clauses
+            max_cls    = int(formula.clause_sizes.max().item())
+            tl         = int(formula.clause_sizes.sum().item())
+            sat_b = 1 if max_cls <= 127 else (2 if max_cls <= 32767 else 4)
+            est_static_gb = K * ((sat_b + 4) * M_formula + 2 * N) / 1e9
+            est_budget_gb = K * per_batch_mem_bytes(M_formula, N, max_cls, tl) / 1e9
+            print(f"\n  Memory (first chunk, measured vs. model):")
+            print(f"    static tensors    : {gpu['mem_static_gb']:.2f} GB  (model: {est_static_gb:.2f} GB)")
+            print(f"    peak after reset  : {gpu['peak_reset_gb']:.2f} GB")
+            print(f"    peak after apply  : {gpu['peak_apply_gb']:.2f} GB")
+            print(f"    peak after prop   : {gpu['peak_prop_gb']:.2f} GB  ← highest = bottleneck")
+            print(f"    peak overall      : {gpu['peak_overall_gb']:.2f} GB  (budget: {est_budget_gb:.2f} GB)")
+
+        cpu: dict | None = None
+        if not args.e2e_no_cpu:
+            print(f"\nRunning CPU (sequential, single PySAT instance) ...")
+            cpu = run_e2e_cpu(args.cnf, mode, N, max_sets=max_sets)
+            cpu_sps = cpu["total_sets"] / (cpu["total_ms"] / 1e3) if cpu["total_ms"] else 0
+            print(f"  CPU ─────────────────────────────────────────────────────")
+            print(f"    wall total  : {cpu['total_ms']:>9.1f} ms          {cpu_sps:,.0f} sets/s   (sequential)")
+            print(f"    conflicts   : {cpu['conflicts_found']:,}  ({cpu['conflicts_found']/cpu['total_sets']:.2%} conflict rate)")
+
+        print()
+        if cpu is not None:
+            speedup = cpu["total_ms"] / gpu["total_ms"] if gpu["total_ms"] else float("inf")
+            match = gpu["conflicts_found"] == cpu["conflicts_found"]
+            print(f"  Speedup (CPU / GPU wall) : {speedup:.1f}x")
+            if match:
+                print(f"  Conflicts match          : YES ({gpu['conflicts_found']:,})")
+            else:
+                ratio = cpu["conflicts_found"] / gpu["conflicts_found"] if gpu["conflicts_found"] else float("inf")
+                print(f"  Conflicts match          : NO  GPU={gpu['conflicts_found']:,}  CPU={cpu['conflicts_found']:,}  "
+                      f"(CPU finds {ratio:.1f}x more — GPU soft-stop too aggressive?)")
+        return
 
     # ---- K sweep mode -------------------------------------------------------
     if args.K_values:
