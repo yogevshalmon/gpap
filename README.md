@@ -30,6 +30,22 @@ print(results['num_propagated']) # (K,) how many literals BCP propagated
 print(results['assignment'])     # (K, 2*N) final assignment state
 ```
 
+## Run on Colab (benchmark any GPU)
+
+Open [`notebooks/gpap_colab_benchmark.ipynb`](notebooks/gpap_colab_benchmark.ipynb) in Google
+Colab, pick a GPU runtime (`Runtime ▸ Change runtime type ▸ GPU`), and run all cells. It clones
+this repo, benchmarks the attached GPU on the bundled CNFs in `benchmarks/cnf/`, and prints the
+headline: **how fast GPAP propagates assumption sets (sets/s) vs a sequential CPU PySAT baseline.**
+Batch size `K` auto-sizes to the GPU's VRAM, so the same notebook works on a T4 or an A100.
+
+Results are saved per-GPU to `benchmarks/colab_results/<gpu>.json`; the last cell ranks every
+saved GPU so you can say "GPU A is N× faster than GPU B." The same driver runs headless:
+
+```bash
+PYTHONPATH=. python scripts/colab_benchmark.py --quick     # benchmark this machine's GPU
+PYTHONPATH=. python scripts/colab_benchmark.py --compare   # rank saved per-GPU results
+```
+
 ## Architecture
 
 ```

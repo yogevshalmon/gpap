@@ -77,7 +77,12 @@ scripts/
   run_benchmark_suite.py   # run suite.json and optionally compare vs baseline
   build_benchmark_suite.py # scan CNF dirs, compute K/L params, write suite manifest
   clause_learn_solve.py    # GPAP clause learning → kissat augmented solve
+  colab_benchmark.py       # cross-GPU driver: GPU-vs-CPU set-propagation throughput + compare
+notebooks/
+  gpap_colab_benchmark.ipynb # Colab front-end: clone → benchmark this GPU → rank GPUs
 benchmarks/
+  cnf/                     # 14 bundled family-diverse CNFs (portable; used by colab_benchmark)
+  colab_results/           # per-GPU result JSON (committed; read by compare_saved)
   suite.json               # 15-instance mixed suite (sat2006 + sat24)
   suite_sat24_small.json   # 108 sat24 instances with M ≤ 10,000
   .experiments/            # result JSON files (gitignored)
@@ -115,6 +120,18 @@ PYTHONPATH=. .venv/bin/python scripts/clause_learn_solve.py \
 PYTHONPATH=. .venv/bin/python scripts/clause_learn_solve.py \
     --cnf /path/to/formula.cnf --mode random --K 65536 --L 2 --rounds 5
 ```
+
+### Cross-GPU benchmark (Colab or local)
+```bash
+# Headline = GPU-vs-CPU set-propagation throughput on bundled benchmarks/cnf/.
+# K auto-sizes to the GPU's VRAM; results saved to benchmarks/colab_results/<gpu>.json.
+PYTHONPATH=. .venv/bin/python scripts/colab_benchmark.py --quick --device cuda
+PYTHONPATH=. .venv/bin/python scripts/colab_benchmark.py --compare   # rank saved GPUs
+```
+On Colab, open `notebooks/gpap_colab_benchmark.ipynb` (GPU runtime): it clones the repo,
+benchmarks the attached GPU, and `compare_saved()` ranks all committed per-GPU results.
+`max_sets` must be large enough that the GPU batch `K` is sizable — too small a cap throttles
+GPU parallelism and the speedup collapses (quick=200K, full=500K).
 
 ### Build a suite manifest
 ```bash
