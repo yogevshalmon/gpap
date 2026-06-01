@@ -177,6 +177,12 @@ def _gpu_with_retry(mode: str, path: str, formula: CnfFormula, K: int,
     memory model under-sized this formula (hard OOM on Linux, silent spill on WSL); either way we
     shrink K. Returns (gpu_result, K_actually_used).
     """
+    # Start every performance test from a clean allocator state: return the previous test's
+    # freed-but-cached blocks to the driver so each measured run is isolated (no fragmentation
+    # carried across the L × soft-stop grid). run_e2e_gpu warms up before timing, so the
+    # re-allocation cost is excluded from the measurement.
+    if device.type == "cuda":
+        torch.cuda.empty_cache()
     res = None
     for attempt in range(max_retries + 1):
         target_sets = target_chunks * K if mode == "random" else None
