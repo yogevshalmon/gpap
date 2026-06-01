@@ -77,12 +77,13 @@ scripts/
   run_benchmark_suite.py   # run suite.json and optionally compare vs baseline
   build_benchmark_suite.py # scan CNF dirs, compute K/L params, write suite manifest
   clause_learn_solve.py    # GPAP clause learning → kissat augmented solve
-  colab_benchmark.py       # cross-GPU driver: GPU-vs-CPU set-propagation throughput + compare
+  colab_benchmark.py       # cross-GPU driver: pairs anchor + random-L×soft-stop e2e grid + compare
+  colab_plots.py           # plots for a colab_benchmark payload (throughput/speedup/soft-stop tradeoff)
 notebooks/
-  gpap_colab_benchmark.ipynb # Colab front-end: clone → benchmark this GPU → rank GPUs
+  gpap_colab_benchmark.ipynb # Colab front-end: clone → benchmark this GPU → plots → rank GPUs
 benchmarks/
-  cnf/                     # 14 bundled family-diverse CNFs (portable; used by colab_benchmark)
-  colab_results/           # per-GPU result JSON (committed; read by compare_saved)
+  cnf/                     # 20 bundled family-diverse CNFs (incl. 6 medium M 10k–40k; used by colab_benchmark)
+  colab_results/           # per-GPU result JSON + PNG plots (committed; read by compare_saved)
   suite.json               # 15-instance mixed suite (sat2006 + sat24)
   suite_sat24_small.json   # 108 sat24 instances with M ≤ 10,000
   .experiments/            # result JSON files (gitignored)
@@ -123,15 +124,23 @@ PYTHONPATH=. .venv/bin/python scripts/clause_learn_solve.py \
 
 ### Cross-GPU benchmark (Colab or local)
 ```bash
-# Headline = GPU-vs-CPU set-propagation throughput on bundled benchmarks/cnf/.
-# K auto-sizes to the GPU's VRAM; results saved to benchmarks/colab_results/<gpu>.json.
+# Two e2e measurements on bundled benchmarks/cnf/, GPU vs sequential CPU PySAT:
+#  1. Pairs anchor — exhaustive (±v1,±v2) sets, no cutoff: the deterministic headline sets/s
+#     + a conflict-count sanity check (GPU real_conflict ≤ CPU all-conflicts).
+#  2. Random-L × soft-stop grid — for each L, random L-literal sets streamed in target_chunks×K
+#     batches, run with no cutoff (baseline) and several soft_stop_frac (min_rounds=5). Reports
+#     sets/s and successful_sets/s (finished = ¬timed_out) so soft-stop's throughput gain shows.
+# K auto-sizes to ALL the GPU's free VRAM (compute_k_safe cap=None); workload = target_chunks×K.
+# Writes benchmarks/colab_results/<gpu>.json + PNG plots (scripts/colab_plots.py).
 PYTHONPATH=. .venv/bin/python scripts/colab_benchmark.py --quick --device cuda
+PYTHONPATH=. .venv/bin/python scripts/colab_benchmark.py --device cuda \
+    --target-chunks 32 --l-values 2,5,10,20 --soft-stop-fracs 0.9,0.7,0.5,0.3,0.1
 PYTHONPATH=. .venv/bin/python scripts/colab_benchmark.py --compare   # rank saved GPUs
 ```
 On Colab, open `notebooks/gpap_colab_benchmark.ipynb` (GPU runtime): it clones the repo,
-benchmarks the attached GPU, and `compare_saved()` ranks all committed per-GPU results.
-`max_sets` must be large enough that the GPU batch `K` is sizable — too small a cap throttles
-GPU parallelism and the speedup collapses (quick=200K, full=500K).
+benchmarks the attached GPU, shows the plots, and `compare_saved()` ranks all committed results.
+`target_chunks` must be large enough that the GPU is amortized over many chunks (quick=6, full=32);
+K is uncapped so high-VRAM GPUs get more parallelism. The full grid runs minutes to ~1 h per GPU.
 
 ### Build a suite manifest
 ```bash
