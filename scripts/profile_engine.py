@@ -549,8 +549,17 @@ def run_e2e_gpu(
     soft_stop_frac: float | None = None,
     min_rounds: int = 0,
     max_sets: int | None = None,
+    L: int | None = None,
+    target_sets: int | None = None,
+    seed: int = 42,
 ) -> dict:
-    """Full GPAP pipeline over all pairs/triplets: generate chunks → reset → propagate → extract.
+    """Full GPAP pipeline over assumption-set chunks: generate → reset → propagate → extract.
+
+    mode:
+      "pairs"/"triplets" — exhaustive (±v1,±v2[,±v3]) chunks, capped at max_sets.
+      "random"           — fresh random-L chunks generated on the fly until target_sets is
+                           reached (requires L and target_sets); internally drives the same
+                           truncation path by setting max_sets = target_sets.
 
     Returns timing dict plus per-phase peak GPU memory (CUDA only):
       mem_static_gb   — memory_allocated after init_state (static tensors only)
@@ -558,6 +567,9 @@ def run_e2e_gpu(
       peak_apply_gb   — max_memory_allocated during first apply_assumptions_bulk
       peak_prop_gb    — max_memory_allocated during first propagate (can be >> static)
       peak_overall_gb — max_memory_allocated across the entire run (warmup excluded)
+    and finished-batch counts:
+      successful_sets — sets whose BCP reached fixpoint/conflict (not soft-stop timed_out)
+      timed_out_sets  — sets cut off by soft_stop_frac/max_rounds (==0 with no cutoff)
     """
     is_cuda = device.type == "cuda"
 
@@ -578,8 +590,22 @@ def run_e2e_gpu(
 
     if mode == "pairs":
         chunk_gen_fn = lambda: generate_all_pairs_chunks_gpu(N, K, device)
-    else:
+    elif mode == "triplets":
         chunk_gen_fn = lambda: generate_all_triplets_chunks_gpu(N, K, device)
+    elif mode == "random":
+        if L is None or target_sets is None:
+            raise ValueError("mode='random' requires both L and target_sets")
+        max_sets = target_sets  # bound the (infinite) generator via the truncation path
+
+        def _random_chunks():
+            idx = 0
+            while True:
+                yield generate_random_assumptions_gpu(N, K, L, device, seed=seed + idx)
+                idx += 1
+
+        chunk_gen_fn = _random_chunks
+    else:
+        raise ValueError(f"unknown mode: {mode!r}")
 
     engine = BCPEngine(formula)
     warmed_up = False
@@ -587,6 +613,8 @@ def run_e2e_gpu(
     total_sets = 0
     n_chunks = 0
     conflicts_found = 0
+    successful_sets = 0
+    timed_out_sets = 0
 
     # Per-phase peak memory (first real chunk only, warmup excluded)
     mem_static_gb = peak_reset_gb = peak_apply_gb = peak_prop_gb = 0.0
@@ -643,6 +671,11 @@ def run_e2e_gpu(
         if n_chunks == 0:
             peak_prop_gb = _peak_gb()
 
+        # Finished-batch accounting (soft_stop_frac/max_rounds may have cut some off)
+        n_timed_out = int(engine.timed_out.sum().item())
+        timed_out_sets += n_timed_out
+        successful_sets += K_chunk - n_timed_out
+
         _reset_peak()
 
         _sync(device); e0 = time.perf_counter()
@@ -667,6 +700,8 @@ def run_e2e_gpu(
         "t_prop_ms":       t_prop,
         "t_extract_ms":    t_extract,
         "total_sets":      total_sets,
+        "successful_sets": successful_sets,
+        "timed_out_sets":  timed_out_sets,
         "n_chunks":        n_chunks,
         "conflicts_found": conflicts_found,
         "mem_static_gb":   mem_static_gb,
@@ -738,6 +773,40 @@ def run_e2e_cpu(
     return {
         "total_ms":        wall_ms,
         "total_sets":      total,
+        "conflicts_found": conflicts_found,
+    }
+
+
+def run_e2e_cpu_random(
+    cnf_path: str,
+    num_vars: int,
+    L: int,
+    sample_sets: int,
+    seed: int = 42,
+) -> dict:
+    """Sequential CPU baseline for random-L assumptions, on a bounded sample to extrapolate from.
+
+    Generates `sample_sets` random-L assumption lists (same distribution as the GPU random mode)
+    and runs them through one MinisatGH instance in a tight loop. The caller extrapolates the
+    per-set cost to the GPU's full workload. Returns wall time for the sample + conflict count.
+    """
+    from pysat.formula import CNF
+    from pysat.solvers import MinisatGH
+
+    assumptions = generate_random_assumptions(num_vars, sample_sets, L, seed)
+    cnf = CNF(from_file=cnf_path)
+    conflicts_found = 0
+
+    t0 = time.perf_counter()
+    with MinisatGH(bootstrap_with=cnf) as solver:
+        for lits in assumptions:
+            st, _ = solver.propagate(assumptions=lits)
+            if not st:
+                conflicts_found += 1
+    wall_ms = (time.perf_counter() - t0) * 1e3
+    return {
+        "total_ms":        wall_ms,
+        "total_sets":      sample_sets,
         "conflicts_found": conflicts_found,
     }
 

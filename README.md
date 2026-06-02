@@ -30,6 +30,30 @@ print(results['num_propagated']) # (K,) how many literals BCP propagated
 print(results['assignment'])     # (K, 2*N) final assignment state
 ```
 
+## Run on Colab (benchmark any GPU)
+
+Open [`notebooks/gpap_colab_benchmark.ipynb`](notebooks/gpap_colab_benchmark.ipynb) in Google
+Colab, pick a GPU runtime (`Runtime ▸ Change runtime type ▸ GPU`), and run all cells. It clones
+this repo and benchmarks the attached GPU on the bundled CNFs in `benchmarks/cnf/`, measuring
+**how fast GPAP propagates assumption sets (sets/s) vs a sequential CPU PySAT baseline**, two ways:
+
+- **Pairs anchor** — exhaustive (±v1,±v2) sets, no cutoff: the deterministic headline sets/s plus a
+  conflict-count sanity check against PySAT.
+- **Random-L × soft-stop grid** — for each assumption-set size `L`, random sets are streamed in
+  `target_chunks × K` batches and run with no cutoff and several `soft_stop_frac` values
+  (`min_rounds=5`). It reports both `sets/s` and `successful_sets/s` (finished = not timed-out), so
+  you can see when an aggressive soft-stop trades a few cut-off batches for higher useful throughput.
+
+Batch size `K` auto-sizes to **all** the GPU's free VRAM, so the same notebook works on a T4 or an
+A100. Results + plots are saved per-GPU to `benchmarks/colab_results/<gpu>.json` (+ PNGs); the last
+cell ranks every saved GPU so you can say "GPU A is N× faster than GPU B." The driver runs headless:
+
+```bash
+PYTHONPATH=. python scripts/colab_benchmark.py --quick     # fast: subset, trimmed grid
+PYTHONPATH=. python scripts/colab_benchmark.py            # full grid (minutes to ~1 h)
+PYTHONPATH=. python scripts/colab_benchmark.py --compare   # rank saved per-GPU results
+```
+
 ## Architecture
 
 ```
