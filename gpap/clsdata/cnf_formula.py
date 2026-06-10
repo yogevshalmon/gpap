@@ -1,3 +1,5 @@
+import os
+
 import torch
 from tqdm import tqdm
 
@@ -71,7 +73,9 @@ class CnfFormula:
         with open(cnf_file) as file:
             lines = [line.rstrip() for line in file]
 
-        for line in tqdm(lines, desc="Parsing CNF"):
+        # quiet the bar for piped/background runs (GPAP_QUIET=1 or non-tty stdout); show interactively
+        _quiet = bool(os.environ.get("GPAP_QUIET")) or not os.isatty(1)
+        for line in tqdm(lines, desc="Parsing CNF", disable=_quiet):
             if len(line) == 0 or line.isspace():
                 continue
             if line.startswith('c'):
