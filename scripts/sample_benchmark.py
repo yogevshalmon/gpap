@@ -52,11 +52,16 @@ def two_wise_coverage(models, support):
 
 
 def gpap_sample(path, device, *, simplify, n_time, n_cov, b, k_cap, max_chunks=8,
-                cov_chunks=4, max_rounds=120, lookahead=False, verify_clauses=None):
+                cov_chunks=4, max_rounds=120, lookahead=False, verify_clauses=None,
+                cov_k_cap=2048):
     """Throughput run timed end-to-end (construction + simplify + sample, to match CMSGen's
     'produce N samples' wall clock) + a small collect run for coverage/soundness. The timed run
     is bounded by `max_chunks` (rate = models/wall is valid regardless of how many it collects —
-    avoids spinning on low-success formulas)."""
+    avoids spinning on low-success formulas).
+
+    The coverage run COLLECTS models to host RAM (one chunk = K models × N ints reconstructed), so
+    its K is capped to `cov_k_cap` independently of the (full-K) timing run — otherwise a large
+    auto-K on a low-RAM host (12 GB Colab) OOM-kills the session collecting a full chunk."""
     if device.type == "cuda":
         torch.cuda.synchronize()
     t0 = time.perf_counter()
@@ -67,6 +72,8 @@ def gpap_sample(path, device, *, simplify, n_time, n_cov, b, k_cap, max_chunks=8
         torch.cuda.synchronize()
     wall = time.perf_counter() - t0                  # includes construct+simplify (fair vs CMSGen)
     sps = t["n_models"] / wall if wall > 0 else 0.0
+    if n_cov:
+        smp.K = min(smp.K, cov_k_cap)                # bound host RAM from collected/reconstructed models
     c = (smp.sample(n_cov, decisions_per_round=b, max_decision_rounds=max_rounds, max_chunks=cov_chunks,
                     collect=True, verify_clauses=verify_clauses, lookahead=lookahead) if n_cov else {})
     del smp
@@ -78,8 +85,12 @@ def gpap_sample(path, device, *, simplify, n_time, n_cov, b, k_cap, max_chunks=8
             "n_distinct": c.get("n_distinct")}
 
 
-def cmsgen_sample(path, cmsgen_bin, n, scratch):
-    """Run CMSGen to produce n samples; return (samp/s, parsed models)."""
+def cmsgen_sample(path, cmsgen_bin, n, scratch, keep=None):
+    """Run CMSGen to produce n samples; return (samp/s, parsed models).
+
+    `keep` caps how many parsed models are retained in memory (the rest are only COUNTED, for the
+    rate). This is essential on low-RAM hosts (e.g. a 12 GB Colab): retaining all `n` full models
+    is `n × N` Python ints (~8-9 GB at n=50k, N=5k) and OOM-kills the session. None = keep all."""
     out = os.path.join(scratch, "cms_" + os.path.basename(path) + ".txt")
     t0 = time.perf_counter()
     try:
@@ -89,14 +100,22 @@ def cmsgen_sample(path, cmsgen_bin, n, scratch):
         return 0.0, []
     dt = time.perf_counter() - t0
     models = []
+    count = 0
     if os.path.exists(out):
         for line in open(out):
             lits = [int(x) for x in line.split() if x.lstrip("-").isdigit()]
             if lits and lits[-1] == 0:
                 lits = lits[:-1]
-            if lits:
+            if not lits:
+                continue
+            count += 1                                   # rate uses the full count, not just kept
+            if keep is None or len(models) < keep:
                 models.append(lits)
-    return (len(models) / dt if dt else 0.0), models
+        try:
+            os.remove(out)                               # the samplefile can be >1 GB; don't accumulate
+        except OSError:
+            pass
+    return (count / dt if dt else 0.0), models
 
 
 def main():
@@ -149,7 +168,8 @@ def main():
             row["gpap_plain_sps"] = plain["samples_per_s"]
         if args.cmsgen:
             # single CMSGen run at n_time (fair samp/s); use a subset of its samples for coverage
-            crate_t, cmodels = cmsgen_sample(path, args.cmsgen, args.n_time, args.scratch)
+            crate_t, cmodels = cmsgen_sample(path, args.cmsgen, args.n_time, args.scratch,
+                                             keep=args.n_cov)
             twc = two_wise_coverage(cmodels[:args.n_cov], sup1)
             ratio = (g["samples_per_s"] / crate_t) if crate_t else float("inf")
             row.update(cms_sps=crate_t, twise_cms=twc, ratio=ratio)

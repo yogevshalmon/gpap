@@ -164,7 +164,9 @@ def run_instance(path: str, device: torch.device, *, cmsgen_bin: str | None, n_t
         "in_niche": g["success_rate"] > 0.10,           # rough: produces models at a usable rate
     }
     if cmsgen_bin:
-        crate, cmodels = cmsgen_sample(path, cmsgen_bin, n_time, scratch)
+        # keep=n_cov: retain only the models needed for coverage; the rest are counted for the rate
+        # (retaining all n_time full models OOM-kills a 12 GB Colab — see cmsgen_sample).
+        crate, cmodels = cmsgen_sample(path, cmsgen_bin, n_time, scratch, keep=n_cov)
         twc = two_wise_coverage(cmodels[:n_cov], sup1)
         ratio = (g["samples_per_s"] / crate) if crate else None
         row.update(cms_sps=round(crate, 1), twise_cms=round(twc, 2),
