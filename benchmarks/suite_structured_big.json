@@ -1,0 +1,163 @@
+[
+ {
+  "path": "/home/yshalmon/sat_benchmarks/sat2006_benchmarks/SAT-Race_TS_1/velev-sss-1.0-cl.cnf",
+  "family": "hwverif",
+  "name": "velev-sss-1.0-cl.cnf",
+  "N": 1453,
+  "M": 12531
+ },
+ {
+  "path": "/home/yshalmon/sat_benchmarks/sat2006_benchmarks/SAT-Race_TS_2/velev-sss-1.0-05.cnf",
+  "family": "hwverif",
+  "name": "velev-sss-1.0-05.cnf",
+  "N": 1516,
+  "M": 12812
+ },
+ {
+  "path": "/home/yshalmon/sat_benchmarks/sat2006_benchmarks/SAT-Race-Benchmarks/hoons-vbmc-lucky7.cnf",
+  "family": "hwverif",
+  "name": "hoons-vbmc-lucky7.cnf",
+  "N": 8503,
+  "M": 25116
+ },
+ {
+  "path": "/home/yshalmon/sat_benchmarks/sat2006_benchmarks/SAT-Race_TS_1/hoons-vbmc-s04-05.cnf",
+  "family": "hwverif",
+  "name": "hoons-vbmc-s04-05.cnf",
+  "N": 8503,
+  "M": 25116
+ },
+ {
+  "path": "/home/yshalmon/sat_benchmarks/sat2006_benchmarks/SAT-Race_TS_2/hoons-vbmc-s04-06.cnf",
+  "family": "hwverif",
+  "name": "hoons-vbmc-s04-06.cnf",
+  "N": 12845,
+  "M": 38367
+ },
+ {
+  "path": "/home/yshalmon/sat_benchmarks/sat2006_benchmarks/SAT-Race_TS_2/velev-pipe-uns-1.1-03.cnf",
+  "family": "hwverif",
+  "name": "velev-pipe-uns-1.1-03.cnf",
+  "N": 2476,
+  "M": 25181
+ },
+ {
+  "path": "/home/yshalmon/sat_benchmarks/sat2006_benchmarks/SAT-Race_TS_2/velev-pipe-uns-1.0-14.cnf",
+  "family": "hwverif",
+  "name": "velev-pipe-uns-1.0-14.cnf",
+  "N": 2391,
+  "M": 27405
+ },
+ {
+  "path": "/home/yshalmon/sat_benchmarks/sat2006_benchmarks/SAT-Race_TS_1/velev-npe-1.0-02.cnf",
+  "family": "hwverif",
+  "name": "velev-npe-1.0-02.cnf",
+  "N": 3295,
+  "M": 35410
+ },
+ {
+  "path": "/home/yshalmon/sat_benchmarks/sat2006_benchmarks/SAT-Race_TS_1/manol-pipe-c7_i.cnf",
+  "family": "hwverif",
+  "name": "manol-pipe-c7_i.cnf",
+  "N": 13023,
+  "M": 38509
+ },
+ {
+  "path": "/home/yshalmon/sat_benchmarks/sat2006_benchmarks/SAT-Race_TS_1/manol-pipe-c8_i.cnf",
+  "family": "hwverif",
+  "name": "manol-pipe-c8_i.cnf",
+  "N": 14052,
+  "M": 41596
+ },
+ {
+  "path": "/home/yshalmon/sat_benchmarks/sat2006_benchmarks/SAT-Race_TS_1/manol-pipe-c6id.cnf",
+  "family": "hwverif",
+  "name": "manol-pipe-c6id.cnf",
+  "N": 82022,
+  "M": 242044
+ },
+ {
+  "path": "/home/yshalmon/sat_benchmarks/sat2006_benchmarks/SAT-Race-Benchmarks/manol-pipe-c7bidw_i.cnf",
+  "family": "hwverif",
+  "name": "manol-pipe-c7bidw_i.cnf",
+  "N": 131004,
+  "M": 387841
+ },
+ {
+  "path": "/home/yshalmon/sat_benchmarks/sat24_benchmarks/08ccc34df5d8eb9e9d45278af3dc093d-simon-r16-1.sanitized.cnf/08ccc34df5d8eb9e9d45278af3dc093d-simon-r16-1.sanitized.cnf",
+  "family": "simon",
+  "name": "08ccc34df5d8eb9e9d45278af3dc093d-simon-r16-1.sanitized.cnf",
+  "N": 2688,
+  "M": 8896
+ },
+ {
+  "path": "/home/yshalmon/sat_benchmarks/sat24_benchmarks/089f909e37b3ef0c4d90687f7e22b68f-simon-r18-0.sanitized.cnf/089f909e37b3ef0c4d90687f7e22b68f-simon-r18-0.sanitized.cnf",
+  "family": "simon",
+  "name": "089f909e37b3ef0c4d90687f7e22b68f-simon-r18-0.sanitized.cnf",
+  "N": 3008,
+  "M": 9984
+ },
+ {
+  "path": "/home/yshalmon/sat_benchmarks/sat24_benchmarks/2fcd8533eba981967292f1b6e41f7433-simon-r20-0.sanitized.cnf/2fcd8533eba981967292f1b6e41f7433-simon-r20-0.sanitized.cnf",
+  "family": "simon",
+  "name": "2fcd8533eba981967292f1b6e41f7433-simon-r20-0.sanitized.cnf",
+  "N": 3328,
+  "M": 11072
+ },
+ {
+  "path": "/home/yshalmon/sat_benchmarks/sat24_benchmarks/7cbc3ce2052ba7c5b501f75af58ab3c4-simon-r22-1.sanitized.cnf/7cbc3ce2052ba7c5b501f75af58ab3c4-simon-r22-1.sanitized.cnf",
+  "family": "simon",
+  "name": "7cbc3ce2052ba7c5b501f75af58ab3c4-simon-r22-1.sanitized.cnf",
+  "N": 3648,
+  "M": 12160
+ },
+ {
+  "path": "/home/yshalmon/sat_benchmarks/sat24_benchmarks/3129198788f182ce6955b18aa3c7e61e-simon-r24-1.sanitized.cnf/3129198788f182ce6955b18aa3c7e61e-simon-r24-1.sanitized.cnf",
+  "family": "simon",
+  "name": "3129198788f182ce6955b18aa3c7e61e-simon-r24-1.sanitized.cnf",
+  "N": 3968,
+  "M": 13248
+ },
+ {
+  "path": "/home/yshalmon/sat_benchmarks/sat2006_benchmarks/SAT-Race-Benchmarks/goldb-heqc-term1mul.cnf",
+  "family": "cec",
+  "name": "goldb-heqc-term1mul.cnf",
+  "N": 3504,
+  "M": 22229
+ },
+ {
+  "path": "/home/yshalmon/sat_benchmarks/sat2006_benchmarks/SAT-Race-Benchmarks/goldb-heqc-alu4mul.cnf",
+  "family": "cec",
+  "name": "goldb-heqc-alu4mul.cnf",
+  "N": 4736,
+  "M": 30465
+ },
+ {
+  "path": "/home/yshalmon/sat_benchmarks/sat2006_benchmarks/SAT-Race-Benchmarks/goldb-heqc-i8mul.cnf",
+  "family": "cec",
+  "name": "goldb-heqc-i8mul.cnf",
+  "N": 14524,
+  "M": 91139
+ },
+ {
+  "path": "/home/yshalmon/sat_benchmarks/sat24_benchmarks/04ded94454830d4ea960327e8b91f5a3-mdp-28-14-sat.cnf/04ded94454830d4ea960327e8b91f5a3-mdp-28-14-sat.cnf",
+  "family": "planning",
+  "name": "04ded94454830d4ea960327e8b91f5a3-mdp-28-14-sat.cnf",
+  "N": 792,
+  "M": 4386
+ },
+ {
+  "path": "/home/yshalmon/sat_benchmarks/sat24_benchmarks/d1940d3d830eb16a7d2270ca4af4acba-mdp-28-11-sat.cnf/d1940d3d830eb16a7d2270ca4af4acba-mdp-28-11-sat.cnf",
+  "family": "planning",
+  "name": "d1940d3d830eb16a7d2270ca4af4acba-mdp-28-11-sat.cnf",
+  "N": 799,
+  "M": 4438
+ },
+ {
+  "path": "/home/yshalmon/sat_benchmarks/sat24_benchmarks/db15a85651e0d941a11bf8640625edd8-mdp-32-11-sat.cnf/db15a85651e0d941a11bf8640625edd8-mdp-32-11-sat.cnf",
+  "family": "planning",
+  "name": "db15a85651e0d941a11bf8640625edd8-mdp-32-11-sat.cnf",
+  "N": 1038,
+  "M": 5842
+ }
+]
