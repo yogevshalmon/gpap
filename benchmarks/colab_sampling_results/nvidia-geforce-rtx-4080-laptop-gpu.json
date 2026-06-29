@@ -1,0 +1,191 @@
+{
+  "timestamp": "2026-06-29T18:46:02",
+  "gpu": {
+    "device": "cuda",
+    "torch_version": "2.11.0+cu130",
+    "cuda_version": "13.0",
+    "platform": "Linux-5.15.167.4-microsoft-standard-WSL2-x86_64-with-glibc2.39",
+    "name": "NVIDIA GeForce RTX 4080 Laptop GPU",
+    "total_gb": 12.88,
+    "free_gb": 11.58,
+    "capability": "8.9",
+    "multiprocessors": 58
+  },
+  "quick": true,
+  "b": 8,
+  "n_time": 20000,
+  "cmsgen": true,
+  "aggregate": {
+    "n_instances": 8,
+    "n_niche": 8,
+    "gpap_sps_peak": 58448.0,
+    "gpap_sps_median": 20620.6,
+    "ratio_geomean": 2.83,
+    "ratio_max": 9.54,
+    "twise_delta_mean": 0.0,
+    "all_gpu_sound": true,
+    "kscale_slope_loglog": 0.57,
+    "kscale_peak_sps": 112568.7,
+    "auto_K": 48531
+  },
+  "instances": [
+    {
+      "name": "35.sk_3_52.cnf",
+      "N": 4915,
+      "M": 10547,
+      "support": 52,
+      "gpap_sps": 41627.5,
+      "succ": 0.5024,
+      "twise_gpap": 61.84,
+      "gpu_sound": true,
+      "n_distinct": 24401,
+      "in_niche": true,
+      "cms_sps": 4363.3,
+      "twise_cms": 61.84,
+      "ratio": 9.54
+    },
+    {
+      "name": "10.sk_1_46.cnf",
+      "N": 1494,
+      "M": 2215,
+      "support": 46,
+      "gpap_sps": 38453.4,
+      "succ": 0.4339,
+      "twise_gpap": 78.45,
+      "gpu_sound": true,
+      "n_distinct": 22257,
+      "in_niche": true,
+      "cms_sps": 12889.2,
+      "twise_cms": 78.45,
+      "ratio": 2.98
+    },
+    {
+      "name": "27.sk_3_32.cnf",
+      "N": 1509,
+      "M": 2707,
+      "support": 32,
+      "gpap_sps": 58448.0,
+      "succ": 0.4979,
+      "twise_gpap": 60.48,
+      "gpu_sound": true,
+      "n_distinct": 10512,
+      "in_niche": true,
+      "cms_sps": 13451.2,
+      "twise_cms": 60.48,
+      "ratio": 4.35
+    },
+    {
+      "name": "32.sk_4_38.cnf",
+      "N": 3834,
+      "M": 13594,
+      "support": 38,
+      "gpap_sps": 23320.9,
+      "succ": 0.3159,
+      "twise_gpap": 61.88,
+      "gpu_sound": true,
+      "n_distinct": 4188,
+      "in_niche": true,
+      "cms_sps": 5774.3,
+      "twise_cms": 61.88,
+      "ratio": 4.04
+    },
+    {
+      "name": "111.sk_2_36.cnf",
+      "N": 2348,
+      "M": 5479,
+      "support": 36,
+      "gpap_sps": 11718.0,
+      "succ": 0.2162,
+      "twise_gpap": 60.0,
+      "gpu_sound": true,
+      "n_distinct": 3943,
+      "in_niche": true,
+      "cms_sps": 8930.3,
+      "twise_cms": 60.0,
+      "ratio": 1.31
+    },
+    {
+      "name": "53.sk_4_32.cnf",
+      "N": 2586,
+      "M": 10747,
+      "support": 32,
+      "gpap_sps": 13897.4,
+      "succ": 0.2938,
+      "twise_gpap": 60.48,
+      "gpu_sound": true,
+      "n_distinct": 3431,
+      "in_niche": true,
+      "cms_sps": 8217.7,
+      "twise_cms": 60.48,
+      "ratio": 1.69
+    },
+    {
+      "name": "55.sk_3_46.cnf",
+      "N": 3128,
+      "M": 12145,
+      "support": 46,
+      "gpap_sps": 17920.2,
+      "succ": 0.3032,
+      "twise_gpap": 64.35,
+      "gpu_sound": true,
+      "n_distinct": 6798,
+      "in_niche": true,
+      "cms_sps": 6960.7,
+      "twise_cms": 64.35,
+      "ratio": 2.57
+    },
+    {
+      "name": "109.sk_4_36.cnf",
+      "N": 3565,
+      "M": 14012,
+      "support": 36,
+      "gpap_sps": 8513.8,
+      "succ": 0.2871,
+      "twise_gpap": 68.1,
+      "gpu_sound": true,
+      "n_distinct": 3851,
+      "in_niche": true,
+      "cms_sps": 5885.1,
+      "twise_cms": 68.1,
+      "ratio": 1.45
+    }
+  ],
+  "ksweeps": [
+    {
+      "name": "35.sk_3_52.cnf",
+      "auto_K": 48531,
+      "points": [
+        {
+          "K": 3033,
+          "samples_per_s": 23514.6,
+          "success_rate": 0.7549,
+          "attempts_per_s": 31163.0
+        },
+        {
+          "K": 6066,
+          "samples_per_s": 44590.6,
+          "success_rate": 0.7511,
+          "attempts_per_s": 59393.0
+        },
+        {
+          "K": 12132,
+          "samples_per_s": 75030.6,
+          "success_rate": 0.7498,
+          "attempts_per_s": 100101.6
+        },
+        {
+          "K": 24265,
+          "samples_per_s": 112568.7,
+          "success_rate": 0.7499,
+          "attempts_per_s": 150158.2
+        },
+        {
+          "K": 48531,
+          "samples_per_s": 107339.9,
+          "success_rate": 0.5782,
+          "attempts_per_s": 185692.3
+        }
+      ]
+    }
+  ]
+}

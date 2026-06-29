@@ -97,3 +97,7 @@ cython_debug/
 
 # Experiments
 .experiments/
+
+# CMSGen build + scratch (built on demand by scripts/colab_sampling_benchmark.py)
+.cmsgen/
+.cmsgen_scratch/
