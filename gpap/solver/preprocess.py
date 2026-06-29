@@ -24,6 +24,7 @@ from collections import defaultdict
 
 import torch
 
+from gpap.clsdata.occ_list import ext_lit_to_lit_index, lit_index_to_ext_lit
 from gpap.solver.inprocess import GPUInprocessor
 
 # A trivially-UNSAT 2-clause formula, returned (same verdict) when preprocessing derives ⊥.
@@ -155,6 +156,128 @@ def apply_learned_subsumption(clauses, learned):
     return out, {"subsumed": n_sub, "added": len(extra)}
 
 
+def equivalent_literal_substitution(clauses, edges, num_vars, *, rep_score=None, max_classes=None):
+    """Equivalent-literal substitution (ELS): collapse mutually-implied literals, drop variables.
+
+    `edges`: (E, 2) tensor/list of (src_lit_idx, dst_lit_idx) implications src ⇒ dst (from
+    `GPUInprocessor.discover_implications`, which BCPs to fixpoint — so the edge set is the
+    *transitive closure*: x and y are equivalent iff BOTH x⇒y and y⇒x appear as direct edges).
+    Two literals are equivalent when each implies the other; equivalence classes are merged with
+    union-find and every member is rewritten to a single representative literal, which removes the
+    other variables. Contrapositive edges (¬y⇒¬x) are produced by the same probe pass, so
+    negations collapse consistently (sub[l^1] == sub[l]^1).
+
+    Heuristic knobs (the "which equivalences / which representative" lever — selection, not
+    discovery, is where prior inprocessing work found the signal):
+      rep_score   : optional {var0(0-based): float}. The class member whose VARIABLE has the
+                    highest score is kept as the representative (ties → smallest var); the others
+                    are eliminated. None → keep the smallest-variable member (default). A
+                    per-VARIABLE score keeps skew-symmetry (sub[l^1] == sub[l]^1). Use e.g. degree
+                    to keep the "central" variable and eliminate the peripheral copies.
+      max_classes : substitute only the largest `max_classes` equivalence classes (most variables
+                    removed first); None → all. A budget knob, like the binary-injection budget.
+
+    A class containing both `l` and `¬l` means the formula is UNSAT. Equisatisfiable: a model of
+    the reduced CNF lifts to the original by setting each removed variable equal to its
+    representative literal (`var_map`).
+
+    Returns (new_clauses, var_map, stats):
+      var_map : {removed_var(1-based): rep_literal(DIMACS)} — removed_var takes the rep's value.
+      stats   : {status: "ok"|"unsat", n_classes, vars_removed, clauses_removed, lits_removed}.
+    """
+    n2 = 2 * num_vars
+    parent = list(range(n2))
+
+    def find(x):
+        while parent[x] != x:
+            parent[x] = parent[parent[x]]
+            x = parent[x]
+        return x
+
+    def union(a, b):
+        ra, rb = find(a), find(b)
+        if ra != rb:
+            parent[ra] = rb
+
+    elist = edges.tolist() if hasattr(edges, "tolist") else [list(e) for e in edges]
+    eset = {(int(s), int(d)) for s, d in elist}
+    for s, d in eset:
+        if (d, s) in eset:                    # mutual implication ⇒ equivalent literals
+            union(s, d)
+            union(s ^ 1, d ^ 1)               # x≡y entails ¬x≡¬y (BCP may miss the contrapositive)
+
+    members = defaultdict(list)
+    for il in range(n2):
+        members[find(il)].append(il)
+
+    classes = [m for m in members.values() if len(m) > 1]
+    if max_classes is not None and len(classes) > max_classes:
+        # Budget: keep only the biggest classes — BUT a class C and its mirror ¬C must be kept or
+        # dropped TOGETHER, else a variable is half-renamed (positive→rep, negative left) which
+        # breaks skew-symmetry and is unsound. Group mirror pairs, keep whole groups by total size.
+        root_of = {find(m[0]): m for m in classes}
+        seen, pairs = set(), []
+        for m in classes:
+            r, rm = find(m[0]), find(m[0] ^ 1)
+            key = frozenset((r, rm))
+            if key in seen:
+                continue
+            seen.add(key)
+            grp = [m] if (rm == r or rm not in root_of) else [m, root_of[rm]]
+            pairs.append((sum(len(x) for x in grp), grp))
+        pairs.sort(key=lambda t: t[0], reverse=True)
+        kept = []
+        for _, grp in pairs:
+            if len(kept) >= max_classes:
+                break
+            kept.extend(grp)
+        classes = kept
+
+    def _canon(mem):
+        if rep_score is None:
+            return min(mem, key=lambda il: (il >> 1, il & 1))     # smallest var
+        return max(mem, key=lambda il: (rep_score.get(il >> 1, 0.0), -(il >> 1)))  # highest score
+
+    sub = list(range(n2))                     # literal index -> canonical (representative) literal
+    n_classes = 0
+    for mem in classes:
+        seen = set()
+        for il in mem:                        # both polarities of a var in one class ⇒ UNSAT
+            v = il >> 1
+            if v in seen:
+                return list(_UNSAT_CNF), {}, {"status": "unsat", "n_classes": n_classes}
+            seen.add(v)
+        canon = _canon(mem)
+        for il in mem:
+            sub[il] = canon
+        n_classes += 1
+
+    var_map: dict[int, int] = {}
+    for v in range(1, num_vars + 1):
+        pos = 2 * (v - 1)
+        if (sub[pos] >> 1) != (v - 1):        # this var's positive literal maps to another var
+            var_map[v] = lit_index_to_ext_lit(sub[pos])
+
+    lits_before = sum(len(c) for c in clauses)
+    out: list[list[int]] = []
+    for c in clauses:
+        s: set[int] = set()
+        taut = False
+        for l in c:
+            nl = lit_index_to_ext_lit(sub[ext_lit_to_lit_index(l)])
+            if -nl in s:
+                taut = True
+                break
+            s.add(nl)
+        if not taut and s:
+            out.append(list(s))
+
+    stats = {"status": "ok", "n_classes": n_classes, "vars_removed": len(var_map),
+             "clauses_removed": len(clauses) - len(out),
+             "lits_removed": lits_before - sum(len(c) for c in out)}
+    return out, var_map, stats
+
+
 def subsume_all(clauses):
     """Generic forward subsumption + dedup + tautology removal (occurrence/rarest-literal pruned).
 
@@ -215,6 +338,7 @@ def preprocess(
     do_vivify: bool = True,
     do_units: bool = True,
     do_subsume: bool = True,
+    do_els: bool = True,
     vivify_max_len: int = 20,
     vivify_max_rounds: int | None = None,
     bin_vars: str = "auto",        # "auto" | "none" | "all"
@@ -224,10 +348,11 @@ def preprocess(
 ):
     """Run the GPU reduction pipeline on a CNF file; return reduced clauses + stats.
 
-    Pipeline (each step equivalence-preserving): GPU vivify → unit closure (failed-literal
-    units) → learned-binary subsumption → generic subsumption/dedup. Returns a dict with
-    `clauses` (the reduced CNF), `nv`, before/after clause+literal counts, per-phase stats,
-    `gpu_ms`, and `status` ("ok"/"unsat").
+    Pipeline (each step preserves satisfiability): GPU vivify → unit closure (failed-literal
+    units) → equivalent-literal substitution (ELS, removes variables) → learned-binary
+    subsumption → generic subsumption/dedup. Returns a dict with `clauses` (the reduced CNF),
+    `nv`, before/after clause+literal counts, per-phase stats, `var_map` (removed_var → rep
+    literal, for ELS model lifting), `gpu_ms`, and `status` ("ok"/"unsat").
     """
     import random
 
@@ -269,6 +394,12 @@ def preprocess(
         bins, s = inp.discover_binaries(bvars)
         phases["binaries"] = s
 
+    edges = None
+    if do_els:
+        edges, els_units, s = inp.discover_implications()
+        units = units + els_units if do_units else units   # probe ⊆ implication failed-literals
+        phases["implications"] = s
+
     clauses = orig
     if do_vivify:
         clauses, s = inp.vivify_clauses(clauses, max_len=vivify_max_len, max_rounds=vivify_max_rounds)
@@ -281,8 +412,16 @@ def preprocess(
 
     status = "ok"
     assigned: dict[int, bool] = {}
+    var_map: dict[int, int] = {}
     if do_units:
         clauses, assigned, status = unit_closure(clauses, units)
+
+    # ELS after unit-closure: assigned vars are gone from `clauses`, so substitution only touches
+    # live variables; equivalences are entailed by the original formula so this stays equisat.
+    if status == "ok" and do_els and edges is not None:
+        clauses, var_map, s = equivalent_literal_substitution(clauses, edges, N)
+        status = s["status"]
+        phases["els"] = s
 
     if status == "ok" and do_subsume and bins:
         bins = _simplify_by_assignment(bins, assigned)
@@ -299,9 +438,9 @@ def preprocess(
 
     lits_final = sum(len(c) for c in clauses)
     return {
-        "clauses": clauses, "nv": N, "status": status,
+        "clauses": clauses, "nv": N, "status": status, "var_map": var_map,
         "n_clauses_orig": len(orig), "n_clauses_final": len(clauses),
         "lits_orig": lits_orig, "lits_final": lits_final,
-        "n_units": len(units), "n_bins": len(bins),
+        "n_units": len(units), "n_bins": len(bins), "n_vars_removed": len(var_map),
         "gpu_ms": gpu_ms, "phases": phases,
     }

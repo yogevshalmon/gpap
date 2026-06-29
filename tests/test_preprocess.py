@@ -17,6 +17,7 @@ from pysat.solvers import Cadical195
 from gpap.solver.inprocess import GPUInprocessor
 from gpap.solver.preprocess import (
     apply_learned_subsumption,
+    equivalent_literal_substitution,
     preprocess,
     subsume_all,
     unit_closure,
@@ -43,6 +44,23 @@ def _satisfies(clauses, model):
         if not any(truth.get(abs(l), l > 0) == (l > 0) for l in c):
             return False
     return True
+
+
+def _lift(model, var_map, nv):
+    """Lift a model of the ELS-reduced formula back to the original variables.
+
+    `var_map[v] = rep_literal` (DIMACS) means original variable v equals that literal's value;
+    variables not in `var_map` keep the reduced model's assignment (default True if absent)."""
+    truth = {abs(l): (l > 0) for l in model}
+    full = []
+    for v in range(1, nv + 1):
+        if v in var_map:
+            rep = var_map[v]
+            rep_true = truth.get(abs(rep), True) == (rep > 0)   # value of the rep literal
+            full.append(v if rep_true else -v)
+        else:
+            full.append(v if truth.get(v, True) else -v)
+    return full
 
 
 # --------------------------------------------------------------------------- vivification
@@ -72,6 +90,23 @@ class TestVivify:
         new, stats = inp.vivify_clauses(clauses)
         assert _norm(new) == _norm(clauses)
         assert stats["n_vivified"] == 0
+
+    def test_asymmetric_removes_redundant_interior_literal(self):
+        # 2→1 and 3→1 (¬2∨1)(¬3∨1): assuming ¬1 forces ¬2,¬3 → (1∨2∨3) conflicts, so 1 is
+        # entailed and (1∨2∨3) vivifies to the unit (1) — interior/whole-clause reduction the
+        # plain prefix test alone would only partially catch.
+        clauses = [[1, 2, 3], [-2, 1], [-3, 1]]
+        inp = GPUInprocessor.from_clauses(3, clauses, CPU)
+        new, stats = inp.vivify_clauses(clauses, asymmetric=True)
+        assert _norm(new) == _norm([[1], [1], [1]])
+
+    def test_asymmetric_is_sound_subset(self):
+        # asymmetric output literals must always be a subset of the originals (never invents lits)
+        clauses = [[1, 2, 3, 4], [-1, 2], [-3, -4], [2, -3]]
+        inp = GPUInprocessor.from_clauses(4, clauses, CPU)
+        new, _ = inp.vivify_clauses(clauses, asymmetric=True)
+        for o, n in zip(clauses, new):
+            assert set(n) <= set(o)
 
 
 # --------------------------------------------------------------------------- CPU reductions
@@ -112,6 +147,44 @@ class TestSubsumption:
         assert _norm(out) == _norm([[1, 2], [4]])
 
 
+# --------------------------------------------------------------------------- ELS
+
+class TestELS:
+    def _els(self, clauses, nv):
+        inp = GPUInprocessor.from_clauses(nv, clauses, CPU)
+        edges, _units, _ = inp.discover_implications()
+        return equivalent_literal_substitution(clauses, edges, nv)
+
+    def test_merges_equivalent_pair(self):
+        # (¬1∨2)∧(¬2∨1) ⇒ 1≡2; the extra clause (1∨3) keeps 1 alive. Var 2 is removed.
+        clauses = [[-1, 2], [-2, 1], [1, 3]]
+        red, var_map, stats = self._els(clauses, 3)
+        assert stats["status"] == "ok"
+        assert stats["vars_removed"] == 1 and var_map == {2: 1}
+        assert 2 not in {abs(l) for c in red for l in c}     # var 2 substituted away
+
+    def test_chain_collapses_to_one_var(self):
+        # 1≡2≡3 via a cycle of implications; two of the three vars vanish.
+        clauses = [[-1, 2], [-2, 1], [-2, 3], [-3, 2], [1, 4]]
+        red, var_map, stats = self._els(clauses, 4)
+        assert stats["vars_removed"] == 2
+        assert {abs(l) for c in red for l in c} <= {1, 4}
+
+    def test_equivalence_to_negation_is_unsat(self):
+        # A class holding both a literal and its negation ⇒ UNSAT. Feed edges making 1≡2 AND
+        # 1≡¬2 (lit indices: 1→0, ¬1→1, 2→2, ¬2→3): union closes 0,1,2,3 into one class.
+        edges = [[0, 2], [2, 0], [0, 3], [3, 0]]
+        red, var_map, stats = equivalent_literal_substitution([[1, 2], [3]], edges, 3)
+        assert stats["status"] == "unsat"
+
+    def test_no_equivalences_is_noop(self):
+        # All clauses ≥3 literals → assuming a single literal never unit-propagates → no edges.
+        clauses = [[1, 2, 3], [2, 3, 4], [-1, 4, 5]]
+        red, var_map, stats = self._els(clauses, 5)
+        assert stats["vars_removed"] == 0 and var_map == {}
+        assert _norm(red) == _norm(clauses)
+
+
 # --------------------------------------------------------------------------- equivalence gate
 
 def _rand_cnf(rng, nv, m, k=3):
@@ -150,7 +223,8 @@ class TestEquivalenceGate:
             assert res["lits_final"] <= res["lits_orig"]
             if base_v == "SAT":
                 n_sat += 1
-                assert _satisfies(clauses, pre_model), f"pre model violates original (seed {t})"
+                lifted = _lift(pre_model, res.get("var_map", {}), nv)
+                assert _satisfies(clauses, lifted), f"pre model violates original (seed {t})"
             else:
                 n_unsat += 1
         # the suite must actually exercise both verdicts

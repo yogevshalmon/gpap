@@ -29,7 +29,7 @@ import time
 import torch
 
 from gpap.clsdata.cnf_formula import CnfFormula
-from gpap.clsdata.occ_list import ext_lit_to_lit_index
+from gpap.clsdata.occ_list import ext_lit_to_lit_index, lit_index_to_ext_lit
 from gpap.solver.bcp_engine import BCPEngine
 from gpap.solver.clause_learner import extract_conflict_clauses_tensor
 from gpap.utils.gpu_budget import compute_k_safe, gpu_mem_available
@@ -259,6 +259,73 @@ class GPUInprocessor:
                  "n_new": len(new), "K": self.K, "ms": (time.perf_counter() - t0) * 1e3}
         return new, stats
 
+    # ----------------------------------------------------------------- implications (ELS)
+
+    def discover_implications(
+        self, var_subset=None, *, max_rounds: int | None = None,
+    ) -> tuple[torch.Tensor, list[list[int]], dict]:
+        """Probe each literal, BCP to fixpoint, read every implied literal from `assignment`.
+
+        Assuming literal `l` and propagating to fixpoint forces a set of literals TRUE; each
+        forced literal `m` (m ≠ l) is an entailed implication l ⇒ m (i.e. the formula entails
+        ¬l ∨ m). These edges are exactly the binary-implication-graph closure (including
+        hyper-binary implications that are NOT present as explicit binary clauses), the carrier
+        for equivalent-literal substitution. A probe that propagates to a *conflict* means `l`
+        is a failed literal → the unit [¬l] is forced (returned separately; edges from conflict
+        rows are dropped as vacuous).
+
+        `var_subset`: optional 0-based variable indices to scope the probe pool on huge N
+        (default = all 2N literals). `max_rounds` caps BCP depth — a lower cap only finds FEWER
+        implications (under-approximation), never an unsound one (SCC over a sub-graph is safe).
+
+        Returns (edges, units, stats):
+          edges : (E, 2) int64 CPU tensor of (src_lit_idx, dst_lit_idx) implications src ⇒ dst.
+          units : DIMACS unit clauses [[¬l], ...] for every failed literal.
+          stats : dict (n_probes, n_edges, n_units, K, ms).
+        """
+        self._sync()
+        t0 = time.perf_counter()
+        if var_subset is None:
+            pool = torch.arange(2 * self.N, dtype=torch.long, device=self.device)
+        else:
+            sub = _as_sorted_unique_vars(var_subset, self.device)
+            pool = torch.stack((2 * sub, 2 * sub + 1), dim=1).reshape(-1)  # both polarities
+        rows = pool.unsqueeze(1)  # (P, 1)
+
+        eng = self.engine
+        edge_chunks: list[torch.Tensor] = []
+        units: list[list[int]] = []
+        mr = self._mr if max_rounds is None else max_rounds
+        for c0 in range(0, rows.size(0), self.K):
+            chunk = rows[c0:c0 + self.K]                       # (Kc, 1) lit indices
+            eng.reset_state(chunk.size(0))
+            eng.apply_assumptions_bulk(chunk)
+            eng.propagate(max_rounds=mr, soft_stop_frac=None, min_rounds=0)
+            conf = eng.conflict                                # (Kc,)
+            # failed literals → forced units [¬l]
+            if bool(conf.any()):
+                for il in chunk[conf, 0].tolist():
+                    units.append([lit_index_to_ext_lit(int(il) ^ 1)])
+            # implications from the non-conflicting rows (assignment is the BCP fixpoint there)
+            keep = ~conf
+            if bool(keep.any()):
+                local = torch.nonzero(keep, as_tuple=False).view(-1)   # rows into chunk
+                asg = eng.assignment[keep]                             # (Kc', 2N) int8, 1=TRUE
+                nz = torch.nonzero(asg, as_tuple=False)                # (E, 2): (subrow, dst_lit)
+                if nz.numel():
+                    src = chunk[local[nz[:, 0]], 0]                    # assumed lit per edge
+                    dst = nz[:, 1]
+                    m = src != dst                                    # drop the assumed-self edge
+                    if bool(m.any()):
+                        edge_chunks.append(torch.stack((src[m], dst[m]), dim=1).cpu())
+        edges = (torch.cat(edge_chunks, dim=0) if edge_chunks
+                 else torch.empty((0, 2), dtype=torch.long))
+        self._sync()
+        stats = {"mode": "implications", "n_probes": int(rows.size(0)),
+                 "n_edges": int(edges.size(0)), "n_units": len(units), "K": self.K,
+                 "ms": (time.perf_counter() - t0) * 1e3}
+        return edges, units, stats
+
     # ----------------------------------------------------------------- vivification
 
     def _bcp_conflict_mask(self, rows_cpu: torch.Tensor, max_rounds: int | None) -> torch.Tensor:
@@ -284,6 +351,7 @@ class GPUInprocessor:
 
     def vivify_clauses(
         self, clauses: list[list[int]], *, max_len: int = 20, max_rounds: int | None = None,
+        asymmetric: bool = False,
     ) -> tuple[list[list[int]], dict]:
         """Shorten each clause to its shortest entailed prefix (equivalence-preserving).
 
@@ -293,6 +361,12 @@ class GPUInprocessor:
         without changing the model set. Two passes: pass 1 tests the full (k−1)-prefix (one row
         per clause) to find which clauses shorten at all; pass 2 refines only those to the
         minimal p. `max_rounds` caps BCP depth — a lower cap only under-vivifies, never unsound.
+
+        `asymmetric=True` adds the second half of vivification: for clauses the prefix test does
+        NOT shorten, a vectorized leave-one-out pass assumes the negation of every literal except
+        one (¬{C\\{lj}}); a conflict proves F ⊨ C\\{lj}, so lj is a redundant literal that can be
+        dropped (interior, not just trailing). One literal is removed per such clause (independent
+        removals can interact, so multi-removal would need re-derivation — kept to one for soundness).
 
         The clauses MUST be the same ones this inprocessor was built from (the engine propagates
         over that formula). Returns (new_clauses, stats); new_clauses[i] replaces clauses[i] in
@@ -332,9 +406,6 @@ class GPUInprocessor:
         local = torch.arange(len(to_viv))
         conf1 = self._bcp_conflict_mask(rows_for(local, klen - 1), max_rounds)
         viv_local = local[conf1]
-        if viv_local.numel() == 0:
-            stats["ms"] = (time.perf_counter() - t0) * 1e3
-            return new, stats
         best_p = {int(tv[l]): int(klen[l]) - 1 for l in viv_local.tolist()}  # default = k−1
 
         # --- Pass 2: refine vivifiable clauses to the minimal prefix (p = 1 … k−2). ---
@@ -356,7 +427,33 @@ class GPUInprocessor:
         for i, p in best_p.items():
             removed += len(clauses[i]) - p
             new[i] = list(clauses[i][:p])
-        stats.update(n_vivified=len(best_p), lits_removed=removed,
+
+        # --- Asymmetric pass: leave-one-out redundant-literal removal on clauses the prefix
+        #     test left untouched. Row (l, j) assumes ¬{C\{lj}}; conflict ⇒ F ⊨ C\{lj}. ---
+        n_asym = 0
+        if asymmetric:
+            ns = [l for l in range(len(to_viv)) if int(tv[l]) not in best_p and int(klen[l]) >= 2]
+            rc, rj = [], []
+            for l in ns:
+                rc.extend([l] * int(klen[l]))
+                rj.extend(range(int(klen[l])))
+            if rc:
+                rc_t = torch.tensor(rc, dtype=torch.long)
+                rj_t = torch.tensor(rj, dtype=torch.long)
+                block = neg[rc_t].clone()                       # (R, maxk), padding already -1
+                block[torch.arange(rc_t.numel()), rj_t] = -1     # drop literal j → leave-one-out
+                confL = self._bcp_conflict_mask(block, max_rounds)
+                first_redundant: dict[int, int] = {}             # global clause idx -> position to drop
+                for idx in torch.nonzero(confL, as_tuple=False).view(-1).tolist():
+                    i = int(tv[rc_t[idx]]); j = int(rj_t[idx])
+                    if i not in first_redundant or j < first_redundant[i]:
+                        first_redundant[i] = j
+                for i, j in first_redundant.items():
+                    new[i] = [lit for p, lit in enumerate(clauses[i]) if p != j]
+                    removed += 1
+                    n_asym += 1
+
+        stats.update(n_vivified=len(best_p) + n_asym, n_asym=n_asym, lits_removed=removed,
                      ms=(time.perf_counter() - t0) * 1e3)
         return new, stats
 
