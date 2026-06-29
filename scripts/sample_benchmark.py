@@ -1,228 +1,174 @@
 #!/usr/bin/env python3
-"""Benchmark the GPU BCP-completion sampler (gpap.solver.sampler.GPUSampler).
+"""Benchmark the GPU BCP-completion sampler (gpap.solver.sampler.GPUSampler) against CMSGen.
 
-The load-bearing questions for whether sampling is a GPAP killer app:
+GPAP runs CMSGen's UniformLikeWitness algorithm (random var + random polarity + unit propagation)
+massively in parallel on the GPU. This harness compares them with the SAT-sampling literature's
+own metrics (Golia et al., FMCAD'21):
 
-  THROUGHPUT  — valid models/sec (samples_per_s). GPAP's engine peaks ~1.5M shallow
-                sets/s; a sampler that stays near that on structured SAT formulas is the win.
-  DEPTH       — mean/max decision rounds. The latency tell: heavily-propagating structured
-                formulas need few decisions (shallow → throughput-bound = good); random-like
-                formulas need ~N decisions (deep → latency-bound = bad fit).
-  SUCCESS     — fraction of trajectories that reach a model vs. die in a conflict. Drops as
-                decisions_per_round (B) rises (random restriction over-constrains).
-  DIVERSITY   — distinct/total models (are we drawing varied solutions, not one repeatedly).
-  SOUNDNESS   — every collected model is independently checked against the DIMACS clauses.
+  THROUGHPUT  — samples/sec (wall time to produce --n-time samples, including setup).
+  QUALITY     — 2-wise coverage %: for each pair of sampling-set vars, the fraction of pairs whose
+                all four (±,±) combinations appear across the samples (the combinatorial-testing
+                quality metric CMSGen reports). Higher = better solution-space spread.
+  SOUNDNESS   — GPAP: GPU check (every model's clauses all have sat_count>0) + optional CPU verify.
 
-Per instance we first do a quick CaDiCaL SAT check (sampling only applies to SAT); UNSAT/UNK
-instances are reported and skipped. Sweeps B ∈ --b-values. Optional --cpu-baseline gives a
-reference "distinct models/sec" from CaDiCaL with blocking clauses (throughput reference, not
-the same distribution).
+GPAP uses unit-propagation simplification (--simplify, on by default): strictly model-preserving
+(unlike the VE/BCE that CMSGen disables), validated in tests/test_sampler.py — it shrinks M so a
+much larger K fits, which is where the GPU throughput win comes from.
 
 Usage:
   PYTHONPATH=. .venv/bin/python scripts/sample_benchmark.py \
-      --cnfs benchmarks/cnf/aa9b67...x9-10002.sat...cnf,... \
-      --device cuda --b-values 1,2,4,8 --n-target 200000 --verify-n 500 --output .experiments/sample.json
+      --glob 'benchmarks/sampling/*.cnf' --device cuda \
+      --cmsgen /path/to/cmsgen --n-time 50000 --n-cov 5000 --output .experiments/sample.json
 """
-import argparse, glob, json, os, statistics as st, sys, time
-import multiprocessing as _mp
+import argparse, glob, json, os, subprocess, sys, time
 
+import numpy as np
 import torch
 sys.path.insert(0, ".")
 from pysat.formula import CNF
-from gpap.solver.sampler import GPUSampler, _satisfies
-
-_SPAWN = _mp.get_context("spawn")
+from gpap.solver.sampler import GPUSampler, parse_independent_support
 
 
-def _sat_worker(clauses, q):
-    try:
-        from pysat.formula import CNF as _CNF
-        from pysat.solvers import Solver as _S
-        s = _S(name="cadical195", bootstrap_with=_CNF(from_clauses=clauses))
-        r = s.solve()
-        s.delete()
-        q.put("SAT" if r else "UNSAT" if r is False else "UNK")
-    except Exception:  # noqa: BLE001
-        q.put("UNK")
-
-
-def sat_check(clauses, budget_s):
-    q = _SPAWN.Queue()
-    p = _SPAWN.Process(target=_sat_worker, args=([list(c) for c in clauses], q))
-    p.start(); p.join(budget_s)
-    if p.is_alive():
-        p.terminate(); p.join(2)
-        if p.is_alive():
-            p.kill(); p.join()
-        return "UNK"
-    try:
-        return q.get_nowait()
-    except Exception:  # noqa: BLE001
-        return "UNK"
-
-
-def _cpu_enum_worker(clauses, nv, budget_s, q):
-    """CPU reference: emit distinct models via CaDiCaL + blocking clauses for budget_s."""
-    try:
-        import time as _t
-        from pysat.formula import CNF as _CNF
-        from pysat.solvers import Solver as _S
-        s = _S(name="cadical195", bootstrap_with=_CNF(from_clauses=clauses))
-        n = 0
-        t0 = _t.perf_counter()
-        while _t.perf_counter() - t0 < budget_s:
-            if not s.solve():
-                break
-            m = s.get_model()
-            if m is None:
-                break
-            n += 1
-            s.add_clause([-l for l in m])  # block this model
-        dt = _t.perf_counter() - t0
-        s.delete()
-        q.put((n, dt))
-    except Exception:  # noqa: BLE001
-        q.put((0, budget_s))
-
-
-def cpu_enum_rate(clauses, nv, budget_s):
-    q = _SPAWN.Queue()
-    p = _SPAWN.Process(target=_cpu_enum_worker, args=([list(c) for c in clauses], nv, budget_s, q))
-    p.start(); p.join(budget_s + 10)
-    if p.is_alive():
-        p.terminate(); p.join(2)
-        if p.is_alive():
-            p.kill(); p.join()
+def two_wise_coverage(models, support):
+    """% of sampling-var pairs whose all 4 (±,±) combos appear. support: 1-based vars."""
+    S = len(support)
+    if S < 2 or not models:
         return 0.0
+    idx = {v: i for i, v in enumerate(support)}
+    M = np.zeros((len(models), S), dtype=np.int8)
+    for r, m in enumerate(models):
+        s = set(m)
+        for v in support:
+            if v in s:
+                M[r, idx[v]] = 1
+    covered = total = 0
+    for i in range(S):
+        ci = M[:, i].astype(np.int16) << 1
+        for j in range(i + 1, S):
+            total += 1
+            if np.unique(ci | M[:, j]).size == 4:
+                covered += 1
+    return 100.0 * covered / total if total else 0.0
+
+
+def gpap_sample(path, device, *, simplify, n_time, n_cov, b, k_cap, max_chunks=8,
+                cov_chunks=4, max_rounds=120, lookahead=False, verify_clauses=None):
+    """Throughput run timed end-to-end (construction + simplify + sample, to match CMSGen's
+    'produce N samples' wall clock) + a small collect run for coverage/soundness. The timed run
+    is bounded by `max_chunks` (rate = models/wall is valid regardless of how many it collects —
+    avoids spinning on low-success formulas)."""
+    if device.type == "cuda":
+        torch.cuda.synchronize()
+    t0 = time.perf_counter()
+    smp = GPUSampler.from_cnf_file(path, device, simplify=simplify, k_cap=k_cap, seed=5)
+    t = smp.sample(n_time, decisions_per_round=b, max_decision_rounds=max_rounds, max_chunks=max_chunks,
+                   collect=False, lookahead=lookahead)
+    if device.type == "cuda":
+        torch.cuda.synchronize()
+    wall = time.perf_counter() - t0                  # includes construct+simplify (fair vs CMSGen)
+    sps = t["n_models"] / wall if wall > 0 else 0.0
+    c = (smp.sample(n_cov, decisions_per_round=b, max_decision_rounds=max_rounds, max_chunks=cov_chunks,
+                    collect=True, verify_clauses=verify_clauses, lookahead=lookahead) if n_cov else {})
+    del smp
+    if device.type == "cuda":
+        torch.cuda.empty_cache()
+    return {"samples_per_s": sps, "success_rate": t["success_rate"],
+            "support_size": t["support_size"], "gpu_sound": c.get("gpu_sound", True),
+            "cpu_sound": c.get("all_valid"), "models": c.get("models", []),
+            "n_distinct": c.get("n_distinct")}
+
+
+def cmsgen_sample(path, cmsgen_bin, n, scratch):
+    """Run CMSGen to produce n samples; return (samp/s, parsed models)."""
+    out = os.path.join(scratch, "cms_" + os.path.basename(path) + ".txt")
+    t0 = time.perf_counter()
     try:
-        n, dt = q.get_nowait()
-        return n / dt if dt > 0 else 0.0
+        subprocess.run([cmsgen_bin, "--samples", str(n), "--samplefile", out, path],
+                       capture_output=True, timeout=1200)
     except Exception:  # noqa: BLE001
-        return 0.0
-
-
-def resolve_paths(args):
-    paths = []
-    if args.cnfs:
-        paths += [p for p in args.cnfs.split(",") if p]
-    if args.suite:
-        for rec in json.load(open(args.suite)):
-            paths.append(rec["path"])
-    if args.glob:
-        paths += sorted(glob.glob(args.glob))
-    return paths
+        return 0.0, []
+    dt = time.perf_counter() - t0
+    models = []
+    if os.path.exists(out):
+        for line in open(out):
+            lits = [int(x) for x in line.split() if x.lstrip("-").isdigit()]
+            if lits and lits[-1] == 0:
+                lits = lits[:-1]
+            if lits:
+                models.append(lits)
+    return (len(models) / dt if dt else 0.0), models
 
 
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument("--cnfs", default=None, help="comma-separated CNF paths")
-    ap.add_argument("--suite", default=None, help="suite JSON with [{path,...}]")
-    ap.add_argument("--glob", default=None, help="glob of CNF paths")
+    ap.add_argument("--glob", default="benchmarks/sampling/*.cnf")
     ap.add_argument("--device", default=None)
-    ap.add_argument("--b-values", default="1,2,4,8")
-    ap.add_argument("--random-var", action="store_true", default=True)
-    ap.add_argument("--first-var", dest="random_var", action="store_false")
-    ap.add_argument("--n-target", type=int, default=200_000)
-    ap.add_argument("--max-chunks", type=int, default=64)
-    ap.add_argument("--max-decision-rounds", type=int, default=500,
-                    help="bound decision depth per trajectory (deep formulas otherwise run "
-                         "thousands of 1-decision rounds). Trajectories hitting the cap are "
-                         "counted as attempts, not models — so success_rate reflects completion.")
-    ap.add_argument("--k-cap", type=int, default=16384)
-    ap.add_argument("--max-n", type=int, default=None, help="skip instances with more than this many vars")
-    ap.add_argument("--verify-n", type=int, default=500, help="independently verify this many models")
-    ap.add_argument("--sat-check", action="store_true",
-                    help="gate on a CaDiCaL SAT check first (skips UNSAT/UNK). Off by default — "
-                         "the sampler's own success_rate already reveals SAT-richness, and hard "
-                         "near-unique-solution instances (the wrong sampling target) hang the check.")
-    ap.add_argument("--sat-budget", type=float, default=20.0)
-    ap.add_argument("--cpu-baseline", action="store_true")
-    ap.add_argument("--cpu-budget", type=float, default=5.0)
-    ap.add_argument("--seed", type=int, default=12345)
+    ap.add_argument("--cmsgen", default=None, help="path to the cmsgen binary (enables comparison)")
+    ap.add_argument("--n-time", type=int, default=50_000, help="samples for the throughput timing")
+    ap.add_argument("--n-cov", type=int, default=5_000, help="samples used for 2-wise coverage")
+    ap.add_argument("--b", type=int, default=8,
+                    help="decisions per round (8 is the throughput sweet spot: fewer rounds while "
+                         "success barely drops; B>=16 over-constrains and collapses success)")
+    ap.add_argument("--k-cap", type=int, default=49152)
+    ap.add_argument("--no-simplify", dest="simplify", action="store_false", default=True)
+    ap.add_argument("--also-plain", action="store_true", help="also run GPAP without simplification")
+    ap.add_argument("--verify-cpu", action="store_true", help="also CPU-verify a few models vs clauses")
+    ap.add_argument("--scratch", default="/tmp")
     ap.add_argument("--output", default=None)
     args = ap.parse_args()
-
     device = (torch.device(args.device) if args.device
               else torch.device("cuda" if torch.cuda.is_available() else "cpu"))
-    bvals = [int(b) for b in args.b_values.split(",")]
-    paths = resolve_paths(args)
-    print(f"Device {device} | B={bvals} | n_target={args.n_target:,} | random_var={args.random_var} "
-          f"| k_cap={args.k_cap}")
-    print(f"{len(paths)} instance(s)\n")
-
-    results = []
-    for path in paths:
+    files = sorted(glob.glob(args.glob))
+    print(f"device={device} | simplify={args.simplify} | n_time={args.n_time:,} n_cov={args.n_cov:,} "
+          f"| cmsgen={'yes' if args.cmsgen else 'no'}\n{len(files)} benchmarks\n")
+    hdr = (f"{'instance':<24}{'N':>6}{'M':>7}{'|sup|':>6}{'GPAP/s':>10}{'succ%':>6}{'2wiseG':>7}"
+           f"{'snd':>4}")
+    if args.cmsgen:
+        hdr += f"{'CMS/s':>9}{'2wiseC':>7}{'GPAP/CMS':>9}"
+    print(hdr); print("-" * len(hdr))
+    results, ratios = [], []
+    for path in files:
         name = os.path.basename(path)
-        try:
-            cnf = CNF(from_file=path)
-        except Exception as e:  # noqa: BLE001
-            print(f"{name[:40]:<40} parse error: {e}")
-            continue
-        nv, M = cnf.nv, len(cnf.clauses)
-        if args.max_n is not None and nv > args.max_n:
-            print(f"{name[:40]:<40} N={nv:<6} M={M:<7} -> skipped (N>{args.max_n})")
-            continue
-        verdict = "?"
-        if args.sat_check:
-            verdict = sat_check(cnf.clauses, args.sat_budget)
-            if verdict != "SAT":
-                print(f"{name[:40]:<40} N={nv:<6} M={M:<7} -> {verdict} (skipped; need SAT)")
-                results.append({"name": name, "nv": nv, "M": M, "verdict": verdict, "runs": []})
-                continue
+        cnf = CNF(from_file=path)
+        sup = parse_independent_support(path)
+        sup1 = [v + 1 for v in (sup or range(cnf.nv))]
+        vc = [list(c) for c in cnf.clauses] if args.verify_cpu else None
+        g = gpap_sample(path, device, simplify=args.simplify, n_time=args.n_time, n_cov=args.n_cov,
+                        b=args.b, k_cap=args.k_cap, verify_clauses=vc)
+        twg = two_wise_coverage(g["models"], sup1)
+        snd = "OK" if g["gpu_sound"] and (g["cpu_sound"] in (None, True)) else "BAD"
+        row = {"name": name, "nv": cnf.nv, "M": len(cnf.clauses), "support": len(sup1),
+               "gpap_sps": g["samples_per_s"], "succ": g["success_rate"], "twise_gpap": twg,
+               "gpu_sound": g["gpu_sound"], "n_distinct": g["n_distinct"]}
+        line = (f"{name[:22]:<24}{cnf.nv:>6}{len(cnf.clauses):>7}{len(sup1):>6}"
+                f"{g['samples_per_s']:>10,.0f}{100*g['success_rate']:>5.0f}%{twg:>6.1f}%{snd:>4}")
+        plain = None
+        if args.also_plain:
+            plain = gpap_sample(path, device, simplify=False, n_time=args.n_time, n_cov=0,
+                                b=args.b, k_cap=args.k_cap)
+            row["gpap_plain_sps"] = plain["samples_per_s"]
+        if args.cmsgen:
+            # single CMSGen run at n_time (fair samp/s); use a subset of its samples for coverage
+            crate_t, cmodels = cmsgen_sample(path, args.cmsgen, args.n_time, args.scratch)
+            twc = two_wise_coverage(cmodels[:args.n_cov], sup1)
+            ratio = (g["samples_per_s"] / crate_t) if crate_t else float("inf")
+            row.update(cms_sps=crate_t, twise_cms=twc, ratio=ratio)
+            ratios.append(ratio)
+            line += f"{crate_t:>9,.0f}{twc:>6.1f}%{ratio:>8.2f}x"
+        print(line)
+        results.append(row)
 
-        cpu_rate = cpu_enum_rate(cnf.clauses, nv, args.cpu_budget) if args.cpu_baseline else None
-        rec = {"name": name, "nv": nv, "M": M, "verdict": verdict,
-               "cpu_distinct_per_s": cpu_rate, "runs": []}
-        hdr = (f"{name[:40]:<40} N={nv} M={M} SAT"
-               + (f" | CPU(cadical+block) {cpu_rate:,.0f} distinct/s" if cpu_rate is not None else ""))
-        print(hdr)
-        print(f"    {'B':>2} {'samples/s':>12} {'attempts/s':>12} {'succ%':>6} "
-              f"{'rounds(μ/max)':>14} {'distinct/N':>12} {'K':>7} {'sound':>6}")
-        for B in bvals:
-            smp = GPUSampler.from_cnf_file(path, device, k_cap=args.k_cap, seed=args.seed)
-            out = smp.sample(args.n_target, decisions_per_round=B, random_var=args.random_var,
-                             max_decision_rounds=args.max_decision_rounds, max_chunks=args.max_chunks,
-                             collect=False, verify_clauses=None)
-            # independent soundness check on a fresh small draw
-            sound = "n/a"
-            if args.verify_n > 0:
-                vout = smp.sample(args.verify_n, decisions_per_round=B, random_var=args.random_var,
-                                  max_decision_rounds=args.max_decision_rounds, max_chunks=4,
-                                  collect=False, verify_clauses=cnf.clauses)
-                sound = "OK" if vout.get("all_valid", True) else "BAD"
-            del smp
-            if device.type == "cuda":
-                torch.cuda.empty_cache()
-            run = {"B": B, **{k: out[k] for k in (
-                "samples_per_s", "attempts_per_s", "success_rate", "n_models", "attempts",
-                "mean_decision_rounds", "max_decision_rounds", "n_distinct", "n_chunks", "K")},
-                "sound": sound}
-            rec["runs"].append(run)
-            dist_ratio = (out["n_distinct"] / out["n_models"]) if out["n_models"] else 0.0
-            print(f"    {B:>2} {out['samples_per_s']:>12,.0f} {out['attempts_per_s']:>12,.0f} "
-                  f"{100*out['success_rate']:>5.1f}% {out['mean_decision_rounds']:>6.1f}/"
-                  f"{out['max_decision_rounds']:<7} {dist_ratio:>11.2f} {out['K']:>7,} {sound:>6}")
-        results.append(rec)
-        print()
-
-    # summary (instances where the sampler actually produced models)
-    sat = [r for r in results if r["runs"] and any(x["n_models"] > 0 for x in r["runs"])]
-    if sat:
-        print("=" * 78)
-        print(f"SUMMARY over {len(sat)} instance(s) with models produced:")
-        for B in bvals:
-            sps = [next((x["samples_per_s"] for x in r["runs"] if x["B"] == B), None) for r in sat]
-            sps = [x for x in sps if x]
-            rounds = [next((x["mean_decision_rounds"] for x in r["runs"] if x["B"] == B), None) for r in sat]
-            rounds = [x for x in rounds if x is not None]
-            succ = [next((x["success_rate"] for x in r["runs"] if x["B"] == B), None) for r in sat]
-            succ = [x for x in succ if x is not None]
-            if sps:
-                gm = st.geometric_mean(sps)
-                print(f"  B={B:<2} geomean {gm:>12,.0f} samples/s | mean rounds "
-                      f"{sum(rounds)/len(rounds):>6.1f} | mean succ {100*sum(succ)/len(succ):>5.1f}%")
-        print("=" * 78)
-
+    if ratios:
+        import statistics as st
+        gm = st.geometric_mean([r for r in ratios if r and r > 0 and r != float("inf")])
+        print(f"\ngeomean GPAP/CMSGen throughput = {gm:.2f}x  "
+              f"(GPAP=GPU, CMSGen=single-core CPU; GPAP scales with K -> A100)")
+        # quality: mean 2-wise coverage delta
+        dq = [r["twise_gpap"] - r["twise_cms"] for r in results if "twise_cms" in r]
+        if dq:
+            print(f"mean 2-wise coverage: GPAP {np.mean([r['twise_gpap'] for r in results]):.1f}% vs "
+                  f"CMSGen {np.mean([r['twise_cms'] for r in results if 'twise_cms' in r]):.1f}% "
+                  f"(Δ {np.mean(dq):+.1f}pp)")
     if args.output:
         os.makedirs(os.path.dirname(args.output) or ".", exist_ok=True)
         json.dump({"device": str(device), "args": vars(args), "results": results},
