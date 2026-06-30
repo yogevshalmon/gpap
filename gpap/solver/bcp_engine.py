@@ -58,8 +58,9 @@ class BCPEngine:
         M = self._num_clauses
         N = self._num_vars
 
-        # auto-select sat_count dtype based on max clause size
-        max_cls = int(self._formula.clause_sizes.max().item())
+        # auto-select sat_count dtype based on max clause size (M==0 — e.g. a formula fully
+        # determined by simplification/ELS — has an empty clause_sizes; .max() would error)
+        max_cls = int(self._formula.clause_sizes.max().item()) if M > 0 else 1
         if max_cls <= 127:
             self._sat_count_dtype = torch.int8
         elif max_cls <= 32767:

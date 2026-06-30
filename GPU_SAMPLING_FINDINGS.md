@@ -63,6 +63,51 @@ rounds with 0 rejects** (every round's bias stayed inside [loThresh 0.29, hiThre
 designed to *reject quickly* on non-uniform samplers (it rejects QuickSampler fast); GPAP runs clean,
 like CMSGen — independent confirmation that GPAP is uniform-like, not just fast.
 
+## Cracking the search-heavy lose-cases: structured decision order (auto-tuned)
+
+The two families GPAP used to score ~0 on were diagnosed precisely (they fail for *opposite* reasons):
+
+- **"service" family** (ActivityService/PhaseService/ProcessBean/…): `supOK` > 0 but `modelOK` = 0,
+  with `freeAft` ≈ 627–1457. The support gets fixed; the **completion** never succeeds. The residual
+  is **individually-free but jointly-constrained**: after failed-literal probing, ActivityService
+  still has 663 free vars and **0/60 are truly forced** — huge solution count, yet random DPLL paints
+  itself into a corner. Probing, careful B=1 (0.05 %), restart, and chronological backtracking all
+  fail — the signature of *needs clause-learning* (mismatched to GPAP).
+- **7/71/80.sk**: `supOK` = `modelOK`, both low, `freeAft` = 0 — here the *support itself*
+  self-conflicts (a small-search problem, different from the service residual).
+
+**The fix that works (free, sound): structured decision order.** `random_var=False` decides variables
+in index order, which follows the program-synthesis formulas' **gate/definition DAG** (inputs → gates)
+instead of a random permutation — so propagation determines the gates rather than the search
+conflicting on them. With `random_var=False` + **B=1** the service family goes from ~0 to real:
+**ActivityService modelOK 0.05 %→12 %, ProcessBean 0→11 %** — at **2-wise coverage identical to CMSGen**
+(51.6 = 51.6) with **96 % distinct** samples (polarity stays random, so diversity/uniformity are
+preserved) and GPU-sound. It needs B=1 *and* structured order together (B≥4 or random order → ≈0).
+
+Because the right combo is **formula-dependent** (niche wants B=8/any order; service wants
+structured+B=1; 7/80.sk want random order), it is chosen automatically. Two mechanisms:
+
+- **`random_var="auto"`** — a cheap small-K probe of the `(order, B)` grid, then commit. Works, but is
+  fragile: the small-K probe **under-rates large B** (kernel-launch overhead dominates B=8's ~3 rounds
+  at K=2048), so it can mispick (e.g. it chose B=1 for 111.sk where B=8/B=1 are close), and it commits.
+- **Adaptive config BANDIT (`configs=[(True,8),(False,1)]`, the harness default)** — the robust answer:
+  each chunk runs ONE config **at full K**, chosen by its measured models/wall so far (decaying-epsilon
+  greedy), dynamically switching to the winner and re-checking the rest. Because it measures full-K
+  throughput on **productive** chunks (not a throwaway probe) and never permanently commits, it is both
+  more accurate (it correctly found B=1 is *genuinely faster* on 111.sk) and more robust. It matches/
+  beats `auto` on the niche (35.sk ~68k/s, 10.sk ~46k/s) AND cracks the service family
+  (ActivityService ~870/s, ProcessBean ~80/s) in **one setting**, all GPU-sound. A `static` portfolio
+  (all configs every chunk, K split) is also available but a slow config's K-independent round count
+  drags every chunk ~1.5–2.7× — the bandit avoids that by running one config per chunk.
+
+Honest scope: this makes GPAP **robust across the whole sk_ suite** (no family stuck at 0) — it does
+**not** beat CMSGen's CDCL on the service family (30–870 samp/s vs CMSGen's thousands), but closes the
+gap from *infinite* (0 samples) to a finite factor, with valid uniform-like samples. 7/71/80.sk's
+support self-conflict is still only partly addressed (a feasibility/lookahead problem, separately
+net-negative). Robustness fix: a formula that fully simplifies to **M=0 clauses** (e.g.
+tableBasedAddition) used to crash `BCPEngine.init_state` (`clause_sizes.max()` on empty) — now handled;
+it samples instantly (every assignment is a model). Regression-tested.
+
 ## The niche (where GPAP wins) — and where it doesn't
 
 GPAP wins **iff both**: (a) `freeAftSup ≈ 0` — fixing the `c ind` support lets BCP *determine* the rest;
@@ -99,17 +144,72 @@ drops** because the overhead (≈3× propagations + half K) exceeds the gain: 35
 4.38×→0.61×, 7.sk 0.04×→0.02×. The 1-step variant (`_immediate_conflict`, using the `sat_count==1`
 test) is cheaper but doesn't help at all (misses cascades).
 
-**Cheap `sat_count`-risk polarity (soft lookahead) — BACKFIRES.** A GPAP-native idea: score each
-polarity by how much it pushes clauses toward conflict (Σ over occ[lit] of w(sat_count): w(1)=1e6,
-w(2)=4, w(3)=1) and pick the safer one — one occ-gather, no snapshot, no K-halving. But it **lowers**
-success, often to 0 % (27.sk 49→0 %, 7.sk 6→0 %): steering polarity is nearly deterministic (tie-break
-rarely fires) so it collapses sample diversity and avoids the very propagation that determines the
-formula, driving all trajectories into the same dead-end. Lesson: **random polarity (CMSGen's
-Algorithm 1) is already near-optimal — biasing it hurts.** (Implemented as `lookahead="soft"`, default off.)
+**Cheap `sat_count`-risk polarity (soft lookahead) — BACKFIRES, and we now know exactly why.** A
+GPAP-native idea: score each polarity by how much it pushes clauses toward conflict (Σ over occ[lit]
+of w(sat_count): w(1)=1e6, w(2)=4, w(3)=1) and pick the safer one — one occ-gather, no snapshot, no
+K-halving. But it **lowers** success, often to 0 % (27.sk 49→0 %, 7.sk 6→0 %).
 
-**Conclusion: the niche cannot be cheaply widened.** GPAP's advantage *is* throughput; both lookahead
-flavours either trade it away (full) or wreck diversity (soft). GPAP's niche stays: `freeAftSup ≈ 0`
-**and** high `supOK`.
+The root cause is a **semantic misreading of `sat_count`**: it is the count of *non-falsified*
+literals (TRUE *or* unassigned), not a satisfaction/quality signal. The only genuinely-bad transition
+when setting `lit` is `sat_count 1→0` (a real conflict). A clause going `2→1` becomes a **unit → it
+propagates**, and in our niche (`freeAftSup ≈ 0`) propagation is *exactly how a trajectory completes
+into a model*. So `w(2)=4` penalizes the engine's own success mechanism. **A/B confirmed** (B=1,
+conflict-only corrected weights w(1)=1, else 0): original-weights soft 27.sk 44→0 %, 10.sk 71→30 %,
+71.sk 26→3 %; **corrected weights ≈ baseline everywhere** (27.sk 44→44 %, 10.sk 71→70 %, 71.sk 26→26 %)
+— it neither helps nor harms, because conflict-only weighting *is* the 1-step `_immediate_conflict`
+test, which can't see the deep cascades that kill the low-supOK family. **No instantaneous counter
+encodes the propagation closure**; "will this decision eventually conflict?" is answerable only by
+propagating (full lookahead, net-negative). Lesson: **random polarity (CMSGen's Algorithm 1) is
+near-optimal — a 1-step proxy can't beat it.** (`lookahead="soft"` retained only as a documented negative.)
+
+**Conclusion: the niche cannot be cheaply widened by per-decision lookahead.** GPAP's advantage *is*
+throughput; both lookahead flavours either trade it away (full) or wreck diversity (soft). The
+remaining lever is *structural* — shrink the formula before sampling; see ELS below.
+
+## Soundness note: `sat_count > 0` ⟹ satisfied ONLY at a full assignment
+
+The GPU soundness check (`all clause sat_count > 0` over completed rows) is correct **only because it
+is gated on `fully`-assigned rows**: at a complete assignment non-falsified ⟺ TRUE, so `sat_count > 0`
+⟺ every clause has a TRUE literal ⟺ satisfied. On a *partial* assignment `sat_count > 0` only means
+"not yet violated", NOT satisfied — never use it mid-propagation. It is in fact **redundant**: `active`
+is cleared the instant any clause hits `sat_count == 0`, so active⊇fully rows already satisfy it. The
+load-bearing independent check is the CPU `_satisfies()` in the tests.
+
+## The real engine improvement: ELS (equivalent-literal substitution) — free, sound, ~1.5×
+
+Profiling a chunk (laptop 4080) shows **propagation is 79–86 % of wall time**; setup/reset is 0.5 %,
+pick/apply ~15 %. So the lever is *propagation*, whose cost scales with **M** (the `sat_count (K,M)`
+traffic) — and K scales with per-trajectory memory (~M). Anything that shrinks the formula hits the
+bottleneck **twice** (faster propagate + bigger K). (This also kills a "recycle dead trajectories"
+idea — amortizing the 0.5 % setup saves nothing.)
+
+`simplify_cnf_els` adds **equivalent-literal substitution** on top of unit-closure: it collapses
+binary-implication SCCs (mutually-implied literals) to one representative, *removing variables*,
+reusing the validated `equivalent_literal_substitution`. The binary-graph SCCs alone (a lower bound —
+full GPU-BCP ELS à la the inprocessing branch finds ~2.8× more) remove **5–38 % of vars / 3–30 % of
+clauses** on the sk_ niche. Measured end-to-end (construction+ELS in the wall, laptop 4080, B=8):
+
+| benchmark | M cut | **ELS / plain** | ELS / CMSGen | (plain / CMSGen) | 2-wise plain=ELS |
+|---|---|---|---|---|---|
+| 35.sk_3_52 | 30 % | **2.16×** | 31.6× | (14.6×) | 61.8 = 61.8 |
+| 10.sk_1_46 | 18 % | 1.85× | 4.9× | (2.65×) | 78.5 = 78.5 |
+| 53.sk_4_32 | 12 % | 1.60× | 2.9× | (1.83×) | 60.5 = 60.5 |
+| 32.sk_4_38 | 16 % | 1.45× | 5.0× | (3.48×) | 61.9 = 61.9 |
+| 109.sk_4_36 | 5 % | 1.45× | 2.2× | (1.50×) | 68.1 = 68.1 |
+| 111.sk_2_36 | 3 % | 1.34× | 1.8× | (1.33×) | 60.0 = 60.0 |
+| 27.sk_3_32 | 9 % | 1.22× | 3.1× | (2.54×) | 60.5 = 60.5 |
+| 55.sk_3_46 | 8 % | 1.06× | 3.3× | (3.12×) | 64.3 = 64.3 |
+
+**Geomean ELS/plain = 1.48×; ELS/CMSGen = 4.16× (was 2.81× plain at this 50k-incl-setup setting).**
+2-wise coverage is **identical** (no quality loss) and every run is GPU-sound. ELS is equisat- and
+**support-projection-preserving iff reconstruction is consistent**: every removed variable equals its
+representative in *every* model, so removed vars — *including don't-care ones* — are reconstructed from
+their representative (one value per equivalence class), never randomized independently (else an
+equivalent pair could be assigned unequal values = an invalid projection). Validated by
+`tests/test_sampler.py::test_els_*` (projection set == CaDiCaL enumeration; equivalent vars stay
+equal). On the laptop K is k_cap-capped so the **N-reduction → bigger-K benefit is largely masked** —
+on an A100 with uncapped K it stacks directly onto the K-scaling lever, so the win should grow.
+Enabled via `els=True` (default on in the colab driver; `--els` in `sample_benchmark.py`).
 
 ## The real improvement: B = 8 (free, +60 % throughput)
 
@@ -141,8 +241,11 @@ by setting B=8 (now the default in `scripts/sample_benchmark.py`). The A100's la
 
 ## Next steps
 
-- **A100 run** (deprioritized): measure the real K-scaling multiplier.
+- **A100 run**: measure the real K-scaling multiplier — and the ELS bonus, since uncapped K turns
+  ELS's N-reduction into extra parallelism on top of the propagate speedup. Driver:
+  `scripts/colab_sampling_benchmark.py` (+ `notebooks/gpap_colab_sampling.ipynb`), els on by default.
+- **GPU-BCP ELS**: replace the cheap binary-graph SCCs with the inprocessing branch's
+  `discover_implications` (BCP-to-fixpoint closure) — it finds ~2.8× more equivalences, so the M/N
+  cut (hence the 1.48×) should grow. Reconstruction is already class-consistent, so it drops in.
 - **Niche detection**: cheaply flag in-niche formulas (`freeAftSup≈0 ∧ supOK high`) to auto-route.
-- **Stronger reduction** (gate/definability detection à la Arjun) to shrink `freeAftSup` on more
-  families — the only plausible path to widen the niche without adding search.
-- **Barbarik** uniformity testing for a formal Accept/Reject vs CMSGen.
+- **Barbarik** uniformity testing for a formal Accept/Reject vs CMSGen (already passed 185/0 once).

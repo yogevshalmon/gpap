@@ -102,11 +102,11 @@ def build_cmsgen(dest: str | None = None) -> str | None:
 # ---------------------------------------------------------------------------
 
 def k_scaling(path: str, device: torch.device, *, b: int, chunks: int, k_cap: int,
-              n_points: int = 5, seed: int = 5) -> dict | None:
+              els: bool = True, n_points: int = 5, seed: int = 5) -> dict | None:
     """Sweep K (batch size) on one instance and measure samples/s at each, to show throughput scales
     ~linearly with K. Builds one simplified sampler, then runs `chunks` chunks at each K in a
     geometric ladder up to the GPU's auto-K. Returns {auto_K, points:[{K,samples_per_s,success}]}."""
-    smp = GPUSampler.from_cnf_file(path, device, simplify=True, k_cap=k_cap, seed=seed)
+    smp = GPUSampler.from_cnf_file(path, device, simplify=True, els=els, k_cap=k_cap, seed=seed)
     auto_K = smp.K
     if smp._recon and smp._recon.get("unsat"):
         return None
@@ -146,21 +146,25 @@ def k_scaling(path: str, device: torch.device, *, b: int, chunks: int, k_cap: in
 # ---------------------------------------------------------------------------
 
 def run_instance(path: str, device: torch.device, *, cmsgen_bin: str | None, n_time: int,
-                 n_cov: int, b: int, k_cap: int, scratch: str, seed: int = 5) -> dict:
+                 n_cov: int, b: int, k_cap: int, scratch: str, els: bool = True,
+                 seed: int = 5) -> dict:
     """Benchmark one CNF: GPAP-simplified throughput + 2-wise coverage + GPU soundness, and (if a
-    cmsgen binary is given) the CMSGen throughput + coverage + the GPAP/CMSGen ratio."""
+    cmsgen binary is given) the CMSGen throughput + coverage + the GPAP/CMSGen ratio. `els=True`
+    adds equivalent-literal substitution (removes vars -> faster propagate + bigger K; ~1.5x)."""
     name = os.path.basename(path)
     sup0 = parse_independent_support(path)
     from pysat.formula import CNF
     cnf = CNF(from_file=path)
     sup1 = [v + 1 for v in (sup0 or range(cnf.nv))]
 
-    g = gpap_sample(path, device, simplify=True, n_time=n_time, n_cov=n_cov, b=b, k_cap=k_cap)
+    g = gpap_sample(path, device, simplify=True, els=els, n_time=n_time, n_cov=n_cov, b=b,
+                    k_cap=k_cap)
     twg = two_wise_coverage(g["models"], sup1)
     row = {
         "name": name, "N": cnf.nv, "M": len(cnf.clauses), "support": len(sup1),
         "gpap_sps": round(g["samples_per_s"], 1), "succ": round(g["success_rate"], 4),
         "twise_gpap": round(twg, 2), "gpu_sound": g["gpu_sound"], "n_distinct": g["n_distinct"],
+        "tuned_rv": g.get("tuned_rv"), "tuned_b": g.get("tuned_b"),   # autotuned (order, B) per formula
         "in_niche": g["success_rate"] > 0.10,           # rough: produces models at a usable rate
     }
     if cmsgen_bin:
@@ -241,6 +245,7 @@ def _print_headline(payload: dict) -> None:
     print("HEADLINE — GPU SAT sampling throughput (GPAP = GPU-parallel CMSGen)")
     print("=" * 74)
     print(f"  GPU                  : {name}")
+    print(f"  ELS reduction        : {'on' if payload.get('els') else 'off'}")
     print(f"  Auto K (batch)       : {a['auto_K']:,}")
     print(f"  Peak GPAP throughput : {a['gpap_sps_peak']:>12,.0f} samples/s")
     print(f"  Median (niche)       : {a['gpap_sps_median']:>12,.0f} samples/s")
@@ -264,7 +269,7 @@ def _print_headline(payload: dict) -> None:
 
 def run_all(quick: bool = False, device=None, sampling_dir: str = DEFAULT_SAMPLING_DIR,
             glob_pat: str | None = None, cmsgen_bin: str | None = "auto", n_time: int | None = None,
-            n_cov: int | None = None, b: int = 8, k_cap: int = 49152,
+            n_cov: int | None = None, b: int = 8, k_cap: int = 49152, els: bool = True,
             k_sweep_insts: list[str] | None = None, k_sweep_chunks: int | None = None,
             limit: int | None = None, do_plots: bool = True, out_dir: str = DEFAULT_OUT_DIR,
             scratch: str | None = None, verbose: bool = True) -> dict:
@@ -301,7 +306,7 @@ def run_all(quick: bool = False, device=None, sampling_dir: str = DEFAULT_SAMPLI
         vram = f"{info['total_gb']:.1f} GB" if info.get("total_gb") else "n/a"
         print(f"\nDevice : {info['name']}  (VRAM={vram}, torch={info['torch_version']}, "
               f"cuda={info['cuda_version']})")
-        print(f"  instances={len(files)}  B={b}  n_time={n_time:,}  "
+        print(f"  instances={len(files)}  B={b}  n_time={n_time:,}  els={els}  "
               f"cmsgen={'yes' if cmsgen_bin else 'no'}\n")
 
     results = []
@@ -310,7 +315,7 @@ def run_all(quick: bool = False, device=None, sampling_dir: str = DEFAULT_SAMPLI
             print(f"[{i}/{len(files)}] {os.path.basename(path)[:48]} ...", flush=True)
         try:
             r = run_instance(path, device, cmsgen_bin=cmsgen_bin, n_time=n_time, n_cov=n_cov,
-                             b=b, k_cap=k_cap, scratch=scratch)
+                             b=b, k_cap=k_cap, scratch=scratch, els=els)
             results.append(r)
             if verbose:
                 rt = f"  {r['ratio']:.2f}x CMS" if r.get("ratio") else ""
@@ -328,7 +333,7 @@ def run_all(quick: bool = False, device=None, sampling_dir: str = DEFAULT_SAMPLI
         if verbose:
             print(f"[K-sweep] {n} ...", flush=True)
         try:
-            ks = k_scaling(p, device, b=b, chunks=k_sweep_chunks, k_cap=k_cap)
+            ks = k_scaling(p, device, b=b, chunks=k_sweep_chunks, k_cap=k_cap, els=els)
             if ks:
                 ksweeps.append(ks)
                 if verbose:
@@ -346,6 +351,7 @@ def run_all(quick: bool = False, device=None, sampling_dir: str = DEFAULT_SAMPLI
         "quick":       quick,
         "b":           b,
         "n_time":      n_time,
+        "els":         els,
         "cmsgen":      bool(cmsgen_bin),
         "aggregate":   agg,
         "instances":   results,
@@ -426,6 +432,8 @@ def main() -> None:
     ap.add_argument("--n-cov", type=int, default=None, help="samples used for 2-wise coverage")
     ap.add_argument("--b", type=int, default=8, help="decisions per round (8 = throughput sweet spot)")
     ap.add_argument("--k-cap", type=int, default=49152)
+    ap.add_argument("--no-els", dest="els", action="store_false", default=True,
+                    help="disable equivalent-literal substitution (on by default; ~1.5x throughput)")
     ap.add_argument("--k-sweep", default=None, help="comma list of instances for the K-scaling sweep")
     ap.add_argument("--out-dir", default=DEFAULT_OUT_DIR)
     ap.add_argument("--limit", type=int, default=None)
@@ -443,8 +451,8 @@ def main() -> None:
     k_sweep = args.k_sweep.split(",") if args.k_sweep else None
     payload = run_all(quick=args.quick, device=args.device, sampling_dir=args.sampling_dir,
                       glob_pat=args.glob, cmsgen_bin=cmsgen, n_time=args.n_time, n_cov=args.n_cov,
-                      b=args.b, k_cap=args.k_cap, k_sweep_insts=k_sweep, limit=args.limit,
-                      do_plots=not args.no_plot, out_dir=args.out_dir)
+                      b=args.b, k_cap=args.k_cap, els=args.els, k_sweep_insts=k_sweep,
+                      limit=args.limit, do_plots=not args.no_plot, out_dir=args.out_dir)
     if not args.no_save:
         save_results(payload, args.out_dir)
         compare_saved(args.out_dir)

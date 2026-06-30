@@ -80,12 +80,14 @@ class GPUSampler:
 
     @classmethod
     def from_cnf_file(cls, path: str, device: torch.device, *, simplify: bool = False,
-                      **kw) -> "GPUSampler":
+                      els: bool = False, **kw) -> "GPUSampler":
         """Build a sampler from a DIMACS file. `simplify=True` first applies unit-propagation
         simplification (shrinks M -> larger K -> more throughput) and samples the compacted
-        formula, reconstructing full original models at collection time (see simplify_cnf)."""
+        formula, reconstructing full original models at collection time (see simplify_cnf).
+        `els=True` additionally does equivalent-literal substitution (simplify_cnf_els): removes
+        more variables/clauses -> faster propagate + bigger K (implies simplify)."""
         support = parse_independent_support(path)   # 0-based, or None
-        if not simplify:
+        if not (simplify or els):
             formula = CnfFormula(device)
             formula.parse_cnf_file(path)
             smp = cls(formula, device, **kw)
@@ -93,13 +95,16 @@ class GPUSampler:
             return smp
         from pysat.formula import CNF
         cnf = CNF(from_file=path)
-        return cls._from_simplified(cnf.nv, [list(c) for c in cnf.clauses], support, device, **kw)
+        return cls._from_simplified(cnf.nv, [list(c) for c in cnf.clauses], support, device,
+                                    els=els, **kw)
 
     @classmethod
     def from_clauses(cls, num_vars: int, clauses, device: torch.device, *,
-                     simplify: bool = False, support: list | None = None, **kw) -> "GPUSampler":
-        if simplify:
-            return cls._from_simplified(num_vars, [list(c) for c in clauses], support, device, **kw)
+                     simplify: bool = False, els: bool = False,
+                     support: list | None = None, **kw) -> "GPUSampler":
+        if simplify or els:
+            return cls._from_simplified(num_vars, [list(c) for c in clauses], support, device,
+                                        els=els, **kw)
         formula = CnfFormula(device)
         formula.init_formula(num_vars, clauses)
         smp = cls(formula, device, **kw)
@@ -108,15 +113,21 @@ class GPUSampler:
 
     @classmethod
     def _from_simplified(cls, nv: int, clauses: list, support: list | None,
-                         device: torch.device, **kw) -> "GPUSampler":
+                         device: torch.device, *, els: bool = False, **kw) -> "GPUSampler":
+        if els:
+            res = simplify_cnf_els(nv, clauses, support)
+            if res is None:
+                return cls._unsat_sampler(device, **kw)
+            nv2, cl2, sup2, recon = res
+            formula = CnfFormula(device)
+            formula.init_formula(nv2, cl2)
+            smp = cls(formula, device, **kw)
+            smp.support = sup2
+            smp._recon = {"unsat": False, "els": True, **recon}
+            return smp
         res = simplify_cnf(nv, clauses, support)
         if res is None:                                  # UNSAT after unit propagation
-            formula = CnfFormula(device)
-            formula.init_formula(1, [[1], [-1]])
-            smp = cls(formula, device, **kw)
-            smp.support = []
-            smp._recon = {"unsat": True}
-            return smp
+            return cls._unsat_sampler(device, **kw)
         nv2, cl2, sup2, old_of_new, forced, free_support = res
         formula = CnfFormula(device)
         formula.init_formula(nv2, cl2)
@@ -125,6 +136,15 @@ class GPUSampler:
         smp._recon = {"unsat": False, "old_of_new": old_of_new, "forced": forced,
                       "free_support": free_support, "orig_nv": nv,
                       "orig_support": sorted(support) if support else []}
+        return smp
+
+    @classmethod
+    def _unsat_sampler(cls, device: torch.device, **kw) -> "GPUSampler":
+        formula = CnfFormula(device)
+        formula.init_formula(1, [[1], [-1]])
+        smp = cls(formula, device, **kw)
+        smp.support = []
+        smp._recon = {"unsat": True}
         return smp
 
     def _sync(self):
@@ -173,10 +193,20 @@ class GPUSampler:
     def _polarity_risk(self, lits: torch.Tensor) -> torch.Tensor:
         """Cheap GPAP-native conflict-risk score for setting each lit TRUE (one occ-gather, no
         snapshot/propagation). Setting `lit` decrements every clause where ¬lit appears (occ[lit]);
-        a clause at sat_count==1 → conflict, ==2 → becomes a forced unit (cascade risk), ==3 →
-        tightens. risk = Σ w(sat_count) over occ[lit], w(1)=1e6, w(2)=4, w(3)=1, else 0. A lower
-        risk means a polarity less likely to (eventually) conflict. `lits`: (P,) lit indices; the
-        row for lits[i] is i (caller passes one lit per active row, aligned with arange(P))."""
+        sat_count==1 → the clause empties → conflict; ==2 → it becomes a forced UNIT; ==3 → tightens.
+        risk = Σ w(sat_count) over occ[lit], w(1)=1e6, w(2)=4, w(3)=1, else 0.
+
+        ⚠️  RETAINED ONLY AS A NEGATIVE RESULT — do not use. The framing is WRONG for our regime:
+        sat_count is the NON-FALSIFIED-literal count, not a satisfaction/quality signal, and the only
+        truly bad transition is 1→0 (a real conflict). A clause going 2→1 (w=4 here) becomes a unit,
+        i.e. it PROPAGATES — and in our niche (freeAftSup≈0) propagation is exactly how a trajectory
+        completes into a model. So this score penalizes the engine's own success mechanism and
+        collapses diversity (measured: 27.sk 49%→0% success). Correcting it to weight ONLY 1→0
+        reduces to `_immediate_conflict` (a sound 1-step test) — which also doesn't help, because the
+        conflicts that kill the low-supOK family are DEEP cascades no instantaneous counter can see.
+        Net: there is no cheap 1-step proxy for "does this decision eventually conflict"; that lives
+        in the propagation closure (only `lookahead="full"` answers it, at net-negative cost).
+        `lits`: (P,) lit indices; the row for lits[i] is i (aligned with arange(P))."""
         occ = self.formula.occ_list
         dev = self.device
         P = lits.numel()
@@ -349,12 +379,108 @@ class GPUSampler:
         fully = eng.active & ~free.any(dim=1)
         return fully, support_complete, rounds, free_after_support
 
+    @torch.inference_mode()
+    def _autotune(self, K, B_hint, max_rounds, support_mask, complete, lookahead, probe_k=2048):
+        """Probe a small (random_var, B) grid and return the (rv, B) with the best THROUGHPUT
+        (models / wall) on this formula. Both are strong, formula-dependent levers (polarity stays
+        random throughout, so diversity / 2-wise coverage are preserved — validated == CMSGen):
+          - niche (support BCP-determines the rest): B=8, order irrelevant — fast, high success.
+          - "service" family (search-heavy residual, freeAft≈685): random_var=False (structured order
+            follows the gate DAG) + B=1 (avoid over-committing) is the ONLY combo that completes them
+            (ActivityService modelOK 0.05%→12%); B≥4 OR random order → ≈0.
+          - low-supOK family (7/80.sk): random_var=True.
+        Selecting by throughput (not raw count) never trades a fast high-success combo for a slow one:
+        a B=1 run that collects more models per chunk but takes 60 rounds loses to a 3-round B=8 run.
+        Niche fast-path: if (random, B_hint) already succeeds well, return immediately so the niche
+        pays one cheap probe; only the lose-cases explore the full grid (≤6 chunks)."""
+        pk = max(1, min(K, probe_k))
+
+        def probe(rv, B):
+            self._sync(); t0 = time.perf_counter()
+            fully, _, _, _ = self._run_chunk(pk, B, rv, max_rounds, support_mask, complete, lookahead)
+            n = int(fully.sum().item()); self._sync()
+            return n, time.perf_counter() - t0
+
+        n0, dt0 = probe(True, B_hint)
+        if n0 / pk > 0.1:                       # workable at (random, B_hint) — keep it; B_hint is fast.
+            # (Threshold is deliberately low: a small-K probe under-rates large B — fewer rounds means
+            #  kernel-launch overhead dominates its wall — so the grid over-favors B=1. If random+B_hint
+            #  already produces at a usable rate, don't risk that misjudgment; only truly-stuck formulas
+            #  (service family ≈0 here) fall through to the full (order,B) grid.)
+            return True, B_hint
+        best = (n0 / dt0 if dt0 > 0 else 0.0, True, B_hint)
+        for rv in (True, False):
+            for B in sorted({1, 4, B_hint}):
+                if rv is True and B == B_hint:  # already probed above
+                    continue
+                n, dt = probe(rv, B)
+                rate = n / dt if dt > 0 else 0.0
+                if rate > best[0]:
+                    best = (rate, rv, B)
+        return best[1], best[2]
+
+    def _select_config(self, plan, stats, chunk):
+        """Adaptive (bandit) config selection: dynamically switch to the best-THROUGHPUT config as it
+        is measured on real full-K chunks. More robust than the small-K `_autotune` probe (which
+        under-rates large B because kernel-launch overhead dominates its few rounds, and commits
+        permanently): here every measurement is a productive full-K chunk and the choice can change.
+        Policy: try each config once, then decaying-epsilon-greedy (explore shrinks as 1/sqrt(chunk),
+        floored at 5%) on cumulative models/wall — keeps re-checking alternatives but spends most of
+        the budget on the winner (niche → (random,8); service → (structured,1))."""
+        for c in plan:                                  # cold start: one real chunk per config
+            if stats[c]["chunks"] == 0:
+                return c
+        eps = max(0.05, chunk ** -0.5)
+        if self._pyrng.random() < eps:
+            return self._pyrng.choice(plan)
+        return max(plan, key=lambda c: (stats[c]["models"] / stats[c]["wall"]) if stats[c]["wall"] > 0 else 0.0)
+
+    def _reconstruct_els(self, comp_rows: list[list[int]]):
+        """Reconstruct original models when the formula was reduced by ELS (simplify_cnf_els).
+        Every original var resolves to its representative's value via `rep_of`: forced vars take their
+        pinned value, decided/propagated reps take the sampled value, and free (don't-care) reps draw
+        ONE random bit per equivalence class (so equivalent vars stay equal — a hard requirement, else
+        the projection is invalid). Returns (original_models, support_projections)."""
+        r = self._recon
+        rep_of = r["rep_of"]                        # rep_of[v-1] = (rep_var, same_polarity)
+        new_of_new = r["new_of_new"]                # rep_var -> compacted var (1-based)
+        forced_map = r["forced_map"]                # var -> bool
+        orig_nv = r["orig_nv"]
+        orig_support = r["orig_support"]
+        out_models, projs = [], []
+        for cm in comp_rows:
+            model_dict = {abs(cl): (cl > 0) for cl in cm}   # compacted var -> bool
+            free_bits: dict[int, bool] = {}
+            model = []
+            for v in range(1, orig_nv + 1):
+                if v in forced_map:
+                    b = forced_map[v]
+                else:
+                    rv, pol = rep_of[v - 1]
+                    if rv in forced_map:
+                        rval = forced_map[rv]
+                    elif rv in new_of_new:
+                        rval = model_dict.get(new_of_new[rv], False)
+                    else:                                    # don't-care rep: one bit per class
+                        rval = free_bits.get(rv)
+                        if rval is None:
+                            rval = self._pyrng.random() < 0.5
+                            free_bits[rv] = rval
+                    b = rval if pol else (not rval)
+                model.append(v if b else -v)
+            out_models.append(model)
+            sset = set(model)
+            projs.append(tuple((v + 1) if (v + 1) in sset else -(v + 1) for v in orig_support))
+        return out_models, projs
+
     def _reconstruct(self, comp_rows: list[list[int]]):
         """Map full models of the simplified (compacted) formula back to full ORIGINAL models, and
         return (original_models, support_projections). Forced vars are pinned to their unit-propagated
         value; the compacted vars take their sampled value; don't-care support vars (free_support) are
         sampled uniformly at random (so the support-projection distribution is preserved). Remaining
         unmapped original vars are true don't-cares set to False (any value gives a valid model)."""
+        if self._recon.get("els"):
+            return self._reconstruct_els(comp_rows)
         r = self._recon
         old_of_new = r["old_of_new"]              # old_of_new[i] = original var of compacted var i+1
         forced_map = {abs(l): (l > 0) for l in r["forced"]}
@@ -382,7 +508,7 @@ class GPUSampler:
         n_target: int,
         *,
         decisions_per_round: int = 1,
-        random_var: bool = True,
+        random_var: "bool | str" = True,
         max_decision_rounds: int | None = None,
         max_chunks: int | None = None,
         collect: bool = True,
@@ -390,6 +516,8 @@ class GPUSampler:
         support: list | None = "auto",
         complete: bool = True,
         lookahead: bool = False,
+        configs: "list[tuple[bool, int]] | None" = None,
+        config_policy: str = "adaptive",
     ) -> dict:
         """Draw at least `n_target` valid models (or until `max_chunks` chunks run).
 
@@ -402,6 +530,22 @@ class GPUSampler:
         n_support_complete counts trajectories that fixed the whole support without conflict
         (equals n_models when the support is a true independent support). If `verify_clauses`
         is given, every fully-assigned model is independently checked and `all_valid` is set.
+
+        `random_var`: True = random decision order (diverse), False = structured/index order (follows
+        the gate DAG — completes search-heavy residuals), "auto" = cheaply probe a (order, B) grid and
+        pick the best-throughput combo per formula (recommended; overrides `decisions_per_round` with
+        the tuned B — cracks the service family with (structured, B=1) without hurting the niche's B=8).
+
+        `configs`: a PORTFOLIO of (random_var, B) tuples, with `config_policy`:
+          - "adaptive" (default): a throughput BANDIT — each chunk runs ONE config at full K, picked by
+            its measured models/wall so far, dynamically switching to the winner and re-checking the
+            rest (decaying-epsilon). Robust like a portfolio yet ~as fast as the best single config; it
+            fixes the autotune's small-K mis-estimate (it measures full-K) and its permanent commit
+            (it can switch). Recommended.
+          - "static": run ALL configs as sub-batches every chunk (K split) — guarantees per-chunk
+            coverage but a slow config's K-independent round count drags every chunk (~1.5-2.7× niche).
+        `config_breakdown` reports each config's models/chunks/throughput. Overrides
+        random_var/decisions_per_round when set.
         """
         B = max(1, decisions_per_round)
         # "full" lookahead snapshots the (K,M) engine state during trials → halve K to fit it;
@@ -415,6 +559,20 @@ class GPUSampler:
             sup_t = torch.tensor(sup, dtype=torch.long, device=self.device)
             support_mask[sup_t] = True
             sup_idx = sup_t                                 # for projection
+        if configs is None and isinstance(random_var, str) and random_var == "auto":
+            random_var, B = self._autotune(K, B, max_decision_rounds, support_mask,
+                                           complete, lookahead)
+        # Config portfolio. Two policies (when len>1):
+        #  - "adaptive" (default): a THROUGHPUT BANDIT — each chunk runs ONE config at full K, chosen by
+        #    its measured models/wall so far, dynamically switching to the winner (and re-checking the
+        #    rest). Robust like a portfolio but ~as fast as the best single config — fixes both the
+        #    autotune's small-K mis-estimate and its permanent commit.
+        #  - "static": run ALL configs as sub-batches every chunk (K split). Guarantees per-chunk
+        #    coverage but a slow config's K-independent round count drags every chunk (~1.5-2.7×).
+        plan = list(configs) if configs else [(random_var, B)]
+        adaptive = configs is not None and config_policy == "adaptive" and len(plan) > 1
+        cfg_stats = {c: {"models": 0, "attempts": 0, "wall": 0.0, "chunks": 0} for c in plan}
+        K_sub = max(1, K // len(plan)) if (configs and not adaptive and len(plan) > 1) else K
         models: list[list[int]] = []
         attempts = 0
         n_models = 0
@@ -433,39 +591,51 @@ class GPUSampler:
             if max_chunks is not None and chunk >= max_chunks:
                 break
             chunk += 1
-            fully, sup_complete, rounds, free_after = self._run_chunk(
-                K, B, random_var, max_decision_rounds, support_mask, complete, lookahead)
-            rounds_hist.append(rounds)
-            free_after_hist.append(free_after)
-            attempts += K
-            n_done = int(fully.sum().item())
-            n_models += n_done
-            n_support_complete += int(sup_complete.sum().item())
-            if n_done:
-                # GPU soundness (cheap): a fully-assigned row satisfies the formula iff every clause
-                # has sat_count > 0 (no clause fully falsified). Verifies models without any CPU work.
-                if not bool((self.engine.sat_count[fully] > 0).all()):
-                    gpu_unsound += int((self.engine.sat_count[fully] <= 0).any(dim=1).sum().item())
-            if n_done and keep_rows:
-                asg = self.engine.assignment[fully]         # (n_done, 2N) int8
-                pos = asg[:, 0::2] == 1                      # (n_done, N) bool, var v TRUE
-                vidx = torch.arange(1, self.N + 1, device=self.device)
-                comp_rows = torch.where(pos, vidx, -vidx).to(torch.int32).cpu().tolist()
-                if self._recon is not None and not self._recon.get("unsat"):
-                    # reconstruct full ORIGINAL models (forced pinned, don't-cares randomized)
-                    out_rows, projs = self._reconstruct(comp_rows)
-                else:
-                    out_rows = comp_rows
-                    si = sup_idx.tolist() if sup_idx is not None else None
-                    projs = [tuple(r[i] for i in si) for r in comp_rows] if si is not None else comp_rows
-                for p in projs:
-                    distinct.add(tuple(p))
-                if verify_clauses is not None:
-                    for r in out_rows:
-                        if not _satisfies(r, verify_clauses):
-                            all_valid = False
-                if collect:
-                    models.extend(out_rows)
+            chunk_cfgs = [self._select_config(plan, cfg_stats, chunk)] if adaptive else plan
+            for (rv_c, B_c) in chunk_cfgs:
+                if adaptive:
+                    self._sync(); t_cfg = time.perf_counter()
+                fully, sup_complete, rounds, free_after = self._run_chunk(
+                    K_sub, B_c, rv_c, max_decision_rounds, support_mask, complete, lookahead)
+                rounds_hist.append(rounds)
+                free_after_hist.append(free_after)
+                attempts += K_sub
+                n_done = int(fully.sum().item())
+                n_models += n_done
+                n_support_complete += int(sup_complete.sum().item())
+                cfg_stats[(rv_c, B_c)]["models"] += n_done
+                cfg_stats[(rv_c, B_c)]["attempts"] += K_sub
+                cfg_stats[(rv_c, B_c)]["chunks"] += 1
+                if adaptive:
+                    self._sync(); cfg_stats[(rv_c, B_c)]["wall"] += time.perf_counter() - t_cfg
+                if n_done:
+                    # GPU soundness (cheap): for a FULLY-assigned row, non-falsified ⟺ TRUE, so
+                    # "every clause has sat_count > 0" ⟺ "every clause has a TRUE literal" ⟺ satisfied.
+                    # (Holds ONLY at a complete assignment — sat_count>0 on a PARTIAL assignment just
+                    # means "not yet violated". We gate on `fully`, so it's valid.) Redundant with
+                    # `active` (cleared the instant a clause hits 0); CPU `_satisfies()` is the real check.
+                    if not bool((self.engine.sat_count[fully] > 0).all()):
+                        gpu_unsound += int((self.engine.sat_count[fully] <= 0).any(dim=1).sum().item())
+                if n_done and keep_rows:
+                    asg = self.engine.assignment[fully]         # (n_done, 2N) int8
+                    pos = asg[:, 0::2] == 1                      # (n_done, N) bool, var v TRUE
+                    vidx = torch.arange(1, self.N + 1, device=self.device)
+                    comp_rows = torch.where(pos, vidx, -vidx).to(torch.int32).cpu().tolist()
+                    if self._recon is not None and not self._recon.get("unsat"):
+                        # reconstruct full ORIGINAL models (forced pinned, don't-cares randomized)
+                        out_rows, projs = self._reconstruct(comp_rows)
+                    else:
+                        out_rows = comp_rows
+                        si = sup_idx.tolist() if sup_idx is not None else None
+                        projs = [tuple(r[i] for i in si) for r in comp_rows] if si is not None else comp_rows
+                    for p in projs:
+                        distinct.add(tuple(p))
+                    if verify_clauses is not None:
+                        for r in out_rows:
+                            if not _satisfies(r, verify_clauses):
+                                all_valid = False
+                    if collect:
+                        models.extend(out_rows)
         self._sync()
         elapsed = time.perf_counter() - t0
 
@@ -477,7 +647,8 @@ class GPUSampler:
             "samples_per_s": (n_models / elapsed) if elapsed > 0 else 0.0,
             "attempts_per_s": (attempts / elapsed) if elapsed > 0 else 0.0,
             "mean_free_after_support": (sum(free_after_hist) / len(free_after_hist)) if free_after_hist else 0.0,
-            "n_chunks": chunk, "K": K, "B": B, "support_size": (len(sup) if sup else None),
+            "n_chunks": chunk, "K": K, "B": B, "random_var": bool(random_var),
+            "support_size": (len(sup) if sup else None),
             "mean_decision_rounds": (sum(rounds_hist) / len(rounds_hist)) if rounds_hist else 0,
             "max_decision_rounds": max(rounds_hist) if rounds_hist else 0,
             "n_distinct": len(distinct) if keep_rows else None,
@@ -487,6 +658,18 @@ class GPUSampler:
             out["models"] = models
         if verify_clauses is not None:
             out["all_valid"] = all_valid
+        if configs is not None:
+            dom = max(cfg_stats.items(), key=lambda kv: kv[1]["models"])[0]   # most-productive config
+            out["random_var"], out["B"] = bool(dom[0]), dom[1]   # so callers reading tuned rv/B get it
+            out["dominant_config"] = [bool(dom[0]), dom[1]]
+            out["config_policy"] = "adaptive" if adaptive else "static"
+            out["config_breakdown"] = {
+                f"rv={c[0]},B={c[1]}": {
+                    "models": s["models"], "attempts": s["attempts"], "chunks": s["chunks"],
+                    "success_rate": (s["models"] / s["attempts"]) if s["attempts"] else 0.0,
+                    "samples_per_s": (s["models"] / s["wall"]) if s["wall"] > 0 else None,
+                } for c, s in cfg_stats.items()
+            }
         return out
 
 
@@ -534,6 +717,85 @@ def simplify_cnf(nv: int, clauses: list, support: list | None):
     free_support = sorted(v for v in (support or [])
                           if (v + 1) not in assigned and (v + 1) not in new_of_old)
     return len(used), clauses2, support2, used, forced, free_support
+
+
+def simplify_cnf_els(nv: int, clauses: list, support: list | None):
+    """Stronger simplification: unit-closure + EQUIVALENT-LITERAL SUBSTITUTION (ELS) + compaction.
+
+    On top of `simplify_cnf`'s unit propagation, this collapses mutually-implied literals (binary-
+    implication SCCs) to a single representative, REMOVING variables. Since BCP propagation cost
+    scales with M (clauses) and K with per-trajectory memory (~M), shrinking the formula speeds up
+    the dominant propagate AND lets a larger K fit — it hits the profiled bottleneck twice. On the
+    sk_ benchmarks the binary-graph SCCs alone remove 5-38% of variables / 3-30% of clauses.
+
+    ELS is equisatisfiability-preserving and, for PROJECTED sampling, support-projection preserving
+    **iff reconstruction is consistent**: every removed variable equals its representative literal
+    in EVERY model, so a removed var (even a don't-care one) must be reconstructed from its rep, NOT
+    randomized independently — otherwise an equivalent pair could be assigned unequal values, an
+    invalid projection. We therefore reconstruct per equivalence-CLASS (one value per representative,
+    applied to all members with the right polarity). Validated by tests/test_sampler.py.
+
+    Returns (nv_r, clauses_r, support_r, recon) or None if UNSAT, where recon carries the per-original
+    -variable resolver used by GPUSampler._reconstruct:
+      rep_of[v-1]  : (rep_var, same_polarity) — original var v takes rep_var's value (negated if not).
+      new_of_new   : {rep_var: compacted_idx(1-based)} — reps that survive as decided/propagated vars.
+      forced_map   : {var: bool} — vars pinned by either unit-closure pass.
+    """
+    from gpap.clsdata.occ_list import ext_lit_to_lit_index
+    from gpap.solver.preprocess import equivalent_literal_substitution, unit_closure
+
+    # Pass 1: unit closure over the original variables.
+    out1, assigned1, st1 = unit_closure([list(c) for c in clauses], [])
+    if st1 == "unsat":
+        return None
+    nonunit1 = [c for c in out1 if len(c) > 1]
+
+    # Binary-implication edges (2N lit-index scheme) from binary clauses: (l1∨l2) ⇒ ¬l1→l2, ¬l2→l1.
+    edges = []
+    for c in nonunit1:
+        if len(c) == 2:
+            i1, i2 = ext_lit_to_lit_index(c[0]), ext_lit_to_lit_index(c[1])
+            edges.append((i1 ^ 1, i2))
+            edges.append((i2 ^ 1, i1))
+    if edges:
+        els_clauses, var_map, st = equivalent_literal_substitution(nonunit1, edges, nv)
+        if st.get("status") == "unsat":
+            return None
+    else:
+        els_clauses, var_map = nonunit1, {}
+
+    # Pass 2: ELS substitution can turn (a∨a)→(a) into new units — absorb them.
+    out2, assigned2, st2 = unit_closure([list(c) for c in els_clauses], [])
+    if st2 == "unsat":
+        return None
+    nonunit2 = [c for c in out2 if len(c) > 1]
+
+    used = sorted({abs(l) for c in nonunit2 for l in c})       # surviving representative vars
+    new_of_new = {v: i + 1 for i, v in enumerate(used)}
+    clauses_r = [[(new_of_new[abs(l)] if l > 0 else -new_of_new[abs(l)]) for l in c]
+                 for c in nonunit2]
+    forced_map = {**assigned1, **assigned2}                    # var -> bool (disjoint key sets)
+
+    # Per-original-variable resolver: v -> (rep_var, same_polarity).
+    rep_of = []
+    for v in range(1, nv + 1):
+        if v in var_map:                                       # removed by ELS -> rep DIMACS literal
+            rl = var_map[v]
+            rep_of.append((abs(rl), rl > 0))
+        else:
+            rep_of.append((v, True))                           # its own rep (forced / model / free)
+
+    def _rep(v0):                                              # surviving decided var for support v0
+        v = v0 + 1
+        if v in forced_map:
+            return None
+        rv = rep_of[v - 1][0]
+        return (new_of_new[rv] - 1) if rv in new_of_new else None
+
+    support_r = sorted({_rep(v0) for v0 in (support or []) if _rep(v0) is not None})
+    recon = {"orig_nv": nv, "orig_support": sorted(support) if support else [],
+             "rep_of": rep_of, "new_of_new": new_of_new, "forced_map": forced_map}
+    return len(used), clauses_r, support_r, recon
 
 
 def parse_independent_support(path: str) -> list[int] | None:

@@ -51,38 +51,61 @@ def two_wise_coverage(models, support):
     return 100.0 * covered / total if total else 0.0
 
 
+# Default config portfolio for the adaptive bandit: the two extremes that cover the niche
+# ((random order, B=8) — fast, BCP-determined) and the search-heavy "service" family
+# ((structured order, B=1) — completes via the gate DAG). The bandit measures each at full K and
+# spends the budget on the winner per formula (dynamic, robust — no probe mis-estimate / commit).
+DEFAULT_PORTFOLIO = [(True, 8), (False, 1)]
+
+
 def gpap_sample(path, device, *, simplify, n_time, n_cov, b, k_cap, max_chunks=8,
-                cov_chunks=4, max_rounds=120, lookahead=False, verify_clauses=None,
-                cov_k_cap=2048):
+                cov_chunks=4, max_rounds=300, lookahead=False, verify_clauses=None,
+                cov_k_cap=2048, els=False, random_var="auto", configs="default"):
     """Throughput run timed end-to-end (construction + simplify + sample, to match CMSGen's
     'produce N samples' wall clock) + a small collect run for coverage/soundness. The timed run
     is bounded by `max_chunks` (rate = models/wall is valid regardless of how many it collects —
     avoids spinning on low-success formulas).
 
+    `configs` (default = adaptive portfolio DEFAULT_PORTFOLIO): a throughput bandit that runs the
+    best config per chunk at full K, dynamically switching to the winner — cracks the search-heavy
+    "service" family (structured order + B=1) AND keeps the niche fast (random order + B=8) in one
+    run, more robustly than the small-K `random_var="auto"` probe. Pass configs=None to fall back to
+    `random_var` (e.g. "auto"). The dominant config is REUSED for the coverage run (focused).
+
     The coverage run COLLECTS models to host RAM (one chunk = K models × N ints reconstructed), so
     its K is capped to `cov_k_cap` independently of the (full-K) timing run — otherwise a large
     auto-K on a low-RAM host (12 GB Colab) OOM-kills the session collecting a full chunk."""
+    if configs == "default":
+        configs = DEFAULT_PORTFOLIO
     if device.type == "cuda":
         torch.cuda.synchronize()
     t0 = time.perf_counter()
-    smp = GPUSampler.from_cnf_file(path, device, simplify=simplify, k_cap=k_cap, seed=5)
-    t = smp.sample(n_time, decisions_per_round=b, max_decision_rounds=max_rounds, max_chunks=max_chunks,
-                   collect=False, lookahead=lookahead)
+    smp = GPUSampler.from_cnf_file(path, device, simplify=simplify, els=els, k_cap=k_cap, seed=5)
+    if configs:
+        t = smp.sample(n_time, configs=configs, max_decision_rounds=max_rounds,
+                       max_chunks=max_chunks, collect=False, lookahead=lookahead)
+    else:
+        t = smp.sample(n_time, decisions_per_round=b, random_var=random_var,
+                       max_decision_rounds=max_rounds, max_chunks=max_chunks, collect=False,
+                       lookahead=lookahead)
     if device.type == "cuda":
         torch.cuda.synchronize()
-    wall = time.perf_counter() - t0                  # includes construct+simplify (fair vs CMSGen)
+    wall = time.perf_counter() - t0                  # includes construct+simplify+bandit (fair vs CMSGen)
     sps = t["n_models"] / wall if wall > 0 else 0.0
+    tuned_rv, tuned_b = t["random_var"], t["B"]      # dominant config (or autotuned); reuse for coverage
     if n_cov:
         smp.K = min(smp.K, cov_k_cap)                # bound host RAM from collected/reconstructed models
-    c = (smp.sample(n_cov, decisions_per_round=b, max_decision_rounds=max_rounds, max_chunks=cov_chunks,
-                    collect=True, verify_clauses=verify_clauses, lookahead=lookahead) if n_cov else {})
+    c = (smp.sample(n_cov, decisions_per_round=tuned_b, random_var=tuned_rv, max_decision_rounds=max_rounds,
+                    max_chunks=cov_chunks, collect=True, verify_clauses=verify_clauses,
+                    lookahead=lookahead) if n_cov else {})
     del smp
     if device.type == "cuda":
         torch.cuda.empty_cache()
     return {"samples_per_s": sps, "success_rate": t["success_rate"],
             "support_size": t["support_size"], "gpu_sound": c.get("gpu_sound", True),
             "cpu_sound": c.get("all_valid"), "models": c.get("models", []),
-            "n_distinct": c.get("n_distinct")}
+            "n_distinct": c.get("n_distinct"), "tuned_rv": tuned_rv, "tuned_b": tuned_b,
+            "config_breakdown": t.get("config_breakdown")}
 
 
 def cmsgen_sample(path, cmsgen_bin, n, scratch, keep=None):
@@ -130,6 +153,9 @@ def main():
                          "success barely drops; B>=16 over-constrains and collapses success)")
     ap.add_argument("--k-cap", type=int, default=49152)
     ap.add_argument("--no-simplify", dest="simplify", action="store_false", default=True)
+    ap.add_argument("--els", action="store_true",
+                    help="also do equivalent-literal substitution (removes vars: faster propagate + "
+                         "bigger K). Sound + model-preserving; ~1.5x throughput on the niche")
     ap.add_argument("--also-plain", action="store_true", help="also run GPAP without simplification")
     ap.add_argument("--verify-cpu", action="store_true", help="also CPU-verify a few models vs clauses")
     ap.add_argument("--scratch", default="/tmp")
@@ -152,8 +178,8 @@ def main():
         sup = parse_independent_support(path)
         sup1 = [v + 1 for v in (sup or range(cnf.nv))]
         vc = [list(c) for c in cnf.clauses] if args.verify_cpu else None
-        g = gpap_sample(path, device, simplify=args.simplify, n_time=args.n_time, n_cov=args.n_cov,
-                        b=args.b, k_cap=args.k_cap, verify_clauses=vc)
+        g = gpap_sample(path, device, simplify=args.simplify, els=args.els, n_time=args.n_time,
+                        n_cov=args.n_cov, b=args.b, k_cap=args.k_cap, verify_clauses=vc)
         twg = two_wise_coverage(g["models"], sup1)
         snd = "OK" if g["gpu_sound"] and (g["cpu_sound"] in (None, True)) else "BAD"
         row = {"name": name, "nv": cnf.nv, "M": len(cnf.clauses), "support": len(sup1),
