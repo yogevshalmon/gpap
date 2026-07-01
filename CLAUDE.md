@@ -58,6 +58,29 @@ Call `gpu_mem_available(device)` AFTER loading the formula, then pass `deduct_fo
 Pass actual `formula.clause_sizes.sum()` as `total_lits` for accurate prop-peak estimation.
 Pass `cap=None` for clause learning (maximize K); `cap=65536` for benchmarks (consistent timing).
 
+#### Sampler memory: expandable_segments + K = 4× floor (the real fix)
+
+The sampler's "mid-run RAM growth" that forced a small K was **allocator FRAGMENTATION**, not tensor
+size. Its hot loop churns VARIABLE-sized temporaries every round (propagate scratch sized by the
+frontier; the (K,N) decision masks), which the default CUDA caching allocator fragments badly:
+measured on the dense post-ELS s1196, peak **reserved = 6.5 GB while live tensors were only 2.5 GB**
+(62% wasted), and that waste grew **super-linearly in K** (≈K^2.3) — the cause of the dense-instance
+spills. `gpap/solver/sampler.py` sets **`PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True` at import**
+(before torch inits CUDA, via `os.environ.setdefault`). That grows one virtual segment instead of many
+fixed blocks → **reserved tracks allocated (6.5→2.8 GB, ~2.3×) and is LINEAR in K** (per-batch stable:
+s1196 678K→671K over K=2196→8784). This is the headline memory win.
+
+With fragmentation gone, `GPUSampler._calibrate_k` just sets **K = min(4 × safe_floor, analytic, cap)**
+where `safe_floor = 0.7·free/(70M+40N)` is the old proven-safe (default-allocator) clamp. Validated:
+4×floor keeps even the densest measured instance (s1196) at 5.9–6.0 GB of the 8 GB safe budget, STABLE
+across chunks, no spill; net **2.2–3.2× throughput** over the old clamp (all instances safe).
+**Lessons (do NOT re-litigate): (1) a runtime per-batch PROBE is unreliable here — with
+expandable_segments the peak-reserved read at construction is ~1.6× below production (allocation-
+history dependent) and the frontier peak varies with the RNG draw, so every probe/differencing variant
+under-measured and over-sized K → spill. The fixed 4×-floor multiple is measured-safe and robust.
+(2) Validate any K change with a real run under an nvidia-smi kill-switch (`used>9.8GB → kill`) — the
+box SPILLS to shared host RAM (slow), it does not OOM, so a bad K won't crash, it just thrashes.**
+
 ## Project Structure
 
 ```
