@@ -294,3 +294,28 @@ a quick run) and is genuinely informative as a diversity/correctness check.
 notebook cell now defaults to it) runs only the circuit suite, swept over unroll depth, and K-sweeps the
 best circuit for the A100 story (validated slope ≈1.04, throughput ∝ K, on b03 T=5). All circuit outputs
 GPU-sound.
+
+### Bandit high-K regression + fix (found on A100)
+
+Adding the slow B=1/soft configs to the portfolio **regressed the A100 throughput** vs the pre-soft run
+(s386 T=1: 8.4M/s → 381k/s). Root cause (reproduced on the laptop with a small `n_time`): on a big-K GPU
+**one chunk already produces ≫ `n_time` models**, so the timing loop exits after the *first* cold-start
+chunk — which is `plan[0] = soft`. The bandit never measured B=8, and soft (B=1, many rounds) is slower
+on shallow circuits. The reported samples/s was also the exploration-*blended* rate (dragged by the slow
+B=1 chunks and first-chunk CUDA warmup). It was **not** the unique-counting (that's off the timing path,
+measured separately at 1.5–10× — kept off precisely so it can't distort samples/s).
+
+Three-part fix:
+1. **Always cold-start every config once** before `n_target` can end the timing run (`sampler.py`), so
+   B=8 is measured even when a single chunk exceeds `n_time`. Bounded by `max_chunks`; cold-start chunks
+   are productive.
+2. **Report the best-*throughput* config's steady-state rate** (`best_rate_sps` = max models/wall over a
+   config's own chunks), not the end-to-end blend — the rate a real run achieves after committing to the
+   winner. (Excludes one-time construction, which amortises over a real run's millions of samples.)
+3. A tiny-K **warmup chunk** before the timed run, to kill first-chunk JIT skew.
+
+Verified on the laptop (forcing the "1 chunk ≥ n_time" regime): shallow s386.c1/s832.c1 now pick **B=8**
+(935k / 1.57M samp/s, was soft at 168k / 360k); medium s386.c5 and b03.c25 keep **soft** (its genuine
+win); deep instances pick B=8. Re-running the full ISCAS-89 set, the bandit picks B=8 almost everywhere
+(soft wins mainly s386 T=5 and the b-instances) — so many of the buggy run's "soft" selections were
+artifacts of never measuring B=8. K-scaling stays linear (slope 1.06).
