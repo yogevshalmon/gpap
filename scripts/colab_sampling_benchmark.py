@@ -53,7 +53,9 @@ if REPO_ROOT not in sys.path:
 from gpap.solver.sampler import GPUSampler, parse_independent_support   # sets expandable_segments
 from gpap.utils.gpu_budget import gpu_mem_available
 from scripts.colab_benchmark import _slug, gpu_info       # reuse device-info helpers
-from scripts.sample_benchmark import cmsgen_sample, gpap_sample, two_wise_coverage
+from scripts.sample_benchmark import (
+    cmsgen_sample, distinct_projections, gpap_sample, two_wise_coverage,
+)
 
 DEFAULT_SAMPLING_DIR = os.path.join(REPO_ROOT, "benchmarks", "sampling")
 DEFAULT_OUT_DIR = os.path.join(REPO_ROOT, "benchmarks", "colab_sampling_results")
@@ -165,10 +167,12 @@ def k_scaling(path: str, device: torch.device, *, b: int, chunks: int, k_cap: in
 
 def run_instance(path: str, device: torch.device, *, cmsgen_bin: str | None, n_time: int,
                  n_cov: int, b: int, k_cap: int, scratch: str, els: bool = True,
-                 seed: int = 5) -> dict:
-    """Benchmark one CNF: GPAP-simplified throughput + 2-wise coverage + GPU soundness, and (if a
-    cmsgen binary is given) the CMSGen throughput + coverage + the GPAP/CMSGen ratio. `els=True`
-    adds equivalent-literal substitution (removes vars -> faster propagate + bigger K; ~1.5x)."""
+                 seed: int = 5, configs="default") -> dict:
+    """Benchmark one CNF: GPAP-simplified throughput + 2-wise coverage + GPU soundness + a UNIQUE-
+    solutions count, and (if a cmsgen binary is given) the CMSGen throughput + coverage + distinct
+    count + the GPAP/CMSGen ratio. `els=True` adds equivalent-literal substitution (removes vars ->
+    faster propagate + bigger K; ~1.5x). `configs` = the adaptive-bandit portfolio (default
+    DEFAULT_PORTFOLIO for the sk_ niche; pass CIRCUIT_PORTFOLIO for circuits — adds soft-lookahead)."""
     name = os.path.basename(path)
     sup0 = parse_independent_support(path)
     from pysat.formula import CNF
@@ -176,13 +180,17 @@ def run_instance(path: str, device: torch.device, *, cmsgen_bin: str | None, n_t
     sup1 = [v + 1 for v in (sup0 or range(cnf.nv))]
 
     g = gpap_sample(path, device, simplify=True, els=els, n_time=n_time, n_cov=n_cov, b=b,
-                    k_cap=k_cap)
+                    k_cap=k_cap, configs=configs)
     twg = two_wise_coverage(g["models"], sup1)
     row = {
         "name": name, "N": cnf.nv, "M": len(cnf.clauses), "support": len(sup1),
         "gpap_sps": round(g["samples_per_s"], 1), "succ": round(g["success_rate"], 4),
-        "twise_gpap": round(twg, 2), "gpu_sound": g["gpu_sound"], "n_distinct": g["n_distinct"],
-        "tuned_rv": g.get("tuned_rv"), "tuned_b": g.get("tuned_b"),   # autotuned (order, B) per formula
+        "twise_gpap": round(twg, 2), "gpu_sound": g["gpu_sound"],
+        # UNIQUE-solution readout — computed OFF the timing path (see gpap_sample): distinct support-
+        # projections among the n_collected coverage models. Verifies the sampler emits genuinely
+        # distinct solutions rather than re-emitting the same model; NOT part of samples/s.
+        "n_distinct": g["n_distinct"], "n_collected": g.get("n_collected"),
+        "tuned_rv": g.get("tuned_rv"), "tuned_b": g.get("tuned_b"), "tuned_la": g.get("tuned_la"),
         "in_niche": g["success_rate"] > 0.10,           # rough: produces models at a usable rate
     }
     if cmsgen_bin:
@@ -190,8 +198,10 @@ def run_instance(path: str, device: torch.device, *, cmsgen_bin: str | None, n_t
         # (retaining all n_time full models OOM-kills a 12 GB Colab — see cmsgen_sample).
         crate, cmodels = cmsgen_sample(path, cmsgen_bin, n_time, scratch, keep=n_cov)
         twc = two_wise_coverage(cmodels[:n_cov], sup1)
+        cms_uniq, cms_coll = distinct_projections(cmodels[:n_cov], sup1)   # same off-timing readout
         ratio = (g["samples_per_s"] / crate) if crate else None
         row.update(cms_sps=round(crate, 1), twise_cms=round(twc, 2),
+                   cms_distinct=cms_uniq, cms_collected=cms_coll,
                    ratio=(round(ratio, 2) if ratio else None))
     return row
 
@@ -202,25 +212,43 @@ def run_instance(path: str, device: torch.device, *, cmsgen_bin: str | None, n_t
 
 DEFAULT_CIRCUIT_DIR = os.path.join(REPO_ROOT, "benchmarks", "circuits")
 CIRCUIT_SEQ = ["s386", "s526", "s832", "s1196"]        # ISCAS-89 sequential (unrolled over cycles)
+# ITC'99 sequential (the "Recurrent CircuitSAT Sampling", arXiv 2502.21226, family). b01–b14; the
+# larger b15+ blow past the 100k-clause budget even shallow. Oversized (instance, cycle) combos are
+# skipped by the CIRCUIT_MAX_CLAUSES guard in run_circuits (e.g. b05/b12 at T=25, b14 at T>1).
+CIRCUIT_ITC = [f"b{i:02d}" for i in range(1, 15)]
 CIRCUIT_COMB = ["c432", "c499", "c880", "c1355", "c1908",    # ISCAS-85 combinational — DEMOTIC's
                 "c2670", "c3540", "c5315", "c6288", "c7552"]  # exact 10-circuit set
 CIRCUIT_CYCLES = [1, 5, 10, 25]
+CIRCUIT_MAX_CLAUSES = 100_000                          # skip any unroll whose CNF exceeds this
+# A curated fast subset for --quick (small-to-medium, both easy and hard cases represented).
+CIRCUIT_ITC_QUICK = ["b01", "b03", "b06", "b08", "b10", "b13"]
+
+# Circuit sampler portfolio (the adaptive bandit picks the winner per instance, at full K):
+#   (True, 1, "soft") — cheap conflict-avoidance risk-polarity: the big win on the tight/deep circuits
+#                       (measured: b03 T=25 succ 10%→88%, 2.5k→13.6k samples/s) where naive BCP-
+#                       completion self-conflicts. No extra memory / propagation vs off.
+#   (True, 8, False)  — the shallow-circuit niche (b07/b12: support ~determines the rest → B=8 fastest).
+#   (False, 1, False) — structured/gate-DAG order for search-heavy residuals.
+CIRCUIT_PORTFOLIO = [(True, 1, "soft"), (True, 8, False), (False, 1, False)]
 
 
 def run_circuits(device: torch.device, *, cmsgen_bin: str | None, n_time: int, n_cov: int, b: int,
                  k_cap: int, scratch: str, els: bool = True, cycles: list[int] | None = None,
                  insts: list[str] | None = None, circuit_dir: str = DEFAULT_CIRCUIT_DIR,
+                 max_clauses: int = CIRCUIT_MAX_CLAUSES, configs=CIRCUIT_PORTFOLIO,
                  verbose: bool = True) -> list[dict]:
     """Benchmark GPAP vs CMSGen on the CIRCUIT-SAT sampling families the competitors use:
-      * ISCAS-89 SEQUENTIAL (s*.bench, has DFFs) — "Recurrent CircuitSAT Sampling" (arXiv 2502.21226):
-        unroll T cycles → Tseitin CNF → pin ALL final-cycle outputs to a simulated target → sample the
-        primary inputs. Swept over `cycles` (GPAP wins big at shallow T, degrades with depth).
+      * ISCAS-89 + ITC'99 SEQUENTIAL (s*/b*.bench, has DFFs) — "Recurrent CircuitSAT Sampling"
+        (arXiv 2502.21226): unroll T cycles → Tseitin CNF → pin ALL final-cycle outputs to a simulated
+        target → sample the primary inputs. Swept over `cycles` (GPAP wins big at shallow T, degrades
+        with depth). Any (instance, T) whose CNF exceeds `max_clauses` is SKIPPED (keeps ≤100k clauses).
       * ISCAS-85 COMBINATIONAL (c*.bench, no DFFs) — DEMOTIC (arXiv 2502.08086): T=1, pin ONE output
         (pinning all over-constrains to a tiny solution set), sample the primary inputs.
-    Each `.bench` in `circuit_dir` is realised by scripts/bench_to_cnf; `c ind` = primary inputs."""
+    Each `.bench` in `circuit_dir` is realised by scripts/bench_to_cnf; `c ind` = primary inputs.
+    `configs` = the sampler portfolio (default CIRCUIT_PORTFOLIO with soft-lookahead for tight circuits)."""
     from scripts.bench_to_cnf import parse_bench, build_cnf, write_dimacs
     cycles = cycles or CIRCUIT_CYCLES
-    insts = insts or (CIRCUIT_SEQ + CIRCUIT_COMB)
+    insts = insts or (CIRCUIT_SEQ + CIRCUIT_ITC + CIRCUIT_COMB)
     gen_dir = os.path.join(scratch, "circuits")
     os.makedirs(gen_dir, exist_ok=True)
     rows = []
@@ -237,15 +265,22 @@ def run_circuits(device: torch.device, *, cmsgen_bin: str | None, n_time: int, n
                 # combinational (ISCAS-85): pin ONE output to keep a large samplable solution space
                 builder, support, _ = build_cnf(circ, T, seed=1,
                                                 pin_outputs=1 if combinational else None)
+                if len(builder.clauses) > max_clauses:  # keep the unrolled CNF within budget
+                    if verbose:
+                        print(f"   {inst} T={T:>2}: skip ({len(builder.clauses):,} clauses "
+                              f"> {max_clauses:,})", flush=True)
+                    continue
                 write_dimacs(cnfp, builder, support)
             r = run_instance(cnfp, device, cmsgen_bin=cmsgen_bin, n_time=n_time, n_cov=n_cov,
-                             b=b, k_cap=k_cap, scratch=scratch, els=els)
+                             b=b, k_cap=k_cap, scratch=scratch, els=els, configs=configs)
             r["circuit"], r["cycles"], r["family"] = inst, T, ("iscas85" if combinational else "iscas89")
             rows.append(r)
             if verbose:
                 rt = f"  {r['ratio']:.2f}x CMS" if r.get("ratio") else ""
-                print(f"   {inst} T={T:>2}: GPAP {r['gpap_sps']:>12,.0f}/s  succ {100*r['succ']:.0f}%{rt}",
-                      flush=True)
+                la = f",la={r['tuned_la']}" if r.get("tuned_la") else ""
+                cfg = f"  [rv={r.get('tuned_rv')},B={r.get('tuned_b')}{la}]"
+                print(f"   {inst} T={T:>2}: GPAP {r['gpap_sps']:>12,.0f}/s  succ {100*r['succ']:.0f}%"
+                      f"{rt}{cfg}", flush=True)
     return rows
 
 
@@ -305,9 +340,79 @@ def aggregate(results: list[dict], ksweeps: list[dict]) -> dict:
     }
 
 
+def aggregate_circuits(circuits: list[dict], ksweeps: list[dict]) -> dict:
+    """Aggregate the circuit rows (over ALL circuits with a CMSGen comparison, not just the niche —
+    the point of the circuit suite is the head-to-head across depths). Includes the UNIQUE-solution
+    readout: mean distinct fraction (distinct/collected) for GPAP vs CMSGen, verifying diversity."""
+    rows = [r for r in circuits if "error" not in r and "gpap_sps" in r]
+    sps = [r["gpap_sps"] for r in rows if r.get("gpap_sps")]
+    ratios = [r["ratio"] for r in rows if r.get("ratio")]
+    dq = [r["twise_gpap"] - r["twise_cms"] for r in rows if "twise_cms" in r]
+
+    def _gm(xs):
+        xs = [x for x in xs if x and x > 0]
+        return round(statistics.geometric_mean(xs), 2) if xs else None
+
+    def _frac(dk, ck):                                   # mean distinct/collected fraction
+        fr = [r[dk] / r[ck] for r in rows if r.get(ck) and r.get(dk) is not None]
+        return round(float(np.mean(fr)), 3) if fr else None
+
+    slope = None
+    peak_k_sps = 0.0
+    auto_K = 0
+    for ks in ksweeps:
+        pts = [p for p in ks["points"] if p["samples_per_s"] > 0]
+        peak_k_sps = max(peak_k_sps, max((p["samples_per_s"] for p in pts), default=0.0))
+        auto_K = max(auto_K, ks.get("auto_K", 0))
+        if len(pts) >= 2 and slope is None:
+            lx = np.log([p["K"] for p in pts]); ly = np.log([p["samples_per_s"] for p in pts])
+            slope = round(float(np.polyfit(lx, ly, 1)[0]), 2)
+    return {
+        "n_instances":          len(rows),
+        "n_circuits":           len({r["circuit"] for r in rows}),
+        "gpap_sps_peak":        round(max(sps), 1) if sps else 0.0,
+        "gpap_sps_median":      round(statistics.median(sps), 1) if sps else 0.0,
+        "ratio_geomean":        _gm(ratios),
+        "ratio_max":            round(max(ratios), 2) if ratios else None,
+        "n_win_vs_cms":         sum(1 for x in ratios if x >= 1.0),
+        "n_compared":           len(ratios),
+        "twise_delta_mean":     round(float(np.mean(dq)), 2) if dq else None,
+        "all_gpu_sound":        all(r["gpu_sound"] for r in rows) if rows else None,
+        "gpap_distinct_frac":   _frac("n_distinct", "n_collected"),   # ~1.0 = all-distinct output
+        "cms_distinct_frac":    _frac("cms_distinct", "cms_collected"),
+        "kscale_slope_loglog":  slope,
+        "kscale_peak_sps":      round(peak_k_sps, 1),
+        "auto_K":               auto_K,
+    }
+
+
 # ---------------------------------------------------------------------------
 # Pretty printing
 # ---------------------------------------------------------------------------
+
+def _print_circuit_table(rows: list[dict], has_cms: bool) -> None:
+    """Per-(circuit, cycle) throughput + UNIQUE-solution counts (distinct support-projections among
+    the collected coverage models — the diversity check, computed off the timing path)."""
+    rows = [r for r in rows if "gpap_sps" in r]
+    if not rows:
+        return
+    hdr = (f"{'circuit':<8}{'T':>4}{'N':>7}{'M':>7}{'sup':>5}{'GPAP/s':>11}{'succ':>6}"
+           f"{'uniqG':>8}{'config':>15}")
+    if has_cms:
+        hdr += f"{'CMS/s':>10}{'uniqC':>8}{'ratio':>8}"
+    print("\n=== circuits: throughput + unique (distinct) solution counts ===")
+    print(hdr); print("-" * len(hdr))
+    for r in sorted(rows, key=lambda x: (len(x["circuit"]), x["circuit"], x["cycles"])):
+        la = f",{r['tuned_la']}" if r.get("tuned_la") else ""
+        cfg = f"rv={int(bool(r.get('tuned_rv')))},B={r.get('tuned_b')}{la}"
+        line = (f"{r['circuit']:<8}{r['cycles']:>4}{r['N']:>7}{r['M']:>7}{r['support']:>5}"
+                f"{r['gpap_sps']:>11,.0f}{100*r['succ']:>5.0f}%{(r.get('n_distinct') or 0):>8,}"
+                f"{cfg:>15}")
+        if has_cms and "cms_sps" in r:
+            ratio = f"{r['ratio']:.2f}x" if r.get("ratio") else "—"
+            line += f"{r['cms_sps']:>10,.0f}{(r.get('cms_distinct') or 0):>8,}{ratio:>8}"
+        print(line)
+
 
 def _print_table(results: list[dict], has_cms: bool) -> None:
     hdr = (f"{'instance':<24}{'N':>6}{'M':>7}{'|sup|':>6}{'GPAP/s':>10}{'succ%':>6}"
@@ -328,18 +433,27 @@ def _print_table(results: list[dict], has_cms: bool) -> None:
 def _print_headline(payload: dict) -> None:
     a = payload["aggregate"]
     name = payload["gpu"]["name"]
+    circ = payload.get("circuits_only")
     print("\n" + "=" * 74)
-    print("HEADLINE — GPU SAT sampling throughput (GPAP = GPU-parallel CMSGen)")
+    kind = "CIRCUIT-SAT" if circ else "GPU SAT"
+    print(f"HEADLINE — {kind} sampling throughput (GPAP = GPU-parallel CMSGen)")
     print("=" * 74)
     print(f"  GPU                  : {name}")
     print(f"  ELS reduction        : {'on' if payload.get('els') else 'off'}")
     print(f"  Auto K (batch)       : {a['auto_K']:,}")
     print(f"  Peak GPAP throughput : {a['gpap_sps_peak']:>12,.0f} samples/s")
-    print(f"  Median (niche)       : {a['gpap_sps_median']:>12,.0f} samples/s")
+    print(f"  Median throughput    : {a['gpap_sps_median']:>12,.0f} samples/s")
     if a.get("ratio_geomean"):
         print(f"  vs CMSGen (geomean)  : {a['ratio_geomean']:>12.2f}x   (max {a['ratio_max']:.1f}x)")
+    if a.get("n_compared"):
+        print(f"  Won vs CMSGen        : {a['n_win_vs_cms']:>7}/{a['n_compared']} circuit unrolls")
     if a.get("twise_delta_mean") is not None:
         print(f"  2-wise coverage Δ    : {a['twise_delta_mean']:>+12.2f} pp  (vs CMSGen; ≈0 = equal quality)")
+    if a.get("gpap_distinct_frac") is not None:
+        cf = (f"  (CMSGen {100*a['cms_distinct_frac']:.0f}%)"
+              if a.get("cms_distinct_frac") is not None else "")
+        print(f"  Unique output (GPAP) : {100*a['gpap_distinct_frac']:>11.0f}%  distinct of collected"
+              f"{cf}")
     print(f"  GPU-sound (all)      : {a['all_gpu_sound']}")
     if a.get("kscale_slope_loglog") is not None:
         print(f"  K-scaling (log-log)  : slope {a['kscale_slope_loglog']:.2f}  "
@@ -360,12 +474,18 @@ def run_all(quick: bool = False, device=None, sampling_dir: str = DEFAULT_SAMPLI
             k_sweep_insts: list[str] | None = None, k_sweep_chunks: int | None = None,
             limit: int | None = None, do_plots: bool = True, out_dir: str = DEFAULT_OUT_DIR,
             scratch: str | None = None, verbose: bool = True, do_circuits: bool = False,
-            circuit_cycles: list[int] | None = None) -> dict:
+            circuit_cycles: list[int] | None = None, circuits_only: bool = False,
+            circuit_insts: list[str] | None = None) -> dict:
     """Discover sampling CNFs, benchmark GPAP vs CMSGen + a K-scaling sweep, and return a payload.
 
     quick=True restricts to the validated niche instances, lowers n_time, and sweeps K on one
     instance (a few minutes). The full run sweeps every *.cnf in `sampling_dir` (the niche boundary
     shows up as ~0-success rows) and sweeps K on two instances.
+
+    circuits_only=True runs ONLY the CircuitSAT-sampling suite (ISCAS-89 + ITC'99 sequential, swept
+    over unroll depth, + ISCAS-85 combinational on full runs) — the "Recurrent CircuitSAT Sampling"
+    family. It skips the sk_ suite entirely and K-sweeps the best-throughput circuit instead. This is
+    the current focus (the circuit regime is where the adaptive soft-lookahead config earns its keep).
 
     k_cap=None (default) sizes the cap to the GPU's VRAM (default_k_cap) so an A100 gets a much larger
     K than a laptop GPU — the cross-GPU headroom this benchmark exposes.
@@ -391,6 +511,12 @@ def run_all(quick: bool = False, device=None, sampling_dir: str = DEFAULT_SAMPLI
         k_sweep_insts = list(K_SWEEP_DEFAULT) if k_sweep_insts is None else k_sweep_insts
         k_sweep_chunks = 8 if k_sweep_chunks is None else k_sweep_chunks
         files = sorted(glob.glob(glob_pat or os.path.join(sampling_dir, "*.cnf")))
+    if circuits_only:
+        files = []                       # skip the sk_ suite; circuits are the whole run
+        do_circuits = True
+        if circuit_insts is None:        # paper family (seq) + b instances; +ISCAS-85 on full runs
+            circuit_insts = (CIRCUIT_SEQ + CIRCUIT_ITC_QUICK if quick
+                             else CIRCUIT_SEQ + CIRCUIT_ITC + CIRCUIT_COMB)
     if limit is not None:
         files = files[:limit]
 
@@ -417,56 +543,83 @@ def run_all(quick: bool = False, device=None, sampling_dir: str = DEFAULT_SAMPLI
             print(f"   ERROR: {e}")
             results.append({"name": os.path.basename(path), "error": str(e)})
 
-    # K-scaling sweep on the chosen instances.
+    # K-scaling sweep on the sk_ instances (skipped in circuits_only — swept on a circuit below).
     ksweeps = []
-    for n in k_sweep_insts:
-        p = os.path.join(sampling_dir, n)
-        if not os.path.exists(p):
-            continue
-        if verbose:
-            print(f"[K-sweep] {n} ...", flush=True)
-        try:
-            ks = k_scaling(p, device, b=b, chunks=k_sweep_chunks, k_cap=k_cap, els=els)
-            if ks:
-                ksweeps.append(ks)
-                if verbose:
-                    for pt in ks["points"]:
-                        print(f"   K={pt['K']:>8,}  {pt['samples_per_s']:>12,.0f} samp/s  "
-                              f"(succ {100*pt['success_rate']:.0f}%)")
-        except Exception as e:  # noqa: BLE001
-            print(f"   [K-sweep] {n} ERROR: {e}")
+    if not circuits_only:
+        for n in k_sweep_insts:
+            p = os.path.join(sampling_dir, n)
+            if not os.path.exists(p):
+                continue
+            if verbose:
+                print(f"[K-sweep] {n} ...", flush=True)
+            try:
+                ks = k_scaling(p, device, b=b, chunks=k_sweep_chunks, k_cap=k_cap, els=els)
+                if ks:
+                    ksweeps.append(ks)
+                    if verbose:
+                        for pt in ks["points"]:
+                            print(f"   K={pt['K']:>8,}  {pt['samples_per_s']:>12,.0f} samp/s  "
+                                  f"(succ {100*pt['success_rate']:.0f}%)")
+            except Exception as e:  # noqa: BLE001
+                print(f"   [K-sweep] {n} ERROR: {e}")
 
-    # Sequential-circuit unrolling suite (ISCAS-89), swept over cycle depth — the CircuitSAT-paper family.
+    # Circuit-SAT unrolling suite (ISCAS-89 + ITC'99 sequential, ISCAS-85 combinational), swept over
+    # unroll depth — the CircuitSAT-paper families. Uses CIRCUIT_PORTFOLIO (adds soft-lookahead).
     circuits = []
     if do_circuits:
         if verbose:
-            print(f"\n[circuits] ISCAS-89 unrolling (cycles={circuit_cycles or CIRCUIT_CYCLES}) ...", flush=True)
+            print(f"\n[circuits] unrolling (cycles={circuit_cycles or CIRCUIT_CYCLES}) ...", flush=True)
         try:
             circuits = run_circuits(device, cmsgen_bin=cmsgen_bin, n_time=n_time, n_cov=n_cov, b=b,
                                     k_cap=k_cap, scratch=scratch, els=els, cycles=circuit_cycles,
-                                    verbose=verbose)
+                                    insts=circuit_insts, verbose=verbose)
         except Exception as e:  # noqa: BLE001
             print(f"   [circuits] ERROR: {e}")
 
+    # circuits_only: K-sweep the best-throughput circuit just generated (the A100 headroom story).
+    if circuits_only and circuits:
+        best = max((r for r in circuits if r.get("in_niche") and "gpap_sps" in r),
+                   key=lambda r: r["gpap_sps"], default=None)
+        if best:
+            cnfp = os.path.join(scratch, "circuits", f"{best['circuit']}.c{best['cycles']}.cnf")
+            if os.path.exists(cnfp):
+                if verbose:
+                    print(f"[K-sweep] {best['circuit']} T={best['cycles']} ...", flush=True)
+                try:
+                    ks = k_scaling(cnfp, device, b=b, chunks=k_sweep_chunks, k_cap=k_cap, els=els)
+                    if ks:
+                        ksweeps.append(ks)
+                        if verbose:
+                            for pt in ks["points"]:
+                                print(f"   K={pt['K']:>8,}  {pt['samples_per_s']:>12,.0f} samp/s  "
+                                      f"(succ {100*pt['success_rate']:.0f}%)")
+                except Exception as e:  # noqa: BLE001
+                    print(f"   [K-sweep] circuit ERROR: {e}")
+
     good = [r for r in results if "error" not in r]
-    agg = aggregate(good, ksweeps)
+    agg = aggregate_circuits(circuits, ksweeps) if circuits_only else aggregate(good, ksweeps)
     payload = {
-        "timestamp":   datetime.now().isoformat(timespec="seconds"),
-        "gpu":         info,
-        "quick":       quick,
-        "b":           b,
-        "n_time":      n_time,
-        "els":         els,
-        "cmsgen":      bool(cmsgen_bin),
-        "aggregate":   agg,
-        "instances":   results,
-        "ksweeps":     ksweeps,
-        "circuits":    circuits,
+        "timestamp":     datetime.now().isoformat(timespec="seconds"),
+        "gpu":           info,
+        "quick":         quick,
+        "b":             b,
+        "n_time":        n_time,
+        "els":           els,
+        "cmsgen":        bool(cmsgen_bin),
+        "circuits_only": circuits_only,
+        "aggregate":     agg,
+        "instances":     results,
+        "ksweeps":       ksweeps,
+        "circuits":      circuits,
     }
     if verbose:
-        _print_table(good, has_cms=bool(cmsgen_bin))
-        if circuits:
+        if circuits_only:
+            _print_circuit_table(circuits, has_cms=bool(cmsgen_bin))
             _print_circuit_matrix(circuits)
+        else:
+            _print_table(good, has_cms=bool(cmsgen_bin))
+            if circuits:
+                _print_circuit_matrix(circuits)
         _print_headline(payload)
     if do_plots:
         try:
@@ -545,8 +698,11 @@ def main() -> None:
                     help="disable equivalent-literal substitution (on by default; ~1.5x throughput)")
     ap.add_argument("--k-sweep", default=None, help="comma list of instances for the K-scaling sweep")
     ap.add_argument("--circuits", action="store_true",
-                    help="also run the ISCAS-89 sequential-circuit unrolling suite (the CircuitSAT-paper "
-                         "benchmark family), swept over cycle depth")
+                    help="also run the ISCAS-89/ITC'99 sequential + ISCAS-85 combinational unrolling "
+                         "suite (the CircuitSAT-paper families), swept over cycle depth")
+    ap.add_argument("--circuits-only", action="store_true",
+                    help="run ONLY the circuit suite (skip the sk_ suite); the current focus — "
+                         "ISCAS-89 + ITC'99 b-instances swept over unroll depth")
     ap.add_argument("--circuit-cycles", default=None,
                     help="comma list of unroll depths for --circuits (default 1,5,10,25)")
     ap.add_argument("--out-dir", default=DEFAULT_OUT_DIR)
@@ -569,7 +725,8 @@ def main() -> None:
                       glob_pat=args.glob, cmsgen_bin=cmsgen, n_time=args.n_time, n_cov=args.n_cov,
                       b=args.b, k_cap=args.k_cap, els=args.els, k_sweep_insts=k_sweep,
                       limit=args.limit, do_plots=not args.no_plot, out_dir=args.out_dir,
-                      do_circuits=args.circuits, circuit_cycles=circuit_cycles)
+                      do_circuits=args.circuits or args.circuits_only,
+                      circuits_only=args.circuits_only, circuit_cycles=circuit_cycles)
     if not args.no_save:
         save_results(payload, args.out_dir)
         compare_saved(args.out_dir)

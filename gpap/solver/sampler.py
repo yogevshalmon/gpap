@@ -578,9 +578,6 @@ class GPUSampler:
         random_var/decisions_per_round when set.
         """
         B = max(1, decisions_per_round)
-        # "full" lookahead snapshots the (K,M) engine state during trials → halve K to fit it;
-        # "soft" (risk-polarity) needs no extra memory.
-        K = max(1, self.K // 2) if lookahead in (True, "full") else self.K
         sup = self.support if (isinstance(support, str) and support == "auto") else support
         support_mask = None
         sup_idx = None
@@ -590,7 +587,7 @@ class GPUSampler:
             support_mask[sup_t] = True
             sup_idx = sup_t                                 # for projection
         if configs is None and isinstance(random_var, str) and random_var == "auto":
-            random_var, B = self._autotune(K, B, max_decision_rounds, support_mask,
+            random_var, B = self._autotune(self.K, B, max_decision_rounds, support_mask,
                                            complete, lookahead)
         # Config portfolio. Two policies (when len>1):
         #  - "adaptive" (default): a THROUGHPUT BANDIT — each chunk runs ONE config at full K, chosen by
@@ -599,7 +596,18 @@ class GPUSampler:
         #    autotune's small-K mis-estimate and its permanent commit.
         #  - "static": run ALL configs as sub-batches every chunk (K split). Guarantees per-chunk
         #    coverage but a slow config's K-independent round count drags every chunk (~1.5-2.7×).
-        plan = list(configs) if configs else [(random_var, B)]
+        # Normalise the portfolio to (random_var, B, lookahead) triples. A config may be a 2-tuple
+        # (rv, B) — lookahead defaults off — or a 3-tuple (rv, B, lookahead), lookahead ∈
+        # {False, "soft", "full"}. "soft" (cheap risk-polarity) is the big win on the tight/deep
+        # CIRCUIT regime (conflict-avoidance polarity → far higher success at no extra memory);
+        # "full" snapshots the (K,M) state so it needs K halved. off/"soft" cost no extra memory.
+        def _norm(c):
+            return (c[0], max(1, c[1]), (c[2] if len(c) > 2 else False))
+        plan = [_norm(c) for c in configs] if configs else [(random_var, B, lookahead)]
+        # If ANY config in the plan uses "full" lookahead, halve K for the whole run (the fixed
+        # per-chunk allocation must fit the most memory-hungry config's snapshot).
+        need_full = any(c[2] in (True, "full") for c in plan)
+        K = max(1, self.K // 2) if need_full else self.K
         adaptive = configs is not None and config_policy == "adaptive" and len(plan) > 1
         cfg_stats = {c: {"models": 0, "attempts": 0, "wall": 0.0, "chunks": 0} for c in plan}
         K_sub = max(1, K // len(plan)) if (configs and not adaptive and len(plan) > 1) else K
@@ -622,22 +630,23 @@ class GPUSampler:
                 break
             chunk += 1
             chunk_cfgs = [self._select_config(plan, cfg_stats, chunk)] if adaptive else plan
-            for (rv_c, B_c) in chunk_cfgs:
+            for cfg in chunk_cfgs:
+                rv_c, B_c, la_c = cfg
                 if adaptive:
                     self._sync(); t_cfg = time.perf_counter()
                 fully, sup_complete, rounds, free_after = self._run_chunk(
-                    K_sub, B_c, rv_c, max_decision_rounds, support_mask, complete, lookahead)
+                    K_sub, B_c, rv_c, max_decision_rounds, support_mask, complete, la_c)
                 rounds_hist.append(rounds)
                 free_after_hist.append(free_after)
                 attempts += K_sub
                 n_done = int(fully.sum().item())
                 n_models += n_done
                 n_support_complete += int(sup_complete.sum().item())
-                cfg_stats[(rv_c, B_c)]["models"] += n_done
-                cfg_stats[(rv_c, B_c)]["attempts"] += K_sub
-                cfg_stats[(rv_c, B_c)]["chunks"] += 1
+                cfg_stats[cfg]["models"] += n_done
+                cfg_stats[cfg]["attempts"] += K_sub
+                cfg_stats[cfg]["chunks"] += 1
                 if adaptive:
-                    self._sync(); cfg_stats[(rv_c, B_c)]["wall"] += time.perf_counter() - t_cfg
+                    self._sync(); cfg_stats[cfg]["wall"] += time.perf_counter() - t_cfg
                 if n_done:
                     # GPU soundness (cheap): for a FULLY-assigned row, non-falsified ⟺ TRUE, so
                     # "every clause has sat_count > 0" ⟺ "every clause has a TRUE literal" ⟺ satisfied.
@@ -690,11 +699,14 @@ class GPUSampler:
             out["all_valid"] = all_valid
         if configs is not None:
             dom = max(cfg_stats.items(), key=lambda kv: kv[1]["models"])[0]   # most-productive config
-            out["random_var"], out["B"] = bool(dom[0]), dom[1]   # so callers reading tuned rv/B get it
-            out["dominant_config"] = [bool(dom[0]), dom[1]]
+            out["random_var"], out["B"], out["lookahead"] = bool(dom[0]), dom[1], dom[2]
+            out["dominant_config"] = [bool(dom[0]), dom[1], dom[2]]
             out["config_policy"] = "adaptive" if adaptive else "static"
+
+            def _lab(c):
+                return f"rv={c[0]},B={c[1]}" + (f",la={c[2]}" if c[2] else "")
             out["config_breakdown"] = {
-                f"rv={c[0]},B={c[1]}": {
+                _lab(c): {
                     "models": s["models"], "attempts": s["attempts"], "chunks": s["chunks"],
                     "success_rate": (s["models"] / s["attempts"]) if s["attempts"] else 0.0,
                     "samples_per_s": (s["models"] / s["wall"]) if s["wall"] > 0 else None,
