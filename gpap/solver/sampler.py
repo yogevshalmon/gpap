@@ -625,7 +625,14 @@ class GPUSampler:
 
         self._sync()
         t0 = time.perf_counter()
-        while n_models < n_target:
+        while True:
+            # Stop once n_target is met — BUT for the adaptive bandit, always measure every config at
+            # least once first. Otherwise on a big-K GPU a single chunk can already exceed n_target, so
+            # only plan[0] ever runs and a faster config is never discovered (the A100 shallow-circuit
+            # regression). Bounded by max_chunks. Cold-start chunks are productive (real models).
+            cold = adaptive and any(cfg_stats[c]["chunks"] == 0 for c in plan)
+            if not cold and n_models >= n_target:
+                break
             if max_chunks is not None and chunk >= max_chunks:
                 break
             chunk += 1
@@ -698,9 +705,19 @@ class GPUSampler:
         if verify_clauses is not None:
             out["all_valid"] = all_valid
         if configs is not None:
-            dom = max(cfg_stats.items(), key=lambda kv: kv[1]["models"])[0]   # most-productive config
+            def _rate(s):
+                return (s["models"] / s["wall"]) if s["wall"] > 0 else 0.0
+            dom = max(cfg_stats.items(), key=lambda kv: kv[1]["models"])[0]   # most models produced
             out["random_var"], out["B"], out["lookahead"] = bool(dom[0]), dom[1], dom[2]
             out["dominant_config"] = [bool(dom[0]), dom[1], dom[2]]
+            # Best-THROUGHPUT config = max models/wall (the one a real run commits to after exploring).
+            # The benchmark headline uses THIS rate, not the end-to-end blend, so the bandit's slower
+            # exploration chunks (and any first-chunk warmup) never drag the reported steady-state
+            # throughput. Only meaningful when adaptive (per-config wall is timed); else wall==0.
+            brc, brs = max(cfg_stats.items(), key=lambda kv: _rate(kv[1]))
+            out["best_rate_config"] = [bool(brc[0]), brc[1], brc[2]]
+            out["best_rate_sps"] = _rate(brs) if brs["wall"] > 0 else None
+            out["best_rate_success"] = (brs["models"] / brs["attempts"]) if brs["attempts"] else 0.0
             out["config_policy"] = "adaptive" if adaptive else "static"
 
             def _lab(c):
