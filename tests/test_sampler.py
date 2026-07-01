@@ -186,6 +186,15 @@ def test_fully_determined_formula_m0():
         assert 1 in s and -2 in s and 3 in s and 4 in s
 
 
+def test_b_larger_than_num_vars():
+    """decisions_per_round B can exceed the (post-simplify) variable count on tiny formulas —
+    _pick_decisions must clamp the topk instead of erroring."""
+    clauses = [[1, 2], [-1, -2]]                       # 2 vars, 2 models
+    smp = GPUSampler.from_clauses(2, clauses, DEV, k_cap=64, seed=1)
+    out = smp.sample(200, decisions_per_round=8, max_chunks=10, collect=True, verify_clauses=clauses)
+    assert out["n_models"] > 0 and out["all_valid"]
+
+
 def test_simplify_dontcare_both_polarities():
     """A don't-care support var must take BOTH polarities across samples (uniform), not be pinned."""
     nv, clauses, sup = _controlled_formula(seed=11)

@@ -26,6 +26,16 @@ Design knobs (the throughput vs. success-rate tradeoff):
 
 K is auto-sized to the GPU (capped by default to stay off the WSL2 host-RAM spill cliff).
 """
+import os
+# Use CUDA expandable-segments allocation BEFORE torch initializes its CUDA allocator. The sampler's
+# hot loop churns many VARIABLE-sized temporaries per round (propagate scratch sized by the frontier;
+# the (K,N) decision masks), which fragments the default caching allocator badly: measured peak
+# RESERVED = 6.5 GB while live tensors were only 2.5 GB (62% wasted to fragmentation), and that
+# fragmentation is what "grows mid-run" and forces a small K. expandable_segments grows one virtual
+# segment instead of many fixed blocks → reserved tracks allocated (6.5→2.8 GB here, ~2.3× more K
+# for the same VRAM). setdefault so an explicit user PYTORCH_CUDA_ALLOC_CONF still wins. Must be set
+# before the first CUDA allocation; importing this module before any CUDA use guarantees that.
+os.environ.setdefault("PYTORCH_CUDA_ALLOC_CONF", "expandable_segments:True")
 import time
 
 import torch
@@ -53,23 +63,7 @@ class GPUSampler:
         self.engine = BCPEngine(formula)
         self._max_cls = int(formula.clause_sizes.max().item()) if self.M else 1
         self._total_lits = int(formula.clause_sizes.sum().item()) if self.M else 0
-        # K auto-sized to the GPU; mem_get_info already excludes the loaded formula.
-        free_bytes = gpu_mem_available(device)
-        self.K = compute_k_safe(
-            self.M, self.N, free_bytes, cap=k_cap,
-            max_clause_size=self._max_cls, total_lits=self._total_lits or None,
-            deduct_formula=False,
-        )
-        # IMPORTANT: compute_k_safe budgets only the BCPEngine's static tensors and is ~20x
-        # OPTIMISTIC for these formulas — the propagate/apply temporaries (and the sampler's own
-        # per-round (K,N) masked-priority + free masks) dominate. Measured full footprint on this
-        # box ≈ 55-110 B per clause-batch + ~30-40 B per var-batch (measured: M=2215,N=1494 →
-        # 238 B/batch... i.e. 0.24 MiB/batch at K; M=17828,N=4842 → ~55 B/clause). Without this
-        # clamp, K spills into host RAM over PCIe on WSL2 (~12 GB/s thrash). Size K to ~70% of free
-        # VRAM under the calibrated per-batch cost (70*M + 40*N covers both small- and large-M).
-        per_batch_emp = 70 * self.M + 40 * self.N + 64
-        k_safe_emp = int(0.7 * free_bytes / per_batch_emp)
-        self.K = max(1, min(self.K, k_safe_emp))
+        # RNG + state must exist before K calibration (the probe chunk in _calibrate_k uses _gen).
         self._gen = torch.Generator(device=device)
         if seed is not None:
             self._gen.manual_seed(seed)
@@ -77,6 +71,41 @@ class GPUSampler:
         self._pyrng = _random.Random(seed)
         self.support: list[int] | None = None   # 0-based independent-support vars (from `c ind`)
         self._recon: dict | None = None          # set when built with simplify=True (see _from_simplified)
+        # K auto-sized to the GPU (see _calibrate_k): the old analytic floor 0.7·free/(70M+40N) was
+        # ~4-6x too conservative because allocator FRAGMENTATION (not tensor size) inflated reserved
+        # memory; enabling expandable_segments (at import) removes that, so K = 4× the floor is safe.
+        free_bytes = gpu_mem_available(device)
+        analytic = compute_k_safe(
+            self.M, self.N, free_bytes, cap=k_cap,
+            max_clause_size=self._max_cls, total_lits=self._total_lits or None,
+            deduct_formula=False,
+        )
+        self.K = self._calibrate_k(free_bytes, k_cap, analytic)
+
+    # K-calibration: with CUDA expandable_segments (set at module import) the sampler's per-round
+    # variable-sized churn no longer fragments the allocator — reserved memory drops ~2.3× AND the
+    # old super-linear (≈K^2.3) growth that spilled dense instances becomes LINEAR in K (per-batch
+    # stable across K). That headroom lets K safely exceed the old proven-safe floor by this factor;
+    # 4× is validated to stay well under budget for the densest measured instance (s1196: 4×floor →
+    # 5.9 GB of the 8 GB safe budget, stable across chunks, no spill), with margin for denser unknowns.
+    _CAL_MULT = 4
+
+    def _calibrate_k(self, free_bytes: int, k_cap: int | None, analytic_k: int) -> int:
+        """Size K to the spill-safe VRAM budget. The old analytic floor (0.7·free/(70M+40N)) was
+        calibrated to never spill under the DEFAULT allocator; enabling `expandable_segments` (at
+        import) both cuts reserved memory ~2.3× and linearises it in K, so K can safely be a fixed
+        multiple (_CAL_MULT) of that floor — no fragile per-instance probe.
+
+        A runtime probe was tried and abandoned: with expandable_segments the peak-reserved read at
+        construction is systematically ~1.6× below production (allocation-history dependent) and the
+        frontier peak varies with the RNG draw, so every probe/differencing variant under-measured
+        per-batch and over-sized K → spill. The fixed 4×-floor multiple is measured-safe and robust.
+        CPU / M==0: analytic only (no CUDA budget to exploit)."""
+        cap = k_cap if k_cap else analytic_k
+        safe_floor = max(1, int(0.7 * free_bytes / (70 * self.M + 40 * self.N + 64)))
+        if self.device.type != "cuda" or self.M == 0:
+            return max(1, min(analytic_k, cap))
+        return max(1, min(self._CAL_MULT * safe_floor, analytic_k, cap))
 
     @classmethod
     def from_cnf_file(cls, path: str, device: torch.device, *, simplify: bool = False,
@@ -270,7 +299,8 @@ class GPUSampler:
         if B == 1:
             score, var = masked.min(dim=1, keepdim=True)    # (K,1) smallest rank among free
         else:
-            score, var = masked.topk(B, dim=1, largest=False)   # (K,B) B smallest ranks
+            # clamp to N: a tiny (post-simplify) formula can have fewer columns than B
+            score, var = masked.topk(min(B, masked.size(1)), dim=1, largest=False)  # (K,min(B,N))
         pol = torch.randint(0, 2, var.shape, generator=self._gen, device=self.device)
         lit = 2 * var + pol                                 # (K,B)
         valid = (score < BIG) & need.unsqueeze(1)           # picked a real free var, row needs it
