@@ -95,35 +95,56 @@ def gpap_sample(path, device, *, simplify, n_time, n_cov, b, k_cap, max_chunks=8
     tuned_rv, tuned_b = t["random_var"], t["B"]      # dominant config (or autotuned); reuse for coverage
     if n_cov:
         smp.K = min(smp.K, cov_k_cap)                # bound host RAM from collected/reconstructed models
-    c = (smp.sample(n_cov, decisions_per_round=tuned_b, random_var=tuned_rv, max_decision_rounds=max_rounds,
-                    max_chunks=cov_chunks, collect=True, verify_clauses=verify_clauses,
-                    lookahead=lookahead) if n_cov else {})
+    if device.type == "cuda":
+        torch.cuda.synchronize()
+    tcov0 = time.perf_counter()
+    # Target ALL cov_chunks (not just n_cov models) so unique_sps is amortized over several chunks
+    # rather than a single reconstruction-dominated chunk — otherwise K≥n_cov stops after 1 chunk and
+    # under-measures the distinct-solutions rate.
+    cov_target = max(n_cov, cov_k_cap * cov_chunks) if n_cov else 0
+    c = (smp.sample(cov_target, decisions_per_round=tuned_b, random_var=tuned_rv,
+                    max_decision_rounds=max_rounds, max_chunks=cov_chunks, collect=True,
+                    verify_clauses=verify_clauses, lookahead=lookahead) if n_cov else {})
+    if device.type == "cuda":
+        torch.cuda.synchronize()
+    cov_wall = time.perf_counter() - tcov0
+    # UNIQUE-solutions/sec: the metric the differentiable GPU samplers (DEMOTIC, HTS) report — distinct
+    # support-projections per second, which (unlike raw samples/s) is NOT inflated by GPAP's duplicate
+    # re-sampling on small solution spaces. Measured over the collect run (reconstruction cost included,
+    # as it must be to materialise + dedup solutions). See gpu-sampler-competitors-and-metric.
+    n_distinct = c.get("n_distinct")
+    unique_sps = (n_distinct / cov_wall) if (n_distinct and cov_wall > 0) else 0.0
     del smp
     if device.type == "cuda":
         torch.cuda.empty_cache()
     return {"samples_per_s": sps, "success_rate": t["success_rate"],
             "support_size": t["support_size"], "gpu_sound": c.get("gpu_sound", True),
             "cpu_sound": c.get("all_valid"), "models": c.get("models", []),
-            "n_distinct": c.get("n_distinct"), "tuned_rv": tuned_rv, "tuned_b": tuned_b,
+            "n_distinct": n_distinct, "unique_sps": unique_sps, "tuned_rv": tuned_rv, "tuned_b": tuned_b,
             "config_breakdown": t.get("config_breakdown")}
 
 
-def cmsgen_sample(path, cmsgen_bin, n, scratch, keep=None):
-    """Run CMSGen to produce n samples; return (samp/s, parsed models).
+def cmsgen_sample(path, cmsgen_bin, n, scratch, keep=None, support=None):
+    """Run CMSGen to produce n samples; return (samp/s, parsed models, unique_sps).
 
     `keep` caps how many parsed models are retained in memory (the rest are only COUNTED, for the
     rate). This is essential on low-RAM hosts (e.g. a 12 GB Colab): retaining all `n` full models
-    is `n × N` Python ints (~8-9 GB at n=50k, N=5k) and OOM-kills the session. None = keep all."""
+    is `n × N` Python ints (~8-9 GB at n=50k, N=5k) and OOM-kills the session. None = keep all.
+
+    `support` (1-based vars): if given, dedup the support-PROJECTIONS across the whole stream (cheap:
+    a set of |support|-tuples) and return distinct-projections/sec as `unique_sps` — the metric the
+    differentiable GPU samplers report, symmetric with gpap_sample's unique_sps."""
     out = os.path.join(scratch, "cms_" + os.path.basename(path) + ".txt")
     t0 = time.perf_counter()
     try:
         subprocess.run([cmsgen_bin, "--samples", str(n), "--samplefile", out, path],
                        capture_output=True, timeout=1200)
     except Exception:  # noqa: BLE001
-        return 0.0, []
+        return 0.0, [], 0.0
     dt = time.perf_counter() - t0
     models = []
     count = 0
+    distinct = set() if support else None
     if os.path.exists(out):
         for line in open(out):
             lits = [int(x) for x in line.split() if x.lstrip("-").isdigit()]
@@ -132,13 +153,17 @@ def cmsgen_sample(path, cmsgen_bin, n, scratch, keep=None):
             if not lits:
                 continue
             count += 1                                   # rate uses the full count, not just kept
+            if distinct is not None:
+                s = set(lits)
+                distinct.add(tuple(v if v in s else -v for v in support))
             if keep is None or len(models) < keep:
                 models.append(lits)
         try:
             os.remove(out)                               # the samplefile can be >1 GB; don't accumulate
         except OSError:
             pass
-    return (count / dt if dt else 0.0), models
+    unique_sps = (len(distinct) / dt) if (distinct and dt > 0) else 0.0
+    return (count / dt if dt else 0.0), models, unique_sps
 
 
 def main():
@@ -194,11 +219,13 @@ def main():
             row["gpap_plain_sps"] = plain["samples_per_s"]
         if args.cmsgen:
             # single CMSGen run at n_time (fair samp/s); use a subset of its samples for coverage
-            crate_t, cmodels = cmsgen_sample(path, args.cmsgen, args.n_time, args.scratch,
-                                             keep=args.n_cov)
+            crate_t, cmodels, cuniq = cmsgen_sample(path, args.cmsgen, args.n_time, args.scratch,
+                                                    keep=args.n_cov, support=sup1)
             twc = two_wise_coverage(cmodels[:args.n_cov], sup1)
             ratio = (g["samples_per_s"] / crate_t) if crate_t else float("inf")
-            row.update(cms_sps=crate_t, twise_cms=twc, ratio=ratio)
+            uratio = (g.get("unique_sps", 0) / cuniq) if cuniq else float("inf")
+            row.update(cms_sps=crate_t, twise_cms=twc, ratio=ratio,
+                       cms_unique_sps=cuniq, unique_ratio=uratio)
             ratios.append(ratio)
             line += f"{crate_t:>9,.0f}{twc:>6.1f}%{ratio:>8.2f}x"
         print(line)

@@ -182,18 +182,91 @@ def run_instance(path: str, device: torch.device, *, cmsgen_bin: str | None, n_t
         "name": name, "N": cnf.nv, "M": len(cnf.clauses), "support": len(sup1),
         "gpap_sps": round(g["samples_per_s"], 1), "succ": round(g["success_rate"], 4),
         "twise_gpap": round(twg, 2), "gpu_sound": g["gpu_sound"], "n_distinct": g["n_distinct"],
+        "gpap_unique_sps": round(g.get("unique_sps", 0.0), 1),   # distinct solutions/sec (DEMOTIC/HTS metric)
         "tuned_rv": g.get("tuned_rv"), "tuned_b": g.get("tuned_b"),   # autotuned (order, B) per formula
         "in_niche": g["success_rate"] > 0.10,           # rough: produces models at a usable rate
     }
     if cmsgen_bin:
         # keep=n_cov: retain only the models needed for coverage; the rest are counted for the rate
-        # (retaining all n_time full models OOM-kills a 12 GB Colab — see cmsgen_sample).
-        crate, cmodels = cmsgen_sample(path, cmsgen_bin, n_time, scratch, keep=n_cov)
+        # (retaining all n_time full models OOM-kills a 12 GB Colab — see cmsgen_sample). support=sup1
+        # so CMSGen's distinct-projection rate is measured for a symmetric unique-solutions/sec ratio.
+        crate, cmodels, cuniq = cmsgen_sample(path, cmsgen_bin, n_time, scratch, keep=n_cov, support=sup1)
         twc = two_wise_coverage(cmodels[:n_cov], sup1)
         ratio = (g["samples_per_s"] / crate) if crate else None
+        uratio = (g.get("unique_sps", 0.0) / cuniq) if cuniq else None
         row.update(cms_sps=round(crate, 1), twise_cms=round(twc, 2),
-                   ratio=(round(ratio, 2) if ratio else None))
+                   ratio=(round(ratio, 2) if ratio else None),
+                   cms_unique_sps=round(cuniq, 1),
+                   unique_ratio=(round(uratio, 2) if uratio else None))
     return row
+
+
+# ---------------------------------------------------------------------------
+# Sequential-circuit (ISCAS-89) unrolling benchmark — the CircuitSAT-paper family
+# ---------------------------------------------------------------------------
+
+DEFAULT_CIRCUIT_DIR = os.path.join(REPO_ROOT, "benchmarks", "circuits")
+CIRCUIT_SEQ = ["s386", "s526", "s832", "s1196"]        # ISCAS-89 sequential (unrolled over cycles)
+CIRCUIT_COMB = ["c432", "c880", "c1355", "c1908", "c3540"]   # ISCAS-85 combinational (DEMOTIC's set)
+CIRCUIT_CYCLES = [1, 5, 10, 25]
+
+
+def run_circuits(device: torch.device, *, cmsgen_bin: str | None, n_time: int, n_cov: int, b: int,
+                 k_cap: int, scratch: str, els: bool = True, cycles: list[int] | None = None,
+                 insts: list[str] | None = None, circuit_dir: str = DEFAULT_CIRCUIT_DIR,
+                 verbose: bool = True) -> list[dict]:
+    """Benchmark GPAP vs CMSGen on the CIRCUIT-SAT sampling families the competitors use:
+      * ISCAS-89 SEQUENTIAL (s*.bench, has DFFs) — "Recurrent CircuitSAT Sampling" (arXiv 2502.21226):
+        unroll T cycles → Tseitin CNF → pin ALL final-cycle outputs to a simulated target → sample the
+        primary inputs. Swept over `cycles` (GPAP wins big at shallow T, degrades with depth).
+      * ISCAS-85 COMBINATIONAL (c*.bench, no DFFs) — DEMOTIC (arXiv 2502.08086): T=1, pin ONE output
+        (pinning all over-constrains to a tiny solution set), sample the primary inputs.
+    Each `.bench` in `circuit_dir` is realised by scripts/bench_to_cnf; `c ind` = primary inputs."""
+    from scripts.bench_to_cnf import parse_bench, build_cnf, write_dimacs
+    cycles = cycles or CIRCUIT_CYCLES
+    insts = insts or (CIRCUIT_SEQ + CIRCUIT_COMB)
+    gen_dir = os.path.join(scratch, "circuits")
+    os.makedirs(gen_dir, exist_ok=True)
+    rows = []
+    for inst in insts:
+        bench = os.path.join(circuit_dir, f"{inst}.bench")
+        if not os.path.exists(bench):
+            continue
+        circ = parse_bench(bench)
+        combinational = not circ[2]                    # circ = (inputs, outputs, dffs, gates)
+        inst_cycles = [1] if combinational else cycles  # combinational = no unrolling
+        for T in inst_cycles:
+            cnfp = os.path.join(gen_dir, f"{inst}.c{T}.cnf")
+            if not os.path.exists(cnfp):
+                # combinational (ISCAS-85): pin ONE output to keep a large samplable solution space
+                builder, support, _ = build_cnf(circ, T, seed=1,
+                                                pin_outputs=1 if combinational else None)
+                write_dimacs(cnfp, builder, support)
+            r = run_instance(cnfp, device, cmsgen_bin=cmsgen_bin, n_time=n_time, n_cov=n_cov,
+                             b=b, k_cap=k_cap, scratch=scratch, els=els)
+            r["circuit"], r["cycles"], r["family"] = inst, T, ("iscas85" if combinational else "iscas89")
+            rows.append(r)
+            if verbose:
+                rt = f"  {r['ratio']:.1f}x/{r.get('unique_ratio','—')}x CMS(raw/uniq)" if r.get("ratio") else ""
+                print(f"   {inst} T={T:>2}: GPAP {r['gpap_sps']:>12,.0f}/s (uniq {r.get('gpap_unique_sps',0):>9,.0f}/s)"
+                      f"  succ {100*r['succ']:.0f}%{rt}", flush=True)
+    return rows
+
+
+def _print_circuit_matrix(rows: list[dict]) -> None:
+    if not rows:
+        return
+    insts = sorted({r["circuit"] for r in rows}, key=lambda s: (len(s), s))
+    cyc = sorted({r["cycles"] for r in rows})
+    idx = {(r["circuit"], r["cycles"]): r for r in rows}
+    print("\n=== circuits: GPAP/CMSGen ratio by unroll depth (rows=circuit, cols=cycles) ===")
+    print(f"{'circuit':<9}" + "".join(f"{'T='+str(t):>9}" for t in cyc))
+    for inst in insts:
+        cells = []
+        for t in cyc:
+            r = idx.get((inst, t))
+            cells.append(f"{r['ratio']:>8.2f}x" if (r and r.get("ratio")) else f"{'—':>9}")
+        print(f"{inst:<9}" + "".join(cells))
 
 
 # ---------------------------------------------------------------------------
@@ -204,6 +277,7 @@ def aggregate(results: list[dict], ksweeps: list[dict]) -> dict:
     niche = [r for r in results if r.get("in_niche")]
     sps = [r["gpap_sps"] for r in niche]
     ratios = [r["ratio"] for r in niche if r.get("ratio")]
+    uratios = [r["unique_ratio"] for r in niche if r.get("unique_ratio")]
     dq = [r["twise_gpap"] - r["twise_cms"] for r in niche if "twise_cms" in r]
 
     def _gm(xs):
@@ -228,6 +302,8 @@ def aggregate(results: list[dict], ksweeps: list[dict]) -> dict:
         "gpap_sps_median":      round(statistics.median(sps), 1) if sps else 0.0,
         "ratio_geomean":        _gm(ratios),
         "ratio_max":            round(max(ratios), 2) if ratios else None,
+        "unique_ratio_geomean": _gm(uratios),   # distinct-solutions/sec vs CMSGen (the fair metric)
+        "unique_ratio_max":     round(max(uratios), 2) if uratios else None,
         "twise_delta_mean":     round(float(np.mean(dq)), 2) if dq else None,
         "all_gpu_sound":        all(r["gpu_sound"] for r in results) if results else None,
         "kscale_slope_loglog":  slope,          # ~1.0 ⇒ samples/s ∝ K
@@ -241,18 +317,23 @@ def aggregate(results: list[dict], ksweeps: list[dict]) -> dict:
 # ---------------------------------------------------------------------------
 
 def _print_table(results: list[dict], has_cms: bool) -> None:
-    hdr = (f"{'instance':<24}{'N':>6}{'M':>7}{'|sup|':>6}{'GPAP/s':>10}{'succ%':>6}"
+    # raw = samples/s (inflated by GPAP's duplicate re-sampling); uniq = DISTINCT solutions/s (the fair
+    # metric the differentiable samplers report). uRatio = GPAP/CMSGen on the fair metric.
+    hdr = (f"{'instance':<24}{'N':>6}{'M':>7}{'|sup|':>6}{'raw/s':>10}{'uniq/s':>9}{'succ%':>6}"
            f"{'2wG':>6}{'snd':>4}")
     if has_cms:
-        hdr += f"{'CMS/s':>9}{'2wC':>6}{'GPAP/CMS':>9}"
+        hdr += f"{'CMSraw/s':>9}{'CMSuniq/s':>10}{'rawX':>7}{'uniqX':>7}"
     print("\n" + hdr); print("-" * len(hdr))
     for r in results:
         snd = "OK" if r["gpu_sound"] else "BAD"
         line = (f"{r['name'][:22]:<24}{r['N']:>6}{r['M']:>7}{r['support']:>6}"
-                f"{r['gpap_sps']:>10,.0f}{100*r['succ']:>5.0f}%{r['twise_gpap']:>6.1f}{snd:>4}")
+                f"{r['gpap_sps']:>10,.0f}{r.get('gpap_unique_sps',0):>9,.0f}{100*r['succ']:>5.0f}%"
+                f"{r['twise_gpap']:>6.1f}{snd:>4}")
         if has_cms and "cms_sps" in r:
-            ratio = f"{r['ratio']:.2f}x" if r.get("ratio") else "—"
-            line += f"{r['cms_sps']:>9,.0f}{r['twise_cms']:>6.1f}{ratio:>9}"
+            ratio = f"{r['ratio']:.1f}x" if r.get("ratio") else "—"
+            uratio = f"{r['unique_ratio']:.1f}x" if r.get("unique_ratio") else "—"
+            line += (f"{r['cms_sps']:>9,.0f}{r.get('cms_unique_sps',0):>10,.0f}"
+                     f"{ratio:>7}{uratio:>7}")
         print(line)
 
 
@@ -268,7 +349,10 @@ def _print_headline(payload: dict) -> None:
     print(f"  Peak GPAP throughput : {a['gpap_sps_peak']:>12,.0f} samples/s")
     print(f"  Median (niche)       : {a['gpap_sps_median']:>12,.0f} samples/s")
     if a.get("ratio_geomean"):
-        print(f"  vs CMSGen (geomean)  : {a['ratio_geomean']:>12.2f}x   (max {a['ratio_max']:.1f}x)")
+        print(f"  raw sps vs CMSGen gm : {a['ratio_geomean']:>12.2f}x   (max {a['ratio_max']:.1f}x)")
+    if a.get("unique_ratio_geomean"):
+        print(f"  UNIQUE sps vs CMS gm : {a['unique_ratio_geomean']:>12.2f}x   (max {a['unique_ratio_max']:.1f}x)"
+              f"   ← the fair metric (distinct solutions/s, à la DEMOTIC/HTS)")
     if a.get("twise_delta_mean") is not None:
         print(f"  2-wise coverage Δ    : {a['twise_delta_mean']:>+12.2f} pp  (vs CMSGen; ≈0 = equal quality)")
     print(f"  GPU-sound (all)      : {a['all_gpu_sound']}")
@@ -290,7 +374,8 @@ def run_all(quick: bool = False, device=None, sampling_dir: str = DEFAULT_SAMPLI
             n_cov: int | None = None, b: int = 8, k_cap: int | None = None, els: bool = True,
             k_sweep_insts: list[str] | None = None, k_sweep_chunks: int | None = None,
             limit: int | None = None, do_plots: bool = True, out_dir: str = DEFAULT_OUT_DIR,
-            scratch: str | None = None, verbose: bool = True) -> dict:
+            scratch: str | None = None, verbose: bool = True, do_circuits: bool = False,
+            circuit_cycles: list[int] | None = None) -> dict:
     """Discover sampling CNFs, benchmark GPAP vs CMSGen + a K-scaling sweep, and return a payload.
 
     quick=True restricts to the validated niche instances, lowers n_time, and sweeps K on one
@@ -366,6 +451,18 @@ def run_all(quick: bool = False, device=None, sampling_dir: str = DEFAULT_SAMPLI
         except Exception as e:  # noqa: BLE001
             print(f"   [K-sweep] {n} ERROR: {e}")
 
+    # Sequential-circuit unrolling suite (ISCAS-89), swept over cycle depth — the CircuitSAT-paper family.
+    circuits = []
+    if do_circuits:
+        if verbose:
+            print(f"\n[circuits] ISCAS-89 unrolling (cycles={circuit_cycles or CIRCUIT_CYCLES}) ...", flush=True)
+        try:
+            circuits = run_circuits(device, cmsgen_bin=cmsgen_bin, n_time=n_time, n_cov=n_cov, b=b,
+                                    k_cap=k_cap, scratch=scratch, els=els, cycles=circuit_cycles,
+                                    verbose=verbose)
+        except Exception as e:  # noqa: BLE001
+            print(f"   [circuits] ERROR: {e}")
+
     good = [r for r in results if "error" not in r]
     agg = aggregate(good, ksweeps)
     payload = {
@@ -379,9 +476,12 @@ def run_all(quick: bool = False, device=None, sampling_dir: str = DEFAULT_SAMPLI
         "aggregate":   agg,
         "instances":   results,
         "ksweeps":     ksweeps,
+        "circuits":    circuits,
     }
     if verbose:
         _print_table(good, has_cms=bool(cmsgen_bin))
+        if circuits:
+            _print_circuit_matrix(circuits)
         _print_headline(payload)
     if do_plots:
         try:
@@ -459,6 +559,11 @@ def main() -> None:
     ap.add_argument("--no-els", dest="els", action="store_false", default=True,
                     help="disable equivalent-literal substitution (on by default; ~1.5x throughput)")
     ap.add_argument("--k-sweep", default=None, help="comma list of instances for the K-scaling sweep")
+    ap.add_argument("--circuits", action="store_true",
+                    help="also run the ISCAS-89 sequential-circuit unrolling suite (the CircuitSAT-paper "
+                         "benchmark family), swept over cycle depth")
+    ap.add_argument("--circuit-cycles", default=None,
+                    help="comma list of unroll depths for --circuits (default 1,5,10,25)")
     ap.add_argument("--out-dir", default=DEFAULT_OUT_DIR)
     ap.add_argument("--limit", type=int, default=None)
     ap.add_argument("--no-plot", action="store_true")
@@ -473,10 +578,13 @@ def main() -> None:
 
     cmsgen = None if args.cmsgen.lower() in ("none", "no", "") else args.cmsgen
     k_sweep = args.k_sweep.split(",") if args.k_sweep else None
+    circuit_cycles = ([int(x) for x in args.circuit_cycles.split(",")]
+                      if args.circuit_cycles else None)
     payload = run_all(quick=args.quick, device=args.device, sampling_dir=args.sampling_dir,
                       glob_pat=args.glob, cmsgen_bin=cmsgen, n_time=args.n_time, n_cov=args.n_cov,
                       b=args.b, k_cap=args.k_cap, els=args.els, k_sweep_insts=k_sweep,
-                      limit=args.limit, do_plots=not args.no_plot, out_dir=args.out_dir)
+                      limit=args.limit, do_plots=not args.no_plot, out_dir=args.out_dir,
+                      do_circuits=args.circuits, circuit_cycles=circuit_cycles)
     if not args.no_save:
         save_results(payload, args.out_dir)
         compare_saved(args.out_dir)

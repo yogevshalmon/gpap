@@ -64,6 +64,11 @@ def _eval_gate(op, vals):
         return not vals[0]
     if op in ("BUFF", "BUF"):
         return vals[0]
+    if op in ("XOR", "XNOR"):                 # ISCAS-85 uses XOR/XNOR
+        r = False
+        for v in vals:
+            r ^= bool(v)
+        return r if op == "XOR" else not r
     raise ValueError(f"unknown gate {op}")
 
 
@@ -106,14 +111,30 @@ class CnfBuilder:
     def add(self, *lits):
         self.clauses.append(list(lits))
 
+    def _xor2(self, y, a, b):
+        """y <-> a ⊕ b (4 clauses)."""
+        self.add(-y, -a, -b); self.add(-y, a, b); self.add(y, -a, b); self.add(y, a, -b)
+
     def tseitin(self, op, o, ins):
-        """o <-> op(ins). Standard CNF (handles AND/OR/NAND/NOR/NOT/BUFF, multi-input)."""
+        """o <-> op(ins). Standard CNF (handles AND/OR/NAND/NOR/NOT/BUFF/XOR/XNOR, multi-input)."""
         if op in ("NOT", "BUFF", "BUF"):
             a = ins[0]
             same = (op != "NOT")
             # o <-> (a or ~a):  (¬o ∨ s·a)(o ∨ ¬s·a) with s = +1 buff / -1 not
             self.add(-o, a if same else -a)
             self.add(o, -a if same else a)
+            return
+        if op in ("XOR", "XNOR"):
+            # chain 2-input XORs into acc = odd-parity(ins); o <-> acc (XOR) / o <-> ¬acc (XNOR)
+            acc = ins[0]
+            for b in ins[1:]:
+                y = self.newvar()
+                self._xor2(y, acc, b)
+                acc = y
+            if op == "XOR":
+                self.add(-o, acc); self.add(o, -acc)
+            else:
+                self.add(-o, -acc); self.add(o, acc)
             return
         pos = op in ("AND", "NAND")          # AND-like (conjunction) vs OR-like
         neg_out = op in ("NAND", "NOR")      # output inverted
@@ -132,7 +153,13 @@ class CnfBuilder:
             self.add(-o, -y); self.add(o, y)  # o <-> ¬y
 
 
-def build_cnf(circ, T, seed):
+def build_cnf(circ, T, seed, pin_outputs=None):
+    """Unroll T cycles → Tseitin CNF; sample the primary inputs (support). `pin_outputs` = how many
+    final-cycle primary outputs to constrain to the simulated target: None = all (sequential circuits,
+    where the whole output pattern is the spec). For COMBINATIONAL circuits (ISCAS-85, many outputs vs
+    inputs) pinning all outputs over-constrains to a tiny solution set — pass a small count (e.g. 1) so
+    the CircuitSAT problem keeps a large, samplable solution space (the DEMOTIC-style single-output
+    setup)."""
     inputs, outputs, dffs, gates = circ
     rng = random.Random(seed)
     in_seq = [{inp: (rng.random() < 0.5) for inp in inputs} for _ in range(T)]
@@ -168,7 +195,8 @@ def build_cnf(circ, T, seed):
         for g in gates:
             var_of(g, t)
     # Pin the primary OUTPUTS at the last cycle to the simulated (reachable => SAT) target.
-    for o in outputs:
+    pin = outputs if pin_outputs is None else outputs[:pin_outputs]
+    for o in pin:
         v = var_of(o, T - 1)
         b.add(v if target[o] else -v)
 
