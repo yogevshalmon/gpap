@@ -15,11 +15,14 @@ Three measurements, all on the projected-sampling sk_ benchmarks (independent su
      vs CMSGen — the speed win must come at equal coverage, not lower quality.
 
   3. **K-scaling** (the A100 story): on a couple of niche instances, sweep K and measure samples/s.
-     Throughput is VRAM-limited (not compute-saturated) so it scales ~linearly with K — which is why
-     a big-VRAM GPU (A100 80 GB) lands far up the line. The plot marks where *this* GPU's auto-K sits.
+     Throughput scales ~linearly with K until the GPU's compute saturates — a big-VRAM GPU (A100
+     80 GB) can hold a far larger K, so it lands further up the line. The plot marks this GPU's auto-K.
 
-K auto-sizes to the GPU's free VRAM (calibrated per-batch cost, ~70·M+40·N bytes at 0.7× free), so the
-same code adapts to a 16 GB T4 or an 80 GB A100. Results are saved per-GPU to
+K auto-sizes to the GPU's free VRAM: importing gpap.solver.sampler enables CUDA `expandable_segments`
+(one growable segment instead of many fixed blocks) which removed the allocator fragmentation that
+used to inflate reserved memory ~2.3× and forced a small K; K is then set to 4× a proven-safe floor,
+bounded by a VRAM-PROPORTIONAL cap (default_k_cap) so an 80 GB A100 gets ~7× the K of a 12 GB laptop
+at the same safe memory fraction. Pass --k-cap to override. Results are saved per-GPU to
 benchmarks/colab_sampling_results/<gpu>.json (+ plots) so runs on different GPUs accumulate and can be
 ranked with compare_saved().
 
@@ -47,12 +50,27 @@ REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 if REPO_ROOT not in sys.path:
     sys.path.insert(0, REPO_ROOT)
 
-from gpap.solver.sampler import GPUSampler, parse_independent_support
+from gpap.solver.sampler import GPUSampler, parse_independent_support   # sets expandable_segments
+from gpap.utils.gpu_budget import gpu_mem_available
 from scripts.colab_benchmark import _slug, gpu_info       # reuse device-info helpers
 from scripts.sample_benchmark import cmsgen_sample, gpap_sample, two_wise_coverage
 
 DEFAULT_SAMPLING_DIR = os.path.join(REPO_ROOT, "benchmarks", "sampling")
 DEFAULT_OUT_DIR = os.path.join(REPO_ROOT, "benchmarks", "colab_sampling_results")
+
+# K auto-sizes to 4× the proven-safe floor (GPUSampler._calibrate_k) under CUDA expandable_segments,
+# but for SMALL post-ELS formulas 4×floor can exceed the (K,N)-mask memory budget, so a cap is needed.
+# Anchor it at the RTX 4080's validated-safe value (49,152 ≈ 23% of its ~8 GB budget) and scale it
+# with free VRAM, so every GPU runs the SAME safe memory fraction — an A100 (80 GB) then gets ~7× the
+# K, which is exactly the cross-GPU headroom this benchmark is meant to expose.
+_KCAP_REF, _BUDGET_REF = 49_152, 8.0e9
+
+
+def default_k_cap(device: torch.device) -> int:
+    """VRAM-proportional K cap (see above): max(ref, ref · free_budget / ref_budget)."""
+    if device.type != "cuda":
+        return _KCAP_REF
+    return max(_KCAP_REF, int(_KCAP_REF * gpu_mem_available(device) / _BUDGET_REF))
 
 # The validated niche (freeAftSup≈0 ∧ high supOK): numeric sk_ where GPAP beats CMSGen. Used for the
 # quick run + K-sweep; the full run sweeps every *.cnf so the niche boundary (service family, low-supOK
@@ -269,7 +287,7 @@ def _print_headline(payload: dict) -> None:
 
 def run_all(quick: bool = False, device=None, sampling_dir: str = DEFAULT_SAMPLING_DIR,
             glob_pat: str | None = None, cmsgen_bin: str | None = "auto", n_time: int | None = None,
-            n_cov: int | None = None, b: int = 8, k_cap: int = 49152, els: bool = True,
+            n_cov: int | None = None, b: int = 8, k_cap: int | None = None, els: bool = True,
             k_sweep_insts: list[str] | None = None, k_sweep_chunks: int | None = None,
             limit: int | None = None, do_plots: bool = True, out_dir: str = DEFAULT_OUT_DIR,
             scratch: str | None = None, verbose: bool = True) -> dict:
@@ -278,8 +296,13 @@ def run_all(quick: bool = False, device=None, sampling_dir: str = DEFAULT_SAMPLI
     quick=True restricts to the validated niche instances, lowers n_time, and sweeps K on one
     instance (a few minutes). The full run sweeps every *.cnf in `sampling_dir` (the niche boundary
     shows up as ~0-success rows) and sweeps K on two instances.
+
+    k_cap=None (default) sizes the cap to the GPU's VRAM (default_k_cap) so an A100 gets a much larger
+    K than a laptop GPU — the cross-GPU headroom this benchmark exposes.
     """
     device = _resolve_device(device)
+    if k_cap is None:
+        k_cap = default_k_cap(device)
     scratch = scratch or os.path.join(REPO_ROOT, ".cmsgen_scratch")
     os.makedirs(scratch, exist_ok=True)
 
@@ -306,7 +329,7 @@ def run_all(quick: bool = False, device=None, sampling_dir: str = DEFAULT_SAMPLI
         vram = f"{info['total_gb']:.1f} GB" if info.get("total_gb") else "n/a"
         print(f"\nDevice : {info['name']}  (VRAM={vram}, torch={info['torch_version']}, "
               f"cuda={info['cuda_version']})")
-        print(f"  instances={len(files)}  B={b}  n_time={n_time:,}  els={els}  "
+        print(f"  instances={len(files)}  B={b}  n_time={n_time:,}  els={els}  k_cap={k_cap:,}  "
               f"cmsgen={'yes' if cmsgen_bin else 'no'}\n")
 
     results = []
@@ -431,7 +454,8 @@ def main() -> None:
     ap.add_argument("--n-time", type=int, default=None, help="samples for the throughput timing")
     ap.add_argument("--n-cov", type=int, default=None, help="samples used for 2-wise coverage")
     ap.add_argument("--b", type=int, default=8, help="decisions per round (8 = throughput sweet spot)")
-    ap.add_argument("--k-cap", type=int, default=49152)
+    ap.add_argument("--k-cap", type=int, default=None,
+                    help="max K (batch). Default: VRAM-proportional (bigger on A100) — see default_k_cap")
     ap.add_argument("--no-els", dest="els", action="store_false", default=True,
                     help="disable equivalent-literal substitution (on by default; ~1.5x throughput)")
     ap.add_argument("--k-sweep", default=None, help="comma list of instances for the K-scaling sweep")
