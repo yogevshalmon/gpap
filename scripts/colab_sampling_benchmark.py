@@ -182,22 +182,17 @@ def run_instance(path: str, device: torch.device, *, cmsgen_bin: str | None, n_t
         "name": name, "N": cnf.nv, "M": len(cnf.clauses), "support": len(sup1),
         "gpap_sps": round(g["samples_per_s"], 1), "succ": round(g["success_rate"], 4),
         "twise_gpap": round(twg, 2), "gpu_sound": g["gpu_sound"], "n_distinct": g["n_distinct"],
-        "gpap_unique_sps": round(g.get("unique_sps", 0.0), 1),   # distinct solutions/sec (DEMOTIC/HTS metric)
         "tuned_rv": g.get("tuned_rv"), "tuned_b": g.get("tuned_b"),   # autotuned (order, B) per formula
         "in_niche": g["success_rate"] > 0.10,           # rough: produces models at a usable rate
     }
     if cmsgen_bin:
         # keep=n_cov: retain only the models needed for coverage; the rest are counted for the rate
-        # (retaining all n_time full models OOM-kills a 12 GB Colab — see cmsgen_sample). support=sup1
-        # so CMSGen's distinct-projection rate is measured for a symmetric unique-solutions/sec ratio.
-        crate, cmodels, cuniq = cmsgen_sample(path, cmsgen_bin, n_time, scratch, keep=n_cov, support=sup1)
+        # (retaining all n_time full models OOM-kills a 12 GB Colab — see cmsgen_sample).
+        crate, cmodels = cmsgen_sample(path, cmsgen_bin, n_time, scratch, keep=n_cov)
         twc = two_wise_coverage(cmodels[:n_cov], sup1)
         ratio = (g["samples_per_s"] / crate) if crate else None
-        uratio = (g.get("unique_sps", 0.0) / cuniq) if cuniq else None
         row.update(cms_sps=round(crate, 1), twise_cms=round(twc, 2),
-                   ratio=(round(ratio, 2) if ratio else None),
-                   cms_unique_sps=round(cuniq, 1),
-                   unique_ratio=(round(uratio, 2) if uratio else None))
+                   ratio=(round(ratio, 2) if ratio else None))
     return row
 
 
@@ -207,7 +202,8 @@ def run_instance(path: str, device: torch.device, *, cmsgen_bin: str | None, n_t
 
 DEFAULT_CIRCUIT_DIR = os.path.join(REPO_ROOT, "benchmarks", "circuits")
 CIRCUIT_SEQ = ["s386", "s526", "s832", "s1196"]        # ISCAS-89 sequential (unrolled over cycles)
-CIRCUIT_COMB = ["c432", "c880", "c1355", "c1908", "c3540"]   # ISCAS-85 combinational (DEMOTIC's set)
+CIRCUIT_COMB = ["c432", "c499", "c880", "c1355", "c1908",    # ISCAS-85 combinational — DEMOTIC's
+                "c2670", "c3540", "c5315", "c6288", "c7552"]  # exact 10-circuit set
 CIRCUIT_CYCLES = [1, 5, 10, 25]
 
 
@@ -247,9 +243,9 @@ def run_circuits(device: torch.device, *, cmsgen_bin: str | None, n_time: int, n
             r["circuit"], r["cycles"], r["family"] = inst, T, ("iscas85" if combinational else "iscas89")
             rows.append(r)
             if verbose:
-                rt = f"  {r['ratio']:.1f}x/{r.get('unique_ratio','—')}x CMS(raw/uniq)" if r.get("ratio") else ""
-                print(f"   {inst} T={T:>2}: GPAP {r['gpap_sps']:>12,.0f}/s (uniq {r.get('gpap_unique_sps',0):>9,.0f}/s)"
-                      f"  succ {100*r['succ']:.0f}%{rt}", flush=True)
+                rt = f"  {r['ratio']:.2f}x CMS" if r.get("ratio") else ""
+                print(f"   {inst} T={T:>2}: GPAP {r['gpap_sps']:>12,.0f}/s  succ {100*r['succ']:.0f}%{rt}",
+                      flush=True)
     return rows
 
 
@@ -277,7 +273,6 @@ def aggregate(results: list[dict], ksweeps: list[dict]) -> dict:
     niche = [r for r in results if r.get("in_niche")]
     sps = [r["gpap_sps"] for r in niche]
     ratios = [r["ratio"] for r in niche if r.get("ratio")]
-    uratios = [r["unique_ratio"] for r in niche if r.get("unique_ratio")]
     dq = [r["twise_gpap"] - r["twise_cms"] for r in niche if "twise_cms" in r]
 
     def _gm(xs):
@@ -302,8 +297,6 @@ def aggregate(results: list[dict], ksweeps: list[dict]) -> dict:
         "gpap_sps_median":      round(statistics.median(sps), 1) if sps else 0.0,
         "ratio_geomean":        _gm(ratios),
         "ratio_max":            round(max(ratios), 2) if ratios else None,
-        "unique_ratio_geomean": _gm(uratios),   # distinct-solutions/sec vs CMSGen (the fair metric)
-        "unique_ratio_max":     round(max(uratios), 2) if uratios else None,
         "twise_delta_mean":     round(float(np.mean(dq)), 2) if dq else None,
         "all_gpu_sound":        all(r["gpu_sound"] for r in results) if results else None,
         "kscale_slope_loglog":  slope,          # ~1.0 ⇒ samples/s ∝ K
@@ -317,23 +310,18 @@ def aggregate(results: list[dict], ksweeps: list[dict]) -> dict:
 # ---------------------------------------------------------------------------
 
 def _print_table(results: list[dict], has_cms: bool) -> None:
-    # raw = samples/s (inflated by GPAP's duplicate re-sampling); uniq = DISTINCT solutions/s (the fair
-    # metric the differentiable samplers report). uRatio = GPAP/CMSGen on the fair metric.
-    hdr = (f"{'instance':<24}{'N':>6}{'M':>7}{'|sup|':>6}{'raw/s':>10}{'uniq/s':>9}{'succ%':>6}"
+    hdr = (f"{'instance':<24}{'N':>6}{'M':>7}{'|sup|':>6}{'GPAP/s':>10}{'succ%':>6}"
            f"{'2wG':>6}{'snd':>4}")
     if has_cms:
-        hdr += f"{'CMSraw/s':>9}{'CMSuniq/s':>10}{'rawX':>7}{'uniqX':>7}"
+        hdr += f"{'CMS/s':>9}{'2wC':>6}{'GPAP/CMS':>9}"
     print("\n" + hdr); print("-" * len(hdr))
     for r in results:
         snd = "OK" if r["gpu_sound"] else "BAD"
         line = (f"{r['name'][:22]:<24}{r['N']:>6}{r['M']:>7}{r['support']:>6}"
-                f"{r['gpap_sps']:>10,.0f}{r.get('gpap_unique_sps',0):>9,.0f}{100*r['succ']:>5.0f}%"
-                f"{r['twise_gpap']:>6.1f}{snd:>4}")
+                f"{r['gpap_sps']:>10,.0f}{100*r['succ']:>5.0f}%{r['twise_gpap']:>6.1f}{snd:>4}")
         if has_cms and "cms_sps" in r:
-            ratio = f"{r['ratio']:.1f}x" if r.get("ratio") else "—"
-            uratio = f"{r['unique_ratio']:.1f}x" if r.get("unique_ratio") else "—"
-            line += (f"{r['cms_sps']:>9,.0f}{r.get('cms_unique_sps',0):>10,.0f}"
-                     f"{ratio:>7}{uratio:>7}")
+            ratio = f"{r['ratio']:.2f}x" if r.get("ratio") else "—"
+            line += f"{r['cms_sps']:>9,.0f}{r['twise_cms']:>6.1f}{ratio:>9}"
         print(line)
 
 
@@ -349,10 +337,7 @@ def _print_headline(payload: dict) -> None:
     print(f"  Peak GPAP throughput : {a['gpap_sps_peak']:>12,.0f} samples/s")
     print(f"  Median (niche)       : {a['gpap_sps_median']:>12,.0f} samples/s")
     if a.get("ratio_geomean"):
-        print(f"  raw sps vs CMSGen gm : {a['ratio_geomean']:>12.2f}x   (max {a['ratio_max']:.1f}x)")
-    if a.get("unique_ratio_geomean"):
-        print(f"  UNIQUE sps vs CMS gm : {a['unique_ratio_geomean']:>12.2f}x   (max {a['unique_ratio_max']:.1f}x)"
-              f"   ← the fair metric (distinct solutions/s, à la DEMOTIC/HTS)")
+        print(f"  vs CMSGen (geomean)  : {a['ratio_geomean']:>12.2f}x   (max {a['ratio_max']:.1f}x)")
     if a.get("twise_delta_mean") is not None:
         print(f"  2-wise coverage Δ    : {a['twise_delta_mean']:>+12.2f} pp  (vs CMSGen; ≈0 = equal quality)")
     print(f"  GPU-sound (all)      : {a['all_gpu_sound']}")
