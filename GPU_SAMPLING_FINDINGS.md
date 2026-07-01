@@ -249,3 +249,48 @@ by setting B=8 (now the default in `scripts/sample_benchmark.py`). The A100's la
   cut (hence the 1.48×) should grow. Reconstruction is already class-consistent, so it drops in.
 - **Niche detection**: cheaply flag in-niche formulas (`freeAftSup≈0 ∧ supOK high`) to auto-route.
 - **Barbarik** uniformity testing for a formal Accept/Reject vs CMSGen (already passed 185/0 once).
+
+## CircuitSAT sampling — the "Recurrent CircuitSAT Sampling" family (2026-07-01)
+
+Focus shifted to the circuit benchmarks the differentiable GPU samplers use (DEMOTIC / High-Throughput
+SAT Sampling / Recurrent CircuitSAT Sampling, arXiv 2502.08086 / 2502.08673 / 2502.21226). Pipeline in
+`scripts/bench_to_cnf.py`: parse a gate-level `.bench`, unroll `T` cycles (flip-flop output at `t` shares
+its D-input's var at `t-1`; reset state 0), Tseitin to CNF, pin the final-cycle outputs to a simulated
+reachable target, sample the primary inputs (the `c ind` support).
+
+**Benchmarks added:**
+- **ISCAS-89 sequential** `s386/s526/s832/s1196` (already present).
+- **ITC'99** `b01`–`b14` (gate-level `.bench` from `cad-polito-it/I99T`; all parse — AND/NAND/OR/NOR/NOT/DFF).
+  A **100k-clause guard** in `run_circuits` auto-skips oversized `(instance, cycle)` unrolls (b05/b12 at
+  T=25, b14 at T>1); b15+ are excluded (too big even shallow).
+- **ISCAS-85 combinational** `c432`…`c7552` (DEMOTIC's 10; T=1, pin one output).
+
+**The circuit config win — soft-lookahead, and why it needs the bandit.** Naive random-polarity BCP-
+completion self-conflicts on deep circuit cascades. The cheap `soft` risk-polarity (score each polarity
+by the `sat_count` of the clauses it touches, pick the safer; 2 occ-gathers, **no** extra propagation,
+**no** K halving — unlike full lookahead) flips this. Measured on the laptop RTX 4080:
+
+| instance | rand,B=8 (default) | rand,B=1,soft |
+|---|---|---|
+| b03 T=25 | 10% succ, 2.5k samp/s | **88% succ, 13.6k samp/s** |
+
+But soft is **not universal**: it *hurts* `b12` T=10 (50% vs 95% for B=8), and on deep high-support
+`s1196` T=25 the B=1 configs time out (>300 rounds) so B=8 wins. So soft is one option in an
+adaptive-bandit **`CIRCUIT_PORTFOLIO = [(True,1,"soft"), (True,8,False), (False,1,False)]`**; the bandit
+runs each at full K and spends the budget on the per-instance winner (validated end-to-end: b01/b03 pick
+soft, b06 T=25 and the deep instances pick B=8). This required extending the sampler's config tuples from
+`(random_var, B)` to `(random_var, B, lookahead)`; the sk_ default portfolio stays 2-tuple (no soft —
+soft is net-negative *there*, see the killer-app-regime note: config value is regime-dependent).
+
+**Unique-solutions metric (decoupled from timing).** Re-added the distinct-solution readout, this time as
+a **count computed off the throughput path**: the timed run stays `collect=False` (pure GPU generation
+rate), and a separate coverage run dedups the collected models by support-projection
+(`distinct_projections`), reported as `uniqG`/`uniqC` columns and `gpap_distinct_frac` in the headline.
+This avoids the earlier mistake of folding the slow host-side reconstruction into a `unique/sec` rate. On
+the large sk_ spaces distinct_frac ≈ 1.0 (raw ≈ distinct); on small circuit spaces it drops (e.g. ~66% in
+a quick run) and is genuinely informative as a diversity/correctness check.
+
+**Driver:** `scripts/colab_sampling_benchmark.py --circuits-only` (or `run_all(circuits_only=True)`; the
+notebook cell now defaults to it) runs only the circuit suite, swept over unroll depth, and K-sweeps the
+best circuit for the A100 story (validated slope ≈1.04, throughput ∝ K, on b03 T=5). All circuit outputs
+GPU-sound.

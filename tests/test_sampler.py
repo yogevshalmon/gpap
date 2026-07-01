@@ -40,6 +40,23 @@ def test_sound_basic():
     assert out["n_models"] > 0
 
 
+def test_config_portfolio_soft_lookahead():
+    # The circuit portfolio uses 3-tuple configs (random_var, B, lookahead) including "soft"
+    # risk-polarity. Every produced model must satisfy the formula, and the reported dominant/
+    # breakdown must reflect the extended (rv, B, lookahead) tuple shape.
+    clauses = [[1, 2], [-1, 3], [-2, -3]]
+    smp = GPUSampler.from_clauses(3, clauses, DEV, k_cap=64, seed=1)
+    out = smp.sample(2000, configs=[(True, 1, "soft"), (True, 8, False)], max_chunks=30,
+                     collect=True, verify_clauses=clauses)
+    assert out["all_valid"], "soft-lookahead portfolio produced an invalid model"
+    assert out["n_models"] > 0
+    assert len(out["dominant_config"]) == 3                      # (rv, B, lookahead)
+    assert any("la=soft" in k for k in out["config_breakdown"])  # label carries lookahead
+    # backward-compat: a bare 2-tuple config still normalises (lookahead defaults off) and runs.
+    out2 = smp.sample(500, configs=[(True, 4)], max_chunks=10, collect=True, verify_clauses=clauses)
+    assert out2["all_valid"] and len(out2["dominant_config"]) == 3
+
+
 def test_unsat():
     smp = GPUSampler.from_clauses(1, [[1], [-1]], DEV, k_cap=16, seed=1)
     out = smp.sample(10, max_chunks=5, collect=True, verify_clauses=[[1], [-1]])

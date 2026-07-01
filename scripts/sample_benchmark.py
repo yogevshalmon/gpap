@@ -29,6 +29,21 @@ from pysat.formula import CNF
 from gpap.solver.sampler import GPUSampler, parse_independent_support
 
 
+def distinct_projections(models, support):
+    """Count DISTINCT support-projections among `models` (support = 1-based vars). Returns
+    (n_distinct, n_models). This is the "unique solutions" verification metric — computed OFF the
+    throughput timing path (the timed run uses collect=False), purely to confirm the sampler emits
+    genuinely distinct solutions (not re-emitting the same model). Used for both GPAP and CMSGen on
+    the SAME collected set so the distinct COUNTS are directly comparable."""
+    if not models:
+        return 0, 0
+    seen = set()
+    for m in models:
+        s = set(m)
+        seen.add(tuple(v if v in s else -v for v in support))
+    return len(seen), len(models)
+
+
 def two_wise_coverage(models, support):
     """% of sampling-var pairs whose all 4 (±,±) combos appear. support: 1-based vars."""
     S = len(support)
@@ -93,18 +108,24 @@ def gpap_sample(path, device, *, simplify, n_time, n_cov, b, k_cap, max_chunks=8
     wall = time.perf_counter() - t0                  # includes construct+simplify+bandit (fair vs CMSGen)
     sps = t["n_models"] / wall if wall > 0 else 0.0
     tuned_rv, tuned_b = t["random_var"], t["B"]      # dominant config (or autotuned); reuse for coverage
+    tuned_la = t.get("lookahead", lookahead)         # winning lookahead (soft/full/off) — honour it below
     if n_cov:
         smp.K = min(smp.K, cov_k_cap)                # bound host RAM from collected/reconstructed models
+    # Coverage / UNIQUE-solution run: collect models with the winning config and count distinct
+    # support-projections. Deliberately SEPARATE from the timed run above (which is collect=False), so
+    # the model reconstruction / dedup cost is NOT charged to samples/s — this is a correctness/quality
+    # readout ("do we actually emit distinct solutions?"), not a throughput number.
     c = (smp.sample(n_cov, decisions_per_round=tuned_b, random_var=tuned_rv, max_decision_rounds=max_rounds,
                     max_chunks=cov_chunks, collect=True, verify_clauses=verify_clauses,
-                    lookahead=lookahead) if n_cov else {})
+                    lookahead=tuned_la) if n_cov else {})
     del smp
     if device.type == "cuda":
         torch.cuda.empty_cache()
     return {"samples_per_s": sps, "success_rate": t["success_rate"],
             "support_size": t["support_size"], "gpu_sound": c.get("gpu_sound", True),
             "cpu_sound": c.get("all_valid"), "models": c.get("models", []),
-            "n_distinct": c.get("n_distinct"), "tuned_rv": tuned_rv, "tuned_b": tuned_b,
+            "n_distinct": c.get("n_distinct"), "n_collected": len(c.get("models", [])),
+            "tuned_rv": tuned_rv, "tuned_b": tuned_b, "tuned_la": tuned_la,
             "config_breakdown": t.get("config_breakdown")}
 
 
