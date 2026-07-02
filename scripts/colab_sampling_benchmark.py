@@ -191,6 +191,10 @@ def run_instance(path: str, device: torch.device, *, cmsgen_bin: str | None, n_t
         # distinct solutions rather than re-emitting the same model; NOT part of samples/s.
         "n_distinct": g["n_distinct"], "n_collected": g.get("n_collected"),
         "tuned_rv": g.get("tuned_rv"), "tuned_b": g.get("tuned_b"), "tuned_la": g.get("tuned_la"),
+        # work stats (free) — diagnose low throughput: low samples/s + high attempts/s = low success;
+        # low attempts/s = BCP-bound (deep propagation, many rounds/ops per trajectory).
+        "attempts_per_s": g.get("attempts_per_s"), "bcp_rounds_pc": g.get("bcp_rounds_per_chunk"),
+        "bcp_ops_pa": g.get("bcp_ops_per_attempt"),
         "in_niche": g["success_rate"] > 0.10,           # rough: produces models at a usable rate
     }
     if cmsgen_bin:
@@ -224,12 +228,19 @@ CIRCUIT_MAX_CLAUSES = 100_000                          # skip any unroll whose C
 CIRCUIT_ITC_QUICK = ["b01", "b03", "b06", "b08", "b10", "b13"]
 
 # Circuit sampler portfolio (the adaptive bandit picks the winner per instance, at full K):
+#   (True, 8, False)  — the general shallow-circuit baseline (support ~determines the rest).
 #   (True, 1, "soft") — cheap conflict-avoidance risk-polarity: the big win on the tight/deep circuits
 #                       (measured: b03 T=25 succ 10%→88%, 2.5k→13.6k samples/s) where naive BCP-
 #                       completion self-conflicts. No extra memory / propagation vs off.
-#   (True, 8, False)  — the shallow-circuit niche (b07/b12: support ~determines the rest → B=8 fastest).
-#   (False, 1, False) — structured/gate-DAG order for search-heavy residuals.
-CIRCUIT_PORTFOLIO = [(True, 1, "soft"), (True, 8, False), (False, 1, False)]
+#   (True, 64, False) — HIGH branching factor: fewer decision rounds ⇒ fewer partial BCP cascades. Big
+#                       win on "redundant-cascade" deep instances (measured s386 T=25: B=8→64 gives
+#                       +81% samples/s, rounds 1009→192, ops/att halved) at a modest success cost; the
+#                       bandit keeps it only where net samples/s wins (medium instances stay on soft/B8).
+# NOTE (Phase-A measured): per-trajectory BCP work is ~UNIFORM on these circuits (b07 = 6,594 props for
+# EVERY trajectory, p99/p50≈1.0), so straggler early-termination has no tail to trim — not included.
+# The irreducibly-deep 100%-success instances (b07/s1196: ~23k–680k ops/attempt, flat in B) are limited
+# by inherent propagation depth, not config — their lever is per-round cost (engine) or K-scaling.
+CIRCUIT_PORTFOLIO = [(True, 8, False), (True, 1, "soft"), (True, 64, False)]
 
 
 def run_circuits(device: torch.device, *, cmsgen_bin: str | None, n_time: int, n_cov: int, b: int,
@@ -279,8 +290,11 @@ def run_circuits(device: torch.device, *, cmsgen_bin: str | None, n_time: int, n
                 rt = f"  {r['ratio']:.2f}x CMS" if r.get("ratio") else ""
                 la = f",la={r['tuned_la']}" if r.get("tuned_la") else ""
                 cfg = f"  [rv={r.get('tuned_rv')},B={r.get('tuned_b')}{la}]"
+                att = r.get("attempts_per_s") or 0
+                work = (f"  | {att:>9,.0f} att/s  {r.get('bcp_rounds_pc') or 0:.0f} rnds/chk  "
+                        f"{r.get('bcp_ops_pa') or 0:,.0f} ops/att")
                 print(f"   {inst} T={T:>2}: GPAP {r['gpap_sps']:>12,.0f}/s  succ {100*r['succ']:.0f}%"
-                      f"{rt}{cfg}", flush=True)
+                      f"{rt}{cfg}{work}", flush=True)
     return rows
 
 

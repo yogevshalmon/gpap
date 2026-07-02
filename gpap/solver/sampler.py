@@ -624,6 +624,7 @@ class GPUSampler:
         keep_rows = collect or verify_clauses is not None
 
         self._sync()
+        bcp_r0, bcp_o0 = self.engine.total_bcp_rounds, self.engine.total_bcp_ops
         t0 = time.perf_counter()
         while True:
             # Stop once n_target is met — BUT for the adaptive bandit, always measure every config at
@@ -684,6 +685,8 @@ class GPUSampler:
                         models.extend(out_rows)
         self._sync()
         elapsed = time.perf_counter() - t0
+        bcp_rounds = self.engine.total_bcp_rounds - bcp_r0     # BCP work over this timed run (delta)
+        bcp_ops = self.engine.total_bcp_ops - bcp_o0
 
         out = {
             "n_models": n_models, "n_support_complete": n_support_complete, "attempts": attempts,
@@ -692,6 +695,12 @@ class GPUSampler:
             "elapsed_s": elapsed,
             "samples_per_s": (n_models / elapsed) if elapsed > 0 else 0.0,
             "attempts_per_s": (attempts / elapsed) if elapsed > 0 else 0.0,
+            # Lightweight BCP-work stats (free counters) — to tell success-bound from BCP-bound: a low
+            # samples/s with high attempts/s = low success; a low attempts/s = each trajectory is slow
+            # (deep propagation). ops/attempt = clause-cells touched per trajectory.
+            "bcp_rounds": bcp_rounds, "bcp_ops": bcp_ops,
+            "bcp_rounds_per_chunk": (bcp_rounds / chunk) if chunk else 0.0,
+            "bcp_ops_per_attempt": (bcp_ops / attempts) if attempts else 0.0,
             "mean_free_after_support": (sum(free_after_hist) / len(free_after_hist)) if free_after_hist else 0.0,
             "n_chunks": chunk, "K": K, "B": B, "random_var": bool(random_var),
             "support_size": (len(sup) if sup else None),

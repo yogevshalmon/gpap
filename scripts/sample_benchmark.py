@@ -146,6 +146,9 @@ def gpap_sample(path, device, *, simplify, n_time, n_cov, b, k_cap, max_chunks=8
     if device.type == "cuda":
         torch.cuda.empty_cache()
     return {"samples_per_s": sps, "success_rate": succ,
+            "attempts_per_s": t.get("attempts_per_s"),        # raw trajectory throughput (K/chunk rate)
+            "bcp_rounds_per_chunk": t.get("bcp_rounds_per_chunk"),
+            "bcp_ops_per_attempt": t.get("bcp_ops_per_attempt"),
             "support_size": t["support_size"], "gpu_sound": c.get("gpu_sound", True),
             "cpu_sound": c.get("all_valid"), "models": c.get("models", []),
             "n_distinct": c.get("n_distinct"), "n_collected": len(c.get("models", [])),
