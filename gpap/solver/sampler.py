@@ -55,12 +55,23 @@ class GPUSampler:
         *,
         k_cap: int | None = 16384,
         seed: int | None = None,
+        use_kernel: "bool | str" = "auto",
     ):
         self.formula = formula
         self.device = device
         self.N = formula.num_vars
         self.M = formula.num_clauses
         self.engine = BCPEngine(formula)
+        # Fused Triton apply+propagate kernel (one launch to fixpoint — kills the Python BCP round
+        # loop's launch/sync/unique overhead + its temporary churn; see bcp_triton). "auto" = on when
+        # CUDA + triton compile are available; the PyTorch engine remains the fallback/oracle.
+        if use_kernel == "auto":
+            from gpap.solver.bcp_triton import TritonBCP
+            use_kernel = device.type == "cuda" and self.M > 0 and TritonBCP.available()
+        if use_kernel:
+            from gpap.solver.bcp_triton import TritonBCP
+            self.engine.attach_kernel(TritonBCP())
+        self.use_kernel = bool(use_kernel)
         self._max_cls = int(formula.clause_sizes.max().item()) if self.M else 1
         self._total_lits = int(formula.clause_sizes.sum().item()) if self.M else 0
         # RNG + state must exist before K calibration (the probe chunk in _calibrate_k uses _gen).
@@ -337,8 +348,7 @@ class GPUSampler:
                 # off, or cheap "soft" risk-polarity (handled inside _pick_decisions)
                 decisions = self._pick_decisions(dfree, need, B, priority,
                                                  soft_la=(lookahead == "soft"))
-                eng.apply_assumptions_bulk(decisions)
-                eng.propagate()
+                eng.apply_and_propagate(decisions)
                 continue
             # --- full-propagation lookahead (B=1) ---
             masked = torch.where(dfree, priority.unsqueeze(0), priority.new_full((), BIG))
@@ -353,18 +363,17 @@ class GPUSampler:
                 eng.sat_count.copy_(sc); eng.lit_sum.copy_(ls); eng.assignment.copy_(asg)
                 eng.active.copy_(act); eng.conflict.copy_(conf)
 
-            eng.apply_assumptions_bulk(dec_t); eng.propagate()
+            eng.apply_and_propagate(dec_t)
             bad_t = eng.conflict & ~conf                           # TRUE newly conflicts
             _restore()
-            eng.apply_assumptions_bulk(dec_f); eng.propagate()
+            eng.apply_and_propagate(dec_f)
             bad_f = eng.conflict & ~conf                           # FALSE newly conflicts
             _restore()
             pol = torch.randint(0, 2, (K,), generator=self._gen, device=self.device)
             pol = torch.where(bad_t & ~bad_f, torch.ones_like(pol), pol)   # TRUE bad → FALSE
             pol = torch.where(bad_f & ~bad_t, torch.zeros_like(pol), pol)  # FALSE bad → TRUE
             dec = torch.where(need, 2 * var + pol, neg1).unsqueeze(1)
-            eng.apply_assumptions_bulk(dec)
-            eng.propagate()
+            eng.apply_and_propagate(dec)
         return rounds
 
     @torch.inference_mode()
@@ -624,7 +633,8 @@ class GPUSampler:
         keep_rows = collect or verify_clauses is not None
 
         self._sync()
-        bcp_r0, bcp_o0 = self.engine.total_bcp_rounds, self.engine.total_bcp_ops
+        bcp_r0 = self.engine.total_bcp_rounds
+        bcp_o0 = self.engine.total_bcp_ops + self.engine.kernel_ops()
         t0 = time.perf_counter()
         while True:
             # Stop once n_target is met — BUT for the adaptive bandit, always measure every config at
@@ -686,7 +696,7 @@ class GPUSampler:
         self._sync()
         elapsed = time.perf_counter() - t0
         bcp_rounds = self.engine.total_bcp_rounds - bcp_r0     # BCP work over this timed run (delta)
-        bcp_ops = self.engine.total_bcp_ops - bcp_o0
+        bcp_ops = self.engine.total_bcp_ops + self.engine.kernel_ops() - bcp_o0
 
         out = {
             "n_models": n_models, "n_support_complete": n_support_complete, "attempts": attempts,
@@ -708,6 +718,7 @@ class GPUSampler:
             "max_decision_rounds": max(rounds_hist) if rounds_hist else 0,
             "n_distinct": len(distinct) if keep_rows else None,
             "gpu_sound": gpu_unsound == 0, "gpu_unsound": gpu_unsound,
+            "kernel": self.use_kernel,
         }
         if collect:
             out["models"] = models

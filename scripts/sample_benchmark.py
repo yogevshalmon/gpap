@@ -75,7 +75,8 @@ DEFAULT_PORTFOLIO = [(True, 8), (False, 1)]
 
 def gpap_sample(path, device, *, simplify, n_time, n_cov, b, k_cap, max_chunks=8,
                 cov_chunks=4, max_rounds=300, lookahead=False, verify_clauses=None,
-                cov_k_cap=2048, els=False, random_var="auto", configs="default"):
+                cov_k_cap=2048, els=False, random_var="auto", configs="default",
+                use_kernel="auto"):
     """Throughput run timed end-to-end (construction + simplify + sample, to match CMSGen's
     'produce N samples' wall clock) + a small collect run for coverage/soundness. The timed run
     is bounded by `max_chunks` (rate = models/wall is valid regardless of how many it collects —
@@ -92,7 +93,8 @@ def gpap_sample(path, device, *, simplify, n_time, n_cov, b, k_cap, max_chunks=8
     auto-K on a low-RAM host (12 GB Colab) OOM-kills the session collecting a full chunk."""
     if configs == "default":
         configs = DEFAULT_PORTFOLIO
-    smp = GPUSampler.from_cnf_file(path, device, simplify=simplify, els=els, k_cap=k_cap, seed=5)
+    smp = GPUSampler.from_cnf_file(path, device, simplify=simplify, els=els, k_cap=k_cap, seed=5,
+                                   use_kernel=use_kernel)
     if device.type == "cuda":
         # Warm up CUDA kernels (first-chunk JIT / allocation) at a tiny K so the timed run isn't
         # skewed by one-time warmup — this is what inflated the first shallow circuit's number.
@@ -146,6 +148,7 @@ def gpap_sample(path, device, *, simplify, n_time, n_cov, b, k_cap, max_chunks=8
     if device.type == "cuda":
         torch.cuda.empty_cache()
     return {"samples_per_s": sps, "success_rate": succ,
+            "kernel": t.get("kernel", False),                 # fused Triton BCP kernel active?
             "attempts_per_s": t.get("attempts_per_s"),        # raw trajectory throughput (K/chunk rate)
             "bcp_rounds_per_chunk": t.get("bcp_rounds_per_chunk"),
             "bcp_ops_per_attempt": t.get("bcp_ops_per_attempt"),
