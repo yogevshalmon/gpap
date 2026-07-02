@@ -51,6 +51,10 @@ class BCPEngine:
         self._num_vars = formula.num_vars
         self._num_clauses = formula.num_clauses
         self._bcp_rounds = 0
+        # Lifetime work counters (NOT reset by reset_state, so they accumulate across chunks; the
+        # sampler reads deltas). Cheap: incremented from tensor .numel() in the propagate loop, no sync.
+        self.total_bcp_rounds = 0   # BCP rounds executed (propagation depth)
+        self.total_bcp_ops = 0      # frontier (batch,clause) cells processed (≈ literal-falsification work)
 
     def init_state(self, num_batches: int):
         """Initialize BCP state for K parallel assumption sets."""
@@ -341,6 +345,8 @@ class BCPEngine:
 
         while frontier_b.numel() > 0:
             self._bcp_rounds += 1
+            self.total_bcp_rounds += 1
+            self.total_bcp_ops += frontier_b.numel()   # cells processed this round (free .numel())
             round_count += 1
 
             if max_rounds is not None and round_count > max_rounds:
