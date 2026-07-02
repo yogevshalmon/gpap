@@ -227,20 +227,22 @@ CIRCUIT_MAX_CLAUSES = 100_000                          # skip any unroll whose C
 # A curated fast subset for --quick (small-to-medium, both easy and hard cases represented).
 CIRCUIT_ITC_QUICK = ["b01", "b03", "b06", "b08", "b10", "b13"]
 
-# Circuit sampler portfolio (the adaptive bandit picks the winner per instance, at full K):
-#   (True, 8, False)  — the general shallow-circuit baseline (support ~determines the rest).
-#   (True, 1, "soft") — cheap conflict-avoidance risk-polarity: the big win on the tight/deep circuits
-#                       (measured: b03 T=25 succ 10%→88%, 2.5k→13.6k samples/s) where naive BCP-
-#                       completion self-conflicts. No extra memory / propagation vs off.
-#   (True, 64, False) — HIGH branching factor: fewer decision rounds ⇒ fewer partial BCP cascades. Big
-#                       win on "redundant-cascade" deep instances (measured s386 T=25: B=8→64 gives
-#                       +81% samples/s, rounds 1009→192, ops/att halved) at a modest success cost; the
-#                       bandit keeps it only where net samples/s wins (medium instances stay on soft/B8).
-# NOTE (Phase-A measured): per-trajectory BCP work is ~UNIFORM on these circuits (b07 = 6,594 props for
-# EVERY trajectory, p99/p50≈1.0), so straggler early-termination has no tail to trim — not included.
-# The irreducibly-deep 100%-success instances (b07/s1196: ~23k–680k ops/attempt, flat in B) are limited
-# by inherent propagation depth, not config — their lever is per-round cost (engine) or K-scaling.
-CIRCUIT_PORTFOLIO = [(True, 8, False), (True, 1, "soft"), (True, 64, False)]
+# Circuit sampler portfolio (the adaptive bandit picks the winner per instance; measured per-config
+# on the circuit subset, RTX 4080, 2026-07-02 — each entry is the outright winner somewhere):
+#   (True, 64, False)  — v1 kernel, high B: wins SHALLOW circuits (s526 T=1: 18.1M samples/s; fused
+#                        loses shallow — its sequential per-warp order walk beats the tensor decide
+#                        path only when decision rounds are many).
+#   (True, 1, "soft")  — cheap conflict-avoidance risk-polarity: still the winner on the tight/deep
+#                        b03-type instances (T=25: 71k/s vs 62k fused).
+#   (True, 8, "fused") — v2 fused-trajectory kernel (whole trajectory in ONE launch) at boosted
+#                        K_fused: wins the deep 100%-success instances (b07 T=25 51k/s, s1196 T=25
+#                        19k/s — +59–126% over the best v1 config).
+#   (True, 1, "fused") — B=1's success edge is FREE in-kernel (rounds cost nothing): wins the
+#                        conflict-heavy deep s386 T=25 (51k/s, 2.5× best v1).
+# NOTE (Phase-A measured): per-trajectory BCP work is ~UNIFORM on these circuits, so straggler
+# early-termination has no tail to trim — not a portfolio option. Fused configs degrade gracefully to
+# plain (rv, B) when the Triton kernel is unavailable.
+CIRCUIT_PORTFOLIO = [(True, 64, False), (True, 1, "soft"), (True, 8, "fused"), (True, 1, "fused")]
 
 
 def run_circuits(device: torch.device, *, cmsgen_bin: str | None, n_time: int, n_cov: int, b: int,

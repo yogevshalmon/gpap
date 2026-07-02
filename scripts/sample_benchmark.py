@@ -66,11 +66,15 @@ def two_wise_coverage(models, support):
     return 100.0 * covered / total if total else 0.0
 
 
-# Default config portfolio for the adaptive bandit: the two extremes that cover the niche
-# ((random order, B=8) — fast, BCP-determined) and the search-heavy "service" family
-# ((structured order, B=1) — completes via the gate DAG). The bandit measures each at full K and
-# spends the budget on the winner per formula (dynamic, robust — no probe mis-estimate / commit).
-DEFAULT_PORTFOLIO = [(True, 8), (False, 1)]
+# Default config portfolio for the adaptive bandit (per-config measured 2026-07-02):
+#   (True, 8, False)   — the classic niche config (BCP-determined support; fast tensor path).
+#   (True, 1, "fused") — v2 fused-trajectory Triton kernel at boosted K_fused: the new sk_ winner
+#                        (35.sk 1.44M samples/s vs 654k for B8 — B=1's success edge is free
+#                        in-kernel and K_fused adds ~5x parallelism). Degrades to (True,1) if the
+#                        kernel is unavailable.
+#   (False, 1, False)  — structured/index order for the search-heavy "service" family.
+# The bandit measures each at full K and spends the budget on the winner per formula.
+DEFAULT_PORTFOLIO = [(True, 8, False), (True, 1, "fused"), (False, 1, False)]
 
 
 def gpap_sample(path, device, *, simplify, n_time, n_cov, b, k_cap, max_chunks=8,
