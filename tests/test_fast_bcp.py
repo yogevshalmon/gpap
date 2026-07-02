@@ -144,6 +144,48 @@ def test_sampler_unsat_kernel():
     assert out["n_models"] == 0
 
 
+def test_fused_trajectory_sound():
+    """v2 fused-trajectory config (whole chunk in one launch): every model valid, UNSAT yields 0,
+    and success parity with the v1 path on a support-driven formula (phase boundary respected)."""
+    clauses = [[1, 2, 3], [-1, 4], [-2, -4], [3, -4, 5], [-5, 1]]
+    smp = GPUSampler.from_clauses(5, clauses, DEV, k_cap=128, seed=17, use_kernel=True)
+    out = smp.sample(400, configs=[(True, 2, "fused")], max_chunks=8, collect=True,
+                     verify_clauses=clauses)
+    assert out["all_valid"] and out["gpu_sound"] and out["n_models"] > 0
+    assert out["n_distinct"] >= 2                       # diversity sanity (formula has ≥2 models)
+    smp_u = GPUSampler.from_clauses(1, [[1], [-1]], DEV, k_cap=16, seed=1, use_kernel=True)
+    out_u = smp_u.sample(10, configs=[(True, 1, "fused")], max_chunks=4, collect=True,
+                         verify_clauses=[[1], [-1]])
+    assert out_u["n_models"] == 0
+
+
+def test_fused_phase_boundary(tmp_path):
+    """A fused decision group must NOT straddle the support→completion boundary: on a circuit whose
+    support fully determines the rest, huge-B fused must match v1's success (~100%), not collapse
+    (the pre-fix straddle bug measured 100%→0% here)."""
+    from scripts.bench_to_cnf import parse_bench, build_cnf, write_dimacs
+    circ = parse_bench("benchmarks/circuits/s386.bench")
+    b, support, _ = build_cnf(circ, T=2, seed=1)
+    p = tmp_path / "s386c2.cnf"
+    write_dimacs(str(p), b, support)
+    smp = GPUSampler.from_cnf_file(str(p), DEV, simplify=True, els=True, k_cap=512, seed=5,
+                                   use_kernel=True)
+    o_v1 = smp.sample(10 ** 9, configs=[(True, 4096, False)], max_chunks=2, collect=False)
+    o_fu = smp.sample(10 ** 9, configs=[(True, 4096, "fused")], max_chunks=2, collect=False)
+    assert o_fu["gpu_sound"]
+    # same ballpark success (both decide the whole support at once, then propagate)
+    assert abs(o_fu["success_rate"] - o_v1["success_rate"]) < 0.25
+
+
+def test_fused_fallback_without_kernel():
+    """A 'fused' config with the kernel OFF degrades to the plain (rv, B) path and stays sound."""
+    clauses = [[1, 2], [-1, 3], [-2, -3]]
+    smp = GPUSampler.from_clauses(3, clauses, DEV, k_cap=64, seed=3, use_kernel=False)
+    out = smp.sample(200, configs=[(True, 1, "fused")], max_chunks=6, collect=True,
+                     verify_clauses=clauses)
+    assert out["all_valid"] and out["n_models"] > 0 and not out["kernel"]
+
+
 def test_kernel_ops_counter():
     """The fused kernel feeds the engine work counters (ops > 0 after propagation)."""
     clauses = [[1, 2], [-1, 3], [-2, -3]]

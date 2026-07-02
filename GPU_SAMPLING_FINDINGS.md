@@ -360,3 +360,42 @@ too. 62/62 tests green with the kernel auto-on.
 ~(sat+4)·M + 6N — much smaller than the old effective footprint ⇒ bigger K on the same VRAM, stacks
 on A100); (2) decide-in-kernel v2 (whole chunk = one launch) if the remaining Python decide loop
 dominates; (3) bandit portfolio re-tune under the new cost model (B=1's success edge got cheaper).
+
+## v2: the fused-trajectory kernel + K-boost + portfolio re-tune (2026-07-02)
+
+With v1 the Python **decide loop** became the bottleneck (measured 41–79% of chunk wall: per decision
+round `_pick_decisions` builds (K,N) masks + topk + a sync). v2 (`_bcp_trajectory_kernel`) runs the
+WHOLE trajectory in ONE launch: each program walks a per-chunk permuted variable order, picks the next
+B still-free vars (exactly `_pick_decisions`' first-B-free-in-priority-order semantics), assigns a
+stateless splitmix-hash polarity, and propagates in-kernel. Two critical details:
+- **The phase boundary must not be straddled**: a decision group stops at the support→completion
+  boundary so phase 1 reaches fixpoint over the support before completion vars are decided (the
+  pre-fix straddle collapsed b07 from 100% to 0% success at large B; regression-tested).
+- **K-boost**: a fused chunk never builds the (K,N) decide masks, so its true footprint is just
+  engine state + trail (≈ (sat+4)·M + 10·N per batch). Fused chunks run at `K_fused` (up to 262k;
+  kill-switch validated ≤5.3 GB reserved on the densest instances) while v1 configs keep the safe K —
+  per-chunk, inside the same bandit run.
+
+Exposed as a THIRD config-tuple value: `(rv, B, "fused")` — the adaptive bandit measures it against
+the v1-kernel and soft configs per instance and commits to the winner (it loses nowhere by
+construction). New measured portfolios: `CIRCUIT_PORTFOLIO = [(T,64,off),(T,1,soft),(T,8,fused),
+(T,1,fused)]`, `DEFAULT_PORTFOLIO = [(T,8,off),(T,1,fused),(F,1,off)]`. Notably **B=1's success edge
+is now free** (decision rounds cost nothing in-kernel), so B=1-fused wins broadly.
+
+**End-to-end (RTX 4080, production `gpap_sample` path, vs the same-day pre-kernel baseline):**
+
+| instance | pre-kernel | v1 kernel | v2 portfolio | total | winner |
+|---|---|---|---|---|---|
+| s526 T=1 | 4.17M/s | 14.7M/s | **70.2M/s** | 16.8× | B=1-fused @K=262k |
+| b03 T=25 | 17.0k/s | 90.9k/s | 69.3k/s* | 4.1× | B=1-soft |
+| b07 T=25 | 9.0k/s | 41.3k/s | **53.3k/s** | 5.9× | B=1-fused |
+| s386 T=25 | 2.6k/s | 12.6k/s | **56.2k/s** | 21.7× | B=1-fused |
+| s1196 T=25 | 3.1k/s | 9.7k/s | **19.6k/s** | 6.4× | B=8-fused |
+| 35.sk | 137.9k/s | 1.04M/s | **1.40M/s** | 10.2× | B=1-fused |
+| 10.sk | 82.3k/s | 508.9k/s | **1.65M/s** | 20.1× | B=1-fused |
+
+*run-to-run seed variance vs the v1 row; soft remains b03's winner both times.
+
+Soundness: fused models are valid by construction (fully-assigned + conflict-free) and CPU-verified in
+tests (65/65 green); the fused polarity source is a splitmix64 hash (balanced; binomial-clean in
+8-groups) rather than the torch stream — watch 2-wise coverage parity on the next full CMSGen run.

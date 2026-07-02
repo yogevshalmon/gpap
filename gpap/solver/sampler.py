@@ -92,6 +92,19 @@ class GPUSampler:
             deduct_formula=False,
         )
         self.K = self._calibrate_k(free_bytes, k_cap, analytic)
+        self._K_init = self.K
+        # FUSED-config K boost: a fused-trajectory chunk never builds the (K,N) per-round decision
+        # masks — its true footprint is just the engine state + the trail + a few (K,N) bool readout
+        # temps: ≈ (sat_bytes+4)·M + 10·N per batch. That is far below the v1 heuristic, so fused
+        # chunks can run a much larger K (throughput ∝ K). Applied per-chunk in sample() ONLY for
+        # fused configs and only while K is at its construction value (a lowered K — e.g. the
+        # coverage run — is honoured). Hard cap 262,144; validated under the nvidia-smi kill-switch.
+        if self.use_kernel and self.M > 0:
+            sat_b = 1 if self._max_cls <= 127 else (2 if self._max_cls <= 32767 else 4)
+            fused_pb = (sat_b + 4) * self.M + 10 * self.N + 64
+            self.K_fused = max(self.K, min(int(0.6 * free_bytes / fused_pb), 262_144))
+        else:
+            self.K_fused = self.K
 
     # K-calibration: with CUDA expandable_segments (set at module import) the sampler's per-round
     # variable-sized churn no longer fragments the allocator — reserved memory drops ~2.3× AND the
@@ -397,6 +410,32 @@ class GPUSampler:
         else:
             priority = torch.arange(self.N, device=self.device)
 
+        if lookahead == "fused" and eng._fused_kernel is not None:
+            # v2 fused-trajectory kernel: the WHOLE decide+propagate loop in ONE launch. Picking the
+            # next-B-free-vars in priority order inside the kernel is exactly _pick_decisions'
+            # semantics; polarity is a per-(chunk,k,v) hash bit. Decision order = support vars first
+            # (phase 1), then the completion vars (phase 2) — same two-phase behaviour.
+            rank = torch.argsort(priority)                  # vars in priority order
+            if support_mask is not None:
+                in_sup = support_mask[rank]
+                sup_part = rank[in_sup]
+                order = torch.cat([sup_part, rank[~in_sup]]) if complete else sup_part
+                n_support = int(sup_part.numel())
+            else:
+                order = rank
+                n_support = order.numel()                   # single phase: boundary = end
+            seed = int(torch.randint(0, 2 ** 62, (1,), generator=self._gen,
+                                     device=self.device).item())
+            rounds = eng._fused_kernel.run_trajectory(eng, order, n_support, B, seed, max_rounds)
+            fr = self._free_mask()
+            if support_mask is not None:
+                support_complete = eng.active & ~(fr & support_mask).any(dim=1)
+            else:
+                support_complete = eng.active
+            fully = eng.active & ~fr.any(dim=1)
+            # free-after-support is unmeasurable mid-trajectory in the fused path (diagnostic only)
+            return fully, support_complete, rounds, 0.0
+
         # Phase 1: fix the support (or, if no support, this decides everything).
         rounds = self._decide_phase(B, priority, support_mask, max_rounds, 0, lookahead)
 
@@ -650,18 +689,21 @@ class GPUSampler:
             chunk_cfgs = [self._select_config(plan, cfg_stats, chunk)] if adaptive else plan
             for cfg in chunk_cfgs:
                 rv_c, B_c, la_c = cfg
+                # Fused chunks run at the boosted K (no (K,N) decide masks — see K_fused). Only while
+                # K is at its construction value: a caller-lowered K (coverage run) is honoured.
+                K_c = self.K_fused if (la_c == "fused" and self.K >= self._K_init) else K_sub
                 if adaptive:
                     self._sync(); t_cfg = time.perf_counter()
                 fully, sup_complete, rounds, free_after = self._run_chunk(
-                    K_sub, B_c, rv_c, max_decision_rounds, support_mask, complete, la_c)
+                    K_c, B_c, rv_c, max_decision_rounds, support_mask, complete, la_c)
                 rounds_hist.append(rounds)
                 free_after_hist.append(free_after)
-                attempts += K_sub
+                attempts += K_c
                 n_done = int(fully.sum().item())
                 n_models += n_done
                 n_support_complete += int(sup_complete.sum().item())
                 cfg_stats[cfg]["models"] += n_done
-                cfg_stats[cfg]["attempts"] += K_sub
+                cfg_stats[cfg]["attempts"] += K_c
                 cfg_stats[cfg]["chunks"] += 1
                 if adaptive:
                     self._sync(); cfg_stats[cfg]["wall"] += time.perf_counter() - t_cfg
