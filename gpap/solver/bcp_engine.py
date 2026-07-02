@@ -55,6 +55,27 @@ class BCPEngine:
         # sampler reads deltas). Cheap: incremented from tensor .numel() in the propagate loop, no sync.
         self.total_bcp_rounds = 0   # BCP rounds executed (propagation depth)
         self.total_bcp_ops = 0      # frontier (batch,clause) cells processed (≈ literal-falsification work)
+        # Optional fused-kernel fast path (see bcp_triton.TritonBCP). None = pure-PyTorch propagate.
+        self._fused_kernel = None
+
+    def attach_kernel(self, kernel) -> None:
+        """Attach a fused apply+propagate kernel (e.g. TritonBCP). apply_and_propagate() dispatches
+        to it; all other engine methods keep using the PyTorch path (the A/B oracle)."""
+        self._fused_kernel = kernel
+
+    def apply_and_propagate(self, assumptions: "torch.Tensor") -> None:
+        """Apply an assumption/decision tensor and run BCP to fixpoint. With a kernel attached this
+        is ONE fused GPU launch (no Python round loop, no per-round syncs/temporaries); otherwise it
+        falls back to apply_assumptions_bulk() + propagate(). Sampler hot-loop entry point."""
+        if self._fused_kernel is not None:
+            self._fused_kernel.run(self, assumptions)
+            return
+        self.apply_assumptions_bulk(assumptions)
+        self.propagate()
+
+    def kernel_ops(self) -> int:
+        """Occ entries processed by the fused kernel (0 when no kernel). Syncs — read off hot path."""
+        return self._fused_kernel.ops_total() if self._fused_kernel is not None else 0
 
     def init_state(self, num_batches: int):
         """Initialize BCP state for K parallel assumption sets."""

@@ -319,3 +319,44 @@ Verified on the laptop (forcing the "1 chunk ≥ n_time" regime): shallow s386.c
 win); deep instances pick B=8. Re-running the full ISCAS-89 set, the bandit picks B=8 almost everywhere
 (soft wins mainly s386 T=5 and the b-instances) — so many of the buggy run's "soft" selections were
 artifacts of never measuring B=8. K-scaling stays linear (slope 1.06).
+
+## The Triton BCP megakernel — one launch to fixpoint (2026-07-02)
+
+Phase-A profiling showed deep-circuit BCP is **latency-bound by the Python round loop** in
+`BCPEngine.propagate()` (per-round: ~15-20 kernel launches + 2 CUDA syncs + a `torch.unique` sort;
+12.9× more trajectories cost only 3.9× wall) and that its per-round temporaries **over-reserve memory
+5.6×** (s1196.c25 K=4096: 6,646 MB reserved / 1,179 MB allocated). Pure-PyTorch fixes are structurally
+impossible (the dedup needs a sort; the loop itself must go), so the sampler's
+`apply_assumptions_bulk + propagate` pair was replaced by a **custom Triton kernel**
+(`gpap/solver/bcp_triton.py`) that runs decisions + BCP-to-fixpoint in **one launch**.
+
+**Design (why it's simple and provably right):** one Triton program per trajectory; the program owns
+its rows of `sat_count`/`lit_sum`/`assignment` exclusively and processes its pending-literal **trail
+sequentially** (per literal, the occ list holds distinct clauses) ⇒ **no atomics, no barriers** — a
+textbook sequential BCP per trajectory, K-wide parallelism saturates the GPU. BCP fixpoints are
+confluent, so non-conflicted rows are **bit-identical** to the PyTorch oracle (tested exactly:
+`tests/test_fast_bcp.py`, 30 random CNFs × multi-step + a real circuit + sampler-level same-seed
+identical model sets). Opt-in (`GPUSampler(use_kernel="auto")`), PyTorch engine kept as
+fallback/oracle; Triton ships with torch (no nvcc), so it works on the laptop and on Colab unchanged.
+
+**Results (RTX 4080, end-to-end sampler, same configs/success — identical semantics):**
+
+| instance | oracle | kernel | gain |
+|---|---|---|---|
+| s526 T=1 | 4.17M/s | **14.7M/s** | 3.5× |
+| b03 T=25 | 17.0k/s | **90.9k/s** | 5.3× |
+| b07 T=25 | 9.0k/s | **41.3k/s** | 4.6× |
+| s386 T=25 | 2.6k/s | **12.6k/s** | 4.9× |
+| s1196 T=25 | 3.1k/s | **9.7k/s** | 3.2× |
+| 35.sk (niche) | 137.9k/s | **1.04M/s** | 7.5× |
+| 10.sk (niche) | 82.3k/s | **508.9k/s** | 6.2× |
+
+Micro (single deep cascade): 8–38× over the PyTorch propagate; reserved memory tracks allocated
+(s1196: 6,646→1,262 MB at K=4096) — and the oracle **spills** at K=7,204 where the kernel runs in
+1.6 GB. The sk_ niche was a feared regression and instead gained the most: BCP was ~80% of its wall
+too. 62/62 tests green with the kernel auto-on.
+
+**Follow-ups unlocked:** (1) K re-calibration for the kernel path (its true per-batch footprint is
+~(sat+4)·M + 6N — much smaller than the old effective footprint ⇒ bigger K on the same VRAM, stacks
+on A100); (2) decide-in-kernel v2 (whole chunk = one launch) if the remaining Python decide loop
+dominates; (3) bandit portfolio re-tune under the new cost model (B=1's success edge got cheaper).
