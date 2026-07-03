@@ -55,6 +55,8 @@ class BCPEngine:
         # sampler reads deltas). Cheap: incremented from tensor .numel() in the propagate loop, no sync.
         self.total_bcp_rounds = 0   # BCP rounds executed (propagation depth)
         self.total_bcp_ops = 0      # frontier (batch,clause) cells processed (≈ literal-falsification work)
+        self.total_bcp_props = 0    # literals assigned TRUE (decisions + implications) — the CDCL-
+                                    # comparable "propagations" count (CDCL solvers report props/sec)
         # Optional fused-kernel fast path (see bcp_triton.TritonBCP). None = pure-PyTorch propagate.
         self._fused_kernel = None
 
@@ -76,6 +78,10 @@ class BCPEngine:
     def kernel_ops(self) -> int:
         """Occ entries processed by the fused kernel (0 when no kernel). Syncs — read off hot path."""
         return self._fused_kernel.ops_total() if self._fused_kernel is not None else 0
+
+    def kernel_props(self) -> int:
+        """Literals assigned by the fused kernel (0 when no kernel). Syncs — read off hot path."""
+        return self._fused_kernel.props_total() if self._fused_kernel is not None else 0
 
     def init_state(self, num_batches: int):
         """Initialize BCP state for K parallel assumption sets."""
@@ -326,6 +332,7 @@ class BCPEngine:
         pairs = pairs[valid]
 
         if pairs.size(0) > 0:
+            self.total_bcp_props += pairs.size(0)          # decision assignments (free metadata)
             new_b, new_c = self._bulk_propagate_lits(pairs[:, 0], pairs[:, 1])
             if new_b.numel() > 0:
                 self._frontier_batches = torch.cat([self._frontier_batches, new_b])
@@ -448,6 +455,7 @@ class BCPEngine:
 
             # --- Propagate; next frontier = clauses whose sat_count just changed (F) ---
             this_round_work = prop_batches.numel()  # free: tensor metadata, no CUDA sync
+            self.total_bcp_props += this_round_work
             frontier_b, frontier_c = self._bulk_propagate_lits(prop_batches, prop_lits)
 
             # --- Per-batch propagation count (G) ---

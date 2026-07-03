@@ -358,10 +358,16 @@ class GPUSampler:
             if lookahead in (True, "full"):
                 pass  # fall through to the snapshot path below
             else:
-                # off, or cheap "soft" risk-polarity (handled inside _pick_decisions)
+                # off, cheap "soft" risk-polarity (handled inside _pick_decisions), or "orac"
+                # (force the PyTorch engine for this config — the oracle's batched tensor ops beat
+                # the per-warp kernel on ultra-shallow wide instances, e.g. b14 T=1; bandit-selected)
                 decisions = self._pick_decisions(dfree, need, B, priority,
                                                  soft_la=(lookahead == "soft"))
-                eng.apply_and_propagate(decisions)
+                if lookahead == "orac":
+                    eng.apply_assumptions_bulk(decisions)
+                    eng.propagate()
+                else:
+                    eng.apply_and_propagate(decisions)
                 continue
             # --- full-propagation lookahead (B=1) ---
             masked = torch.where(dfree, priority.unsqueeze(0), priority.new_full((), BIG))
@@ -410,7 +416,7 @@ class GPUSampler:
         else:
             priority = torch.arange(self.N, device=self.device)
 
-        if lookahead == "fused" and eng._fused_kernel is not None:
+        if lookahead in ("fused", "fsoft") and eng._fused_kernel is not None:
             # v2 fused-trajectory kernel: the WHOLE decide+propagate loop in ONE launch. Picking the
             # next-B-free-vars in priority order inside the kernel is exactly _pick_decisions'
             # semantics; polarity is a per-(chunk,k,v) hash bit. Decision order = support vars first
@@ -426,7 +432,12 @@ class GPUSampler:
                 n_support = order.numel()                   # single phase: boundary = end
             seed = int(torch.randint(0, 2 ** 62, (1,), generator=self._gen,
                                      device=self.device).item())
-            rounds = eng._fused_kernel.run_trajectory(eng, order, n_support, B, seed, max_rounds)
+            # No round cap for fused: the kernel structurally terminates in ≤ |order| decision groups
+            # (each group either decides ≥1 var or exhausts the order). max_decision_rounds exists to
+            # bound the v1 PYTHON loop; applying it here cripples B=1 on large-support instances
+            # (measured: s832 T=25 support=450 → the 300 cap truncated every trajectory, 2× loss).
+            rounds = eng._fused_kernel.run_trajectory(eng, order, n_support, B, seed, None,
+                                                      soft=(lookahead == "fsoft"))
             fr = self._free_mask()
             if support_mask is not None:
                 support_complete = eng.active & ~(fr & support_mask).any(dim=1)
@@ -674,6 +685,7 @@ class GPUSampler:
         self._sync()
         bcp_r0 = self.engine.total_bcp_rounds
         bcp_o0 = self.engine.total_bcp_ops + self.engine.kernel_ops()
+        bcp_p0 = self.engine.total_bcp_props + self.engine.kernel_props()
         t0 = time.perf_counter()
         while True:
             # Stop once n_target is met — BUT for the adaptive bandit, always measure every config at
@@ -739,6 +751,7 @@ class GPUSampler:
         elapsed = time.perf_counter() - t0
         bcp_rounds = self.engine.total_bcp_rounds - bcp_r0     # BCP work over this timed run (delta)
         bcp_ops = self.engine.total_bcp_ops + self.engine.kernel_ops() - bcp_o0
+        bcp_props = self.engine.total_bcp_props + self.engine.kernel_props() - bcp_p0
 
         out = {
             "n_models": n_models, "n_support_complete": n_support_complete, "attempts": attempts,
@@ -753,6 +766,9 @@ class GPUSampler:
             "bcp_rounds": bcp_rounds, "bcp_ops": bcp_ops,
             "bcp_rounds_per_chunk": (bcp_rounds / chunk) if chunk else 0.0,
             "bcp_ops_per_attempt": (bcp_ops / attempts) if attempts else 0.0,
+            # CDCL-comparable work rate: literals assigned (decisions + implications) per second —
+            # what CDCL solvers report as props/sec (typically ~1e7/s single-core).
+            "assigns_per_s": (bcp_props / elapsed) if elapsed > 0 else 0.0,
             "mean_free_after_support": (sum(free_after_hist) / len(free_after_hist)) if free_after_hist else 0.0,
             "n_chunks": chunk, "K": K, "B": B, "random_var": bool(random_var),
             "support_size": (len(sup) if sup else None),

@@ -127,8 +127,9 @@ if _HAVE_TRITON:
         order_ptr,                            # (P,) int32 var indices: the decision order (support
                                               #   first, then completion vars; a per-chunk permutation)
         occ_off_ptr, occ_cls_ptr,             # int32 CSR occ lists
-        trail_ptr, nrounds_ptr, nops_ptr,     # (K,·) workspace / outputs
+        trail_ptr, nrounds_ptr, nops_ptr, nprops_ptr,   # (K,·) workspace / outputs
         M, N2, P, NSUP, B, TRAIL_CAP, MAX_ROUNDS, seed,
+        SOFT: tl.constexpr,                   # 1 = "fsoft": in-kernel soft risk-polarity (see below)
     ):
         """v2 — the WHOLE trajectory in one launch: repeatedly pick the next B still-free variables
         in `order` (identical semantics to _pick_decisions' first-B-free-in-priority-order), assign
@@ -167,6 +168,31 @@ if _HAVE_TRITON:
                         h = (h ^ (h >> 30)) * -4658895280553007687
                         h = (h ^ (h >> 27)) * -7723592293110705685
                         pol = ((h >> 13) & 1).to(tl.int32)
+                        if SOFT:
+                            # "fsoft": soft conflict-avoidance polarity AT FUSED SPEED — mirror
+                            # _polarity_risk: risk of setting lit TRUE = Σ w(sat_count) over occ[lit]
+                            # (clauses lit falsifies): w(1)=1e6 (would empty), w(2)=4 (forces a
+                            # unit), w(3)=1. Pick the lower-risk polarity; hash bit breaks ties.
+                            r0 = nops * 0                       # risk of lit = 2v (v TRUE)
+                            r1 = nops * 0                       # risk of lit = 2v+1 (v FALSE)
+                            s0 = tl.load(occ_off_ptr + 2 * v)
+                            e0 = tl.load(occ_off_ptr + 2 * v + 1)
+                            o0 = s0
+                            while o0 < e0:
+                                c0 = tl.load(occ_cls_ptr + o0).to(tl.int64)
+                                sc0 = tl.load(sat_row + c0)
+                                r0 += tl.where(sc0 == 1, 1000000,
+                                               tl.where(sc0 == 2, 4, tl.where(sc0 == 3, 1, 0)))
+                                o0 += 1
+                            e1 = tl.load(occ_off_ptr + 2 * v + 2)
+                            o1 = e0
+                            while o1 < e1:
+                                c1 = tl.load(occ_cls_ptr + o1).to(tl.int64)
+                                sc1 = tl.load(sat_row + c1)
+                                r1 += tl.where(sc1 == 1, 1000000,
+                                               tl.where(sc1 == 2, 4, tl.where(sc1 == 3, 1, 0)))
+                                o1 += 1
+                            pol = tl.where(r0 < r1, 0, tl.where(r1 < r0, 1, pol))
                         lit = 2 * v + pol
                         tl.store(asg_row + lit, 1)
                         tl.store(trail_row + tail, lit)
@@ -209,6 +235,7 @@ if _HAVE_TRITON:
                 tl.store(active_ptr + k, 0)
             tl.store(nrounds_ptr + k, rounds)
             tl.store(nops_ptr + k, nops)
+            tl.store(nprops_ptr + k, tail)    # literals assigned (decisions + implications)
 
 
 class TritonBCP:
@@ -228,6 +255,7 @@ class TritonBCP:
         self._nops = None               # (K,) int32
         self._nrounds = None            # (K,) int32 (v2 fused-trajectory decision rounds)
         self._ops_acc = None            # 0-d int64 GPU accumulator (lazy-synced)
+        self._props_acc = None          # 0-d int64 GPU accumulator: literals assigned (lazy-synced)
         self.launches = 0
 
     @classmethod
@@ -262,6 +290,7 @@ class TritonBCP:
             self._nops = torch.empty(K, dtype=torch.int32, device=dev)
         if self._ops_acc is None:
             self._ops_acc = torch.zeros((), dtype=torch.int64, device=dev)
+            self._props_acc = torch.zeros((), dtype=torch.int64, device=dev)
 
     @torch.inference_mode()
     def run(self, engine, decisions: torch.Tensor):
@@ -287,10 +316,11 @@ class TritonBCP:
         self.launches += 1
         engine.total_bcp_rounds += 1                    # one fused "round" per launch
         self._ops_acc += self._nops.sum()               # GPU-side, no sync
+        self._props_acc += self._nprops.sum()
 
     @torch.inference_mode()
     def run_trajectory(self, engine, order: torch.Tensor, n_support: int, B: int, seed: int,
-                       max_rounds: "int | None") -> int:
+                       max_rounds: "int | None", soft: bool = False) -> int:
         """v2 fused chunk: run WHOLE trajectories (decide + propagate loops) in one launch.
         `order` = (P,) int32 decision order (support vars first, then completion vars). Picking the
         next B still-free vars in `order` is exactly _pick_decisions' first-B-free-in-priority-order
@@ -306,19 +336,24 @@ class TritonBCP:
             engine._sat_count, engine._lit_sum, engine._assignment,
             engine._active.view(torch.int8), engine._conflict.view(torch.int8),
             order, self._occ_off32, self._occ_cls32,
-            self._trail, self._nrounds, self._nops,
+            self._trail, self._nrounds, self._nops, self._nprops,
             engine._num_clauses, 2 * engine._num_vars, order.numel(), n_support, B,
             self._trail.size(1), (max_rounds if max_rounds is not None else 1 << 30),
-            seed, num_warps=1,
+            seed, SOFT=(1 if soft else 0), num_warps=1,
         )
         self.launches += 1
         engine.total_bcp_rounds += 1
         self._ops_acc += self._nops.sum()
+        self._props_acc += self._nprops.sum()
         return int(self._nrounds.max().item())
 
     def ops_total(self) -> int:
         """Occ entries processed by the kernel so far (syncs; call off the hot path)."""
         return int(self._ops_acc.item()) if self._ops_acc is not None else 0
+
+    def props_total(self) -> int:
+        """Literals assigned by the kernel so far (syncs; call off the hot path)."""
+        return int(self._props_acc.item()) if self._props_acc is not None else 0
 
 
 if _HAVE_TRITON:
