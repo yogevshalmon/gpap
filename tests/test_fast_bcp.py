@@ -236,6 +236,74 @@ def test_packed_circuit_identical_models(tmp_path):
         assert m_packed == m_plain, f"packed kernel changed the model set for {cfg}"
 
 
+def test_apply_already_implied_literal_no_false_conflict():
+    """Regression (found 2026-07-03 by conflict mining): assuming a literal that a prior units
+    flush ALREADY implied must be a no-op. apply_assumptions_bulk used to re-propagate it,
+    double-decrementing occ[lit]'s sat_counts -> garbage forced literals -> FALSE conflicts.
+    Formula: unit (1) forces x1; (-1 2) then forces x2; re-assuming x1 or x2 must not conflict."""
+    clauses = [[1], [-1, 2], [-2, 3, 4], [-3, 4, 5]]
+    f = CnfFormula(DEV)
+    f.init_formula(5, clauses)
+    eng = BCPEngine(f)
+    eng.init_state(4)
+    eng.propagate()                                        # flush: x1, x2 now TRUE
+    assert bool(eng.assignment[0, 0] == 1) and bool(eng.assignment[0, 2] == 1)
+    dec = torch.tensor([[0], [2], [0], [6]], dtype=torch.long, device=DEV)  # x1, x2, x1, x4
+    eng.apply_assumptions_bulk(dec)
+    eng.propagate()
+    assert not bool(eng.conflict.any()), "re-assuming an implied literal produced a false conflict"
+    # sat_count must equal ground truth (count non-falsified literals under the assignment)
+    for c_i, cl in enumerate(clauses):
+        for k in range(4):
+            truth = sum(1 for l in cl
+                        if eng.assignment[k, 2 * (abs(l) - 1) + (1 if l > 0 else 0)] != 1)
+            assert int(eng.sat_count[k, c_i]) == truth, (k, c_i)
+
+
+def test_miner_entailed_and_model_preserving():
+    """Every clause mine_entailed() learns must be ENTAILED (formula ∧ ¬clause UNSAT), and the
+    augmented formula must have EXACTLY the original model set."""
+    from pysat.solvers import Minisat22
+    from gpap.solver.miner import mine_entailed
+
+    def models(cls_):
+        out = set()
+        with Minisat22(bootstrap_with=cls_) as s:
+            for m in s.enum_models():
+                out.add(tuple(m))
+        return out
+
+    def check(nv, clauses, support):
+        res = mine_entailed(nv, clauses, support, DEV)
+        for cl in res["learned"]:
+            with Minisat22(bootstrap_with=clauses) as s:
+                assert not s.solve(assumptions=[-l for l in cl]), \
+                    f"mined clause {cl} is NOT entailed"
+        if res["learned"]:
+            assert models(clauses) == models(clauses + res["learned"])
+        return res
+
+    # planted: (1|2),(1|-2) => backbone unit (1), NOT flush-implied (no unit clauses exist);
+    # (-1,-3,-4),(−1,−3,4) => assuming {3} (with 1 forced) conflicts => unit (-3);
+    # support pair: (-5|-6) is entailed via x7: (-5,-6,7),(-5,-6,-7)
+    clauses = [[1, 2], [1, -2], [-1, -3, -4], [-1, -3, 4],
+               [-5, -6, 7], [-5, -6, -7], [5, 6, 8], [2, 8, -5]]
+    res = check(8, clauses, [4, 5])                       # support = vars 5,6 (0-based 4,5)
+    assert res["n_units"] >= 2, res                        # backbone (1) and (-3) at least
+    all_mined = {tuple(sorted(c)) for c in res["learned"]}
+    assert (-6, -5) in all_mined or (-5,) in all_mined or (-6,) in all_mined, all_mined
+
+    # random sweep: whatever is mined must be entailed + model-preserving
+    rng = random.Random(7)
+    for _ in range(10):
+        nv = rng.randint(6, 14)
+        clauses = _random_cnf(rng, nv, rng.randint(2 * nv, 5 * nv))
+        with Minisat22(bootstrap_with=clauses) as s:
+            if not s.solve():
+                continue                                   # UNSAT input: mining may derive it; skip
+        check(nv, clauses, list(range(min(nv, 6))))
+
+
 def test_packed_bandit_mix_sound():
     """Alternating packed-fused / oracle / v1 chunks in ONE run: the engine state groups
     (assignment at the fused K vs sat/lsum at the base K) must never corrupt each other

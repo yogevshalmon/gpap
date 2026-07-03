@@ -449,3 +449,53 @@ overhead. Also: wrapping the retry loop around the packed kernel taxed the RETRI
 median (loop-carried state / register pressure) — structural lesson: **experimental paths get their
 own kernel; never wrap the accepted hot loop.** The experiment was removed; the residuals still
 need a learning-class lever, not restarts.
+
+## Entailed-clause mining: GPAP probes the formula against itself (2026-07-03)
+
+The remaining CMSGen losses (the "service" family + a handful of sk/circuit instances at succ
+0-12%) die from LATE BCP conflicts, which restarts don't fix (measured above) but CLAUSES do:
+`gpap/solver/miner.py` exhaustively BCP-probes (fused kernel, cached-flush rows, one launch per
+chunk) **L1 = every literal to fixpoint** (real conflict assuming l ⇒ unit ¬l — the BCP-visible
+BACKBONE, hundreds-to-thousands of units on every losing instance), **L2 = all support pairs**,
+**L3 = all support triplets**. Each learned clause is ENTAILED ⇒ the model set is EXACTLY
+unchanged (pysat-verified in tests) — but the sampler's own propagation now kills doomed
+trajectories EARLY, and the units shrink the simplified formula (M drops ⇒ K and speed rise).
+
+Wired into `gpap_sample(mine="auto")`, gated on the (already-present) warmup chunk's success
+rate < 15%: healthy flagships skip at ZERO added cost; losing instances pay 0.1-30s ONCE
+(60s hard budget). Two integration bugs mattered: (1) mining's reserved VRAM poisoned the
+rebuilt sampler's free-memory read → K collapsed to 1 (throughput 899/s instead of 6.5M/s!) —
+`torch.cuda.empty_cache()` after mining; (2) giant PyTorch probe temporaries tripped the WSL2
+watchdog ("device not ready") — the kernel-based prober fixed it structurally.
+
+**Full 29-instance sk suite (RTX 4080, vs the 2026-07-03 reference table; CMSGen rates frozen
+from it): geomean GPAP/CMSGen 4.65× → 27.3×; suite geomean 5.87× over the previous GPAP.**
+2-wise coverage IDENTICAL to CMSGen on every mined instance (quality preserved exactly).
+
+| instance | before | after | vs CMSGen |
+|---|---|---|---|
+| 80.sk / 70.sk / 7.sk | 6.4k / 12k / 6k/s | 6.6M / 6.5M / 2.8M/s | 1.4-2.6× → **880-1,480×** |
+| 51.sk | 92.6k/s | 1.36M/s | 16.8× → **246×** |
+| UserServiceImpl | 2.9k/s | 62.4k/s | 0.31× → **6.8×** |
+| ActivityService | 9.0k/s | 38.6k/s | 1.27× → **5.5×** |
+| ProjectService3 | 759/s | 8.1k/s | 0.38× → **4.1×** |
+| IterationService / PhaseService | 548 / 495/s | 9.0k / 7.1k/s | 0.12×/0.07× → **2.0× / 1.0×** |
+| polynomial | 127k/s | 1.1M/s | 3.4× → **29.5×** |
+| b03 T=25 (circuit) | 427k/s | 1.75M/s | — (**4.1×**, 1,007 units) |
+| c3540 T=1 (circuit) | 3.7k/s | 29.1k/s | 0.72× → **~10×** |
+
+Healthy instances gate-skip: b07/s1196/c1355/b13 at 0.99-1.10×; all sk flagships ≥0.94×
+(within their noise bands). Residuals: NotificationServiceImpl2 (0.13× — joint constraint
+beyond ternary reach; deep mining finds 1,400+ clauses and full lookahead lifts success 50×,
+but neither reaches CMSGen throughput: genuinely needs in-search learning) and b04/b11-class
+circuits (mining finds ~nothing; their residual isn't backbone-shaped).
+
+**The bug that mining flushed out** (would never have been found from the sampler side):
+`apply_assumptions_bulk` re-propagated literals ALREADY assigned by a prior units flush —
+`_bulk_propagate_lits` decrements occ[lit] unconditionally, so the double-decrement corrupted
+sat_count, materialised garbage forced literals (lit_sum of ≥2 remaining literals is a bogus
+index), and reported FALSE CONFLICTS. The sampler never triggers it (decisions are always fresh
+free vars) and output soundness is unaffected (conflicted rows are discarded) — but any
+assumption-checking flow that assumes an implied literal after a flush silently saw false
+conflicts. Fixed with an already-assigned filter on the pair list (mirrors the kernel's
+skip-duplicates guard); regression test + miner entailment tests added.

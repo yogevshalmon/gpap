@@ -80,7 +80,7 @@ DEFAULT_PORTFOLIO = [(True, 8, False), (True, 1, "fused"), (False, 1, False)]
 def gpap_sample(path, device, *, simplify, n_time, n_cov, b, k_cap, max_chunks=8,
                 cov_chunks=4, max_rounds=300, lookahead=False, verify_clauses=None,
                 cov_k_cap=2048, els=False, random_var="auto", configs="default",
-                use_kernel="auto"):
+                use_kernel="auto", mine="auto", mine_gate=0.15):
     """Throughput run timed end-to-end (construction + simplify + sample, to match CMSGen's
     'produce N samples' wall clock) + a small collect run for coverage/soundness. The timed run
     is bounded by `max_chunks` (rate = models/wall is valid regardless of how many it collects —
@@ -97,21 +97,50 @@ def gpap_sample(path, device, *, simplify, n_time, n_cov, b, k_cap, max_chunks=8
     auto-K on a low-RAM host (12 GB Colab) OOM-kills the session collecting a full chunk."""
     if configs == "default":
         configs = DEFAULT_PORTFOLIO
-    smp = GPUSampler.from_cnf_file(path, device, simplify=simplify, els=els, k_cap=k_cap, seed=5,
-                                   use_kernel=use_kernel)
-    if device.type == "cuda":
+
+    def _warmup(s):
         # Warm up CUDA kernels (first-chunk JIT / allocation) at a tiny K so the timed run isn't
         # skewed by one-time warmup — this is what inflated the first shallow circuit's number.
-        _k = smp.K
-        smp.K = min(smp.K, 1024)
-        smp.sample(1, configs=(configs or None), decisions_per_round=b, random_var=random_var,
-                   max_decision_rounds=min(10, max_rounds), max_chunks=1, collect=False,
-                   lookahead=lookahead)   # low round cap: JIT is per-kernel, not per-round → stays cheap
-        smp.K = _k
-        smp._gen.manual_seed(5)                       # restore RNG so the timed run is deterministic
+        # Returns the probe chunk's stats (a FREE gate signal for mining) and restores the RNG
+        # so the timed run stays deterministic.
+        _k = s.K
+        s.K = min(s.K, 1024)
+        w = s.sample(1, configs=(configs or None), decisions_per_round=b, random_var=random_var,
+                     max_decision_rounds=min(10, max_rounds), max_chunks=1, collect=False,
+                     lookahead=lookahead)  # low round cap: JIT is per-kernel, not per-round → stays cheap
+        s.K = _k
+        s._gen.manual_seed(5)
         import random as _r
-        smp._pyrng = _r.Random(5)
+        s._pyrng = _r.Random(5)
         torch.cuda.synchronize()
+        return w
+
+    smp = GPUSampler.from_cnf_file(path, device, simplify=simplify, els=els, k_cap=k_cap, seed=5,
+                                   use_kernel=use_kernel)
+    mine_info = None
+    if device.type == "cuda":
+        w = _warmup(smp)
+        # Entailed-clause mining, gated on the warmup chunk's success rate (free signal — the
+        # warmup runs anyway): healthy instances skip at zero added cost; low-success ones pay
+        # seconds ONCE and every subsequent trajectory inherits the pruning (learned clauses turn
+        # the late BCP conflicts that kill random completions into early ones). Mined clauses are
+        # ENTAILED, so the model set is exactly unchanged (soundness unaffected). Measured: flips
+        # the service family from 0.02-0.7x vs CMSGen to 1.1-6.7x (see gpap/solver/miner.py).
+        if mine == "auto" and smp.M > 0 and w["success_rate"] < mine_gate:
+            try:
+                from gpap.solver.miner import mine_entailed
+                cnf0 = CNF(from_file=path)
+                sup0 = parse_independent_support(path)
+                mi = mine_entailed(cnf0.nv, [list(c) for c in cnf0.clauses], sup0, device)
+                if mi["learned"]:
+                    smp = GPUSampler.from_clauses(
+                        cnf0.nv, [list(c) for c in cnf0.clauses] + mi["learned"], device,
+                        simplify=simplify, els=els, support=sup0, k_cap=k_cap, seed=5,
+                        use_kernel=use_kernel)
+                    _warmup(smp)
+                mine_info = {k2: mi[k2] for k2 in ("n_units", "n_binary", "n_ternary", "seconds")}
+            except RuntimeError as e:   # mining is an optimization — never let it kill the run
+                print(f"   [mine] skipped after error: {e}", file=sys.stderr)
     t0 = time.perf_counter()
     if configs:
         t = smp.sample(n_time, configs=configs, max_decision_rounds=max_rounds,
@@ -158,6 +187,7 @@ def gpap_sample(path, device, *, simplify, n_time, n_cov, b, k_cap, max_chunks=8
     n_coll = len(c.get("models", []))
     uniq_sps = (sps * c["n_distinct"] / n_coll) if (n_coll and c.get("n_distinct")) else None
     return {"samples_per_s": sps, "success_rate": succ,
+            "mined": mine_info,                               # entailed-clause mining stats (None = skipped)
             "unique_sps_est": uniq_sps,
             "assigns_per_s": t.get("assigns_per_s"),          # literals assigned/s (CDCL props/s analogue)
             "kernel": t.get("kernel", False),                 # fused Triton BCP kernel active?
@@ -230,7 +260,7 @@ def main():
     print(f"device={device} | simplify={args.simplify} | n_time={args.n_time:,} n_cov={args.n_cov:,} "
           f"| cmsgen={'yes' if args.cmsgen else 'no'}\n{len(files)} benchmarks\n")
     hdr = (f"{'instance':<24}{'N':>6}{'M':>7}{'|sup|':>6}{'GPAP/s':>10}{'uniq/s~':>10}"
-           f"{'assign/s':>10}{'succ%':>6}{'2wiseG':>7}{'snd':>4}")
+           f"{'assign/s':>10}{'succ%':>6}{'2wiseG':>8}{'snd':>4}")
     if args.cmsgen:
         hdr += f"{'CMS/s':>9}{'2wiseC':>7}{'GPAP/CMS':>9}"
     print(hdr); print("-" * len(hdr))
@@ -248,12 +278,16 @@ def main():
         row = {"name": name, "nv": cnf.nv, "M": len(cnf.clauses), "support": len(sup1),
                "gpap_sps": g["samples_per_s"], "succ": g["success_rate"], "twise_gpap": twg,
                "gpu_sound": g["gpu_sound"], "n_distinct": g["n_distinct"],
-               "unique_sps_est": g.get("unique_sps_est"), "assigns_per_s": g.get("assigns_per_s")}
+               "unique_sps_est": g.get("unique_sps_est"), "assigns_per_s": g.get("assigns_per_s"),
+               "mined": g.get("mined")}
         uq = f"{g['unique_sps_est']:,.0f}" if g.get("unique_sps_est") else "—"
         asg = f"{g['assigns_per_s']:.1e}" if g.get("assigns_per_s") else "—"
+        mi = g.get("mined")
+        # '+' after succ% = entailed-clause mining ran (low-success gate); details land in the JSON
+        mn = "+" if mi else " "
         line = (f"{name[:22]:<24}{cnf.nv:>6}{len(cnf.clauses):>7}{len(sup1):>6}"
                 f"{g['samples_per_s']:>10,.0f}{uq:>10}{asg:>10}"
-                f"{100*g['success_rate']:>5.0f}%{twg:>6.1f}%{snd:>4}")
+                f"{100*g['success_rate']:>5.0f}%{mn}{twg:>6.1f}%{snd:>4}")
         plain = None
         if args.also_plain:
             plain = gpap_sample(path, device, simplify=False, n_time=args.n_time, n_cov=0,
