@@ -144,7 +144,11 @@ class BCPEngine:
         instead of allocating new (K, M) tensors. Falls back to init_state() when K changes
         (e.g. last partial chunk) or when called before any init.
         """
-        if not hasattr(self, '_sat_count') or self._sat_count.size(0) != num_batches:
+        # Re-init when ANY state tensor is missing or K-mismatched: a packed fused chunk
+        # (TritonBCP.reset_fused) resizes assignment/active/conflict to the boosted K while
+        # leaving sat_count/lit_sum untouched, so the two groups can disagree here.
+        if (not hasattr(self, '_sat_count') or self._sat_count.size(0) != num_batches
+                or self._assignment.size(0) != num_batches):
             self.init_state(num_batches)
             return
 

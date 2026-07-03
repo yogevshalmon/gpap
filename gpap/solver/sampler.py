@@ -101,8 +101,17 @@ class GPUSampler:
         # coverage run — is honoured). Hard cap 262,144; validated under the nvidia-smi kill-switch.
         if self.use_kernel and self.M > 0:
             sat_b = 1 if self._max_cls <= 127 else (2 if self._max_cls <= 32767 else 4)
-            fused_pb = (sat_b + 4) * self.M + 10 * self.N + 64
-            self.K_fused = max(self.K, min(int(0.6 * free_bytes / fused_pb), 262_144))
+            if 2 * self.N <= 65535:
+                # PACKED fused chunks (mirrors TritonBCP eligibility): clause state is ONE (K,M)
+                # int32 (vs sat+lsum's (sat_b+4)·M), and the engine's sat/lsum stay allocated at
+                # the BASE K for the other configs — deduct that held block from the budget.
+                eng_hold = ((sat_b + 4) * self.M + 2 * self.N) * self.K
+                fused_pb = 4 * self.M + 10 * self.N + 300
+                budget = max(0, int(0.6 * (free_bytes - eng_hold)))
+                self.K_fused = max(self.K, min(budget // fused_pb, 262_144))
+            else:
+                fused_pb = (sat_b + 4) * self.M + 10 * self.N + 64
+                self.K_fused = max(self.K, min(int(0.6 * free_bytes / fused_pb), 262_144))
         else:
             self.K_fused = self.K
 
@@ -409,14 +418,22 @@ class GPUSampler:
                                the completion phase faces; ~0 means support nearly determines all).
         """
         eng = self.engine
-        eng.reset_state(K)
-        eng.propagate()                                     # process the formula's own units
+        kern = eng._fused_kernel
+        fused_c = lookahead in ("fused", "fsoft") and kern is not None
+        # PACKED fused chunks (16|16 sat|xor state, see bcp_triton) skip reset_state+propagate
+        # entirely: the post-units-flush state is row-identical every chunk, so reset_fused
+        # broadcast-restores a cached row — no (K,M) sat/lsum writes, no per-chunk Python-round
+        # units flush. Falls back (returns False) when 2N > 65535 or no kernel: ordinary path.
+        self._last_chunk_packed = bool(fused_c and kern.reset_fused(eng, K))
+        if not self._last_chunk_packed:
+            eng.reset_state(K)
+            eng.propagate()                                 # process the formula's own units
         if random_var:
             priority = torch.randperm(self.N, generator=self._gen, device=self.device)
         else:
             priority = torch.arange(self.N, device=self.device)
 
-        if lookahead in ("fused", "fsoft") and eng._fused_kernel is not None:
+        if fused_c:
             # v2 fused-trajectory kernel: the WHOLE decide+propagate loop in ONE launch. Picking the
             # next-B-free-vars in priority order inside the kernel is exactly _pick_decisions'
             # semantics; polarity is a per-(chunk,k,v) hash bit. Decision order = support vars first
@@ -436,8 +453,9 @@ class GPUSampler:
             # (each group either decides ≥1 var or exhausts the order). max_decision_rounds exists to
             # bound the v1 PYTHON loop; applying it here cripples B=1 on large-support instances
             # (measured: s832 T=25 support=450 → the 300 cap truncated every trajectory, 2× loss).
-            rounds = eng._fused_kernel.run_trajectory(eng, order, n_support, B, seed, None,
-                                                      soft=(lookahead == "fsoft"))
+            rounds = kern.run_trajectory(eng, order, n_support, B, seed, None,
+                                         soft=(lookahead == "fsoft"),
+                                         packed=self._last_chunk_packed)
             fr = self._free_mask()
             if support_mask is not None:
                 support_complete = eng.active & ~(fr & support_mask).any(dim=1)
@@ -701,9 +719,10 @@ class GPUSampler:
             chunk_cfgs = [self._select_config(plan, cfg_stats, chunk)] if adaptive else plan
             for cfg in chunk_cfgs:
                 rv_c, B_c, la_c = cfg
-                # Fused chunks run at the boosted K (no (K,N) decide masks — see K_fused). Only while
-                # K is at its construction value: a caller-lowered K (coverage run) is honoured.
-                K_c = self.K_fused if (la_c == "fused" and self.K >= self._K_init) else K_sub
+                # Fused-trajectory chunks (fused AND fsoft — both are single-launch kernels with no
+                # (K,N) decide masks — see K_fused) run at the boosted K. Only while K is at its
+                # construction value: a caller-lowered K (coverage run) is honoured.
+                K_c = self.K_fused if (la_c in ("fused", "fsoft") and self.K >= self._K_init) else K_sub
                 if adaptive:
                     self._sync(); t_cfg = time.perf_counter()
                 fully, sup_complete, rounds, free_after = self._run_chunk(
@@ -725,8 +744,16 @@ class GPUSampler:
                     # (Holds ONLY at a complete assignment — sat_count>0 on a PARTIAL assignment just
                     # means "not yet violated". We gate on `fully`, so it's valid.) Redundant with
                     # `active` (cleared the instant a clause hits 0); CPU `_satisfies()` is the real check.
-                    if not bool((self.engine.sat_count[fully] > 0).all()):
-                        gpu_unsound += int((self.engine.sat_count[fully] <= 0).any(dim=1).sum().item())
+                    # Capped to 4096 rows: it's a diagnostic, and an uncapped slice materialises an
+                    # (n_done, M) temp that can reach GBs at the fused K. Packed fused chunks keep
+                    # their counters in the kernel's packed tensor, not engine.sat_count.
+                    idx = fully.nonzero().view(-1)[:4096]
+                    if getattr(self, "_last_chunk_packed", False):
+                        sat_rows = self.engine._fused_kernel.packed_sat_rows(idx)
+                    else:
+                        sat_rows = self.engine.sat_count[idx]
+                    if not bool((sat_rows > 0).all()):
+                        gpu_unsound += int((sat_rows <= 0).any(dim=1).sum().item())
                 if n_done and keep_rows:
                     asg = self.engine.assignment[fully]         # (n_done, 2N) int8
                     pos = asg[:, 0::2] == 1                      # (n_done, N) bool, var v TRUE

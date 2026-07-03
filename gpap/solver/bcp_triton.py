@@ -237,6 +237,117 @@ if _HAVE_TRITON:
             tl.store(nops_ptr + k, nops)
             tl.store(nprops_ptr + k, tail)    # literals assigned (decisions + implications)
 
+    @triton.jit
+    def _bcp_trajectory_packed_kernel(
+        st_ptr,                               # (K, M) int32 PACKED clause state, kernel-private:
+                                              #   low 16 bits  = sat_count (non-falsified count)
+                                              #   high 16 bits = XOR of non-falsified lit indices
+        asg_ptr, active_ptr, conflict_ptr,
+        order_ptr, occ_off_ptr, occ_cls_ptr,
+        trail_ptr, nrounds_ptr, nops_ptr, nprops_ptr,
+        M, N2, P, NSUP, B, TRAIL_CAP, MAX_ROUNDS, seed,
+        SOFT: tl.constexpr,
+    ):
+        """PACKED variant of _bcp_trajectory_kernel — same trajectory semantics, half the state
+        traffic. The inner BCP loop is memory-bound on SCATTERED clause-state sectors (uncoalesced
+        by construction: each occ entry is a random clause), so fusing both counters into ONE int32
+        turns 2 loads + 2 stores (int8/16 sat + int32 sum, 4 random 32B sectors) into 1 load +
+        1 store (2 sectors). XOR replaces SUM as the remaining-literal trick (xor of a one-element
+        set IS the element) because XOR never overflows -> fits 16 bits whenever lit indices do
+        (2N <= 65535; the wrapper falls back to the unpacked kernel otherwise).
+
+        Packed update per falsified literal:  st = (st - 1) ^ (neg << 16)
+          * the -1 hits only the low half: sat >= 1 at every decrement (sat==0 conflicts and halts
+            the row before any further update), so the subtraction never borrows into the XOR half;
+          * the XOR hits only the high half (low 16 bits of the operand are zero).
+        sat==1 -> forced literal = (st >> 16) & 0xFFFF."""
+        k = tl.program_id(0).to(tl.int64)
+        if tl.load(active_ptr + k) != 0:
+            st_row = st_ptr + k * M
+            asg_row = asg_ptr + k * N2
+            trail_row = trail_ptr + k * TRAIL_CAP
+
+            conflict = B * 0
+            head = B * 0
+            tail = B * 0
+            nops = B * 0
+            rounds = B * 0
+            ptr = B * 0
+            while (ptr < P) & (conflict == 0) & (rounds < MAX_ROUNDS):
+                phase_end = NSUP if ptr < NSUP else P
+                picked = B * 0
+                while (picked < B) & (ptr < phase_end):
+                    v = tl.load(order_ptr + ptr)
+                    ptr += 1
+                    if (tl.load(asg_row + 2 * v) == 0) & (tl.load(asg_row + 2 * v + 1) == 0):
+                        h = seed + k * -7046029254386353131 + v.to(tl.int64) * -4658895280553007687
+                        h = (h ^ (h >> 30)) * -4658895280553007687
+                        h = (h ^ (h >> 27)) * -7723592293110705685
+                        pol = ((h >> 13) & 1).to(tl.int32)
+                        if SOFT:
+                            r0 = nops * 0
+                            r1 = nops * 0
+                            s0 = tl.load(occ_off_ptr + 2 * v)
+                            e0 = tl.load(occ_off_ptr + 2 * v + 1)
+                            o0 = s0
+                            while o0 < e0:
+                                c0 = tl.load(occ_cls_ptr + o0).to(tl.int64)
+                                sc0 = tl.load(st_row + c0) & 0xFFFF
+                                r0 += tl.where(sc0 == 1, 1000000,
+                                               tl.where(sc0 == 2, 4, tl.where(sc0 == 3, 1, 0)))
+                                o0 += 1
+                            e1 = tl.load(occ_off_ptr + 2 * v + 2)
+                            o1 = e0
+                            while o1 < e1:
+                                c1 = tl.load(occ_cls_ptr + o1).to(tl.int64)
+                                sc1 = tl.load(st_row + c1) & 0xFFFF
+                                r1 += tl.where(sc1 == 1, 1000000,
+                                               tl.where(sc1 == 2, 4, tl.where(sc1 == 3, 1, 0)))
+                                o1 += 1
+                            pol = tl.where(r0 < r1, 0, tl.where(r1 < r0, 1, pol))
+                        lit = 2 * v + pol
+                        tl.store(asg_row + lit, 1)
+                        tl.store(trail_row + tail, lit)
+                        tail += 1
+                        picked += 1
+                if picked > 0:
+                    rounds += 1
+                while (head < tail) & (conflict == 0):
+                    lit = tl.load(trail_row + head)
+                    head += 1
+                    neg = lit ^ 1
+                    start = tl.load(occ_off_ptr + lit)
+                    end = tl.load(occ_off_ptr + lit + 1)
+                    nops += end - start
+                    o = start
+                    while (o < end) & (conflict == 0):
+                        c = tl.load(occ_cls_ptr + o).to(tl.int64)
+                        st = (tl.load(st_row + c) - 1) ^ (neg << 16)
+                        tl.store(st_row + c, st)
+                        sat = st & 0xFFFF
+                        if sat == 0:
+                            conflict = 1
+                        elif sat == 1:
+                            forced = (st >> 16) & 0xFFFF
+                            if tl.load(asg_row + forced) == 0:
+                                if tl.load(asg_row + (forced ^ 1)) != 0:
+                                    conflict = 1
+                                elif tail < TRAIL_CAP:
+                                    tl.store(asg_row + forced, 1)
+                                    tl.store(trail_row + tail, forced)
+                                    tail += 1
+                                else:
+                                    conflict = 1
+                        o += 1
+
+            if conflict != 0:
+                tl.store(conflict_ptr + k, 1)
+                tl.store(active_ptr + k, 0)
+            tl.store(nrounds_ptr + k, rounds)
+            tl.store(nops_ptr + k, nops)
+            tl.store(nprops_ptr + k, tail)
+
+
 
 class TritonBCP:
     """Per-engine wrapper: buffers, availability, and the launch. Attach via
@@ -256,6 +367,13 @@ class TritonBCP:
         self._nrounds = None            # (K,) int32 (v2 fused-trajectory decision rounds)
         self._ops_acc = None            # 0-d int64 GPU accumulator (lazy-synced)
         self._props_acc = None          # 0-d int64 GPU accumulator: literals assigned (lazy-synced)
+        # PACKED trajectory state (see _bcp_trajectory_packed_kernel): kernel-private (K, M) int32
+        # replacing the engine's sat_count+lit_sum for fused chunks, plus the cached post-units-flush
+        # row that reset_fused() broadcast-restores per chunk (the flush is row-identical every chunk).
+        self._packed = None             # (K, M) int32 packed clause state
+        self._packed_flushed = None     # (M,) int32 packed row AFTER the formula-units flush
+        self._asg_flushed = None        # (2N,) int8 assignment row AFTER the flush
+        self._packed_mode = None        # None = undecided; True/False once probed for this formula
         self.launches = 0
 
     @classmethod
@@ -276,13 +394,16 @@ class TritonBCP:
         cls._avail_cache = ok
         return ok
 
-    def _ensure(self, engine, K: int, B: int):
-        dev = engine._device
+    def _ensure_occ(self, engine):
         occ = engine._formula.occ_list
         if self._occ_key != id(occ):
             self._occ_off32 = occ.occ_offsets.to(torch.int32).contiguous()
             self._occ_cls32 = occ.occ_clauses.to(torch.int32).contiguous()
             self._occ_key = id(occ)
+
+    def _ensure(self, engine, K: int, B: int):
+        dev = engine._device
+        self._ensure_occ(engine)
         cap = engine._num_vars + max(B, 64) + 8
         if (self._trail is None or self._trail.size(0) != K or self._trail.size(1) < cap):
             self._trail = torch.empty((K, cap), dtype=torch.int32, device=dev)
@@ -291,6 +412,77 @@ class TritonBCP:
         if self._ops_acc is None:
             self._ops_acc = torch.zeros((), dtype=torch.int64, device=dev)
             self._props_acc = torch.zeros((), dtype=torch.int64, device=dev)
+
+    def _build_flush_cache(self, engine) -> None:
+        """One-time (per formula): decide packed-eligibility and cache the post-units-flush state.
+
+        Eligibility: literal indices must fit the packed word's 16-bit XOR half (2N <= 65535; the
+        sat half needs max clause size <= 65535, trivially true whenever 2N fits since a clause
+        can't repeat variables more than N times). Otherwise `_packed_mode = False` and fused
+        chunks keep the unpacked kernel on the engine's own tensors.
+
+        The cache: after reset_state()+propagate() the engine state is IDENTICAL for every row of
+        every chunk (the formula-units flush is deterministic), so one (M,)/(2N,) row pair suffices
+        and reset_fused() broadcast-restores it — replacing both reset_state's (K,M) sat/lsum
+        writes and the per-chunk Python-round-loop flush. The packed row's XOR half is computed
+        with one numpy pass over the occ CSR (occ[l] ∋ c ⟺ literal l^1 ∈ clause c; falsified
+        literals map to 0, the XOR identity)."""
+        import numpy as np
+        n2 = 2 * engine._num_vars
+        M = engine._num_clauses
+        if M == 0 or n2 > 65535:
+            self._packed_mode = False
+            return
+        self._ensure_occ(engine)
+        engine.reset_state(1)
+        engine.propagate()
+        if bool(engine._conflict[0].item()):    # formula units conflict -> whole formula UNSAT;
+            self._packed_mode = False           # keep the ordinary path (0 models either way)
+            return
+        self._asg_flushed = engine._assignment[0].clone()
+        sat0 = engine._sat_count[0].to(torch.int32)
+        off = self._occ_off32.cpu().numpy().astype(np.int64)
+        cls = self._occ_cls32.cpu().numpy().astype(np.int64)
+        lits = np.repeat(np.arange(n2, dtype=np.int64) ^ 1, off[1:] - off[:-1])
+        asg = self._asg_flushed.cpu().numpy()
+        vals = np.where(asg[lits ^ 1] == 1, 0, lits)        # falsified -> 0 (XOR identity)
+        order = np.argsort(cls, kind="stable")
+        starts = np.searchsorted(cls[order], np.arange(M, dtype=np.int64))
+        xor = np.bitwise_xor.reduceat(vals[order], starts)  # per-clause XOR of non-falsified lits
+        xor_t = torch.from_numpy((xor & 0xFFFF).astype(np.int32)).to(engine._device)
+        self._packed_flushed = (sat0 & 0xFFFF) | (xor_t << 16)
+        self._packed_mode = True
+
+    @torch.inference_mode()
+    def reset_fused(self, engine, K: int) -> bool:
+        """Fast per-chunk reset for PACKED fused chunks: broadcast-restore the cached post-flush
+        state instead of reset_state()+propagate(). Engine sat_count/lit_sum are left UNTOUCHED
+        (the packed tensor is the kernel's clause state); assignment/active/conflict stay on the
+        engine so the sampler's readout code is unchanged. Returns False when packing is
+        unavailable (caller must run the ordinary reset_state()+propagate() path)."""
+        if self._packed_mode is None:
+            self._build_flush_cache(engine)
+        if not self._packed_mode:
+            return False
+        dev = engine._device
+        n2 = 2 * engine._num_vars
+        if getattr(engine, "_assignment", None) is None or engine._assignment.size(0) != K:
+            engine._assignment = torch.empty((K, n2), dtype=torch.int8, device=dev)
+            engine._active = torch.empty(K, dtype=torch.bool, device=dev)
+            engine._conflict = torch.empty(K, dtype=torch.bool, device=dev)
+            engine._timed_out = torch.empty(K, dtype=torch.bool, device=dev)
+        engine._assignment.copy_(self._asg_flushed.unsqueeze(0).expand(K, -1))
+        engine._active.fill_(True)
+        engine._conflict.fill_(False)
+        engine._timed_out.fill_(False)
+        if self._packed is None or self._packed.size(0) != K:
+            self._packed = torch.empty((K, engine._num_clauses), dtype=torch.int32, device=dev)
+        self._packed.copy_(self._packed_flushed.unsqueeze(0).expand(K, -1))
+        return True
+
+    def packed_sat_rows(self, row_idx: torch.Tensor) -> torch.Tensor:
+        """sat_count values for the given rows of the PACKED state (diagnostics/soundness only)."""
+        return self._packed[row_idx] & 0xFFFF
 
     @torch.inference_mode()
     def run(self, engine, decisions: torch.Tensor):
@@ -320,27 +512,42 @@ class TritonBCP:
 
     @torch.inference_mode()
     def run_trajectory(self, engine, order: torch.Tensor, n_support: int, B: int, seed: int,
-                       max_rounds: "int | None", soft: bool = False) -> int:
+                       max_rounds: "int | None", soft: bool = False, packed: bool = False) -> int:
         """v2 fused chunk: run WHOLE trajectories (decide + propagate loops) in one launch.
         `order` = (P,) int32 decision order (support vars first, then completion vars). Picking the
         next B still-free vars in `order` is exactly _pick_decisions' first-B-free-in-priority-order
         semantics; polarity is a stateless per-(chunk,k,v) hash bit (distributionally uniform — the
         torch RNG stream is NOT consumed, so fused runs are reproducible via `seed` alone).
+        `packed=True` (caller must have prepared state via reset_fused) runs the 16|16 packed-state
+        kernel — identical trajectory semantics, half the clause-state memory traffic.
+        (In-kernel retry-on-conflict was built and MEASURED OUT here: 3 retries tripled per-slot
+        success on the low-success instances exactly as predicted, but wall tripled with it —
+        conflicts on those instances die LATE, so a retry costs a full trajectory and models/wall
+        stayed 0.8-1.0x. Wrapping the retry loop around this kernel also taxed the no-retry path
+        ~10% median, so the experiment was removed rather than kept as a config.)
         Returns the max decision rounds any trajectory used (diagnostic; one small sync)."""
-        K = engine._sat_count.size(0)
+        K = engine._assignment.size(0)          # NOT sat_count: stale-sized on packed chunks
         self._ensure(engine, K, 64)
         if self._nrounds is None or self._nrounds.size(0) != K:
             self._nrounds = torch.empty(K, dtype=torch.int32, device=engine._device)
         order = order.to(torch.int32).contiguous()
-        _bcp_trajectory_kernel[(K,)](
-            engine._sat_count, engine._lit_sum, engine._assignment,
-            engine._active.view(torch.int8), engine._conflict.view(torch.int8),
-            order, self._occ_off32, self._occ_cls32,
-            self._trail, self._nrounds, self._nops, self._nprops,
-            engine._num_clauses, 2 * engine._num_vars, order.numel(), n_support, B,
-            self._trail.size(1), (max_rounds if max_rounds is not None else 1 << 30),
-            seed, SOFT=(1 if soft else 0), num_warps=1,
-        )
+        bufs = (order, self._occ_off32, self._occ_cls32,
+                self._trail, self._nrounds, self._nops, self._nprops)
+        dims = (engine._num_clauses, 2 * engine._num_vars, order.numel(), n_support, B,
+                self._trail.size(1), (max_rounds if max_rounds is not None else 1 << 30), seed)
+        if packed:
+            _bcp_trajectory_packed_kernel[(K,)](
+                self._packed, engine._assignment,
+                engine._active.view(torch.int8), engine._conflict.view(torch.int8),
+                *bufs, *dims,
+                SOFT=(1 if soft else 0), num_warps=1,
+            )
+        else:
+            _bcp_trajectory_kernel[(K,)](
+                engine._sat_count, engine._lit_sum, engine._assignment,
+                engine._active.view(torch.int8), engine._conflict.view(torch.int8),
+                *bufs, *dims, SOFT=(1 if soft else 0), num_warps=1,
+            )
         self.launches += 1
         engine.total_bcp_rounds += 1
         self._ops_acc += self._nops.sum()

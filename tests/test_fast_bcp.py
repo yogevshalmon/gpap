@@ -194,3 +194,57 @@ def test_kernel_ops_counter():
     kern.apply_and_propagate(dec)
     assert kern.kernel_ops() > 0
     assert kern.total_bcp_rounds >= 1
+
+
+def _sample_fused(clauses, nv, cfg, *, force_unpacked, seed=17, chunks=8):
+    smp = GPUSampler.from_clauses(nv, clauses, DEV, k_cap=128, seed=seed, use_kernel=True)
+    if force_unpacked:
+        smp.engine._fused_kernel._packed_mode = False   # reset_fused declines -> unpacked kernel
+    out = smp.sample(10 ** 9, configs=[cfg], max_chunks=chunks, collect=True,
+                     verify_clauses=clauses)
+    packed_ran = bool(getattr(smp, "_last_chunk_packed", False))
+    assert packed_ran == (not force_unpacked), "wrong kernel variant dispatched"
+    assert out["all_valid"] and out["gpu_sound"]
+    return sorted(tuple(m) for m in out["models"]), out
+
+
+def test_packed_vs_unpacked_identical_models():
+    """The PACKED 16|16 (sat|xor) trajectory kernel must be semantically identical to the unpacked
+    one: same seed => bit-identical model sets (same order, same hash polarity, same propagation).
+    Includes formula UNIT clauses so the cached-flush restore path (reset_fused) is non-trivial."""
+    clauses = [[3], [1, 2, -3], [-1, 4], [-2, -4], [3, -4, 5], [-5, 1], [2, 5, 6], [-6, -2]]
+    for cfg in [(True, 1, "fused"), (True, 2, "fused"), (True, 2, "fsoft")]:
+        m_packed, o_p = _sample_fused(clauses, 6, cfg, force_unpacked=False)
+        m_plain, o_u = _sample_fused(clauses, 6, cfg, force_unpacked=True)
+        assert m_packed == m_plain, f"packed kernel changed the model set for {cfg}"
+        assert o_p["n_models"] == o_u["n_models"]
+
+
+def test_packed_circuit_identical_models(tmp_path):
+    """Packed vs unpacked on a real unrolled circuit (deep cascades + a pinned-output unit)."""
+    from scripts.bench_to_cnf import parse_bench, build_cnf, write_dimacs
+    circ = parse_bench("benchmarks/circuits/s386.bench")
+    b, support, _ = build_cnf(circ, T=2, seed=1)
+    p = tmp_path / "s386c2.cnf"
+    write_dimacs(str(p), b, support)
+    from pysat.formula import CNF
+    cnf = CNF(from_file=str(p))
+    clauses = [list(c) for c in cnf.clauses]
+    for cfg in [(True, 8, "fused"), (True, 1, "fsoft")]:
+        m_packed, _ = _sample_fused(clauses, cnf.nv, cfg, force_unpacked=False, chunks=4)
+        m_plain, _ = _sample_fused(clauses, cnf.nv, cfg, force_unpacked=True, chunks=4)
+        assert m_packed == m_plain, f"packed kernel changed the model set for {cfg}"
+
+
+def test_packed_bandit_mix_sound():
+    """Alternating packed-fused / oracle / v1 chunks in ONE run: the engine state groups
+    (assignment at the fused K vs sat/lsum at the base K) must never corrupt each other
+    (reset_state re-inits on any K mismatch)."""
+    clauses = [[3], [1, 2, -3], [-1, 4], [-2, -4], [3, -4, 5], [-5, 1]]
+    smp = GPUSampler.from_clauses(5, clauses, DEV, k_cap=64, seed=9, use_kernel=True)
+    smp.K_fused = 128                                   # force fused chunks to a DIFFERENT K
+    out = smp.sample(10 ** 9, configs=[(True, 1, "fused"), (True, 2, False), (True, 2, "orac")],
+                     max_chunks=9, collect=True, verify_clauses=clauses)
+    assert out["all_valid"] and out["gpu_sound"] and out["n_models"] > 0
+    for m in out["models"]:
+        assert _satisfies(m, clauses)
