@@ -151,14 +151,22 @@ def gpap_sample(path, device, *, simplify, n_time, n_cov, b, k_cap, max_chunks=8
     del smp
     if device.type == "cuda":
         torch.cuda.empty_cache()
+    # Estimated UNIQUE solutions/s: timed raw rate × the distinct fraction measured post-hoc on the
+    # coverage sample. Dedup/reconstruction NEVER touches the timed run (collect=False) — this is a
+    # pure post-processing estimate (exact on large spaces where distinct_frac≈1; honest on tiny
+    # spaces where re-sampling dominates). None when no coverage run was requested.
+    n_coll = len(c.get("models", []))
+    uniq_sps = (sps * c["n_distinct"] / n_coll) if (n_coll and c.get("n_distinct")) else None
     return {"samples_per_s": sps, "success_rate": succ,
+            "unique_sps_est": uniq_sps,
+            "assigns_per_s": t.get("assigns_per_s"),          # literals assigned/s (CDCL props/s analogue)
             "kernel": t.get("kernel", False),                 # fused Triton BCP kernel active?
             "attempts_per_s": t.get("attempts_per_s"),        # raw trajectory throughput (K/chunk rate)
             "bcp_rounds_per_chunk": t.get("bcp_rounds_per_chunk"),
             "bcp_ops_per_attempt": t.get("bcp_ops_per_attempt"),
             "support_size": t["support_size"], "gpu_sound": c.get("gpu_sound", True),
             "cpu_sound": c.get("all_valid"), "models": c.get("models", []),
-            "n_distinct": c.get("n_distinct"), "n_collected": len(c.get("models", [])),
+            "n_distinct": c.get("n_distinct"), "n_collected": n_coll,
             "tuned_rv": tuned_rv, "tuned_b": tuned_b, "tuned_la": tuned_la,
             "config_breakdown": t.get("config_breakdown")}
 
@@ -221,8 +229,8 @@ def main():
     files = sorted(glob.glob(args.glob))
     print(f"device={device} | simplify={args.simplify} | n_time={args.n_time:,} n_cov={args.n_cov:,} "
           f"| cmsgen={'yes' if args.cmsgen else 'no'}\n{len(files)} benchmarks\n")
-    hdr = (f"{'instance':<24}{'N':>6}{'M':>7}{'|sup|':>6}{'GPAP/s':>10}{'succ%':>6}{'2wiseG':>7}"
-           f"{'snd':>4}")
+    hdr = (f"{'instance':<24}{'N':>6}{'M':>7}{'|sup|':>6}{'GPAP/s':>10}{'uniq/s~':>10}"
+           f"{'assign/s':>10}{'succ%':>6}{'2wiseG':>7}{'snd':>4}")
     if args.cmsgen:
         hdr += f"{'CMS/s':>9}{'2wiseC':>7}{'GPAP/CMS':>9}"
     print(hdr); print("-" * len(hdr))
@@ -239,9 +247,13 @@ def main():
         snd = "OK" if g["gpu_sound"] and (g["cpu_sound"] in (None, True)) else "BAD"
         row = {"name": name, "nv": cnf.nv, "M": len(cnf.clauses), "support": len(sup1),
                "gpap_sps": g["samples_per_s"], "succ": g["success_rate"], "twise_gpap": twg,
-               "gpu_sound": g["gpu_sound"], "n_distinct": g["n_distinct"]}
+               "gpu_sound": g["gpu_sound"], "n_distinct": g["n_distinct"],
+               "unique_sps_est": g.get("unique_sps_est"), "assigns_per_s": g.get("assigns_per_s")}
+        uq = f"{g['unique_sps_est']:,.0f}" if g.get("unique_sps_est") else "—"
+        asg = f"{g['assigns_per_s']:.1e}" if g.get("assigns_per_s") else "—"
         line = (f"{name[:22]:<24}{cnf.nv:>6}{len(cnf.clauses):>7}{len(sup1):>6}"
-                f"{g['samples_per_s']:>10,.0f}{100*g['success_rate']:>5.0f}%{twg:>6.1f}%{snd:>4}")
+                f"{g['samples_per_s']:>10,.0f}{uq:>10}{asg:>10}"
+                f"{100*g['success_rate']:>5.0f}%{twg:>6.1f}%{snd:>4}")
         plain = None
         if args.also_plain:
             plain = gpap_sample(path, device, simplify=False, n_time=args.n_time, n_cov=0,

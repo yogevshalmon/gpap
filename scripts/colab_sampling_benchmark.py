@@ -195,6 +195,10 @@ def run_instance(path: str, device: torch.device, *, cmsgen_bin: str | None, n_t
         # low attempts/s = BCP-bound (deep propagation, many rounds/ops per trajectory).
         "attempts_per_s": g.get("attempts_per_s"), "bcp_rounds_pc": g.get("bcp_rounds_per_chunk"),
         "bcp_ops_pa": g.get("bcp_ops_per_attempt"),
+        # unique/s estimate (post-processing only — raw rate × distinct fraction of the cov sample)
+        # + literals-assigned/s (the CDCL props/sec analogue; CDCL ≈ 1e7/s single-core).
+        "unique_sps_est": g.get("unique_sps_est"), "assigns_per_s": g.get("assigns_per_s"),
+        "kernel": g.get("kernel"),
         "in_niche": g["success_rate"] > 0.10,           # rough: produces models at a usable rate
     }
     if cmsgen_bin:
@@ -228,21 +232,23 @@ CIRCUIT_MAX_CLAUSES = 100_000                          # skip any unroll whose C
 CIRCUIT_ITC_QUICK = ["b01", "b03", "b06", "b08", "b10", "b13"]
 
 # Circuit sampler portfolio (the adaptive bandit picks the winner per instance; measured per-config
-# on the circuit subset, RTX 4080, 2026-07-02 — each entry is the outright winner somewhere):
-#   (True, 64, False)  — v1 kernel, high B: wins SHALLOW circuits (s526 T=1: 18.1M samples/s; fused
-#                        loses shallow — its sequential per-warp order walk beats the tensor decide
-#                        path only when decision rounds are many).
-#   (True, 1, "soft")  — cheap conflict-avoidance risk-polarity: still the winner on the tight/deep
-#                        b03-type instances (T=25: 71k/s vs 62k fused).
-#   (True, 8, "fused") — v2 fused-trajectory kernel (whole trajectory in ONE launch) at boosted
-#                        K_fused: wins the deep 100%-success instances (b07 T=25 51k/s, s1196 T=25
-#                        19k/s — +59–126% over the best v1 config).
-#   (True, 1, "fused") — B=1's success edge is FREE in-kernel (rounds cost nothing): wins the
-#                        conflict-heavy deep s386 T=25 (51k/s, 2.5× best v1).
-# NOTE (Phase-A measured): per-trajectory BCP work is ~UNIFORM on these circuits, so straggler
-# early-termination has no tail to trim — not a portfolio option. Fused configs degrade gracefully to
-# plain (rv, B) when the Triton kernel is unavailable.
-CIRCUIT_PORTFOLIO = [(True, 64, False), (True, 1, "soft"), (True, 8, "fused"), (True, 1, "fused")]
+# on 22 circuit instances incl. all ISCAS-85, RTX 4080, 2026-07-02 — each entry is the outright
+# winner somewhere):
+#   (True, 8, "fused") — v2 fused-trajectory kernel at boosted K_fused: broad deep-circuit winner
+#                        (b07 T=25, b05/b12; strong everywhere the support drives propagation).
+#   (True, 1, "fused") — B=1's success edge is FREE in-kernel: wins the conflict-heavy deep set
+#                        (s386 T=25 48k/s, s832 T=25 21k/s, s1196 T=25 22k/s, b04, most ISCAS-85).
+#   (True, 8, "fsoft") — in-kernel SOFT risk-polarity at fused speed: wins the tight-cascade family
+#                        (b03 T=25 267k/s = 3.8× the old v1-soft winner; c1355 T=1 830k/s at 100%).
+#                        Regime-dependent (0% where greedy polarity misleads) — the bandit gates it.
+#                        Replaces v1 (True,1,"soft"), which it dominates everywhere measured.
+#   (True, 64, "orac") — high-B on the PYTHON engine: ultra-shallow wide instances where the batched
+#                        tensor ops beat the per-warp kernel (b14 T=1: 53.7M/s vs 42M kernel-B64).
+# NOTES: fused configs ignore max_decision_rounds (the kernel structurally terminates in ≤|order|
+# groups; the cap is a v1-Python-loop artifact that truncated B=1 on large supports). Per-trajectory
+# BCP work is ~UNIFORM on circuits ⇒ straggler early-stop has no tail to trim (measured; not an
+# option). Fused/orac degrade gracefully to plain (rv,B) when the Triton kernel is unavailable.
+CIRCUIT_PORTFOLIO = [(True, 8, "fused"), (True, 1, "fused"), (True, 8, "fsoft"), (True, 64, "orac")]
 
 
 def run_circuits(device: torch.device, *, cmsgen_bin: str | None, n_time: int, n_cov: int, b: int,
@@ -293,7 +299,9 @@ def run_circuits(device: torch.device, *, cmsgen_bin: str | None, n_time: int, n
                 la = f",la={r['tuned_la']}" if r.get("tuned_la") else ""
                 cfg = f"  [rv={r.get('tuned_rv')},B={r.get('tuned_b')}{la}]"
                 att = r.get("attempts_per_s") or 0
-                work = (f"  | {att:>9,.0f} att/s  {r.get('bcp_rounds_pc') or 0:.0f} rnds/chk  "
+                uq = f"{r['unique_sps_est']:,.0f}" if r.get("unique_sps_est") else "—"
+                asg = f"{r['assigns_per_s']:.1e}" if r.get("assigns_per_s") else "—"
+                work = (f"  | uniq~{uq}/s  {asg} assign/s  {att:>9,.0f} att/s  "
                         f"{r.get('bcp_ops_pa') or 0:,.0f} ops/att")
                 print(f"   {inst} T={T:>2}: GPAP {r['gpap_sps']:>12,.0f}/s  succ {100*r['succ']:.0f}%"
                       f"{rt}{cfg}{work}", flush=True)
@@ -412,8 +420,8 @@ def _print_circuit_table(rows: list[dict], has_cms: bool) -> None:
     rows = [r for r in rows if "gpap_sps" in r]
     if not rows:
         return
-    hdr = (f"{'circuit':<8}{'T':>4}{'N':>7}{'M':>7}{'sup':>5}{'GPAP/s':>11}{'succ':>6}"
-           f"{'uniqG':>8}{'config':>15}")
+    hdr = (f"{'circuit':<8}{'T':>4}{'N':>7}{'M':>7}{'sup':>5}{'GPAP/s':>11}{'uniq/s~':>10}"
+           f"{'assign/s':>10}{'succ':>6}{'uniqG':>8}{'config':>15}")
     if has_cms:
         hdr += f"{'CMS/s':>10}{'uniqC':>8}{'ratio':>8}"
     print("\n=== circuits: throughput + unique (distinct) solution counts ===")
@@ -421,9 +429,11 @@ def _print_circuit_table(rows: list[dict], has_cms: bool) -> None:
     for r in sorted(rows, key=lambda x: (len(x["circuit"]), x["circuit"], x["cycles"])):
         la = f",{r['tuned_la']}" if r.get("tuned_la") else ""
         cfg = f"rv={int(bool(r.get('tuned_rv')))},B={r.get('tuned_b')}{la}"
+        uq = f"{r['unique_sps_est']:,.0f}" if r.get("unique_sps_est") else "—"
+        asg = f"{r['assigns_per_s']:.1e}" if r.get("assigns_per_s") else "—"
         line = (f"{r['circuit']:<8}{r['cycles']:>4}{r['N']:>7}{r['M']:>7}{r['support']:>5}"
-                f"{r['gpap_sps']:>11,.0f}{100*r['succ']:>5.0f}%{(r.get('n_distinct') or 0):>8,}"
-                f"{cfg:>15}")
+                f"{r['gpap_sps']:>11,.0f}{uq:>10}{asg:>10}"
+                f"{100*r['succ']:>5.0f}%{(r.get('n_distinct') or 0):>8,}{cfg:>15}")
         if has_cms and "cms_sps" in r:
             ratio = f"{r['ratio']:.2f}x" if r.get("ratio") else "—"
             line += f"{r['cms_sps']:>10,.0f}{(r.get('cms_distinct') or 0):>8,}{ratio:>8}"
