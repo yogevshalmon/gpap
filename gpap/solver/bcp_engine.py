@@ -330,9 +330,14 @@ class BCPEngine:
         self._conflict |= new_conflicts
         self._active   &= ~new_conflicts
 
-        # Get unique (batch, lit) pairs for still-active batches
+        # Get unique (batch, lit) pairs for still-active batches. Also drop literals ALREADY
+        # assigned TRUE (e.g. implied by a prior propagate() units flush): _bulk_propagate_lits
+        # decrements occ[lit] unconditionally, so re-applying an assigned literal would
+        # double-decrement sat_count -> garbage forced literals -> FALSE conflicts. (The Triton
+        # kernel has always had this skip-duplicates guard; this mirrors it on the bulk path.)
         pairs = assum_mat.nonzero()           # (total_unique, 2) int64
-        valid = self._active[pairs[:, 0]]
+        valid = self._active[pairs[:, 0]] & \
+            (self._assignment[pairs[:, 0], pairs[:, 1]] == 0)
         pairs = pairs[valid]
 
         if pairs.size(0) > 0:
