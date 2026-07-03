@@ -399,3 +399,53 @@ is now free** (decision rounds cost nothing in-kernel), so B=1-fused wins broadl
 Soundness: fused models are valid by construction (fully-assigned + conflict-free) and CPU-verified in
 tests (65/65 green); the fused polarity source is a splitmix64 hash (balanced; binomial-clean in
 8-groups) rather than the torch stream — watch 2-wise coverage parity on the next full CMSGen run.
+
+## v3: packed 16|16 (sat|XOR) clause state + cached-flush reset (2026-07-03)
+
+The fused kernel's inner loop is **bandwidth-bound on scattered clause-state sectors**: every occ
+entry does read-modify-write on `sat_count` (int8/16) AND `lit_sum` (int32) — 4 uncoalesced 32-byte
+sectors (each occ entry hits a "random" clause; each scalar access fetches a full sector). v3 packs
+both counters into ONE int32 per (trajectory, clause): **low 16 bits = sat_count, high 16 bits = XOR
+of the non-falsified literal indices**. XOR replaces SUM as the remaining-literal trick — the xor of
+a one-element set IS the element — and unlike the sum it **never overflows**, so 16 bits suffice
+whenever literal indices do (2N ≤ 65535, checked on the POST-simplification formula; every current
+bench instance qualifies, incl. b12 T=25 after ELS: N 42,051 → 16,344; the unpacked kernel remains
+as the fallback). The packed update is one instruction pair:
+
+    st = (tl.load(st_row + c) - 1) ^ (neg << 16)     # -1 can't borrow into the XOR half:
+    tl.store(st_row + c, st)                          # sat ≥ 1 at every decrement (sat==0
+    sat = st & 0xFFFF                                 # conflicts and halts the row first)
+    forced = (st >> 16) & 0xFFFF                      # when sat == 1
+
+→ 2 sectors per occ entry instead of 4. Second win, same design: the packed state is
+**kernel-private** (`TritonBCP._packed`), and the post-units-flush state is row-identical every
+chunk, so `reset_fused()` broadcast-restores ONE cached (M,)/(2N,) row pair instead of
+`reset_state()+propagate()` — no (K,M) sat/lsum rewrite, no per-chunk Python-round units flush
+(the XOR half of the cached row is one numpy `bitwise_xor.reduceat` pass over the occ CSR).
+`K_fused` re-budgets to 4M+10N per row (was (sat_b+4)M+10N) → **K_fused +10–30% across the table**.
+
+**Validation (the noise-methodology playbook, RTX 4080):**
+- Pinned same-seed gate: **27/27 (instance,config) rows bit-identical model counts** vs the
+  pre-packed tree, walls 1.03–1.54× (median ~1.22×) at equal pinned K. Packed-vs-unpacked
+  model-set identity is also a permanent test (`test_packed_vs_unpacked_identical_models`).
+- 24-chunk portfolio, 22 circuit instances: geomean best-rate **1.27×**, no real row <0.9×
+  (b14 T=1 read 0.88× once; re-probes 0.99–1.00× — ms-scale walls, noise).
+- Peak reserved 7.0 GB vs baseline's 7.6 GB (fast reset kills the temporaries), no kill-switch trips.
+
+**fsoft joins the K-boost**: fsoft chunks are fused-trajectory launches too (no (K,N) masks), so they
+now run at `K_fused` as well — b03 T=25 e2e 2.30×, c1355 1.95×, c499 1.62×; the one soft spot
+(s832, whose winner is a *fused* config the change doesn't touch) re-probed at 0.90×/0.90× = its
+established noise band, while its own e2e sps improved.
+
+**Final vs the pre-packed baseline: geomean 1.31× e2e samples/s, 1.23× best-rate, worst instance
+0.93× (noise-band).** Everything is a pure win on top of v2's 4–22×.
+
+**Measured OUT — in-kernel retry-on-conflict** ("dead slots become extra attempts"): 3 in-kernel
+restarts (row state restored from the cached flushed rows, attempt index mixed into the polarity
+hash) **tripled per-slot success exactly as predicted** (b04 11→34%, b11 3→12%, s386 37→83%) — and
+tripled wall with it: models/wall 0.81–0.97× everywhere. Conflicts on the success-bound residuals
+die LATE (a failed attempt ≈ a full trajectory), so retry ≈ running more chunks, minus kernel
+overhead. Also: wrapping the retry loop around the packed kernel taxed the RETRIES=0 path ~10%
+median (loop-carried state / register pressure) — structural lesson: **experimental paths get their
+own kernel; never wrap the accepted hot loop.** The experiment was removed; the residuals still
+need a learning-class lever, not restarts.
