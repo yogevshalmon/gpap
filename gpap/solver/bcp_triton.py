@@ -192,7 +192,13 @@ if _HAVE_TRITON:
                                 r1 += tl.where(sc1 == 1, 1000000,
                                                tl.where(sc1 == 2, 4, tl.where(sc1 == 3, 1, 0)))
                                 o1 += 1
-                            pol = tl.where(r0 < r1, 0, tl.where(r1 < r0, 1, pol))
+                            # ε-greedy (25% hash-forced random): pure risk-argmin is
+                            # row-DETERMINISTIC when risks never tie — all K trajectories
+                            # replicate ONE path (measured: c1355 collapsed to 70 distinct
+                            # solutions in 6,144 samples while CMSGen's were 100% distinct).
+                            # ε keeps most conflict-avoidance and guarantees divergence.
+                            risky = tl.where(r0 < r1, 0, tl.where(r1 < r0, 1, pol))
+                            pol = tl.where(((h >> 17) & 7) == 0, pol, risky)
                         lit = 2 * v + pol
                         tl.store(asg_row + lit, 1)
                         tl.store(trail_row + tail, lit)
@@ -304,7 +310,13 @@ if _HAVE_TRITON:
                                 r1 += tl.where(sc1 == 1, 1000000,
                                                tl.where(sc1 == 2, 4, tl.where(sc1 == 3, 1, 0)))
                                 o1 += 1
-                            pol = tl.where(r0 < r1, 0, tl.where(r1 < r0, 1, pol))
+                            # ε-greedy (25% hash-forced random): pure risk-argmin is
+                            # row-DETERMINISTIC when risks never tie — all K trajectories
+                            # replicate ONE path (measured: c1355 collapsed to 70 distinct
+                            # solutions in 6,144 samples while CMSGen's were 100% distinct).
+                            # ε keeps most conflict-avoidance and guarantees divergence.
+                            risky = tl.where(r0 < r1, 0, tl.where(r1 < r0, 1, pol))
+                            pol = tl.where(((h >> 17) & 7) == 0, pol, risky)
                         lit = 2 * v + pol
                         tl.store(asg_row + lit, 1)
                         tl.store(trail_row + tail, lit)

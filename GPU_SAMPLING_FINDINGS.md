@@ -499,3 +499,52 @@ free vars) and output soundness is unaffected (conflicted rows are discarded) �
 assumption-checking flow that assumes an implied literal after a flush silently saw false
 conflicts. Fixed with an already-assigned filter on the pair list (mirrors the kernel's
 skip-duplicates guard); regression test + miner entailment tests added.
+
+## Comparison audit: methodology, paper faithfulness, and a mode-collapse fix (2026-07-04)
+
+Full sanity pass over the CMSGen comparison + the circuit benchmark constructions, against the
+two reference papers (Recurrent CircuitSAT Sampling, arXiv 2502.21226; DEMOTIC, arXiv 2502.08086).
+
+**Comparison-fairness findings (fixed in scripts/sample_benchmark.py):**
+1. *Wall asymmetry*: CMSGen's rate was end-to-end (subprocess incl. parse+write) while GPAP's
+   headline is steady-state (excludes construction/simplify/warmup/mining). Added a TRUE
+   end-to-end column + `e2e/CMS` ratio. Fresh 29-instance sk suite, live CMSGen, CPU-verified:
+   **geomean 22.3× steady-state / 5.34× end-to-end** at the 50k-sample workload (e2e converges
+   to steady-state as the workload grows; at 50k, setup dominates the fastest instances).
+   Three borderline mined instances don't recoup mining at 50k samples (ActivityService2 0.27×,
+   PhaseService 0.52×, Notification 0.03× e2e — steady-state 0.91×/1.11×/0.14×).
+2. *Unique-metric parity* (both papers report UNIQUE solutions/s): CMSGen's distinct fraction is
+   now measured too — GPAP's ≥ CMSGen's on every sk instance (both collapse only on the two
+   tiny-space instances), so unique/s quotes never flatter us.
+3. CMSGen v1.0, seed 0, single-threaded, full-model output (projection applied identically to
+   both samplers for coverage/distinct metrics). All GPAP models CPU-verified (`--verify-cpu`).
+
+**Paper-faithfulness (verified from the papers' full texts):**
+* Recurrent: complete ISCAS-89+ITC'99; baselines at T=25 unroll, Tseitin CNF; output constraints
+  = random values on *certain* output nodes chosen SAT-feasible at T=25; metric unique/s; CMSGen
+  on EPYC 9274F. Ours matches the T=25 Tseitin protocol (clause counts within 0.4% on s386);
+  deviations: we pin ALL final-cycle outputs to a simulated (guaranteed-SAT) trace (tighter
+  constraint), sweep T∈{1,5,10,25} (superset), skip their >100k-clause instances.
+* DEMOTIC: all 11 ISCAS-85; random values on *some* outputs (their c17 example: one output);
+  Tseitin CNF for baselines; metric unique/s, ≥1000 distinct in 2h, best run. Ours matches
+  (pin-1-output, seed=1 simulated value); we exclude trivial c17. NOTE: pin-choice variance is
+  large — the same c3540 under two different pinned values gives 98% vs 0% trajectory success.
+* Cross-check, our local CMSGen vs the papers' published CMSGen rates on the shared protocol
+  rows: 0.5–3.8× (mostly ~2× — our CNFs share DFF variables so they're ~3× fewer vars; CPU
+  differs). Same order of magnitude everywhere ⇒ our CMSGen baseline is healthy, mostly FASTER
+  than what the papers gave it.
+
+**Fresh full circuit table (77 rows, per-instance isolated runs, live CMSGen): GPAP wins every
+row; geomean 215× vs CMSGen** (worst rows: b10 T=10 3.3×, b11 T=25 11×). Informal GPU-vs-GPU on
+the papers' unique/s metric (our laptop 4080 vs their V100): above the Recurrent paper on all
+shared sequential rows (1.0–10.7×), above DEMOTIC on 10/10 shared ISCAS-85 after the fix below
+(1.1–7.9×).
+
+**Mode collapse found & fixed (the audit's key catch):** c1355-fsoft produced 70 distinct
+solutions in 6,144 samples (CMSGen: 5,000/5,000 distinct on the same CNF) — pure risk-argmin
+polarity is row-DETERMINISTIC when risks never tie, so all K trajectories replicate one path;
+the raw-throughput bandit is blind to it. Fix: ε-greedy risk polarity in both SOFT kernels
+(hash-forced random bit, ε=1/8) — c1355 distinct 2%→77%, unique/s 13.7k→**700k** (36×, now above
+DEMOTIC's 649k), while the healthy fsoft winners hold 0.94–0.99× raw (same-protocol A/B).
+Residual hardening idea (not implemented): scale the bandit's reward by a sampled distinct
+fraction so any future collapse self-corrects.

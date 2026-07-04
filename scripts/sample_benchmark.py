@@ -115,6 +115,8 @@ def gpap_sample(path, device, *, simplify, n_time, n_cov, b, k_cap, max_chunks=8
         torch.cuda.synchronize()
         return w
 
+    t_start = time.perf_counter()   # TRUE end-to-end clock: construction + simplify + warmup +
+    #                                 mining + the timed run — the wall CMSGen is charged for
     smp = GPUSampler.from_cnf_file(path, device, simplify=simplify, els=els, k_cap=k_cap, seed=5,
                                    use_kernel=use_kernel)
     mine_info = None
@@ -159,6 +161,11 @@ def gpap_sample(path, device, *, simplify, n_time, n_cov, b, k_cap, max_chunks=8
     # after committing to the winner (construction/warmup amortised). Falls back to the blend if a
     # single non-adaptive config was used (no per-config timing).
     sps_e2e = t["n_models"] / wall if wall > 0 else 0.0
+    # TRUE end-to-end rate (construction + simplify + warmup + MINING + sampling) — the honest
+    # apples-to-apples number vs CMSGen's subprocess wall. The steady-state headline (best_rate_sps)
+    # remains valid for large-N workloads where the one-time costs amortise away.
+    wall_total = time.perf_counter() - t_start
+    sps_e2e_total = t["n_models"] / wall_total if wall_total > 0 else 0.0
     sps = t.get("best_rate_sps") or sps_e2e
     brc = t.get("best_rate_config")
     if brc:                                          # (rv, B, lookahead) of the fastest config
@@ -187,6 +194,7 @@ def gpap_sample(path, device, *, simplify, n_time, n_cov, b, k_cap, max_chunks=8
     n_coll = len(c.get("models", []))
     uniq_sps = (sps * c["n_distinct"] / n_coll) if (n_coll and c.get("n_distinct")) else None
     return {"samples_per_s": sps, "success_rate": succ,
+            "sps_e2e_total": sps_e2e_total,                   # incl. construction+simplify+mining
             "mined": mine_info,                               # entailed-clause mining stats (None = skipped)
             "unique_sps_est": uniq_sps,
             "assigns_per_s": t.get("assigns_per_s"),          # literals assigned/s (CDCL props/s analogue)
@@ -259,10 +267,10 @@ def main():
     files = sorted(glob.glob(args.glob))
     print(f"device={device} | simplify={args.simplify} | n_time={args.n_time:,} n_cov={args.n_cov:,} "
           f"| cmsgen={'yes' if args.cmsgen else 'no'}\n{len(files)} benchmarks\n")
-    hdr = (f"{'instance':<24}{'N':>6}{'M':>7}{'|sup|':>6}{'GPAP/s':>10}{'uniq/s~':>10}"
+    hdr = (f"{'instance':<24}{'N':>6}{'M':>7}{'|sup|':>6}{'GPAP/s':>10}{'e2e/s':>10}{'uniq/s~':>10}"
            f"{'assign/s':>10}{'succ%':>6}{'2wiseG':>8}{'snd':>4}")
     if args.cmsgen:
-        hdr += f"{'CMS/s':>9}{'2wiseC':>7}{'GPAP/CMS':>9}"
+        hdr += f"{'CMS/s':>9}{'2wiseC':>7}{'GPAP/CMS':>9}{'e2e/CMS':>8}"
     print(hdr); print("-" * len(hdr))
     results, ratios = [], []
     for path in files:
@@ -276,7 +284,8 @@ def main():
         twg = two_wise_coverage(g["models"], sup1)
         snd = "OK" if g["gpu_sound"] and (g["cpu_sound"] in (None, True)) else "BAD"
         row = {"name": name, "nv": cnf.nv, "M": len(cnf.clauses), "support": len(sup1),
-               "gpap_sps": g["samples_per_s"], "succ": g["success_rate"], "twise_gpap": twg,
+               "gpap_sps": g["samples_per_s"], "gpap_sps_e2e": g.get("sps_e2e_total"),
+               "succ": g["success_rate"], "twise_gpap": twg,
                "gpu_sound": g["gpu_sound"], "n_distinct": g["n_distinct"],
                "unique_sps_est": g.get("unique_sps_est"), "assigns_per_s": g.get("assigns_per_s"),
                "mined": g.get("mined")}
@@ -286,7 +295,7 @@ def main():
         # '+' after succ% = entailed-clause mining ran (low-success gate); details land in the JSON
         mn = "+" if mi else " "
         line = (f"{name[:22]:<24}{cnf.nv:>6}{len(cnf.clauses):>7}{len(sup1):>6}"
-                f"{g['samples_per_s']:>10,.0f}{uq:>10}{asg:>10}"
+                f"{g['samples_per_s']:>10,.0f}{g.get('sps_e2e_total') or 0:>10,.0f}{uq:>10}{asg:>10}"
                 f"{100*g['success_rate']:>5.0f}%{mn}{twg:>6.1f}%{snd:>4}")
         plain = None
         if args.also_plain:
@@ -298,18 +307,26 @@ def main():
             crate_t, cmodels = cmsgen_sample(path, args.cmsgen, args.n_time, args.scratch,
                                              keep=args.n_cov)
             twc = two_wise_coverage(cmodels[:args.n_cov], sup1)
+            # CMSGen distinct fraction on the same subset — the papers' metric is UNIQUE
+            # solutions/s, so report the dedup factor for BOTH samplers, not just GPAP
+            cd, cn = distinct_projections(cmodels[:args.n_cov], sup1)
             ratio = (g["samples_per_s"] / crate_t) if crate_t else float("inf")
-            row.update(cms_sps=crate_t, twise_cms=twc, ratio=ratio)
+            ratio_e2e = ((g.get("sps_e2e_total") or 0) / crate_t) if crate_t else float("inf")
+            row.update(cms_sps=crate_t, twise_cms=twc, ratio=ratio, ratio_e2e=ratio_e2e,
+                       cms_distinct=cd, cms_distinct_of=cn)
             ratios.append(ratio)
-            line += f"{crate_t:>9,.0f}{twc:>6.1f}%{ratio:>8.2f}x"
+            line += f"{crate_t:>9,.0f}{twc:>6.1f}%{ratio:>8.2f}x{ratio_e2e:>7.2f}x"
         print(line)
         results.append(row)
 
     if ratios:
         import statistics as st
         gm = st.geometric_mean([r for r in ratios if r and r > 0 and r != float("inf")])
-        print(f"\ngeomean GPAP/CMSGen throughput = {gm:.2f}x  "
-              f"(GPAP=GPU, CMSGen=single-core CPU; GPAP scales with K -> A100)")
+        e2e_rs = [r["ratio_e2e"] for r in results
+                  if r.get("ratio_e2e") and 0 < r["ratio_e2e"] != float("inf")]
+        gm_e2e = st.geometric_mean(e2e_rs) if e2e_rs else 0.0
+        print(f"\ngeomean GPAP/CMSGen throughput = {gm:.2f}x steady-state, {gm_e2e:.2f}x "
+              f"end-to-end incl. setup+mining  (GPAP=GPU, CMSGen=single-core CPU)")
         # quality: mean 2-wise coverage delta
         dq = [r["twise_gpap"] - r["twise_cms"] for r in results if "twise_cms" in r]
         if dq:
