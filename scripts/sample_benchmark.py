@@ -80,7 +80,7 @@ DEFAULT_PORTFOLIO = [(True, 8, False), (True, 1, "fused"), (False, 1, False)]
 def gpap_sample(path, device, *, simplify, n_time, n_cov, b, k_cap, max_chunks=8,
                 cov_chunks=4, max_rounds=300, lookahead=False, verify_clauses=None,
                 cov_k_cap=2048, els=False, random_var="auto", configs="default",
-                use_kernel="auto", mine="auto", mine_gate=0.15):
+                use_kernel="auto", mine="auto", mine_gate=0.15, min_measure_chunks=3):
     """Throughput run timed end-to-end (construction + simplify + sample, to match CMSGen's
     'produce N samples' wall clock) + a small collect run for coverage/soundness. The timed run
     is bounded by `max_chunks` (rate = models/wall is valid regardless of how many it collects —
@@ -144,13 +144,18 @@ def gpap_sample(path, device, *, simplify, n_time, n_cov, b, k_cap, max_chunks=8
             except RuntimeError as e:   # mining is an optimization — never let it kill the run
                 print(f"   [mine] skipped after error: {e}", file=sys.stderr)
     t0 = time.perf_counter()
+    # A big-K GPU meets n_time in the bandit cold-start (1 chunk/config), so the headline rates would
+    # rest on a single noisy chunk (measured: best_rate_sps ±1.9x run-to-run). min_measure_chunks makes
+    # the winner run >= that many back-to-back chunks post-target for a stable, config-consistent rate.
+    mmc = max(1, min(min_measure_chunks, max_chunks - (len(configs) if configs else 1)))
     if configs:
         t = smp.sample(n_time, configs=configs, max_decision_rounds=max_rounds,
-                       max_chunks=max_chunks, collect=False, lookahead=lookahead)
+                       max_chunks=max_chunks, collect=False, lookahead=lookahead,
+                       min_measure_chunks=mmc)
     else:
         t = smp.sample(n_time, decisions_per_round=b, random_var=random_var,
                        max_decision_rounds=max_rounds, max_chunks=max_chunks, collect=False,
-                       lookahead=lookahead)
+                       lookahead=lookahead, min_measure_chunks=mmc)
     if device.type == "cuda":
         torch.cuda.synchronize()
     wall = time.perf_counter() - t0
@@ -168,6 +173,12 @@ def gpap_sample(path, device, *, simplify, n_time, n_cov, b, k_cap, max_chunks=8
     sps_e2e_total = t["n_models"] / wall_total if wall_total > 0 else 0.0
     sps = t.get("best_rate_sps") or sps_e2e
     brc = t.get("best_rate_config")
+    # Work rates for the SAME config as `sps` (best_rate). Falls back to the whole-run blend for a
+    # single non-adaptive config. This keeps dec/s, impl/s, assigns/s consistent with samples/s —
+    # otherwise the blend is dragged by the bandit's slow exploration chunk (e.g. orac).
+    dps = t.get("best_rate_decisions_per_s") if t.get("best_rate_decisions_per_s") is not None else t.get("decisions_per_s")
+    ips = t.get("best_rate_implications_per_s") if t.get("best_rate_implications_per_s") is not None else t.get("implications_per_s")
+    aps = t.get("best_rate_assigns_per_s") if t.get("best_rate_assigns_per_s") is not None else t.get("assigns_per_s")
     if brc:                                          # (rv, B, lookahead) of the fastest config
         tuned_rv, tuned_b, tuned_la = brc[0], brc[1], brc[2]
         succ = t.get("best_rate_success", t["success_rate"])
@@ -197,9 +208,9 @@ def gpap_sample(path, device, *, simplify, n_time, n_cov, b, k_cap, max_chunks=8
             "sps_e2e_total": sps_e2e_total,                   # incl. construction+simplify+mining
             "mined": mine_info,                               # entailed-clause mining stats (None = skipped)
             "unique_sps_est": uniq_sps,
-            "assigns_per_s": t.get("assigns_per_s"),          # literals assigned/s (CDCL props/s analogue)
-            "decisions_per_s": t.get("decisions_per_s"),      # branch decisions/s
-            "implications_per_s": t.get("implications_per_s"),  # unit-prop implications/s (=assigns-decisions)
+            "assigns_per_s": aps,                             # literals assigned/s (CDCL props/s analogue)
+            "decisions_per_s": dps,                           # branch decisions/s (best-rate config)
+            "implications_per_s": ips,                        # unit-prop implications/s (=assigns-decisions)
             "kernel": t.get("kernel", False),                 # fused Triton BCP kernel active?
             "attempts_per_s": t.get("attempts_per_s"),        # raw trajectory throughput (K/chunk rate)
             "bcp_rounds_per_chunk": t.get("bcp_rounds_per_chunk"),
