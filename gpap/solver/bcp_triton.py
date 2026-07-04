@@ -57,6 +57,7 @@ if _HAVE_TRITON:
         trail_ptr,     # (K, TRAIL_CAP) int32 workspace
         nprops_ptr,    # (K,) int32 out: literals set TRUE this call (seeds + forced)
         nops_ptr,      # (K,) int32 out: occ entries processed (≈ engine bcp_ops)
+        ndecs_ptr,     # (K,) int32 out: DECISION literals this call (seeds only; implications = nprops - ndecs)
         M, N2, B, TRAIL_CAP,
     ):
         k = tl.program_id(0).to(tl.int64)
@@ -82,6 +83,7 @@ if _HAVE_TRITON:
                         tl.store(asg_row + lit, 1)
                         tl.store(trail_row + tail, lit)
                         tail += 1
+            ndecs = tail                # seeds assigned so far ARE the decisions (before propagation)
 
             # --- propagate to fixpoint: pop one literal, walk occ[lit] (distinct clauses) ---
             while (head < tail) & (conflict == 0):
@@ -119,6 +121,7 @@ if _HAVE_TRITON:
                 tl.store(active_ptr + k, 0)
             tl.store(nprops_ptr + k, tail)
             tl.store(nops_ptr + k, nops)
+            tl.store(ndecs_ptr + k, ndecs)
 
     @triton.jit
     def _bcp_trajectory_kernel(
@@ -127,7 +130,7 @@ if _HAVE_TRITON:
         order_ptr,                            # (P,) int32 var indices: the decision order (support
                                               #   first, then completion vars; a per-chunk permutation)
         occ_off_ptr, occ_cls_ptr,             # int32 CSR occ lists
-        trail_ptr, nrounds_ptr, nops_ptr, nprops_ptr,   # (K,·) workspace / outputs
+        trail_ptr, nrounds_ptr, nops_ptr, nprops_ptr, ndecs_ptr,   # (K,·) workspace / outputs
         M, N2, P, NSUP, B, TRAIL_CAP, MAX_ROUNDS, seed,
         SOFT: tl.constexpr,                   # 1 = "fsoft": in-kernel soft risk-polarity (see below)
     ):
@@ -152,6 +155,7 @@ if _HAVE_TRITON:
             tail = B * 0
             nops = B * 0
             rounds = B * 0
+            decs = B * 0                        # DECISION literals (picks); implications = tail - decs
             ptr = B * 0
             while (ptr < P) & (conflict == 0) & (rounds < MAX_ROUNDS):
                 # --- decision group: next B free vars in order, hash-random polarity.
@@ -206,6 +210,7 @@ if _HAVE_TRITON:
                         picked += 1
                 if picked > 0:
                     rounds += 1
+                    decs += picked
                 # --- propagate to fixpoint (identical to the v1 loop) ---
                 while (head < tail) & (conflict == 0):
                     lit = tl.load(trail_row + head)
@@ -242,6 +247,7 @@ if _HAVE_TRITON:
             tl.store(nrounds_ptr + k, rounds)
             tl.store(nops_ptr + k, nops)
             tl.store(nprops_ptr + k, tail)    # literals assigned (decisions + implications)
+            tl.store(ndecs_ptr + k, decs)     # decisions only (implications = nprops - ndecs)
 
     @triton.jit
     def _bcp_trajectory_packed_kernel(
@@ -250,7 +256,7 @@ if _HAVE_TRITON:
                                               #   high 16 bits = XOR of non-falsified lit indices
         asg_ptr, active_ptr, conflict_ptr,
         order_ptr, occ_off_ptr, occ_cls_ptr,
-        trail_ptr, nrounds_ptr, nops_ptr, nprops_ptr,
+        trail_ptr, nrounds_ptr, nops_ptr, nprops_ptr, ndecs_ptr,
         M, N2, P, NSUP, B, TRAIL_CAP, MAX_ROUNDS, seed,
         SOFT: tl.constexpr,
     ):
@@ -278,6 +284,7 @@ if _HAVE_TRITON:
             tail = B * 0
             nops = B * 0
             rounds = B * 0
+            decs = B * 0
             ptr = B * 0
             while (ptr < P) & (conflict == 0) & (rounds < MAX_ROUNDS):
                 phase_end = NSUP if ptr < NSUP else P
@@ -324,6 +331,7 @@ if _HAVE_TRITON:
                         picked += 1
                 if picked > 0:
                     rounds += 1
+                    decs += picked
                 while (head < tail) & (conflict == 0):
                     lit = tl.load(trail_row + head)
                     head += 1
@@ -358,6 +366,7 @@ if _HAVE_TRITON:
             tl.store(nrounds_ptr + k, rounds)
             tl.store(nops_ptr + k, nops)
             tl.store(nprops_ptr + k, tail)
+            tl.store(ndecs_ptr + k, decs)
 
 
 
@@ -376,9 +385,11 @@ class TritonBCP:
         self._trail = None              # (K, cap) int32
         self._nprops = None             # (K,) int32
         self._nops = None               # (K,) int32
+        self._ndecs = None              # (K,) int32 (decision literals this launch)
         self._nrounds = None            # (K,) int32 (v2 fused-trajectory decision rounds)
         self._ops_acc = None            # 0-d int64 GPU accumulator (lazy-synced)
         self._props_acc = None          # 0-d int64 GPU accumulator: literals assigned (lazy-synced)
+        self._decs_acc = None           # 0-d int64 GPU accumulator: decisions (implications = props-decs)
         # PACKED trajectory state (see _bcp_trajectory_packed_kernel): kernel-private (K, M) int32
         # replacing the engine's sat_count+lit_sum for fused chunks, plus the cached post-units-flush
         # row that reset_fused() broadcast-restores per chunk (the flush is row-identical every chunk).
@@ -421,9 +432,11 @@ class TritonBCP:
             self._trail = torch.empty((K, cap), dtype=torch.int32, device=dev)
             self._nprops = torch.empty(K, dtype=torch.int32, device=dev)
             self._nops = torch.empty(K, dtype=torch.int32, device=dev)
+            self._ndecs = torch.empty(K, dtype=torch.int32, device=dev)
         if self._ops_acc is None:
             self._ops_acc = torch.zeros((), dtype=torch.int64, device=dev)
             self._props_acc = torch.zeros((), dtype=torch.int64, device=dev)
+            self._decs_acc = torch.zeros((), dtype=torch.int64, device=dev)
 
     def _build_flush_cache(self, engine) -> None:
         """One-time (per formula): decide packed-eligibility and cache the post-units-flush state.
@@ -507,13 +520,17 @@ class TritonBCP:
         if decisions.numel() == 0:
             return
         self._ensure(engine, K, B)
+        # Zero the per-row outputs: this launch may leave INACTIVE rows (already-conflicted in a
+        # prior decide round) unwritten, and summing stale values would double-count. Zeroed rows
+        # contribute 0, so the accumulators are exact across the multi-round decide loop.
+        self._nprops.zero_(); self._nops.zero_(); self._ndecs.zero_()
         dec = decisions.to(torch.int64).contiguous()
         _bcp_fixpoint_kernel[(K,)](
             engine._sat_count, engine._lit_sum, engine._assignment,
             engine._active.view(torch.int8), engine._conflict.view(torch.int8),
             engine._timed_out.view(torch.int8),
             dec, self._occ_off32, self._occ_cls32,
-            self._trail, self._nprops, self._nops,
+            self._trail, self._nprops, self._nops, self._ndecs,
             engine._num_clauses, 2 * engine._num_vars, B, self._trail.size(1),
             num_warps=1,
         )
@@ -521,6 +538,7 @@ class TritonBCP:
         engine.total_bcp_rounds += 1                    # one fused "round" per launch
         self._ops_acc += self._nops.sum()               # GPU-side, no sync
         self._props_acc += self._nprops.sum()
+        self._decs_acc += self._ndecs.sum()
 
     @torch.inference_mode()
     def run_trajectory(self, engine, order: torch.Tensor, n_support: int, B: int, seed: int,
@@ -544,7 +562,7 @@ class TritonBCP:
             self._nrounds = torch.empty(K, dtype=torch.int32, device=engine._device)
         order = order.to(torch.int32).contiguous()
         bufs = (order, self._occ_off32, self._occ_cls32,
-                self._trail, self._nrounds, self._nops, self._nprops)
+                self._trail, self._nrounds, self._nops, self._nprops, self._ndecs)
         dims = (engine._num_clauses, 2 * engine._num_vars, order.numel(), n_support, B,
                 self._trail.size(1), (max_rounds if max_rounds is not None else 1 << 30), seed)
         if packed:
@@ -564,6 +582,7 @@ class TritonBCP:
         engine.total_bcp_rounds += 1
         self._ops_acc += self._nops.sum()
         self._props_acc += self._nprops.sum()
+        self._decs_acc += self._ndecs.sum()      # every row is active at launch (post-reset) => exact
         return int(self._nrounds.max().item())
 
     def ops_total(self) -> int:
@@ -573,6 +592,11 @@ class TritonBCP:
     def props_total(self) -> int:
         """Literals assigned by the kernel so far (syncs; call off the hot path)."""
         return int(self._props_acc.item()) if self._props_acc is not None else 0
+
+    def decs_total(self) -> int:
+        """Decision literals assigned by the kernel so far (syncs; call off the hot path).
+        Implications = props_total() - decs_total()."""
+        return int(self._decs_acc.item()) if self._decs_acc is not None else 0
 
 
 if _HAVE_TRITON:

@@ -57,6 +57,9 @@ class BCPEngine:
         self.total_bcp_ops = 0      # frontier (batch,clause) cells processed (≈ literal-falsification work)
         self.total_bcp_props = 0    # literals assigned TRUE (decisions + implications) — the CDCL-
                                     # comparable "propagations" count (CDCL solvers report props/sec)
+        self.total_bcp_decisions = 0  # DECISION assignments only (branch picks). Implications =
+                                    # total_bcp_props - total_bcp_decisions (every non-decision
+                                    # assignment is a unit-propagation implication).
         # Optional fused-kernel fast path (see bcp_triton.TritonBCP). None = pure-PyTorch propagate.
         self._fused_kernel = None
 
@@ -82,6 +85,10 @@ class BCPEngine:
     def kernel_props(self) -> int:
         """Literals assigned by the fused kernel (0 when no kernel). Syncs — read off hot path."""
         return self._fused_kernel.props_total() if self._fused_kernel is not None else 0
+
+    def kernel_decs(self) -> int:
+        """Decision literals assigned by the fused kernel (0 when no kernel). Syncs — off hot path."""
+        return self._fused_kernel.decs_total() if self._fused_kernel is not None else 0
 
     def init_state(self, num_batches: int):
         """Initialize BCP state for K parallel assumption sets."""
@@ -342,6 +349,7 @@ class BCPEngine:
 
         if pairs.size(0) > 0:
             self.total_bcp_props += pairs.size(0)          # decision assignments (free metadata)
+            self.total_bcp_decisions += pairs.size(0)      # ...and they are DECISIONS (branch picks)
             new_b, new_c = self._bulk_propagate_lits(pairs[:, 0], pairs[:, 1])
             if new_b.numel() > 0:
                 self._frontier_batches = torch.cat([self._frontier_batches, new_b])
