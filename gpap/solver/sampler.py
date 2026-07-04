@@ -531,21 +531,27 @@ class GPUSampler:
                     best = (rate, rv, B)
         return best[1], best[2]
 
-    def _select_config(self, plan, stats, chunk):
+    def _select_config(self, plan, stats, chunk, exploit=False):
         """Adaptive (bandit) config selection: dynamically switch to the best-THROUGHPUT config as it
         is measured on real full-K chunks. More robust than the small-K `_autotune` probe (which
         under-rates large B because kernel-launch overhead dominates its few rounds, and commits
         permanently): here every measurement is a productive full-K chunk and the choice can change.
         Policy: try each config once, then decaying-epsilon-greedy (explore shrinks as 1/sqrt(chunk),
         floored at 5%) on cumulative models/wall — keeps re-checking alternatives but spends most of
-        the budget on the winner (niche → (random,8); service → (structured,1))."""
+        the budget on the winner (niche → (random,8); service → (structured,1)).
+        `exploit=True` skips exploration and returns the current best — used in the post-target
+        top-up phase to accumulate a stable measurement window on the winner (min_measure_chunks)."""
+        best = lambda: max(plan, key=lambda c: (stats[c]["models"] / stats[c]["wall"])
+                           if stats[c]["wall"] > 0 else 0.0)
         for c in plan:                                  # cold start: one real chunk per config
             if stats[c]["chunks"] == 0:
                 return c
+        if exploit:
+            return best()
         eps = max(0.05, chunk ** -0.5)
         if self._pyrng.random() < eps:
             return self._pyrng.choice(plan)
-        return max(plan, key=lambda c: (stats[c]["models"] / stats[c]["wall"]) if stats[c]["wall"] > 0 else 0.0)
+        return best()
 
     def _reconstruct_els(self, comp_rows: list[list[int]]):
         """Reconstruct original models when the formula was reduced by ELS (simplify_cnf_els).
@@ -630,6 +636,7 @@ class GPUSampler:
         lookahead: bool = False,
         configs: "list[tuple[bool, int]] | None" = None,
         config_policy: str = "adaptive",
+        min_measure_chunks: int = 1,
     ) -> dict:
         """Draw at least `n_target` valid models (or until `max_chunks` chunks run).
 
@@ -691,7 +698,12 @@ class GPUSampler:
         need_full = any(c[2] in (True, "full") for c in plan)
         K = max(1, self.K // 2) if need_full else self.K
         adaptive = configs is not None and config_policy == "adaptive" and len(plan) > 1
-        cfg_stats = {c: {"models": 0, "attempts": 0, "wall": 0.0, "chunks": 0} for c in plan}
+        # Per-config work counters (decs/props) alongside models/wall so the reported dec/s, impl/s,
+        # assigns/s can be attributed to the SAME config as the headline samples/s (best_rate) —
+        # otherwise they blend over the bandit's exploration (incl. the slow orac chunk), understating
+        # the winner ~2x and diverging across GPUs (measured on b06.c25, 2026-07-04).
+        cfg_stats = {c: {"models": 0, "attempts": 0, "wall": 0.0, "chunks": 0,
+                         "decs": 0, "props": 0} for c in plan}
         K_sub = max(1, K // len(plan)) if (configs and not adaptive and len(plan) > 1) else K
         models: list[list[int]] = []
         attempts = 0
@@ -717,12 +729,22 @@ class GPUSampler:
             # only plan[0] ever runs and a faster config is never discovered (the A100 shallow-circuit
             # regression). Bounded by max_chunks. Cold-start chunks are productive (real models).
             cold = adaptive and any(cfg_stats[c]["chunks"] == 0 for c in plan)
-            if not cold and n_models >= n_target:
+            # Stability: don't stop until SOME config has been measured over >= min_measure_chunks
+            # chunks (the bandit piles those onto the winner). A big-K GPU meets n_target in the
+            # cold-start (1 chunk/config), so a single noisy chunk would set the headline rate —
+            # measured on b06.c25: best_rate_sps swung 131k-249k (1.9x) run-to-run at 1 chunk.
+            enough = (not adaptive) or max((cfg_stats[c]["chunks"] for c in plan),
+                                           default=0) >= min_measure_chunks
+            if not cold and enough and n_models >= n_target:
                 break
             if max_chunks is not None and chunk >= max_chunks:
                 break
             chunk += 1
-            chunk_cfgs = [self._select_config(plan, cfg_stats, chunk)] if adaptive else plan
+            # Once past n_target but short of the measurement window, EXPLOIT the winner (no eps
+            # exploration) so its stable rate is measured on back-to-back chunks, not diluted.
+            topup = adaptive and not cold and n_models >= n_target
+            chunk_cfgs = ([self._select_config(plan, cfg_stats, chunk, exploit=topup)]
+                          if adaptive else plan)
             for cfg in chunk_cfgs:
                 rv_c, B_c, la_c = cfg
                 # Fused-trajectory chunks (fused AND fsoft — both are single-launch kernels with no
@@ -730,7 +752,11 @@ class GPUSampler:
                 # construction value: a caller-lowered K (coverage run) is honoured.
                 K_c = self.K_fused if (la_c in ("fused", "fsoft") and self.K >= self._K_init) else K_sub
                 if adaptive:
-                    self._sync(); t_cfg = time.perf_counter()
+                    self._sync()
+                    # read BEFORE t_cfg so the (synced) counter reads aren't charged to wall
+                    p_before = self.engine.total_bcp_props + self.engine.kernel_props()
+                    d_before = self.engine.total_bcp_decisions + self.engine.kernel_decs()
+                    t_cfg = time.perf_counter()
                 fully, sup_complete, rounds, free_after = self._run_chunk(
                     K_c, B_c, rv_c, max_decision_rounds, support_mask, complete, la_c)
                 rounds_hist.append(rounds)
@@ -744,6 +770,10 @@ class GPUSampler:
                 cfg_stats[cfg]["chunks"] += 1
                 if adaptive:
                     self._sync(); cfg_stats[cfg]["wall"] += time.perf_counter() - t_cfg
+                    cfg_stats[cfg]["props"] += (self.engine.total_bcp_props
+                                                + self.engine.kernel_props()) - p_before
+                    cfg_stats[cfg]["decs"] += (self.engine.total_bcp_decisions
+                                               + self.engine.kernel_decs()) - d_before
                 if n_done:
                     # GPU soundness (cheap): for a FULLY-assigned row, non-falsified ⟺ TRUE, so
                     # "every clause has sat_count > 0" ⟺ "every clause has a TRUE literal" ⟺ satisfied.
@@ -832,10 +862,21 @@ class GPUSampler:
             # The benchmark headline uses THIS rate, not the end-to-end blend, so the bandit's slower
             # exploration chunks (and any first-chunk warmup) never drag the reported steady-state
             # throughput. Only meaningful when adaptive (per-config wall is timed); else wall==0.
-            brc, brs = max(cfg_stats.items(), key=lambda kv: _rate(kv[1]))
+            # Prefer a WELL-MEASURED config (>= min_measure_chunks) over a lucky 1-chunk rate, then by
+            # rate — so the headline rests on the config the top-up phase actually committed to and
+            # measured, not a config whose single cold-start chunk happened to clock fast.
+            brc, brs = max(cfg_stats.items(),
+                           key=lambda kv: (kv[1]["chunks"] >= min_measure_chunks, _rate(kv[1])))
             out["best_rate_config"] = [bool(brc[0]), brc[1], brc[2]]
             out["best_rate_sps"] = _rate(brs) if brs["wall"] > 0 else None
             out["best_rate_success"] = (brs["models"] / brs["attempts"]) if brs["attempts"] else 0.0
+            # Work rates for the SAME best-rate config as best_rate_sps (consistent + stable: measured
+            # over the winner's chunks, not blended over the exploration). gpap_sample reports these.
+            bw = brs["wall"]
+            out["best_rate_decisions_per_s"] = (brs["decs"] / bw) if bw > 0 else None
+            out["best_rate_implications_per_s"] = ((brs["props"] - brs["decs"]) / bw) if bw > 0 else None
+            out["best_rate_assigns_per_s"] = (brs["props"] / bw) if bw > 0 else None
+            out["best_rate_chunks"] = brs["chunks"]
             out["config_policy"] = "adaptive" if adaptive else "static"
 
             def _lab(c):
@@ -845,6 +886,8 @@ class GPUSampler:
                     "models": s["models"], "attempts": s["attempts"], "chunks": s["chunks"],
                     "success_rate": (s["models"] / s["attempts"]) if s["attempts"] else 0.0,
                     "samples_per_s": (s["models"] / s["wall"]) if s["wall"] > 0 else None,
+                    "decisions_per_s": (s["decs"] / s["wall"]) if s["wall"] > 0 else None,
+                    "implications_per_s": ((s["props"] - s["decs"]) / s["wall"]) if s["wall"] > 0 else None,
                 } for c, s in cfg_stats.items()
             }
         return out
