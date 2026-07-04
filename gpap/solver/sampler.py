@@ -101,6 +101,11 @@ class GPUSampler:
         # coverage run — is honoured). Hard cap 262,144; validated under the nvidia-smi kill-switch.
         if self.use_kernel and self.M > 0:
             sat_b = 1 if self._max_cls <= 127 else (2 if self._max_cls <= 32767 else 4)
+            # Hard ceiling on the fused-K boost. 262,144 was kill-switch-validated on the 12 GB 4080;
+            # on a big-VRAM GPU (A100 80 GB) the caller's VRAM-proportional k_cap is larger, so let it
+            # raise the ceiling — the memory-safe `budget // fused_pb` below still bounds the actual K.
+            # No-op on the 4080 (its k_cap < 262,144); unlocks A100 fused headroom for the K-scaling story.
+            fused_cap = max(262_144, k_cap or 0)
             if 2 * self.N <= 65535:
                 # PACKED fused chunks (mirrors TritonBCP eligibility): clause state is ONE (K,M)
                 # int32 (vs sat+lsum's (sat_b+4)·M), and the engine's sat/lsum stay allocated at
@@ -108,10 +113,10 @@ class GPUSampler:
                 eng_hold = ((sat_b + 4) * self.M + 2 * self.N) * self.K
                 fused_pb = 4 * self.M + 10 * self.N + 300
                 budget = max(0, int(0.6 * (free_bytes - eng_hold)))
-                self.K_fused = max(self.K, min(budget // fused_pb, 262_144))
+                self.K_fused = max(self.K, min(budget // fused_pb, fused_cap))
             else:
                 fused_pb = (sat_b + 4) * self.M + 10 * self.N + 64
-                self.K_fused = max(self.K, min(int(0.6 * free_bytes / fused_pb), 262_144))
+                self.K_fused = max(self.K, min(int(0.6 * free_bytes / fused_pb), fused_cap))
         else:
             self.K_fused = self.K
 
@@ -704,6 +709,7 @@ class GPUSampler:
         bcp_r0 = self.engine.total_bcp_rounds
         bcp_o0 = self.engine.total_bcp_ops + self.engine.kernel_ops()
         bcp_p0 = self.engine.total_bcp_props + self.engine.kernel_props()
+        bcp_d0 = self.engine.total_bcp_decisions + self.engine.kernel_decs()
         t0 = time.perf_counter()
         while True:
             # Stop once n_target is met — BUT for the adaptive bandit, always measure every config at
@@ -779,6 +785,8 @@ class GPUSampler:
         bcp_rounds = self.engine.total_bcp_rounds - bcp_r0     # BCP work over this timed run (delta)
         bcp_ops = self.engine.total_bcp_ops + self.engine.kernel_ops() - bcp_o0
         bcp_props = self.engine.total_bcp_props + self.engine.kernel_props() - bcp_p0
+        bcp_decs = self.engine.total_bcp_decisions + self.engine.kernel_decs() - bcp_d0
+        bcp_impl = bcp_props - bcp_decs                        # every non-decision assignment
 
         out = {
             "n_models": n_models, "n_support_complete": n_support_complete, "attempts": attempts,
@@ -794,8 +802,13 @@ class GPUSampler:
             "bcp_rounds_per_chunk": (bcp_rounds / chunk) if chunk else 0.0,
             "bcp_ops_per_attempt": (bcp_ops / attempts) if attempts else 0.0,
             # CDCL-comparable work rate: literals assigned (decisions + implications) per second —
-            # what CDCL solvers report as props/sec (typically ~1e7/s single-core).
+            # what CDCL solvers report as props/sec (typically ~1e7/s single-core). Split into the
+            # branch DECISIONS and the unit-propagation IMPLICATIONS they triggered (impl = assigns
+            # - decisions); implications/decision is the propagation fan-out per branch.
             "assigns_per_s": (bcp_props / elapsed) if elapsed > 0 else 0.0,
+            "decisions_per_s": (bcp_decs / elapsed) if elapsed > 0 else 0.0,
+            "implications_per_s": (bcp_impl / elapsed) if elapsed > 0 else 0.0,
+            "bcp_decisions": bcp_decs, "bcp_implications": bcp_impl,
             "mean_free_after_support": (sum(free_after_hist) / len(free_after_hist)) if free_after_hist else 0.0,
             "n_chunks": chunk, "K": K, "B": B, "random_var": bool(random_var),
             "support_size": (len(sup) if sup else None),

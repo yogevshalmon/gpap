@@ -198,6 +198,8 @@ def gpap_sample(path, device, *, simplify, n_time, n_cov, b, k_cap, max_chunks=8
             "mined": mine_info,                               # entailed-clause mining stats (None = skipped)
             "unique_sps_est": uniq_sps,
             "assigns_per_s": t.get("assigns_per_s"),          # literals assigned/s (CDCL props/s analogue)
+            "decisions_per_s": t.get("decisions_per_s"),      # branch decisions/s
+            "implications_per_s": t.get("implications_per_s"),  # unit-prop implications/s (=assigns-decisions)
             "kernel": t.get("kernel", False),                 # fused Triton BCP kernel active?
             "attempts_per_s": t.get("attempts_per_s"),        # raw trajectory throughput (K/chunk rate)
             "bcp_rounds_per_chunk": t.get("bcp_rounds_per_chunk"),
@@ -268,7 +270,7 @@ def main():
     print(f"device={device} | simplify={args.simplify} | n_time={args.n_time:,} n_cov={args.n_cov:,} "
           f"| cmsgen={'yes' if args.cmsgen else 'no'}\n{len(files)} benchmarks\n")
     hdr = (f"{'instance':<24}{'N':>6}{'M':>7}{'|sup|':>6}{'GPAP/s':>10}{'e2e/s':>10}{'uniq/s~':>10}"
-           f"{'assign/s':>10}{'succ%':>6}{'2wiseG':>8}{'snd':>4}")
+           f"{'dec/s':>9}{'impl/s':>9}{'succ%':>6}{'2wiseG':>8}{'snd':>4}")
     if args.cmsgen:
         hdr += f"{'CMS/s':>9}{'2wiseC':>7}{'GPAP/CMS':>9}{'e2e/CMS':>8}"
     print(hdr); print("-" * len(hdr))
@@ -288,14 +290,16 @@ def main():
                "succ": g["success_rate"], "twise_gpap": twg,
                "gpu_sound": g["gpu_sound"], "n_distinct": g["n_distinct"],
                "unique_sps_est": g.get("unique_sps_est"), "assigns_per_s": g.get("assigns_per_s"),
-               "mined": g.get("mined")}
+               "decisions_per_s": g.get("decisions_per_s"),
+               "implications_per_s": g.get("implications_per_s"), "mined": g.get("mined")}
         uq = f"{g['unique_sps_est']:,.0f}" if g.get("unique_sps_est") else "—"
-        asg = f"{g['assigns_per_s']:.1e}" if g.get("assigns_per_s") else "—"
+        dps = f"{g['decisions_per_s']:.1e}" if g.get("decisions_per_s") else "—"
+        ips = f"{g['implications_per_s']:.1e}" if g.get("implications_per_s") else "—"
         mi = g.get("mined")
         # '+' after succ% = entailed-clause mining ran (low-success gate); details land in the JSON
         mn = "+" if mi else " "
         line = (f"{name[:22]:<24}{cnf.nv:>6}{len(cnf.clauses):>7}{len(sup1):>6}"
-                f"{g['samples_per_s']:>10,.0f}{g.get('sps_e2e_total') or 0:>10,.0f}{uq:>10}{asg:>10}"
+                f"{g['samples_per_s']:>10,.0f}{g.get('sps_e2e_total') or 0:>10,.0f}{uq:>10}{dps:>9}{ips:>9}"
                 f"{100*g['success_rate']:>5.0f}%{mn}{twg:>6.1f}%{snd:>4}")
         plain = None
         if args.also_plain:

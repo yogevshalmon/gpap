@@ -198,6 +198,8 @@ def run_instance(path: str, device: torch.device, *, cmsgen_bin: str | None, n_t
         # unique/s estimate (post-processing only — raw rate × distinct fraction of the cov sample)
         # + literals-assigned/s (the CDCL props/sec analogue; CDCL ≈ 1e7/s single-core).
         "unique_sps_est": g.get("unique_sps_est"), "assigns_per_s": g.get("assigns_per_s"),
+        "decisions_per_s": g.get("decisions_per_s"),     # branch decisions/s
+        "implications_per_s": g.get("implications_per_s"),  # unit-prop implications/s (assigns-decisions)
         "kernel": g.get("kernel"),
         "in_niche": g["success_rate"] > 0.10,           # rough: produces models at a usable rate
     }
@@ -255,7 +257,7 @@ def run_circuits(device: torch.device, *, cmsgen_bin: str | None, n_time: int, n
                  k_cap: int, scratch: str, els: bool = True, cycles: list[int] | None = None,
                  insts: list[str] | None = None, circuit_dir: str = DEFAULT_CIRCUIT_DIR,
                  max_clauses: int = CIRCUIT_MAX_CLAUSES, configs=CIRCUIT_PORTFOLIO,
-                 verbose: bool = True) -> list[dict]:
+                 verbose: bool = True, on_row=None, skip_keys=None) -> list[dict]:
     """Benchmark GPAP vs CMSGen on the CIRCUIT-SAT sampling families the competitors use:
       * ISCAS-89 + ITC'99 SEQUENTIAL (s*/b*.bench, has DFFs) — "Recurrent CircuitSAT Sampling"
         (arXiv 2502.21226): unroll T cycles → Tseitin CNF → pin ALL final-cycle outputs to a simulated
@@ -264,10 +266,16 @@ def run_circuits(device: torch.device, *, cmsgen_bin: str | None, n_time: int, n
       * ISCAS-85 COMBINATIONAL (c*.bench, no DFFs) — DEMOTIC (arXiv 2502.08086): T=1, pin ONE output
         (pinning all over-constrains to a tiny solution set), sample the primary inputs.
     Each `.bench` in `circuit_dir` is realised by scripts/bench_to_cnf; `c ind` = primary inputs.
-    `configs` = the sampler portfolio (default CIRCUIT_PORTFOLIO with soft-lookahead for tight circuits)."""
+    `configs` = the sampler portfolio (default CIRCUIT_PORTFOLIO with soft-lookahead for tight circuits).
+
+    Resumable: `skip_keys` = a set of (inst, T) already done (skipped); `on_row(row)` is called after
+    EACH (inst, T) completes so callers can persist incrementally (the Colab idle-disconnect
+    mitigation — see run_family). A single (inst, T) that raises is recorded as an error row and the
+    sweep continues (one WSL2/CUDA hiccup never loses the rest of the family)."""
     from scripts.bench_to_cnf import parse_bench, build_cnf, write_dimacs
     cycles = cycles or CIRCUIT_CYCLES
     insts = insts or (CIRCUIT_SEQ + CIRCUIT_ITC + CIRCUIT_COMB)
+    skip_keys = skip_keys or set()
     gen_dir = os.path.join(scratch, "circuits")
     os.makedirs(gen_dir, exist_ok=True)
     rows = []
@@ -279,6 +287,8 @@ def run_circuits(device: torch.device, *, cmsgen_bin: str | None, n_time: int, n
         combinational = not circ[2]                    # circ = (inputs, outputs, dffs, gates)
         inst_cycles = [1] if combinational else cycles  # combinational = no unrolling
         for T in inst_cycles:
+            if (inst, T) in skip_keys:                 # already persisted on a prior (interrupted) run
+                continue
             cnfp = os.path.join(gen_dir, f"{inst}.c{T}.cnf")
             if not os.path.exists(cnfp):
                 # combinational (ISCAS-85): pin ONE output to keep a large samplable solution space
@@ -290,18 +300,26 @@ def run_circuits(device: torch.device, *, cmsgen_bin: str | None, n_time: int, n
                               f"> {max_clauses:,})", flush=True)
                     continue
                 write_dimacs(cnfp, builder, support)
-            r = run_instance(cnfp, device, cmsgen_bin=cmsgen_bin, n_time=n_time, n_cov=n_cov,
-                             b=b, k_cap=k_cap, scratch=scratch, els=els, configs=configs)
+            try:
+                r = run_instance(cnfp, device, cmsgen_bin=cmsgen_bin, n_time=n_time, n_cov=n_cov,
+                                 b=b, k_cap=k_cap, scratch=scratch, els=els, configs=configs)
+            except Exception as e:  # noqa: BLE001 — keep the family going; record the failure
+                r = {"name": f"{inst}.c{T}.cnf", "error": str(e)}
+                if verbose:
+                    print(f"   {inst} T={T:>2}: ERROR {e}", flush=True)
             r["circuit"], r["cycles"], r["family"] = inst, T, ("iscas85" if combinational else "iscas89")
             rows.append(r)
-            if verbose:
+            if on_row is not None:
+                on_row(r)                              # persist incrementally (resume checkpoint)
+            if "error" not in r and verbose:
                 rt = f"  {r['ratio']:.2f}x CMS" if r.get("ratio") else ""
                 la = f",la={r['tuned_la']}" if r.get("tuned_la") else ""
                 cfg = f"  [rv={r.get('tuned_rv')},B={r.get('tuned_b')}{la}]"
                 att = r.get("attempts_per_s") or 0
                 uq = f"{r['unique_sps_est']:,.0f}" if r.get("unique_sps_est") else "—"
-                asg = f"{r['assigns_per_s']:.1e}" if r.get("assigns_per_s") else "—"
-                work = (f"  | uniq~{uq}/s  {asg} assign/s  {att:>9,.0f} att/s  "
+                dps = f"{r['decisions_per_s']:.1e}" if r.get("decisions_per_s") else "—"
+                ips = f"{r['implications_per_s']:.1e}" if r.get("implications_per_s") else "—"
+                work = (f"  | uniq~{uq}/s  {dps} dec/s  {ips} impl/s  {att:>9,.0f} att/s  "
                         f"{r.get('bcp_ops_pa') or 0:,.0f} ops/att")
                 print(f"   {inst} T={T:>2}: GPAP {r['gpap_sps']:>12,.0f}/s  succ {100*r['succ']:.0f}%"
                       f"{rt}{cfg}{work}", flush=True)
@@ -349,6 +367,8 @@ def aggregate(results: list[dict], ksweeps: list[dict]) -> dict:
         if len(pts) >= 2 and slope is None:
             lx = np.log([p["K"] for p in pts]); ly = np.log([p["samples_per_s"] for p in pts])
             slope = round(float(np.polyfit(lx, ly, 1)[0]), 2)
+    decs = [r["decisions_per_s"] for r in niche if r.get("decisions_per_s")]
+    impl = [r["implications_per_s"] for r in niche if r.get("implications_per_s")]
     return {
         "n_instances":          len(results),
         "n_niche":              len(niche),
@@ -361,6 +381,10 @@ def aggregate(results: list[dict], ksweeps: list[dict]) -> dict:
         "kscale_slope_loglog":  slope,          # ~1.0 ⇒ samples/s ∝ K
         "kscale_peak_sps":      round(peak_k_sps, 1),
         "auto_K":               auto_K,
+        # CDCL-comparable work rates (peak over the niche): branch decisions/s and the unit-prop
+        # implications/s they triggered (CDCL solvers report ≈1e7 props/s single-core).
+        "decisions_per_s_peak":     round(max(decs), 1) if decs else 0.0,
+        "implications_per_s_peak":  round(max(impl), 1) if impl else 0.0,
     }
 
 
@@ -407,6 +431,12 @@ def aggregate_circuits(circuits: list[dict], ksweeps: list[dict]) -> dict:
         "kscale_slope_loglog":  slope,
         "kscale_peak_sps":      round(peak_k_sps, 1),
         "auto_K":               auto_K,
+        # CDCL-comparable work rates (peak across the circuit rows): branch decisions/s + the
+        # unit-prop implications/s they triggered (CDCL ≈ 1e7 props/s single-core).
+        "decisions_per_s_peak":     round(max([r["decisions_per_s"] for r in rows
+                                               if r.get("decisions_per_s")], default=0.0), 1),
+        "implications_per_s_peak":  round(max([r["implications_per_s"] for r in rows
+                                               if r.get("implications_per_s")], default=0.0), 1),
     }
 
 
@@ -421,7 +451,7 @@ def _print_circuit_table(rows: list[dict], has_cms: bool) -> None:
     if not rows:
         return
     hdr = (f"{'circuit':<8}{'T':>4}{'N':>7}{'M':>7}{'sup':>5}{'GPAP/s':>11}{'uniq/s~':>10}"
-           f"{'assign/s':>10}{'succ':>6}{'uniqG':>8}{'config':>15}")
+           f"{'dec/s':>9}{'impl/s':>9}{'succ':>6}{'uniqG':>8}{'config':>15}")
     if has_cms:
         hdr += f"{'CMS/s':>10}{'uniqC':>8}{'ratio':>8}"
     print("\n=== circuits: throughput + unique (distinct) solution counts ===")
@@ -430,9 +460,10 @@ def _print_circuit_table(rows: list[dict], has_cms: bool) -> None:
         la = f",{r['tuned_la']}" if r.get("tuned_la") else ""
         cfg = f"rv={int(bool(r.get('tuned_rv')))},B={r.get('tuned_b')}{la}"
         uq = f"{r['unique_sps_est']:,.0f}" if r.get("unique_sps_est") else "—"
-        asg = f"{r['assigns_per_s']:.1e}" if r.get("assigns_per_s") else "—"
+        dps = f"{r['decisions_per_s']:.1e}" if r.get("decisions_per_s") else "—"
+        ips = f"{r['implications_per_s']:.1e}" if r.get("implications_per_s") else "—"
         line = (f"{r['circuit']:<8}{r['cycles']:>4}{r['N']:>7}{r['M']:>7}{r['support']:>5}"
-                f"{r['gpap_sps']:>11,.0f}{uq:>10}{asg:>10}"
+                f"{r['gpap_sps']:>11,.0f}{uq:>10}{dps:>9}{ips:>9}"
                 f"{100*r['succ']:>5.0f}%{(r.get('n_distinct') or 0):>8,}{cfg:>15}")
         if has_cms and "cms_sps" in r:
             ratio = f"{r['ratio']:.2f}x" if r.get("ratio") else "—"
@@ -469,6 +500,9 @@ def _print_headline(payload: dict) -> None:
     print(f"  Auto K (batch)       : {a['auto_K']:,}")
     print(f"  Peak GPAP throughput : {a['gpap_sps_peak']:>12,.0f} samples/s")
     print(f"  Median throughput    : {a['gpap_sps_median']:>12,.0f} samples/s")
+    if a.get("implications_per_s_peak"):
+        print(f"  Peak decisions/s     : {a['decisions_per_s_peak']:>12,.0f}  (branch picks)")
+        print(f"  Peak implications/s  : {a['implications_per_s_peak']:>12,.0f}  (unit-prop; CDCL ≈1e7/s single-core)")
     if a.get("ratio_geomean"):
         print(f"  vs CMSGen (geomean)  : {a['ratio_geomean']:>12.2f}x   (max {a['ratio_max']:.1f}x)")
     if a.get("n_compared"):
@@ -657,6 +691,238 @@ def run_all(quick: bool = False, device=None, sampling_dir: str = DEFAULT_SAMPLI
                     print(f"  {p}")
         except Exception as e:  # noqa: BLE001
             print(f"  [plot] skipped: {e}")
+    return payload
+
+
+# ---------------------------------------------------------------------------
+# Per-family runner (Colab idle-disconnect mitigation)
+# ---------------------------------------------------------------------------
+# Colab kills a runtime that looks "idle" — a single cell that runs for an hour without the browser
+# tab producing/receiving interaction can be reaped. Splitting the suite into one SHORT cell per
+# benchmark FAMILY (each ~minutes, printing per-instance rows) keeps the session lively AND, because
+# each family persists its rows to a partial file after EVERY instance, an interruption costs at most
+# the in-flight instance — re-running the cell RESUMES (skips already-saved instances). A final
+# `finalize_families()` cell merges the partials into the one <gpu>.json that compare_saved/plots read.
+FAMILIES = {                                    # family -> (kind, full-run insts, quick-run insts)
+    "iscas89": ("circuit", CIRCUIT_SEQ, CIRCUIT_SEQ),          # ISCAS-89 sequential (s*)
+    "itc99":   ("circuit", CIRCUIT_ITC, CIRCUIT_ITC_QUICK),    # ITC'99 (b01-b14)
+    "iscas85": ("circuit", CIRCUIT_COMB, CIRCUIT_COMB),        # ISCAS-85 combinational (c*)
+    "sk":      ("sk", None, None),                             # the sk_ sampling suite
+}
+_PARTIAL_SUBDIR = "_partial"
+
+
+def _partial_path(out_dir: str, slug: str, family: str) -> str:
+    d = os.path.join(out_dir, _PARTIAL_SUBDIR)
+    os.makedirs(d, exist_ok=True)
+    return os.path.join(d, f"{slug}.{family}.json")
+
+
+def run_family(family: str, *, quick: bool = False, device=None, cmsgen_bin: str | None = "auto",
+               out_dir: str = DEFAULT_OUT_DIR, sampling_dir: str = DEFAULT_SAMPLING_DIR,
+               circuit_cycles: list[int] | None = None, n_time: int | None = None,
+               n_cov: int | None = None, b: int = 8, k_cap: int | None = None, els: bool = True,
+               resume: bool = True, scratch: str | None = None, limit: int | None = None,
+               verbose: bool = True) -> dict:
+    """Benchmark ONE family (see FAMILIES), persisting each instance to a partial file as it finishes.
+
+    Run one family per notebook cell (the Colab idle-disconnect fix). Resumable: re-running the same
+    cell skips instances already saved in the partial file. Call finalize_families() once all the
+    family cells are done to merge + aggregate + plot + save the combined <gpu>.json.
+    Returns the partial payload {"gpu", "family", "rows", ...}."""
+    if family not in FAMILIES:
+        raise ValueError(f"unknown family {family!r}; choose from {list(FAMILIES)}")
+    kind, insts_full, insts_quick = FAMILIES[family]
+    device = _resolve_device(device)
+    if k_cap is None:
+        k_cap = default_k_cap(device)
+    scratch = scratch or os.path.join(REPO_ROOT, ".cmsgen_scratch")
+    os.makedirs(scratch, exist_ok=True)
+    if cmsgen_bin == "auto":
+        cmsgen_bin = build_cmsgen()
+    n_time = (20_000 if quick else 50_000) if n_time is None else n_time
+    n_cov = (2_000 if quick else 5_000) if n_cov is None else n_cov
+
+    info = gpu_info(device)
+    slug = _slug(info["name"])
+    ppath = _partial_path(out_dir, slug, family)
+    rows: list[dict] = []
+    if resume and os.path.exists(ppath):
+        try:
+            rows = json.load(open(ppath)).get("rows", [])
+            if verbose and rows:
+                print(f"[resume] {family}: {len(rows)} instance(s) already saved in {ppath}")
+        except Exception:  # noqa: BLE001
+            rows = []
+
+    params = {"quick": quick, "b": b, "n_time": n_time, "n_cov": n_cov, "els": els,
+              "k_cap": k_cap, "cmsgen": bool(cmsgen_bin)}
+
+    def _save():
+        with open(ppath, "w") as f:
+            json.dump({"timestamp": datetime.now().isoformat(timespec="seconds"), "gpu": info,
+                       "family": family, "kind": kind, "params": params, "rows": rows}, f, indent=2)
+
+    if verbose:
+        vram = f"{info['total_gb']:.1f} GB" if info.get("total_gb") else "n/a"
+        print(f"\n=== family '{family}' on {info['name']} (VRAM={vram}) — k_cap={k_cap:,} "
+              f"n_time={n_time:,} ===", flush=True)
+
+    if kind == "circuit":
+        insts = insts_quick if quick else insts_full
+        if limit:
+            insts = insts[:limit]
+        done = {(r["circuit"], r["cycles"]) for r in rows if "error" not in r and "circuit" in r}
+
+        def _on_row(r):
+            rows.append(r)
+            _save()                                  # checkpoint after every (inst, T)
+        new = run_circuits(device, cmsgen_bin=cmsgen_bin, n_time=n_time, n_cov=n_cov, b=b,
+                           k_cap=k_cap, scratch=scratch, els=els, cycles=circuit_cycles,
+                           insts=insts, verbose=verbose, on_row=_on_row, skip_keys=done)
+        _ = new                                      # rows already collected via _on_row
+        if verbose:
+            _print_circuit_table([r for r in rows if "error" not in r], has_cms=bool(cmsgen_bin))
+    else:  # sk suite
+        files = ([os.path.join(sampling_dir, n) for n in NICHE_FOCUS] if quick
+                 else sorted(glob.glob(os.path.join(sampling_dir, "*.cnf"))))
+        files = [p for p in files if os.path.exists(p)]
+        if limit:
+            files = files[:limit]
+        done = {r["name"] for r in rows if "error" not in r}
+        for i, path in enumerate(files, 1):
+            name = os.path.basename(path)
+            if name in done:
+                continue
+            if verbose:
+                print(f"[{i}/{len(files)}] {name[:48]} ...", flush=True)
+            try:
+                r = run_instance(path, device, cmsgen_bin=cmsgen_bin, n_time=n_time, n_cov=n_cov,
+                                 b=b, k_cap=k_cap, scratch=scratch, els=els)
+            except Exception as e:  # noqa: BLE001
+                r = {"name": name, "error": str(e)}
+                print(f"   ERROR: {e}")
+            rows.append(r)
+            _save()                                  # checkpoint after every instance
+            if verbose and "error" not in r:
+                rt = f"  {r['ratio']:.2f}x CMS" if r.get("ratio") else ""
+                print(f"   GPAP {r['gpap_sps']:,.0f}/s  succ {100*r['succ']:.0f}%{rt}", flush=True)
+        if verbose:
+            _print_table([r for r in rows if "error" not in r], has_cms=bool(cmsgen_bin))
+    _save()
+    if verbose:
+        print(f"\n[saved] {family}: {len([r for r in rows if 'error' not in r])} rows → {ppath}")
+    return {"gpu": info, "family": family, "kind": kind, "params": params, "rows": rows}
+
+
+def finalize_families(*, device=None, out_dir: str = DEFAULT_OUT_DIR, do_plots: bool = True,
+                      verbose: bool = True) -> dict:
+    """Merge all per-family partial files for THIS GPU into the combined <gpu>.json (what
+    compare_saved + the plots read), aggregate, print the headline, and plot. Run once after all the
+    run_family() cells. Circuit families are aggregated as the circuit suite; an sk partial (if any)
+    is stored under `instances`."""
+    device = _resolve_device(device)
+    info = gpu_info(device)
+    slug = _slug(info["name"])
+    pdir = os.path.join(out_dir, _PARTIAL_SUBDIR)
+    circuits: list[dict] = []
+    instances: list[dict] = []
+    params: dict = {}
+    for p in sorted(glob.glob(os.path.join(pdir, f"{slug}.*.json"))):
+        try:
+            part = json.load(open(p))
+        except Exception:  # noqa: BLE001
+            continue
+        params = part.get("params", params)
+        if part.get("kind") == "circuit":
+            circuits.extend(part.get("rows", []))
+        else:
+            instances.extend(part.get("rows", []))
+    good_circ = [r for r in circuits if "error" not in r and "gpap_sps" in r]
+    good_inst = [r for r in instances if "error" not in r and "gpap_sps" in r]
+    circuits_only = bool(good_circ) and not good_inst
+    agg = aggregate_circuits(circuits, []) if good_circ else aggregate(good_inst, [])
+    payload = {
+        "timestamp":     datetime.now().isoformat(timespec="seconds"),
+        "gpu":           info,
+        "quick":         params.get("quick"),
+        "b":             params.get("b"),
+        "n_time":        params.get("n_time"),
+        "els":           params.get("els"),
+        "cmsgen":        params.get("cmsgen"),
+        "circuits_only": circuits_only,
+        "aggregate":     agg,
+        "instances":     instances,
+        "ksweeps":       [],
+        "circuits":      circuits,
+    }
+    if verbose:
+        if good_circ:
+            _print_circuit_table(circuits, has_cms=bool(params.get("cmsgen")))
+            _print_circuit_matrix(circuits)
+        if good_inst:
+            _print_table(good_inst, has_cms=bool(params.get("cmsgen")))
+        _print_headline(payload)
+    save_results(payload, out_dir)
+    if do_plots:
+        try:
+            from scripts.colab_sampling_plots import make_plots
+            for p in make_plots(payload, out_dir):
+                print(f"  plot: {p}")
+        except Exception as e:  # noqa: BLE001
+            print(f"  [plot] skipped: {e}")
+    return payload
+
+
+def run_ksweep(payload: dict | None = None, *, device=None, out_dir: str = DEFAULT_OUT_DIR,
+               scratch: str | None = None, b: int = 8, chunks: int | None = None,
+               k_cap: int | None = None, els: bool = True, circuit: str | None = None,
+               cycles: int | None = None, do_plots: bool = True, verbose: bool = True) -> dict:
+    """K-scaling sweep on ONE circuit — the A100 headroom story (throughput ∝ K up the VRAM curve).
+
+    Run after finalize_families(). With no `circuit` it sweeps the highest-throughput circuit in the
+    finalized `<gpu>.json` (or the passed `payload`); the CNF must still be in `scratch/circuits/`
+    (it is, right after the family runs). Merges the sweep into the saved payload and re-plots."""
+    device = _resolve_device(device)
+    if k_cap is None:
+        k_cap = default_k_cap(device)
+    scratch = scratch or os.path.join(REPO_ROOT, ".cmsgen_scratch")
+    chunks = chunks or 8
+    if payload is None:
+        p = os.path.join(out_dir, f"{_slug(gpu_info(device)['name'])}.json")
+        payload = json.load(open(p))
+    rows = [r for r in payload.get("circuits", []) if "error" not in r and "gpap_sps" in r]
+    if circuit is None:
+        best = max(rows, key=lambda r: r.get("gpap_sps", 0), default=None)
+        if best is None:
+            print("[ksweep] no circuit rows to sweep"); return payload
+        circuit, cycles = best["circuit"], best["cycles"]
+    cnfp = os.path.join(scratch, "circuits", f"{circuit}.c{cycles}.cnf")
+    if not os.path.exists(cnfp):
+        print(f"[ksweep] {cnfp} not found (re-run the family cell first)"); return payload
+    if verbose:
+        print(f"[K-sweep] {circuit} T={cycles} up to auto-K ...", flush=True)
+    ks = k_scaling(cnfp, device, b=b, chunks=chunks, k_cap=k_cap, els=els)
+    if ks:
+        payload.setdefault("ksweeps", []).append(ks)
+        if verbose:
+            for pt in ks["points"]:
+                print(f"   K={pt['K']:>9,}  {pt['samples_per_s']:>13,.0f} samp/s  "
+                      f"(succ {100*pt['success_rate']:.0f}%)", flush=True)
+        payload["aggregate"] = (aggregate_circuits(payload.get("circuits", []), payload["ksweeps"])
+                                if payload.get("circuits_only")
+                                else aggregate([r for r in payload.get("instances", [])
+                                                if "error" not in r], payload["ksweeps"]))
+        if verbose:
+            _print_headline(payload)
+        save_results(payload, out_dir)
+        if do_plots:
+            try:
+                from scripts.colab_sampling_plots import make_plots
+                for pp in make_plots(payload, out_dir):
+                    print(f"  plot: {pp}")
+            except Exception as e:  # noqa: BLE001
+                print(f"  [plot] skipped: {e}")
     return payload
 
 
