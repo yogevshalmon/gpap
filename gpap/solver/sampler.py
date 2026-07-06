@@ -162,16 +162,14 @@ class GPUSampler:
             return smp
         from pysat.formula import CNF
         cnf = CNF(from_file=path)
-        return cls._from_simplified(cnf.nv, [list(c) for c in cnf.clauses], support, device,
-                                    els=els, **kw)
+        return cls._from_simplified(cnf.nv, cnf.clauses, support, device, els=els, **kw)
 
     @classmethod
     def from_clauses(cls, num_vars: int, clauses, device: torch.device, *,
                      simplify: bool = False, els: bool = False,
                      support: list | None = None, **kw) -> "GPUSampler":
         if simplify or els:
-            return cls._from_simplified(num_vars, [list(c) for c in clauses], support, device,
-                                        els=els, **kw)
+            return cls._from_simplified(num_vars, clauses, support, device, els=els, **kw)
         formula = CnfFormula(device)
         formula.init_formula(num_vars, clauses)
         smp = cls(formula, device, **kw)
@@ -181,6 +179,8 @@ class GPUSampler:
     @classmethod
     def _from_simplified(cls, nv: int, clauses: list, support: list | None,
                          device: torch.device, *, els: bool = False, **kw) -> "GPUSampler":
+        # `clauses` is treated read-only here and by simplify_cnf/simplify_cnf_els (they copy
+        # before mutating) — no defensive deep copy: it costs ~1s per call on 1M-clause unrolls.
         if els:
             res = simplify_cnf_els(nv, clauses, support)
             if res is None:
@@ -539,10 +539,15 @@ class GPUSampler:
         Policy: try each config once, then decaying-epsilon-greedy (explore shrinks as 1/sqrt(chunk),
         floored at 5%) on cumulative models/wall — keeps re-checking alternatives but spends most of
         the budget on the winner (niche → (random,8); service → (structured,1)).
+        Exploration is PLAUSIBILITY-FILTERED: only configs within 20x of the best measured rate get
+        re-checked. Uniform re-checks ignored what a re-check COSTS — measured on b10 T=25 (64-chunk
+        collect run): orac at 102 models/s vs the winner's 29.6k (290x) got 5 uniform picks = 20.4s
+        of the 29s wall (70%). Run-to-run rate noise is ~1.9x (b06 measurements), so a 20x-slower
+        config is dead on this formula, not noisy — it keeps exactly its one cold-start chunk.
         `exploit=True` skips exploration and returns the current best — used in the post-target
         top-up phase to accumulate a stable measurement window on the winner (min_measure_chunks)."""
-        best = lambda: max(plan, key=lambda c: (stats[c]["models"] / stats[c]["wall"])
-                           if stats[c]["wall"] > 0 else 0.0)
+        rate = lambda c: (stats[c]["models"] / stats[c]["wall"]) if stats[c]["wall"] > 0 else 0.0
+        best = lambda: max(plan, key=rate)
         for c in plan:                                  # cold start: one real chunk per config
             if stats[c]["chunks"] == 0:
                 return c
@@ -550,7 +555,10 @@ class GPUSampler:
             return best()
         eps = max(0.05, chunk ** -0.5)
         if self._pyrng.random() < eps:
-            return self._pyrng.choice(plan)
+            b = best()
+            cands = [c for c in plan if c is not b and rate(c) >= rate(b) / 20]
+            if cands:
+                return self._pyrng.choice(cands)
         return best()
 
     def _reconstruct_els(self, comp_rows: list[list[int]]):
@@ -637,8 +645,17 @@ class GPUSampler:
         configs: "list[tuple[bool, int]] | None" = None,
         config_policy: str = "adaptive",
         min_measure_chunks: int = 1,
+        max_seconds: "float | None" = None,
     ) -> dict:
-        """Draw at least `n_target` valid models (or until `max_chunks` chunks run).
+        """Draw at least `n_target` valid models.
+
+        Stops early on any of the safety valves (all optional):
+          - `max_chunks` chunks have run;
+          - `max_seconds` of sampling wall have elapsed (checked between chunks — the intended
+            "produce N samples, but never spin longer than T" contract);
+          - ZERO models after every config has been measured plus a couple of grace chunks —
+            the target is unreachable (e.g. a 0%-success instance would otherwise loop forever
+            once no chunk cap is given).
 
         `support`: 0-based variable indices to restrict decisions to (independent-support
         sampling — the rest are determined by propagation). "auto" (default) uses the
@@ -739,6 +756,10 @@ class GPUSampler:
                 break
             if max_chunks is not None and chunk >= max_chunks:
                 break
+            if max_seconds is not None and time.perf_counter() - t0 > max_seconds:
+                break                                   # hard time cap (between chunks)
+            if n_models == 0 and not cold and chunk >= len(plan) + 2:
+                break                                   # every config measured + grace: hopeless
             chunk += 1
             # Once past n_target but short of the measurement window, EXPLOIT the winner (no eps
             # exploration) so its stable rate is measured on back-to-back chunks, not diluted.
@@ -884,6 +905,7 @@ class GPUSampler:
             out["config_breakdown"] = {
                 _lab(c): {
                     "models": s["models"], "attempts": s["attempts"], "chunks": s["chunks"],
+                    "wall_s": s["wall"],
                     "success_rate": (s["models"] / s["attempts"]) if s["attempts"] else 0.0,
                     "samples_per_s": (s["models"] / s["wall"]) if s["wall"] > 0 else None,
                     "decisions_per_s": (s["decs"] / s["wall"]) if s["wall"] > 0 else None,
@@ -924,19 +946,34 @@ def simplify_cnf(nv: int, clauses: list, support: list | None):
     support projections is unchanged, provided forced support vars are pinned to their forced value
     and free_support vars are randomized. Validated by tests/test_sampler.py.
     """
+    import numpy as np
+    from itertools import chain
     from gpap.solver.preprocess import unit_closure
-    out, assigned, status = unit_closure([list(c) for c in clauses], [])
+    out, assigned, status = unit_closure(clauses, [])   # reads only — no defensive copy needed
     if status == "unsat":
         return None
     nonunit = [c for c in out if len(c) > 1]
-    used = sorted({abs(l) for c in nonunit for l in c})
-    new_of_old = {v: i + 1 for i, v in enumerate(used)}
-    clauses2 = [[(new_of_old[abs(l)] if l > 0 else -new_of_old[abs(l)]) for l in c] for c in nonunit]
-    support2 = sorted({new_of_old[v + 1] - 1 for v in (support or []) if (v + 1) in new_of_old})
+    # Vectorised variable compaction (the sorted-set + per-literal remap listcomps cost ~1.5s
+    # of pure Python per call on 1M-clause unrolls; this runs on construct AND rebuild).
+    lens = np.fromiter(map(len, nonunit), dtype=np.int64, count=len(nonunit))
+    flat = (np.array(list(chain.from_iterable(nonunit)), dtype=np.int64) if lens.sum()
+            else np.empty(0, dtype=np.int64))
+    used_np = np.unique(np.abs(flat))                   # sorted unique surviving vars
+    lut = np.zeros((int(used_np[-1]) + 1) if len(used_np) else 1, dtype=np.int64)
+    lut[used_np] = np.arange(1, len(used_np) + 1)       # old var -> compacted var (0 = unused)
+    nf = (np.sign(flat) * lut[np.abs(flat)]).tolist()
+    bounds = np.zeros(len(nonunit) + 1, dtype=np.int64)
+    np.cumsum(lens, out=bounds[1:])
+    clauses2 = [nf[a:b] for a, b in zip(bounds[:-1].tolist(), bounds[1:].tolist())]
+
+    def _new(v1):                                       # 1-based old var -> compacted var or 0
+        return int(lut[v1]) if v1 < len(lut) else 0
+
+    support2 = sorted({_new(v + 1) - 1 for v in (support or []) if _new(v + 1)})
     forced = [(v if assigned[v] else -v) for v in assigned]
     free_support = sorted(v for v in (support or [])
-                          if (v + 1) not in assigned and (v + 1) not in new_of_old)
-    return len(used), clauses2, support2, used, forced, free_support
+                          if (v + 1) not in assigned and not _new(v + 1))
+    return len(used_np), clauses2, support2, used_np.tolist(), forced, free_support
 
 
 def simplify_cnf_els(nv: int, clauses: list, support: list | None):
@@ -964,8 +1001,8 @@ def simplify_cnf_els(nv: int, clauses: list, support: list | None):
     from gpap.clsdata.occ_list import ext_lit_to_lit_index
     from gpap.solver.preprocess import equivalent_literal_substitution, unit_closure
 
-    # Pass 1: unit closure over the original variables.
-    out1, assigned1, st1 = unit_closure([list(c) for c in clauses], [])
+    # Pass 1: unit closure over the original variables (reads only — no copy).
+    out1, assigned1, st1 = unit_closure(clauses, [])
     if st1 == "unsat":
         return None
     nonunit1 = [c for c in out1 if len(c) > 1]
@@ -985,7 +1022,7 @@ def simplify_cnf_els(nv: int, clauses: list, support: list | None):
         els_clauses, var_map = nonunit1, {}
 
     # Pass 2: ELS substitution can turn (a∨a)→(a) into new units — absorb them.
-    out2, assigned2, st2 = unit_closure([list(c) for c in els_clauses], [])
+    out2, assigned2, st2 = unit_closure(els_clauses, [])
     if st2 == "unsat":
         return None
     nonunit2 = [c for c in out2 if len(c) > 1]

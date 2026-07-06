@@ -1,7 +1,24 @@
 import torch
-from collections import defaultdict
+import numpy as np
+from itertools import chain
 
 from gpap.utils.sat_def import ext_cls
+
+
+def flat_lit_arrays(clauses: list) -> tuple:
+    """(lens, lit_idx, cls_idx) int64 numpy arrays for a clause list — the shared vectorised
+    path for CSR-occ / clause-size / lit-sum construction. The per-literal Python loops this
+    replaces cost seconds per call on 1M-clause circuit unrolls (and construction runs several
+    times per instance: sampler, miner prober, post-mining rebuild)."""
+    M = len(clauses)
+    lens = np.fromiter(map(len, clauses), dtype=np.int64, count=M)
+    if M and lens.sum():
+        flat = np.array(list(chain.from_iterable(clauses)), dtype=np.int64)
+    else:
+        flat = np.empty(0, dtype=np.int64)
+    lit_idx = 2 * (np.abs(flat) - 1) + (flat < 0)      # ext_lit_to_lit_index, vectorised
+    cls_idx = np.repeat(np.arange(M, dtype=np.int64), lens)
+    return lens, lit_idx, cls_idx
 
 
 def ext_lit_to_lit_index(ext_lit: int) -> int:
@@ -52,32 +69,28 @@ class OccurrenceList:
         For each literal l in a clause, we add the clause index to occ[~l]
         (the negation's occurrence list). This way occ[l] = clauses where ~l appears.
         """
+        _, lit_idx, cls_idx = flat_lit_arrays(clauses)
+        return OccurrenceList.from_flat(num_vars, len(clauses), lit_idx ^ 1, cls_idx, device)
+
+    @staticmethod
+    def from_flat(num_vars: int, num_clauses: int, neg_lit_idx, cls_idx,
+                  device: torch.device) -> 'OccurrenceList':
+        """CSR build from pre-flattened arrays (see flat_lit_arrays). The stable argsort keeps
+        each literal's clause indices in ascending clause order — identical layout to the old
+        per-clause append loop."""
         occ = OccurrenceList(device)
         occ._num_vars = num_vars
-        occ._num_clauses = len(clauses)
-
+        occ._num_clauses = num_clauses
         num_lits = 2 * num_vars
-        # collect clause indices per literal (negated)
-        lit_to_clauses = defaultdict(list)
-
-        for cls_idx, clause in enumerate(clauses):
-            for ext_lit in clause:
-                lit_idx = ext_lit_to_lit_index(ext_lit)
-                # store in the negation's list: occ[~lit] gets this clause
-                neg_lit_idx = lit_index_negation(lit_idx)
-                lit_to_clauses[neg_lit_idx].append(cls_idx)
-
-        # build CSR arrays
-        offsets = [0]
-        all_clauses = []
-        for l in range(num_lits):
-            cls_list = lit_to_clauses.get(l, [])
-            all_clauses.extend(cls_list)
-            offsets.append(len(all_clauses))
-
-        occ._occ_offsets = torch.tensor(offsets, dtype=torch.int64, device=device)
-        occ._occ_clauses = torch.tensor(all_clauses, dtype=torch.int64, device=device) if all_clauses else torch.empty(0, dtype=torch.int64, device=device)
-
+        if len(neg_lit_idx) == 0:
+            occ._occ_offsets = torch.zeros(num_lits + 1, dtype=torch.int64, device=device)
+            occ._occ_clauses = torch.empty(0, dtype=torch.int64, device=device)
+            return occ
+        order = np.argsort(neg_lit_idx, kind="stable")
+        offsets = np.zeros(num_lits + 1, dtype=np.int64)
+        np.cumsum(np.bincount(neg_lit_idx, minlength=num_lits), out=offsets[1:])
+        occ._occ_offsets = torch.from_numpy(offsets).to(device)
+        occ._occ_clauses = torch.from_numpy(cls_idx[order]).to(device)
         return occ
 
     def get_clause_indices(self, lit_index: int) -> torch.Tensor:

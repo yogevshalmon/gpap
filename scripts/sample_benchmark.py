@@ -29,6 +29,22 @@ from pysat.formula import CNF
 from gpap.solver.sampler import GPUSampler, parse_independent_support
 
 
+# CIRCUIT portfolio (the default here — this harness is currently evaluated on CircuitSAT
+# unrollings). Measured per-config on 22+ circuit instances (RTX 4080, 2026-07-02..04); each entry
+# is the outright winner somewhere, the adaptive bandit picks per instance:
+#   (True, 8, "fused")  — fused-trajectory kernel at boosted K_fused: broad deep-circuit winner.
+#   (True, 1, "fused")  — B=1's success edge is free in-kernel: wins the conflict-heavy deep set.
+#   (True, 8, "fsoft")  — in-kernel ε-greedy soft risk-polarity: wins the tight-cascade family.
+# (True, 64, "orac") — high-B on the PYTHON engine — was REMOVED 2026-07-06: measured on the full
+# 64-instance circuits dir (RTX 4080, per-config bandit breakdown), it wins 0/64 and is never
+# within 1.05x of the winner (closest: b09 T=1); its original niche (ultra-shallow wide, b14 T=1)
+# is now >3x behind the boosted-K fused configs, while its cold-start chunk cost 0.2-5.1s per
+# instance (~67s across the dir). Re-add if a GPU/regime shifts the balance (e.g. A100 large-K
+# PyTorch-engine batching) — the "orac" lookahead mode itself remains fully supported.
+# (scripts/colab_sampling_benchmark.py imports this same list — single source of truth.)
+CIRCUIT_PORTFOLIO = [(True, 8, "fused"), (True, 1, "fused"), (True, 8, "fsoft")]
+
+
 def distinct_projections(models, support):
     """Count DISTINCT support-projections among `models` (support = 1-based vars). Returns
     (n_distinct, n_models). This is the "unique solutions" verification metric — computed OFF the
@@ -77,14 +93,19 @@ def two_wise_coverage(models, support):
 DEFAULT_PORTFOLIO = [(True, 8, False), (True, 1, "fused"), (False, 1, False)]
 
 
-def gpap_sample(path, device, *, simplify, n_time, n_cov, b, k_cap, max_chunks=8,
-                cov_chunks=4, max_rounds=300, lookahead=False, verify_clauses=None,
-                cov_k_cap=2048, els=False, random_var="auto", configs="default",
-                use_kernel="auto", mine="auto", mine_gate=0.15, min_measure_chunks=3):
+def gpap_sample(path, device, *, simplify, n_time, n_cov, b, k_cap, max_chunks=None,
+                time_limit=60.0, cov_chunks=4, max_rounds=300, lookahead=False,
+                verify_clauses=None, verify_cpu=False, cov_k_cap=2048, els=False,
+                random_var="auto", configs="default", use_kernel="auto", mine="auto",
+                mine_gate=0.15, min_measure_chunks=3):
     """Throughput run timed end-to-end (construction + simplify + sample, to match CMSGen's
-    'produce N samples' wall clock) + a small collect run for coverage/soundness. The timed run
-    is bounded by `max_chunks` (rate = models/wall is valid regardless of how many it collects —
-    avoids spinning on low-success formulas).
+    'produce N samples' wall clock) + a small collect run for coverage/soundness. `n_time` is a
+    CONTRACT: the timed run keeps sampling until it has delivered that many models. Safety
+    valves (both reported via the '<' marker when they fire): `time_limit` seconds of sampling
+    wall, and the sampler's zero-progress stop (0 models after every config is measured — a
+    0%-success instance would otherwise spin forever). `max_chunks` (default None = unbounded)
+    remains as an expert knob; the old default of 8 silently capped low-success instances far
+    below the requested n_time.
 
     `configs` (default = adaptive portfolio DEFAULT_PORTFOLIO): a throughput bandit that runs the
     best config per chunk at full K, dynamically switching to the winner — cracks the search-heavy
@@ -103,11 +124,24 @@ def gpap_sample(path, device, *, simplify, n_time, n_cov, b, k_cap, max_chunks=8
         # skewed by one-time warmup — this is what inflated the first shallow circuit's number.
         # Returns the probe chunk's stats (a FREE gate signal for mining) and restores the RNG
         # so the timed run stays deterministic.
+        # FULL round budget + one chunk per FUSED-FAMILY config: with the old min(10, max_rounds)
+        # cap NO deep-circuit trajectory could complete in the warmup, so success_rate read 0% on
+        # every c25 unroll; and measuring only configs[0] (fused B=8) misreads instances whose
+        # success lives in another config (b03 T=25: B=8 4.5%, B=1 99%). Either way the miner's
+        # "stuck" gate fired suite-wide and burned the full L2/L3 budget everywhere (77.6s of the
+        # c25 set's 99s overhead). Fused/fsoft chunks are in-kernel — cheap at any round budget —
+        # while an orac chunk can cost seconds even at K=1024 (measured 2.5s on b10 T=25), so the
+        # slow configs keep paying their own cold-start in the timed run exactly as before.
+        # Returns "best_success" = the best warmed config's completion rate — THE stuck signal.
+        cw = [c for c in (configs or []) if len(c) > 2 and c[2] in ("fused", "fsoft")]
+        cw = cw or (configs[:1] if configs else None)
         _k = s.K
         s.K = min(s.K, 1024)
-        w = s.sample(1, configs=(configs or None), decisions_per_round=b, random_var=random_var,
-                     max_decision_rounds=min(10, max_rounds), max_chunks=1, collect=False,
-                     lookahead=lookahead)  # low round cap: JIT is per-kernel, not per-round → stays cheap
+        w = s.sample(1, configs=cw, decisions_per_round=b, random_var=random_var,
+                     max_decision_rounds=max_rounds, max_chunks=len(cw) if cw else 1,
+                     collect=False, lookahead=lookahead)
+        bd = (w.get("config_breakdown") or {}).values()
+        w["best_success"] = max((c["success_rate"] for c in bd), default=w["success_rate"])
         s.K = _k
         s._gen.manual_seed(5)
         import random as _r
@@ -115,31 +149,78 @@ def gpap_sample(path, device, *, simplify, n_time, n_cov, b, k_cap, max_chunks=8
         torch.cuda.synchronize()
         return w
 
-    t_start = time.perf_counter()   # TRUE end-to-end clock: construction + simplify + warmup +
-    #                                 mining + the timed run — the wall CMSGen is charged for
-    smp = GPUSampler.from_cnf_file(path, device, simplify=simplify, els=els, k_cap=k_cap, seed=5,
-                                   use_kernel=use_kernel)
+    t_start = time.perf_counter()   # TRUE end-to-end clock: parse + construction + simplify +
+    #                                 warmup + mining + the timed run — the wall CMSGen is charged for
+    phases = {}                     # per-phase seconds (overhead attribution; lands in the JSON)
+    # THE single parse. It is shared by sampler construction, mining and the caller's table
+    # metadata — the flow previously parsed every CNF three times (from_cnf_file + miner + main),
+    # ~2s/parse extra on a 1M-clause unroll.
+    cnf0 = CNF(from_file=path)
+    sup0 = parse_independent_support(path)
+    phases["parse"] = time.perf_counter() - t_start
+    _tc = time.perf_counter()
+    smp = GPUSampler.from_clauses(cnf0.nv, cnf0.clauses, device, simplify=simplify, els=els,
+                                  support=sup0, k_cap=k_cap, seed=5, use_kernel=use_kernel)
+    phases["construct"] = time.perf_counter() - _tc
     mine_info = None
     if device.type == "cuda":
+        _tw = time.perf_counter()
         w = _warmup(smp)
-        # Entailed-clause mining, gated on the warmup chunk's success rate (free signal — the
-        # warmup runs anyway): healthy instances skip at zero added cost; low-success ones pay
-        # seconds ONCE and every subsequent trajectory inherits the pruning (learned clauses turn
-        # the late BCP conflicts that kill random completions into early ones). Mined clauses are
-        # ENTAILED, so the model set is exactly unchanged (soundness unaffected). Measured: flips
-        # the service family from 0.02-0.7x vs CMSGen to 1.1-6.7x (see gpap/solver/miner.py).
-        if mine == "auto" and smp.M > 0 and w["success_rate"] < mine_gate:
+        phases["warmup"] = time.perf_counter() - _tw
+        # Entailed-clause mining (learned clauses are ENTAILED — the model set is exactly
+        # unchanged; measured: service family 0.02-0.7x -> 1.1-6.7x vs CMSGen, circuit backbone
+        # instances 1.2-16x). Mining is now nearly self-gating (see gpap/solver/miner.py): the L1
+        # backbone sweep costs 0.1-0.5s when there is nothing to learn, and the expensive L2/L3
+        # support-tuple tiers only run when L1 found units — so mine on every non-tiny formula
+        # (M >= 3000; below that the whole timed run is ~instant and even 0.3s of probing would
+        # dominate the e2e wall). The warmup success rate (< mine_gate = truly stuck) FORCES the
+        # full L2/L3 tiers even without L1 yield — the original service-family behaviour.
+        if mine == "auto" and smp.M >= 3000:
             try:
                 from gpap.solver.miner import mine_entailed
-                cnf0 = CNF(from_file=path)
-                sup0 = parse_independent_support(path)
-                mi = mine_entailed(cnf0.nv, [list(c) for c in cnf0.clauses], sup0, device)
-                if mi["learned"]:
+                # Two-stage mining. Stage 1: L1 backbone units ALWAYS (cheap fixpoint, THE
+                # measured circuit win) + the L2/L3 tiers that are CHEAP for this support size
+                # (pairs="auto", see the miner docstring — b09's 4 ternaries are 1.4x for 0.7s,
+                # s386's 18 binaries 1.48x for ~2s; wide-support tiers never paid). Stage 2
+                # (full tiers — the service-family lever) only if the instance is still stuck
+                # AFTER the units are in: pre-mining success is low almost everywhere because
+                # mining is exactly what lifts it (b03 T=25: best config 4.5% before its 1007
+                # units, 99% after), so gating the tiers on the PRE-mining rate burned the full
+                # L2/L3 budget suite-wide (77.6s of the c25 set's 99s overhead).
+                _tm = time.perf_counter()
+                mi = mine_entailed(cnf0.nv, cnf0.clauses, sup0, device, pairs="auto",
+                                   pairs_min_units=0)
+                phases["mine"] = time.perf_counter() - _tm
+                learned = mi["learned"]
+                stuck = w["best_success"] < mine_gate
+                if learned:
+                    # Rebuild on the augmented formula. No trailing re-warmup needed: kernels
+                    # are JIT'd and the fresh seed=5 sampler starts the timed run from the same
+                    # RNG state the warmup+reseed dance produced.
+                    _tm = time.perf_counter()
                     smp = GPUSampler.from_clauses(
-                        cnf0.nv, [list(c) for c in cnf0.clauses] + mi["learned"], device,
-                        simplify=simplify, els=els, support=sup0, k_cap=k_cap, seed=5,
-                        use_kernel=use_kernel)
-                    _warmup(smp)
+                        cnf0.nv, cnf0.clauses + learned, device, simplify=simplify, els=els,
+                        support=sup0, k_cap=k_cap, seed=5, use_kernel=use_kernel)
+                    phases["rebuild"] = time.perf_counter() - _tm
+                    _tm = time.perf_counter()
+                    stuck = _warmup(smp)["best_success"] < mine_gate   # post-units stuck signal
+                    phases["recheck"] = time.perf_counter() - _tm
+                if stuck:
+                    _tm = time.perf_counter()
+                    mi2 = mine_entailed(cnf0.nv, cnf0.clauses + learned, sup0, device,
+                                        pairs=True, pairs_min_units=0,
+                                        max_seconds=max(1.0, 5.0 - mi["seconds"]))
+                    phases["mine"] += time.perf_counter() - _tm
+                    if mi2["learned"]:
+                        learned = learned + mi2["learned"]
+                        _tm = time.perf_counter()
+                        smp = GPUSampler.from_clauses(
+                            cnf0.nv, cnf0.clauses + learned, device, simplify=simplify,
+                            els=els, support=sup0, k_cap=k_cap, seed=5, use_kernel=use_kernel)
+                        phases["rebuild"] = (phases.get("rebuild", 0.0)
+                                             + time.perf_counter() - _tm)
+                    for k2 in ("n_units", "n_binary", "n_ternary", "seconds"):
+                        mi[k2] += mi2[k2]
                 mine_info = {k2: mi[k2] for k2 in ("n_units", "n_binary", "n_ternary", "seconds")}
             except RuntimeError as e:   # mining is an optimization — never let it kill the run
                 print(f"   [mine] skipped after error: {e}", file=sys.stderr)
@@ -147,15 +228,17 @@ def gpap_sample(path, device, *, simplify, n_time, n_cov, b, k_cap, max_chunks=8
     # A big-K GPU meets n_time in the bandit cold-start (1 chunk/config), so the headline rates would
     # rest on a single noisy chunk (measured: best_rate_sps ±1.9x run-to-run). min_measure_chunks makes
     # the winner run >= that many back-to-back chunks post-target for a stable, config-consistent rate.
-    mmc = max(1, min(min_measure_chunks, max_chunks - (len(configs) if configs else 1)))
+    mmc = max(1, min(min_measure_chunks,
+                     (max_chunks - (len(configs) if configs else 1)) if max_chunks
+                     else min_measure_chunks))
     if configs:
         t = smp.sample(n_time, configs=configs, max_decision_rounds=max_rounds,
                        max_chunks=max_chunks, collect=False, lookahead=lookahead,
-                       min_measure_chunks=mmc)
+                       min_measure_chunks=mmc, max_seconds=time_limit)
     else:
         t = smp.sample(n_time, decisions_per_round=b, random_var=random_var,
                        max_decision_rounds=max_rounds, max_chunks=max_chunks, collect=False,
-                       lookahead=lookahead, min_measure_chunks=mmc)
+                       lookahead=lookahead, min_measure_chunks=mmc, max_seconds=time_limit)
     if device.type == "cuda":
         torch.cuda.synchronize()
     wall = time.perf_counter() - t0
@@ -192,8 +275,9 @@ def gpap_sample(path, device, *, simplify, n_time, n_cov, b, k_cap, max_chunks=8
     # support-projections. Deliberately SEPARATE from the timed run above (which is collect=False), so
     # the model reconstruction / dedup cost is NOT charged to samples/s — this is a correctness/quality
     # readout ("do we actually emit distinct solutions?"), not a throughput number.
+    vc = cnf0.clauses if (verify_cpu and verify_clauses is None) else verify_clauses
     c = (smp.sample(n_cov, decisions_per_round=tuned_b, random_var=tuned_rv, max_decision_rounds=max_rounds,
-                    max_chunks=cov_chunks, collect=True, verify_clauses=verify_clauses,
+                    max_chunks=cov_chunks, collect=True, verify_clauses=vc,
                     lookahead=tuned_la) if n_cov else {})
     del smp
     if device.type == "cuda":
@@ -204,8 +288,19 @@ def gpap_sample(path, device, *, simplify, n_time, n_cov, b, k_cap, max_chunks=8
     # spaces where re-sampling dominates). None when no coverage run was requested.
     n_coll = len(c.get("models", []))
     uniq_sps = (sps * c["n_distinct"] / n_coll) if (n_coll and c.get("n_distinct")) else None
+    phases["timed"] = wall
     return {"samples_per_s": sps, "success_rate": succ,
+            "nv": cnf0.nv, "n_clauses": len(cnf0.clauses),  # ORIGINAL sizes (pre-simplify) — the
+            #   caller's table metadata; saves main() a third parse of the same file
+            "sup1": [v + 1 for v in (sup0 or range(cnf0.nv))],
             "sps_e2e_total": sps_e2e_total,                   # incl. construction+simplify+mining
+            "phases": phases,                                 # per-phase seconds of the e2e wall
+            "n_models": t["n_models"],                        # total solutions found in the timed run
+            # True when a safety valve (time_limit / zero-progress / explicit max_chunks) stopped
+            # the timed run BEFORE it delivered n_time models. Rates stay valid either way.
+            "chunk_capped": t["n_models"] < n_time,
+            "wall_timed_s": wall,                             # the solver's sampling wall (timed run)
+            "wall_total_s": wall_total,                       # e2e wall incl. construction+simplify+mining
             "mined": mine_info,                               # entailed-clause mining stats (None = skipped)
             "unique_sps_est": uniq_sps,
             "assigns_per_s": aps,                             # literals assigned/s (CDCL props/s analogue)
@@ -215,7 +310,10 @@ def gpap_sample(path, device, *, simplify, n_time, n_cov, b, k_cap, max_chunks=8
             "attempts_per_s": t.get("attempts_per_s"),        # raw trajectory throughput (K/chunk rate)
             "bcp_rounds_per_chunk": t.get("bcp_rounds_per_chunk"),
             "bcp_ops_per_attempt": t.get("bcp_ops_per_attempt"),
-            "support_size": t["support_size"], "gpu_sound": c.get("gpu_sound", True),
+            # gpu_sound: from the coverage run when it exists, else from the timed run (the timed
+            # run's capped per-chunk check) — so soundness is reported even with quality checks off
+            "support_size": t["support_size"],
+            "gpu_sound": c.get("gpu_sound", t.get("gpu_sound", True)),
             "cpu_sound": c.get("all_valid"), "models": c.get("models", []),
             "n_distinct": c.get("n_distinct"), "n_collected": n_coll,
             "tuned_rv": tuned_rv, "tuned_b": tuned_b, "tuned_la": tuned_la,
@@ -260,8 +358,25 @@ def main():
     ap.add_argument("--glob", default="benchmarks/sampling/*.cnf")
     ap.add_argument("--device", default=None)
     ap.add_argument("--cmsgen", default=None, help="path to the cmsgen binary (enables comparison)")
-    ap.add_argument("--n-time", type=int, default=50_000, help="samples for the throughput timing")
-    ap.add_argument("--n-cov", type=int, default=5_000, help="samples used for 2-wise coverage")
+    ap.add_argument("--n-time", type=int, default=50_000,
+                    help="samples to PRODUCE in the timed run (a contract, not a hint). Only the "
+                         "safety valves end the run short of this ('<' after sols): --time-limit, "
+                         "or zero models after every config was measured (hopeless instance)")
+    ap.add_argument("--time-limit", type=float, default=60.0,
+                    help="per-instance sampling wall cap in seconds (the safety valve that bounds "
+                         "very-low-success instances; e.g. at 1k samples/s, 200k samples would "
+                         "otherwise take 200s)")
+    ap.add_argument("--max-chunks", type=int, default=None,
+                    help="expert knob: hard chunk cap for the timed run (default none — --n-time "
+                         "and --time-limit govern)")
+    ap.add_argument("--n-cov", type=int, default=0,
+                    help="samples for the QUALITY pass (2-wise coverage + distinct count). 0 (default) "
+                         "SKIPS it: the collect run's Python model-reconstruction dominated instance "
+                         "wall (measured 26s of 34s on s1196 T=25) while distinct≈100%% on all non-tiny "
+                         "circuits. Pass e.g. 5000 for the paper-quality metrics")
+    ap.add_argument("--portfolio", choices=["circuit", "default"], default="circuit",
+                    help="bandit config portfolio: 'circuit' (fused/fsoft/orac — the CircuitSAT "
+                         "focus, default) or 'default' (the sk_ projected-sampling portfolio)")
     ap.add_argument("--b", type=int, default=8,
                     help="decisions per round (8 is the throughput sweet spot: fewer rounds while "
                          "success barely drops; B>=16 over-constrains and collapses success)")
@@ -278,75 +393,104 @@ def main():
     device = (torch.device(args.device) if args.device
               else torch.device("cuda" if torch.cuda.is_available() else "cpu"))
     files = sorted(glob.glob(args.glob))
-    print(f"device={device} | simplify={args.simplify} | n_time={args.n_time:,} n_cov={args.n_cov:,} "
+    portfolio = CIRCUIT_PORTFOLIO if args.portfolio == "circuit" else DEFAULT_PORTFOLIO
+    quality = args.n_cov > 0
+    print(f"device={device} | simplify={args.simplify} | portfolio={args.portfolio} "
+          f"| n_time={args.n_time:,} (limit {args.time_limit:g}s/inst) n_cov={args.n_cov:,} "
           f"| cmsgen={'yes' if args.cmsgen else 'no'}\n{len(files)} benchmarks\n")
-    hdr = (f"{'instance':<24}{'N':>6}{'M':>7}{'|sup|':>6}{'GPAP/s':>10}{'e2e/s':>10}{'uniq/s~':>10}"
-           f"{'dec/s':>9}{'impl/s':>9}{'succ%':>6}{'2wiseG':>8}{'snd':>4}")
+    hdr = (f"{'instance':<24}{'N':>6}{'M':>7}{'|sup|':>6}{'GPAP/s':>10}{'e2e/s':>10}"
+           f"{'dec/s':>9}{'impl/s':>9}{'succ%':>6}{'sols':>10}{'t_slv':>7}{'t_tot':>7}")
+    if quality:
+        hdr += f"{'uniq/s~':>10}{'2wiseG':>8}"
+    hdr += f"{'snd':>4}"
     if args.cmsgen:
-        hdr += f"{'CMS/s':>9}{'2wiseC':>7}{'GPAP/CMS':>9}{'e2e/CMS':>8}"
+        hdr += f"{'CMS/s':>9}{'GPAP/CMS':>9}{'e2e/CMS':>8}"
+        if quality:
+            hdr += f"{'2wiseC':>7}"
     print(hdr); print("-" * len(hdr))
     results, ratios = [], []
+    t_suite = time.perf_counter()
+    total_sols = 0
     for path in files:
         name = os.path.basename(path)
-        cnf = CNF(from_file=path)
-        sup = parse_independent_support(path)
-        sup1 = [v + 1 for v in (sup or range(cnf.nv))]
-        vc = [list(c) for c in cnf.clauses] if args.verify_cpu else None
         g = gpap_sample(path, device, simplify=args.simplify, els=args.els, n_time=args.n_time,
-                        n_cov=args.n_cov, b=args.b, k_cap=args.k_cap, verify_clauses=vc)
-        twg = two_wise_coverage(g["models"], sup1)
+                        n_cov=args.n_cov, b=args.b, k_cap=args.k_cap, verify_cpu=args.verify_cpu,
+                        configs=portfolio, max_chunks=args.max_chunks,
+                        time_limit=args.time_limit)
+        sup1 = g["sup1"]                       # metadata from gpap_sample's single parse
+        twg = two_wise_coverage(g["models"], sup1) if quality else None
         snd = "OK" if g["gpu_sound"] and (g["cpu_sound"] in (None, True)) else "BAD"
-        row = {"name": name, "nv": cnf.nv, "M": len(cnf.clauses), "support": len(sup1),
+        total_sols += g["n_models"]
+        row = {"name": name, "nv": g["nv"], "M": g["n_clauses"], "support": len(sup1),
                "gpap_sps": g["samples_per_s"], "gpap_sps_e2e": g.get("sps_e2e_total"),
+               "n_models": g["n_models"], "wall_timed_s": g["wall_timed_s"],
+               "wall_total_s": g["wall_total_s"],
                "succ": g["success_rate"], "twise_gpap": twg,
                "gpu_sound": g["gpu_sound"], "n_distinct": g["n_distinct"],
                "unique_sps_est": g.get("unique_sps_est"), "assigns_per_s": g.get("assigns_per_s"),
                "decisions_per_s": g.get("decisions_per_s"),
-               "implications_per_s": g.get("implications_per_s"), "mined": g.get("mined")}
-        uq = f"{g['unique_sps_est']:,.0f}" if g.get("unique_sps_est") else "—"
+               "implications_per_s": g.get("implications_per_s"), "mined": g.get("mined"),
+               "phases": g.get("phases"), "config_breakdown": g.get("config_breakdown")}
         dps = f"{g['decisions_per_s']:.1e}" if g.get("decisions_per_s") else "—"
         ips = f"{g['implications_per_s']:.1e}" if g.get("implications_per_s") else "—"
         mi = g.get("mined")
-        # '+' after succ% = entailed-clause mining ran (low-success gate); details land in the JSON
+        # '+' after succ% = entailed-clause mining ran (low-success gate); details land in the JSON.
+        # '<' after sols = a safety valve (--time-limit, or zero-progress on a hopeless instance)
+        # stopped the run before it delivered --n-time samples; rates are still valid.
         mn = "+" if mi else " "
-        line = (f"{name[:22]:<24}{cnf.nv:>6}{len(cnf.clauses):>7}{len(sup1):>6}"
-                f"{g['samples_per_s']:>10,.0f}{g.get('sps_e2e_total') or 0:>10,.0f}{uq:>10}{dps:>9}{ips:>9}"
-                f"{100*g['success_rate']:>5.0f}%{mn}{twg:>6.1f}%{snd:>4}")
+        sols_s = f"{g['n_models']:,}" + ("<" if g.get("chunk_capped") else "")
+        line = (f"{name[:22]:<24}{g['nv']:>6}{g['n_clauses']:>7}{len(sup1):>6}"
+                f"{g['samples_per_s']:>10,.0f}{g.get('sps_e2e_total') or 0:>10,.0f}{dps:>9}{ips:>9}"
+                f"{100*g['success_rate']:>5.0f}%{mn}{sols_s:>9}"
+                f"{g['wall_timed_s']:>6.1f}s{g['wall_total_s']:>6.1f}s")
+        if quality:
+            uq = f"{g['unique_sps_est']:,.0f}" if g.get("unique_sps_est") else "—"
+            line += f"{uq:>10}{twg:>7.1f}%"
+        line += f"{snd:>4}"
         plain = None
         if args.also_plain:
             plain = gpap_sample(path, device, simplify=False, n_time=args.n_time, n_cov=0,
-                                b=args.b, k_cap=args.k_cap)
+                                b=args.b, k_cap=args.k_cap, configs=portfolio,
+                                max_chunks=args.max_chunks, time_limit=args.time_limit)
             row["gpap_plain_sps"] = plain["samples_per_s"]
         if args.cmsgen:
             # single CMSGen run at n_time (fair samp/s); use a subset of its samples for coverage
             crate_t, cmodels = cmsgen_sample(path, args.cmsgen, args.n_time, args.scratch,
-                                             keep=args.n_cov)
-            twc = two_wise_coverage(cmodels[:args.n_cov], sup1)
-            # CMSGen distinct fraction on the same subset — the papers' metric is UNIQUE
-            # solutions/s, so report the dedup factor for BOTH samplers, not just GPAP
-            cd, cn = distinct_projections(cmodels[:args.n_cov], sup1)
+                                             keep=args.n_cov or 1)
             ratio = (g["samples_per_s"] / crate_t) if crate_t else float("inf")
             ratio_e2e = ((g.get("sps_e2e_total") or 0) / crate_t) if crate_t else float("inf")
-            row.update(cms_sps=crate_t, twise_cms=twc, ratio=ratio, ratio_e2e=ratio_e2e,
-                       cms_distinct=cd, cms_distinct_of=cn)
+            row.update(cms_sps=crate_t, ratio=ratio, ratio_e2e=ratio_e2e)
             ratios.append(ratio)
-            line += f"{crate_t:>9,.0f}{twc:>6.1f}%{ratio:>8.2f}x{ratio_e2e:>7.2f}x"
-        print(line)
+            line += f"{crate_t:>9,.0f}{ratio:>8.2f}x{ratio_e2e:>7.2f}x"
+            if quality:
+                twc = two_wise_coverage(cmodels[:args.n_cov], sup1)
+                # CMSGen distinct fraction on the same subset — the papers' metric is UNIQUE
+                # solutions/s, so report the dedup factor for BOTH samplers, not just GPAP
+                cd, cn = distinct_projections(cmodels[:args.n_cov], sup1)
+                row.update(twise_cms=twc, cms_distinct=cd, cms_distinct_of=cn)
+                line += f"{twc:>6.1f}%"
+        print(line, flush=True)
         results.append(row)
 
+    suite_wall = time.perf_counter() - t_suite
+    print(f"\nTOTAL: {total_sols:,} solutions over {len(results)} instances in {suite_wall:,.1f}s "
+          f"suite wall (solver e2e {sum(r['wall_total_s'] for r in results):,.1f}s, of which "
+          f"timed sampling {sum(r['wall_timed_s'] for r in results):,.1f}s)")
     if ratios:
         import statistics as st
         gm = st.geometric_mean([r for r in ratios if r and r > 0 and r != float("inf")])
         e2e_rs = [r["ratio_e2e"] for r in results
                   if r.get("ratio_e2e") and 0 < r["ratio_e2e"] != float("inf")]
         gm_e2e = st.geometric_mean(e2e_rs) if e2e_rs else 0.0
-        print(f"\ngeomean GPAP/CMSGen throughput = {gm:.2f}x steady-state, {gm_e2e:.2f}x "
+        print(f"geomean GPAP/CMSGen throughput = {gm:.2f}x steady-state, {gm_e2e:.2f}x "
               f"end-to-end incl. setup+mining  (GPAP=GPU, CMSGen=single-core CPU)")
-        # quality: mean 2-wise coverage delta
-        dq = [r["twise_gpap"] - r["twise_cms"] for r in results if "twise_cms" in r]
+        # quality: mean 2-wise coverage delta (only when the quality pass ran)
+        dq = [r["twise_gpap"] - r["twise_cms"] for r in results
+              if r.get("twise_cms") is not None and r.get("twise_gpap") is not None]
         if dq:
-            print(f"mean 2-wise coverage: GPAP {np.mean([r['twise_gpap'] for r in results]):.1f}% vs "
-                  f"CMSGen {np.mean([r['twise_cms'] for r in results if 'twise_cms' in r]):.1f}% "
+            print(f"mean 2-wise coverage: GPAP "
+                  f"{np.mean([r['twise_gpap'] for r in results if r['twise_gpap'] is not None]):.1f}% "
+                  f"vs CMSGen {np.mean([r['twise_cms'] for r in results if r.get('twise_cms') is not None]):.1f}% "
                   f"(Δ {np.mean(dq):+.1f}pp)")
     if args.output:
         os.makedirs(os.path.dirname(args.output) or ".", exist_ok=True)

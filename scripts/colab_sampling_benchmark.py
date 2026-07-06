@@ -174,16 +174,12 @@ def run_instance(path: str, device: torch.device, *, cmsgen_bin: str | None, n_t
     faster propagate + bigger K; ~1.5x). `configs` = the adaptive-bandit portfolio (default
     DEFAULT_PORTFOLIO for the sk_ niche; pass CIRCUIT_PORTFOLIO for circuits — adds soft-lookahead)."""
     name = os.path.basename(path)
-    sup0 = parse_independent_support(path)
-    from pysat.formula import CNF
-    cnf = CNF(from_file=path)
-    sup1 = [v + 1 for v in (sup0 or range(cnf.nv))]
-
     g = gpap_sample(path, device, simplify=True, els=els, n_time=n_time, n_cov=n_cov, b=b,
                     k_cap=k_cap, configs=configs)
+    sup1 = g["sup1"]                       # metadata from gpap_sample's single parse
     twg = two_wise_coverage(g["models"], sup1)
     row = {
-        "name": name, "N": cnf.nv, "M": len(cnf.clauses), "support": len(sup1),
+        "name": name, "N": g["nv"], "M": g["n_clauses"], "support": len(sup1),
         "gpap_sps": round(g["samples_per_s"], 1), "succ": round(g["success_rate"], 4),
         "twise_gpap": round(twg, 2), "gpu_sound": g["gpu_sound"],
         # UNIQUE-solution readout — computed OFF the timing path (see gpap_sample): distinct support-
@@ -220,7 +216,7 @@ def run_instance(path: str, device: torch.device, *, cmsgen_bin: str | None, n_t
 # Sequential-circuit (ISCAS-89) unrolling benchmark — the CircuitSAT-paper family
 # ---------------------------------------------------------------------------
 
-DEFAULT_CIRCUIT_DIR = os.path.join(REPO_ROOT, "benchmarks", "circuits")
+DEFAULT_CIRCUIT_DIR = os.path.join(REPO_ROOT, "benchmarks", "circuits", "bench")
 CIRCUIT_SEQ = ["s386", "s526", "s832", "s1196"]        # ISCAS-89 sequential (unrolled over cycles)
 # ITC'99 sequential (the "Recurrent CircuitSAT Sampling", arXiv 2502.21226, family). b01–b14; the
 # larger b15+ blow past the 100k-clause budget even shallow. Oversized (instance, cycle) combos are
@@ -250,7 +246,7 @@ CIRCUIT_ITC_QUICK = ["b01", "b03", "b06", "b08", "b10", "b13"]
 # groups; the cap is a v1-Python-loop artifact that truncated B=1 on large supports). Per-trajectory
 # BCP work is ~UNIFORM on circuits ⇒ straggler early-stop has no tail to trim (measured; not an
 # option). Fused/orac degrade gracefully to plain (rv,B) when the Triton kernel is unavailable.
-CIRCUIT_PORTFOLIO = [(True, 8, "fused"), (True, 1, "fused"), (True, 8, "fsoft"), (True, 64, "orac")]
+from scripts.sample_benchmark import CIRCUIT_PORTFOLIO  # single source of truth (same list)
 
 
 def run_circuits(device: torch.device, *, cmsgen_bin: str | None, n_time: int, n_cov: int, b: int,

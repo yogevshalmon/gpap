@@ -94,7 +94,7 @@ def test_ab_random_cnfs():
 def test_ab_circuit_cnf(tmp_path):
     """A/B on a real unrolled circuit (deep propagation cascades)."""
     from scripts.bench_to_cnf import parse_bench, build_cnf, write_dimacs
-    circ = parse_bench("benchmarks/circuits/s386.bench")
+    circ = parse_bench("benchmarks/circuits/bench/s386.bench")
     b, support, _ = build_cnf(circ, T=3, seed=1)
     p = tmp_path / "s386c3.cnf"
     write_dimacs(str(p), b, support)
@@ -164,7 +164,7 @@ def test_fused_phase_boundary(tmp_path):
     support fully determines the rest, huge-B fused must match v1's success (~100%), not collapse
     (the pre-fix straddle bug measured 100%→0% here)."""
     from scripts.bench_to_cnf import parse_bench, build_cnf, write_dimacs
-    circ = parse_bench("benchmarks/circuits/s386.bench")
+    circ = parse_bench("benchmarks/circuits/bench/s386.bench")
     b, support, _ = build_cnf(circ, T=2, seed=1)
     p = tmp_path / "s386c2.cnf"
     write_dimacs(str(p), b, support)
@@ -223,7 +223,7 @@ def test_packed_vs_unpacked_identical_models():
 def test_packed_circuit_identical_models(tmp_path):
     """Packed vs unpacked on a real unrolled circuit (deep cascades + a pinned-output unit)."""
     from scripts.bench_to_cnf import parse_bench, build_cnf, write_dimacs
-    circ = parse_bench("benchmarks/circuits/s386.bench")
+    circ = parse_bench("benchmarks/circuits/bench/s386.bench")
     b, support, _ = build_cnf(circ, T=2, seed=1)
     p = tmp_path / "s386c2.cnf"
     write_dimacs(str(p), b, support)
