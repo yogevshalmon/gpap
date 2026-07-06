@@ -52,62 +52,103 @@ def unit_closure(clauses, units):
                     logically equivalent to (clauses ∧ units).
       assigned    : {var(1-based): bool}.
       status      : "ok" | "unsat" (a contradiction among entailed units ⇒ the formula is UNSAT).
+
+    Vectorised (numpy CSR + the per-clause remaining-count/key-sum trick — the same sum trick
+    as the GPU engine, on CPU): the old per-literal Python worklist (sets + occ dicts over every
+    clause) cost ~2.5s per call on 1M-clause circuit unrolls, and the sampler pays it twice
+    (construct + post-mining rebuild). Clause ORDER is preserved (units in assignment order,
+    then survivors in original order); literals within a surviving clause come out sorted and
+    de-duplicated (downstream consumers are order-insensitive: lit_sum/occ-CSR are sums/sets).
     """
-    val: dict[int, int] = {}        # var -> +1 / -1
-    q: list[int] = []
-    ok = True
+    import numpy as np
+    from itertools import chain
 
-    def enqueue(lit):
-        nonlocal ok
-        v, s = abs(lit), (1 if lit > 0 else -1)
-        if v in val:
-            if val[v] != s:
-                ok = False
-            return
-        val[v] = s
-        q.append(lit)
+    M = len(clauses)
+    lens0 = np.fromiter(map(len, clauses), dtype=np.int64, count=M)
+    total = int(lens0.sum())
+    flat = (np.array(list(chain.from_iterable(clauses)), dtype=np.int64) if total
+            else np.empty(0, dtype=np.int64))
+    cls_idx = np.repeat(np.arange(M, dtype=np.int64), lens0)
+    # de-duplicate literals within each clause (parity with the old `set(c)`); sorts them too
+    order = np.lexsort((flat, cls_idx))
+    f, ci = flat[order], cls_idx[order]
+    keep = np.ones(len(f), dtype=bool)
+    keep[1:] = (ci[1:] != ci[:-1]) | (f[1:] != f[:-1])
+    f, ci = f[keep], ci[keep]
 
-    for u in units:
-        for lit in u:
-            enqueue(lit)
-    for c in clauses:
-        if len(c) == 1:
-            enqueue(c[0])
-    if not ok:
-        return list(_UNSAT_CNF), {}, "unsat"
+    init_lits = [lit for u in units for lit in u]
+    maxv = max(int(np.abs(f).max()) if len(f) else 0,
+               max((abs(l) for l in init_lits), default=0))
+    key = 2 * (np.abs(f) - 1) + (f < 0)                 # lit-index key (2N scheme)
+    nk = 2 * maxv
+    korder = np.argsort(key, kind="stable")
+    csr_cls = ci[korder]                                # clause indices grouped by literal key
+    offs = np.zeros(nk + 1, dtype=np.int64)
+    if len(key):
+        np.cumsum(np.bincount(key, minlength=nk), out=offs[1:])
 
-    work = [set(c) for c in clauses if len(c) != 1]     # non-unit clauses (mutated in place)
-    occ: dict[int, list[int]] = defaultdict(list)
-    for idx, s in enumerate(work):
-        for lit in s:
-            occ[lit].append(idx)
-    removed = [False] * len(work)
+    n_rem = np.bincount(ci, minlength=M)                # non-falsified lits per clause
+    key_sum = np.bincount(ci, weights=key, minlength=M) # sum of their keys (float64 — exact)
+    removed = np.zeros(M, dtype=bool)
+    emitted = np.zeros(M, dtype=bool)                   # clauses already consumed as units
+    val = np.zeros(maxv + 1, dtype=np.int8)             # var -> 0 / +1 / -1
+    assigned_order: list[int] = []
 
-    head = 0
-    while head < len(q) and ok:
-        lit = q[head]
-        head += 1
-        for idx in occ.get(lit, ()):        # clauses with `lit` are satisfied
-            removed[idx] = True
-        for idx in occ.get(-lit, ()):       # clauses with `¬lit` lose that literal
-            if removed[idx]:
+    def push(lits):
+        """Assign new lits; returns the fresh batch or None on contradiction."""
+        batch = []
+        for l in lits:
+            v, s = abs(l), (1 if l > 0 else -1)
+            if val[v]:
+                if val[v] != s:
+                    return None
                 continue
-            s = work[idx]
-            s.discard(-lit)
-            if len(s) == 0:
-                ok = False
-                break
-            if len(s) == 1:
-                enqueue(next(iter(s)))
-    if not ok:
-        return list(_UNSAT_CNF), {}, "unsat"
+            val[v] = s
+            assigned_order.append(l)
+            batch.append(l)
+        return batch
 
-    out = [[v if val[v] == 1 else -v] for v in val]     # unit clauses for assigned vars
-    for idx, s in enumerate(work):
-        if removed[idx] or len(s) <= 1:                 # len<=1 ⇒ became a unit (already in `out`)
-            continue
-        out.append(list(s))
-    return out, {v: (val[v] == 1) for v in val}, "ok"
+    batch = push(init_lits + [c[0] for c in clauses if len(c) == 1])
+    if batch is None:
+        return list(_UNSAT_CNF), {}, "unsat"
+    while True:
+        seg_sat, seg_fal, fal_keys = [], [], []
+        for l in batch:
+            k = 2 * (abs(l) - 1) + (0 if l > 0 else 1)
+            seg_sat.append(csr_cls[offs[k]:offs[k + 1]])        # clauses satisfied by l
+            fk = k ^ 1
+            seg = csr_cls[offs[fk]:offs[fk + 1]]                # clauses losing ¬l
+            seg_fal.append(seg)
+            fal_keys.append(np.full(len(seg), fk, dtype=np.int64))
+        if seg_sat:
+            removed[np.concatenate(seg_sat)] = True
+            fal = np.concatenate(seg_fal)
+            n_rem -= np.bincount(fal, minlength=M)
+            key_sum -= np.bincount(fal, weights=np.concatenate(fal_keys).astype(np.float64),
+                                   minlength=M)
+        live = ~removed
+        if bool((live & (n_rem == 0)).any()):                    # all literals falsified
+            return list(_UNSAT_CNF), {}, "unsat"
+        unit_mask = live & (n_rem == 1) & ~emitted
+        if not unit_mask.any():
+            break
+        emitted[unit_mask] = True
+        ks = key_sum[unit_mask].astype(np.int64)                 # the remaining lit IS the sum
+        batch = push([(k // 2 + 1) * (1 if k % 2 == 0 else -1) for k in ks.tolist()])
+        if batch is None:
+            return list(_UNSAT_CNF), {}, "unsat"
+        if not batch:
+            break
+
+    out = [[l] for l in assigned_order]                          # unit clauses for assigned vars
+    alive = ~removed & (n_rem >= 2)
+    if alive.any():
+        m = alive[ci] & (val[np.abs(f)] == 0)                    # falsified lits drop out
+        kf, kc = f[m].tolist(), ci[m]
+        bounds = np.zeros(int(alive.sum()) + 1, dtype=np.int64)
+        np.cumsum(np.bincount(kc, minlength=M)[alive], out=bounds[1:])
+        out.extend(kf[a:b] for a, b in zip(bounds[:-1].tolist(), bounds[1:].tolist()))
+    return out, {abs(l): l > 0 for l in assigned_order}, "ok"
 
 
 def apply_learned_subsumption(clauses, learned):

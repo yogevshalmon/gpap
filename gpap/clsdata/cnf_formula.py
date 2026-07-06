@@ -3,8 +3,10 @@ import os
 import torch
 from tqdm import tqdm
 
+import numpy as np
+
 from gpap.utils.sat_def import ext_lit, ext_cls
-from gpap.clsdata.occ_list import OccurrenceList, ext_lit_to_lit_index
+from gpap.clsdata.occ_list import OccurrenceList, ext_lit_to_lit_index, flat_lit_arrays
 
 
 class CnfFormula:
@@ -45,25 +47,25 @@ class CnfFormula:
         return self._init_lit_sum
 
     def init_formula(self, num_vars: int, clauses: list[ext_cls]):
-        """Initialize from a list of clauses (external literal format)."""
+        """Initialize from a list of clauses (external literal format). Vectorised: one shared
+        flatten (flat_lit_arrays) feeds the occ CSR, clause_sizes and init_lit_sum — the old
+        per-literal Python loops cost seconds per build on 1M-clause circuit unrolls, and
+        construction runs several times per instance (sampler, miner prober, post-mining
+        rebuild)."""
         self._num_vars = num_vars
         self._num_clauses = len(clauses)
 
-        # build occurrence lists
-        self._occ_list = OccurrenceList.from_clauses(num_vars, clauses, self._device)
-
-        # build clause_sizes and init_lit_sum
-        clause_sizes = []
-        lit_sums = []
-        for clause in clauses:
-            clause_sizes.append(len(clause))
-            lit_sum = 0
-            for ext_l in clause:
-                lit_sum += ext_lit_to_lit_index(ext_l)
-            lit_sums.append(lit_sum)
-
-        self._clause_sizes = torch.tensor(clause_sizes, dtype=torch.int32, device=self._device)
-        self._init_lit_sum = torch.tensor(lit_sums, dtype=torch.int32, device=self._device)
+        lens, lit_idx, cls_idx = flat_lit_arrays(clauses)
+        self._occ_list = OccurrenceList.from_flat(num_vars, len(clauses), lit_idx ^ 1, cls_idx,
+                                                  self._device)
+        # per-clause sum of literal indices (bincount weights are float64 — exact below 2^53)
+        if len(clauses):
+            lit_sums = np.bincount(cls_idx, weights=lit_idx,
+                                   minlength=len(clauses)).astype(np.int32)
+        else:
+            lit_sums = np.zeros(0, dtype=np.int32)
+        self._clause_sizes = torch.from_numpy(lens.astype(np.int32)).to(self._device)
+        self._init_lit_sum = torch.from_numpy(lit_sums).to(self._device)
 
     def parse_cnf_file(self, cnf_file: str):
         """Parse a DIMACS CNF file and build the formula."""
