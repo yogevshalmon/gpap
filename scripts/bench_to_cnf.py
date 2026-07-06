@@ -221,10 +221,14 @@ def main():
     ap.add_argument("--cycles", type=int, default=25)
     ap.add_argument("--out", required=True)
     ap.add_argument("--seed", type=int, default=1)
+    ap.add_argument("--pin-outputs", type=int, default=None,
+                     help="constrain only this many final-cycle outputs (default: all). Use a small "
+                          "value (e.g. 1) for combinational circuits with many outputs, where pinning "
+                          "all of them over-constrains to a tiny solution set.")
     args = ap.parse_args()
     circ = parse_bench(args.bench)
     inputs, outputs, dffs, gates = circ
-    b, support, target = build_cnf(circ, args.cycles, args.seed)
+    b, support, target = build_cnf(circ, args.cycles, args.seed, pin_outputs=args.pin_outputs)
     write_dimacs(args.out, b, support)
     print(f"{args.bench}: PI={len(inputs)} PO={len(outputs)} DFF={len(dffs)} gates={len(gates)} "
           f"| cycles={args.cycles} -> vars={b.nv} clauses={len(b.clauses)} support={len(support)}")
