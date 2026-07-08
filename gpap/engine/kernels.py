@@ -28,6 +28,15 @@ Semantics contract vs the PyTorch engine (the A/B oracle; BCP fixpoints are CONF
     `apply_assumptions_bulk`. `real_conflict` / `num_propagated` / soft-stop are NOT maintained
     (unused by the sampler).
 
+Three JIT kernels live here:
+  * `_bcp_fixpoint_kernel`  — batched assumption checking: apply a (K,L) decision tensor and BCP to
+    fixpoint (the engine's `apply_and_propagate` fast path; the other apps consume this).
+  * `_bcp_trajectory_kernel` — the whole randomized decide+propagate loop in one launch, on the
+    engine's own int8/16 sat_count + int32 lit_sum tensors (the UNPACKED fallback).
+  * `_bcp_trajectory_packed_kernel` — the same, on a PACKED int32 clause state (sat_count + XOR of
+    remaining literals fused into one word), with a compile-time `SHIFT` selecting 16|16 or 8|24
+    (see its docstring). This is the default fused path; ~half the scattered-state traffic.
+
 Requires CUDA + triton (ships with torch on Linux/Colab — no nvcc). `TritonBCP.available()` probes
 once; everything degrades gracefully to the PyTorch path when unavailable.
 """
@@ -252,27 +261,36 @@ if _HAVE_TRITON:
     @triton.jit
     def _bcp_trajectory_packed_kernel(
         st_ptr,                               # (K, M) int32 PACKED clause state, kernel-private:
-                                              #   low 16 bits  = sat_count (non-falsified count)
-                                              #   high 16 bits = XOR of non-falsified lit indices
+                                              #   low SHIFT bits    = sat_count (non-falsified count)
+                                              #   high 32-SHIFT bits = XOR of non-falsified lit idx
         asg_ptr, active_ptr, conflict_ptr,
         order_ptr, occ_off_ptr, occ_cls_ptr,
         trail_ptr, nrounds_ptr, nops_ptr, nprops_ptr, ndecs_ptr,
         M, N2, P, NSUP, B, TRAIL_CAP, MAX_ROUNDS, seed,
         SOFT: tl.constexpr,
+        SHIFT: tl.constexpr,                  # packed split (16 -> 16|16, 8 -> 8|24)
     ):
         """PACKED variant of _bcp_trajectory_kernel — same trajectory semantics, half the state
         traffic. The inner BCP loop is memory-bound on SCATTERED clause-state sectors (uncoalesced
         by construction: each occ entry is a random clause), so fusing both counters into ONE int32
         turns 2 loads + 2 stores (int8/16 sat + int32 sum, 4 random 32B sectors) into 1 load +
         1 store (2 sectors). XOR replaces SUM as the remaining-literal trick (xor of a one-element
-        set IS the element) because XOR never overflows -> fits 16 bits whenever lit indices do
-        (2N <= 65535; the wrapper falls back to the unpacked kernel otherwise).
+        set IS the element) because it never overflows.
 
-        Packed update per falsified literal:  st = (st - 1) ^ (neg << 16)
-          * the -1 hits only the low half: sat >= 1 at every decrement (sat==0 conflicts and halts
-            the row before any further update), so the subtraction never borrows into the XOR half;
-          * the XOR hits only the high half (low 16 bits of the operand are zero).
-        sat==1 -> forced literal = (st >> 16) & 0xFFFF."""
+        `SHIFT` selects the field split (a compile-time constexpr, so each value specialises to its
+        own binary — this is one source for two kernels, not a runtime branch):
+          SHIFT=16 -> 16|16, covers 2N <= 65535       (sat half holds any realistic clause size)
+          SHIFT=8  -> 8|24,  covers 2N <= 0xFFFFFF and max clause len <= 255 (the "wide" instances)
+        The wrapper falls back to the UNPACKED kernel when neither fits.
+
+        Packed update per falsified literal:  st = (st - 1) ^ (neg << SHIFT)
+          * the -1 hits only the sat field: sat >= 1 at every decrement (sat==0 conflicts and halts
+            the row before any further update), so the subtraction never borrows into the XOR field;
+          * (neg << SHIFT) hits only the XOR field. For 2N near the 24-bit ceiling the shift may set
+            bit 31 (int32 sign) — harmless: the arithmetic is bitwise and extraction re-masks.
+        sat==1 -> forced literal = (st >> SHIFT) & XOR_MASK."""
+        SAT_MASK: tl.constexpr = (1 << SHIFT) - 1
+        XOR_MASK: tl.constexpr = (1 << (32 - SHIFT)) - 1
         k = tl.program_id(0).to(tl.int64)
         if tl.load(active_ptr + k) != 0:
             st_row = st_ptr + k * M
@@ -305,7 +323,7 @@ if _HAVE_TRITON:
                             o0 = s0
                             while o0 < e0:
                                 c0 = tl.load(occ_cls_ptr + o0).to(tl.int64)
-                                sc0 = tl.load(st_row + c0) & 0xFFFF
+                                sc0 = tl.load(st_row + c0) & SAT_MASK
                                 r0 += tl.where(sc0 == 1, 1000000,
                                                tl.where(sc0 == 2, 4, tl.where(sc0 == 3, 1, 0)))
                                 o0 += 1
@@ -313,7 +331,7 @@ if _HAVE_TRITON:
                             o1 = e0
                             while o1 < e1:
                                 c1 = tl.load(occ_cls_ptr + o1).to(tl.int64)
-                                sc1 = tl.load(st_row + c1) & 0xFFFF
+                                sc1 = tl.load(st_row + c1) & SAT_MASK
                                 r1 += tl.where(sc1 == 1, 1000000,
                                                tl.where(sc1 == 2, 4, tl.where(sc1 == 3, 1, 0)))
                                 o1 += 1
@@ -342,13 +360,13 @@ if _HAVE_TRITON:
                     o = start
                     while (o < end) & (conflict == 0):
                         c = tl.load(occ_cls_ptr + o).to(tl.int64)
-                        st = (tl.load(st_row + c) - 1) ^ (neg << 16)
+                        st = (tl.load(st_row + c) - 1) ^ (neg << SHIFT)
                         tl.store(st_row + c, st)
-                        sat = st & 0xFFFF
+                        sat = st & SAT_MASK
                         if sat == 0:
                             conflict = 1
                         elif sat == 1:
-                            forced = (st >> 16) & 0xFFFF
+                            forced = (st >> SHIFT) & XOR_MASK
                             if tl.load(asg_row + forced) == 0:
                                 if tl.load(asg_row + (forced ^ 1)) != 0:
                                     conflict = 1
@@ -397,7 +415,16 @@ class TritonBCP:
         self._packed_flushed = None     # (M,) int32 packed row AFTER the formula-units flush
         self._asg_flushed = None        # (2N,) int8 assignment row AFTER the flush
         self._packed_mode = None        # None = undecided; True/False once probed for this formula
+        # Packed field split, decided per formula in _build_flush_cache: 16 -> 16|16 (2N <= 65535),
+        # 8 -> 8|24 (the "wide" instances, 65535 < 2N <= 0xFFFFFF, max clause len <= 255).
+        self._shift = 16
+        self._force_wide = False        # test hook: pack 8|24 even where 16|16 would fit (A/B tests)
         self.launches = 0
+
+    @property
+    def _wide_mode(self) -> bool:
+        """True when this formula packs 8|24 (the wide split). Diagnostics / tests."""
+        return bool(self._packed_mode) and self._shift == 8
 
     @classmethod
     def available(cls) -> bool:
@@ -439,12 +466,17 @@ class TritonBCP:
             self._decs_acc = torch.zeros((), dtype=torch.int64, device=dev)
 
     def _build_flush_cache(self, engine) -> None:
-        """One-time (per formula): decide packed-eligibility and cache the post-units-flush state.
+        """One-time (per formula): pick the packed field split and cache the post-units-flush state.
 
-        Eligibility: literal indices must fit the packed word's 16-bit XOR half (2N <= 65535; the
-        sat half needs max clause size <= 65535, trivially true whenever 2N fits since a clause
-        can't repeat variables more than N times). Otherwise `_packed_mode = False` and fused
-        chunks keep the unpacked kernel on the engine's own tensors.
+        Split selection (self._shift):
+          2N <= 65535                          -> 16|16 (SHIFT=16; the sat half holds any realistic
+                                                  clause size, so no max-length constraint here).
+          65535 < 2N <= 0xFFFFFF, max len<=255 -> 8|24 (SHIFT=8; the "wide" instances — b12-c25,
+                                                  c50 unrolls — that the 16-bit XOR half can't index).
+          otherwise                            -> `_packed_mode = False`: fused chunks fall back to
+                                                  the UNPACKED kernel on the engine's own tensors.
+        `_force_wide` (test hook) forces 8|24 wherever it fits, so A/B tests can compare it against
+        16|16 on small formulas.
 
         The cache: after reset_state()+propagate() the engine state is IDENTICAL for every row of
         every chunk (the formula-units flush is deterministic), so one (M,)/(2N,) row pair suffices
@@ -455,9 +487,13 @@ class TritonBCP:
         import numpy as np
         n2 = 2 * engine._num_vars
         M = engine._num_clauses
-        if M == 0 or n2 > 65535:
+        max_len = int(engine._formula.clause_sizes.max().item()) if M else 0
+        if M == 0 or n2 > 0xFFFFFF or (n2 > 65535 and max_len > 255):
             self._packed_mode = False
             return
+        self._shift = 8 if (n2 > 65535 or self._force_wide) else 16
+        sat_mask = (1 << self._shift) - 1
+        xor_mask = (1 << (32 - self._shift)) - 1
         self._ensure_occ(engine)
         engine.reset_state(1)
         engine.propagate()
@@ -465,7 +501,7 @@ class TritonBCP:
             self._packed_mode = False           # keep the ordinary path (0 models either way)
             return
         self._asg_flushed = engine._assignment[0].clone()
-        sat0 = engine._sat_count[0].to(torch.int32)
+        sat0 = engine._sat_count[0].to(torch.int32).cpu().numpy()
         off = self._occ_off32.cpu().numpy().astype(np.int64)
         cls = self._occ_cls32.cpu().numpy().astype(np.int64)
         lits = np.repeat(np.arange(n2, dtype=np.int64) ^ 1, off[1:] - off[:-1])
@@ -474,8 +510,11 @@ class TritonBCP:
         order = np.argsort(cls, kind="stable")
         starts = np.searchsorted(cls[order], np.arange(M, dtype=np.int64))
         xor = np.bitwise_xor.reduceat(vals[order], starts)  # per-clause XOR of non-falsified lits
-        xor_t = torch.from_numpy((xor & 0xFFFF).astype(np.int32)).to(engine._device)
-        self._packed_flushed = (sat0 & 0xFFFF) | (xor_t << 16)
+        # Pack in uint32 (the shifted XOR may legitimately reach bit 31) then reinterpret as the
+        # kernel's int32 — torch integer casts would truncate but a view is exact.
+        packed = ((sat0.astype(np.uint32) & sat_mask)
+                  | ((xor.astype(np.uint32) & xor_mask) << self._shift)).view(np.int32)
+        self._packed_flushed = torch.from_numpy(packed).to(engine._device)
         self._packed_mode = True
 
     @torch.inference_mode()
@@ -507,7 +546,7 @@ class TritonBCP:
 
     def packed_sat_rows(self, row_idx: torch.Tensor) -> torch.Tensor:
         """sat_count values for the given rows of the PACKED state (diagnostics/soundness only)."""
-        return self._packed[row_idx] & 0xFFFF
+        return self._packed[row_idx] & ((1 << self._shift) - 1)
 
     @torch.inference_mode()
     def run(self, engine, decisions: torch.Tensor):
@@ -548,8 +587,9 @@ class TritonBCP:
         next B still-free vars in `order` is exactly _pick_decisions' first-B-free-in-priority-order
         semantics; polarity is a stateless per-(chunk,k,v) hash bit (distributionally uniform — the
         torch RNG stream is NOT consumed, so fused runs are reproducible via `seed` alone).
-        `packed=True` (caller must have prepared state via reset_fused) runs the 16|16 packed-state
-        kernel — identical trajectory semantics, half the clause-state memory traffic.
+        `packed=True` (caller must have prepared state via reset_fused) runs the packed-state
+        kernel at this formula's field split (self._shift: 16|16 or 8|24) — identical trajectory
+        semantics, half the clause-state memory traffic.
         (In-kernel retry-on-conflict was built and MEASURED OUT here: 3 retries tripled per-slot
         success on the low-success instances exactly as predicted, but wall tripled with it —
         conflicts on those instances die LATE, so a retry costs a full trajectory and models/wall
@@ -570,7 +610,7 @@ class TritonBCP:
                 self._packed, engine._assignment,
                 engine._active.view(torch.int8), engine._conflict.view(torch.int8),
                 *bufs, *dims,
-                SOFT=(1 if soft else 0), num_warps=1,
+                SOFT=(1 if soft else 0), SHIFT=self._shift, num_warps=1,
             )
         else:
             _bcp_trajectory_kernel[(K,)](

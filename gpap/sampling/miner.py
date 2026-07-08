@@ -30,8 +30,8 @@ import time
 
 import torch
 
-from gpap.clsdata.cnf_formula import CnfFormula
-from gpap.solver.bcp_engine import BCPEngine
+from gpap.engine.formula import CnfFormula
+from gpap.engine.bcp_engine import BCPEngine
 
 
 def _lit_idx(ext: int) -> int:
@@ -59,7 +59,7 @@ class _Prober:
         f.init_formula(num_vars, clauses)
         self.eng = BCPEngine(f)
         if device.type == "cuda":
-            from gpap.solver.bcp_triton import TritonBCP
+            from gpap.engine.kernels import TritonBCP
             if TritonBCP.available():
                 self.eng.attach_kernel(TritonBCP())
         self.eng.reset_state(1)

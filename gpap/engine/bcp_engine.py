@@ -2,8 +2,7 @@ import time
 
 import torch
 
-from gpap.clsdata.cnf_formula import CnfFormula
-from gpap.clsdata.occ_list import lit_index_negation
+from gpap.engine.formula import CnfFormula
 
 
 def make_assumption_tensor(
@@ -60,13 +59,18 @@ class BCPEngine:
         self.total_bcp_decisions = 0  # DECISION assignments only (branch picks). Implications =
                                     # total_bcp_props - total_bcp_decisions (every non-decision
                                     # assignment is a unit-propagation implication).
-        # Optional fused-kernel fast path (see bcp_triton.TritonBCP). None = pure-PyTorch propagate.
+        # Optional fused-kernel fast path (see gpap.engine.kernels.TritonBCP). None = pure-PyTorch.
         self._fused_kernel = None
+        self._packed_active = False   # last reset was a packed fused reset (see reset_fused)
 
     def attach_kernel(self, kernel) -> None:
         """Attach a fused apply+propagate kernel (e.g. TritonBCP). apply_and_propagate() dispatches
         to it; all other engine methods keep using the PyTorch path (the A/B oracle)."""
         self._fused_kernel = kernel
+
+    @property
+    def has_kernel(self) -> bool:
+        return self._fused_kernel is not None
 
     def apply_and_propagate(self, assumptions: "torch.Tensor") -> None:
         """Apply an assumption/decision tensor and run BCP to fixpoint. With a kernel attached this
@@ -77,6 +81,31 @@ class BCPEngine:
             return
         self.apply_assumptions_bulk(assumptions)
         self.propagate()
+
+    def reset_fused(self, K: int) -> bool:
+        """Fast per-chunk reset for PACKED fused chunks (the kernel broadcast-restores its cached
+        post-units-flush state). Returns False when unavailable (no kernel / formula not
+        packed-eligible) — the caller must then run the ordinary reset_state() + propagate()."""
+        self._packed_active = bool(self._fused_kernel is not None
+                                   and self._fused_kernel.reset_fused(self, K))
+        return self._packed_active
+
+    def run_trajectory(self, order: "torch.Tensor", n_support: int, B: int, seed: int,
+                       max_rounds: "int | None" = None, *, soft: bool = False,
+                       packed: bool = False) -> int:
+        """Fused trajectory sampling — contract entry point 2: the WHOLE randomized
+        decide+propagate loop for every batch row in ONE kernel launch. Requires an attached
+        kernel. See kernels._bcp_trajectory_kernel for semantics."""
+        return self._fused_kernel.run_trajectory(self, order, n_support, B, seed, max_rounds,
+                                                 soft=soft, packed=packed)
+
+    def sat_rows(self, row_idx: "torch.Tensor") -> "torch.Tensor":
+        """sat_count values for the given batch rows, transparent to the packed fused state
+        (after a packed reset_fused the counters live in the kernel's packed tensor, not
+        `sat_count`). The supported accessor for app-level soundness checks."""
+        if self._packed_active:
+            return self._fused_kernel.packed_sat_rows(row_idx)
+        return self._sat_count[row_idx]
 
     def kernel_ops(self) -> int:
         """Occ entries processed by the fused kernel (0 when no kernel). Syncs — read off hot path."""
@@ -92,6 +121,7 @@ class BCPEngine:
 
     def init_state(self, num_batches: int):
         """Initialize BCP state for K parallel assumption sets."""
+        self._packed_active = False
         K = num_batches
         M = self._num_clauses
         N = self._num_vars
@@ -159,6 +189,7 @@ class BCPEngine:
             self.init_state(num_batches)
             return
 
+        self._packed_active = False
         K = num_batches
         # In-place overwrite — no new allocations for sat_count/lit_sum/assignment.
         # Dtype conversion on the M-element vector before expand avoids materialising K×M temps.
@@ -183,34 +214,6 @@ class BCPEngine:
         else:
             self._frontier_batches = torch.empty(0, dtype=torch.long, device=self._device)
             self._frontier_clauses = torch.empty(0, dtype=torch.long, device=self._device)
-
-    def _apply_literal(self, lit_index: int, batch_mask: torch.Tensor):
-        """Set literal lit_index TRUE for batches where batch_mask is True.
-        Update sat_count and lit_sum for affected clauses.
-        """
-        occ = self._formula.occ_list
-        # clauses where ~lit_index appears (these are the clauses affected)
-        affected_clauses = occ.get_clause_indices(lit_index)
-
-        if affected_clauses.numel() == 0:
-            return
-
-        neg_lit = lit_index_negation(lit_index)
-
-        # update for selected batches
-        # sat_count[batch_mask, affected_clauses] -= 1
-        # lit_sum[batch_mask, affected_clauses] -= neg_lit
-        batch_indices = torch.where(batch_mask)[0]
-        if batch_indices.numel() == 0:
-            return
-
-        # use advanced indexing: create grid of (batch, clause) pairs
-        # batch_indices: (B,), affected_clauses: (C,)
-        self._sat_count[batch_indices.unsqueeze(1), affected_clauses.unsqueeze(0)] -= 1
-        self._lit_sum[batch_indices.unsqueeze(1), affected_clauses.unsqueeze(0)] -= neg_lit
-
-        # mark literal as TRUE in assignment
-        self._assignment[batch_indices, lit_index] = 1
 
     def _bulk_propagate_lits(
         self, batch_ids: torch.Tensor, lit_ids: torch.Tensor
@@ -267,31 +270,6 @@ class BCPEngine:
 
         self._assignment[batch_ids, lit_ids] = 1
         return _empty, _empty
-
-    def apply_assumptions(self, assumptions_lit_indices: list[list[int]]):
-        """Apply assumption sets. assumptions_lit_indices[k] is a list of literal indices for batch k.
-
-        Each literal is set TRUE. Its negation is implicitly FALSE.
-        """
-        K = self._sat_count.size(0)
-
-        for k in range(K):
-            if not self._active[k]:
-                continue
-            batch_mask = torch.zeros(K, dtype=torch.bool, device=self._device)
-            batch_mask[k] = True
-
-            for lit_idx in assumptions_lit_indices[k]:
-                # check for contradiction: negation already assigned
-                neg_lit = lit_index_negation(lit_idx)
-                if self._assignment[k, neg_lit] == 1:
-                    self._conflict[k] = True
-                    self._active[k] = False
-                    break
-                # skip if already assigned
-                if self._assignment[k, lit_idx] == 1:
-                    continue
-                self._apply_literal(lit_idx, batch_mask)
 
     @torch.inference_mode()
     def apply_assumptions_bulk(self, assumptions: torch.Tensor):
@@ -694,7 +672,7 @@ class BCPEngine:
 
 
 if __name__ == "__main__":
-    from gpap.clsdata.occ_list import ext_lit_to_lit_index
+    from gpap.engine.formula import ext_lit_to_lit_index
 
     device = torch.device("cpu")
     formula = CnfFormula(device)

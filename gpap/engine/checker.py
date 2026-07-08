@@ -1,9 +1,9 @@
 import torch
 
-from gpap.clsdata.cnf_formula import CnfFormula
-from gpap.clsdata.occ_list import ext_lit_to_lit_index, lit_index_to_var
-from gpap.solver.bcp_engine import BCPEngine, make_assumption_tensor
-from gpap.utils.sat_def import ext_assumptions
+from gpap.engine.formula import CnfFormula
+from gpap.engine.formula import ext_lit_to_lit_index
+from gpap.engine.bcp_engine import BCPEngine, make_assumption_tensor
+from gpap.engine.formula import ext_assumptions
 
 
 class AssumptionChecker:

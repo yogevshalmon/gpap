@@ -40,9 +40,9 @@ import time
 
 import torch
 
-from gpap.clsdata.cnf_formula import CnfFormula
-from gpap.solver.bcp_engine import BCPEngine
-from gpap.utils.gpu_budget import compute_k_safe, gpu_mem_available
+from gpap.engine.formula import CnfFormula
+from gpap.engine.bcp_engine import BCPEngine
+from gpap.engine.calibrate import compute_k_safe, gpu_mem_available
 
 
 class GPUSampler:
@@ -63,28 +63,18 @@ class GPUSampler:
         self.M = formula.num_clauses
         self.engine = BCPEngine(formula)
         # Fused Triton apply+propagate kernel (one launch to fixpoint — kills the Python BCP round
-        # loop's launch/sync/unique overhead + its temporary churn; see bcp_triton). "auto" = on when
-        # CUDA + triton compile are available; the PyTorch engine remains the fallback/oracle.
-        wide = use_kernel == "wide"     # opt-in 8|24 packed kernel: extends the packed fused
-        #                                 path to 65535 < 2N <= 0xFFFFFF (see bcp_triton_wide)
-        mono = use_kernel == "mono"     # opt-in 1-byte count-only kernel: unit literal recovered
-        #                                 by a clause scan; no size ceiling (see bcp_triton_wide)
-        if use_kernel == "auto" or wide or mono:
-            from gpap.solver.bcp_triton import TritonBCP
+        # loop's launch/sync/unique overhead + its temporary churn; see gpap.engine.kernels).
+        # "auto" (default) = on when CUDA + triton compile are available; the PyTorch engine remains
+        # the fallback/oracle. TritonBCP now picks the packed field split PER FORMULA in
+        # _build_flush_cache (16|16 for 2N<=65535, 8|24 "wide" up to 2N<=0xFFFFFF, else unpacked), so
+        # a single class covers every instance — the old "wide"/"mono" opt-in flags are accepted as
+        # legacy aliases for "auto" (mono lost to wide, measured 0.93x — see docs/findings/INSIGHTS).
+        if use_kernel in ("auto", "wide", "mono", True):
+            from gpap.engine.kernels import TritonBCP
             use_kernel = device.type == "cuda" and self.M > 0 and TritonBCP.available()
-        if use_kernel:
-            if mono:
-                from gpap.solver.bcp_triton_wide import TritonBCPMono
-                self.engine.attach_kernel(TritonBCPMono())
-            elif wide:
-                from gpap.solver.bcp_triton_wide import TritonBCPWide
-                self.engine.attach_kernel(TritonBCPWide())
-            else:
-                from gpap.solver.bcp_triton import TritonBCP
+            if use_kernel:
                 self.engine.attach_kernel(TritonBCP())
         self.use_kernel = bool(use_kernel)
-        self._wide = wide and self.use_kernel
-        self._mono = mono and self.use_kernel
         self._max_cls = int(formula.clause_sizes.max().item()) if self.M else 1
         self._total_lits = int(formula.clause_sizes.sum().item()) if self.M else 0
         # RNG + state must exist before K calibration (the probe chunk in _calibrate_k uses _gen).
@@ -119,27 +109,20 @@ class GPUSampler:
             # raise the ceiling — the memory-safe `budget // fused_pb` below still bounds the actual K.
             # No-op on the 4080 (its k_cap < 262,144); unlocks A100 fused headroom for the K-scaling story.
             fused_cap = max(262_144, k_cap or 0)
-            if self._mono and 2 * self.N > 65535 and self._max_cls <= 127:
-                # MONO fused chunks: clause state is ONE (K,M) int8 — 4x below the packed
-                # budget's int32, so the same VRAM buys ~1.5-2x more trajectories.
-                eng_hold = ((sat_b + 4) * self.M + 2 * self.N) * self.K
-                fused_pb = 1 * self.M + 10 * self.N + 300
-                budget = max(0, int(0.6 * (free_bytes - eng_hold)))
-                self.K_fused = max(self.K, min(budget // fused_pb, fused_cap))
-            # The wide (8|24) packed kernel keeps the same one-int32-per-clause state, so the
-            # packed K_fused budget applies to its extended eligibility range too.
-            elif 2 * self.N <= 65535 or (self._wide and 2 * self.N <= 0xFFFFFF
-                                         and self._max_cls <= 255):
-                # PACKED fused chunks (mirrors TritonBCP eligibility): clause state is ONE (K,M)
-                # int32 (vs sat+lsum's (sat_b+4)·M), and the engine's sat/lsum stay allocated at
-                # the BASE K for the other configs — deduct that held block from the budget.
-                eng_hold = ((sat_b + 4) * self.M + 2 * self.N) * self.K
-                fused_pb = 4 * self.M + 10 * self.N + 300
-                budget = max(0, int(0.6 * (free_bytes - eng_hold)))
-                self.K_fused = max(self.K, min(budget // fused_pb, fused_cap))
-            else:
-                fused_pb = (sat_b + 4) * self.M + 10 * self.N + 64
-                self.K_fused = max(self.K, min(int(0.6 * free_bytes / fused_pb), fused_cap))
+            n2 = 2 * self.N
+            packed = n2 <= 65535 or (n2 <= 0xFFFFFF and self._max_cls <= 255)
+            # Per-batch fused footprint: PACKED = ONE (K,M) int32 clause word; UNPACKED = the engine's
+            # (sat_b+4)·M sat/lsum. Either way the (K,N) per-round decision masks a v1 chunk builds are
+            # ABSENT in the fused path, so only ~10N of assignment + trail + readout temps remain.
+            fused_pb = (4 * self.M + 300 if packed else (sat_b + 4) * self.M + 64) + 10 * self.N
+            # eng_hold = the engine's (K,M) sat/lsum + (K,2N) assignment held at BASE K by a
+            # NON-fused config (PACKED only — the unpacked fused path reuses those very tensors, so
+            # its fused_pb already counts them). We deduct it UNCONDITIONALLY: even an all-fused
+            # portfolio needs comparable headroom for the fixed 4096×M soundness-check temporary
+            # (skipping it spilled b05-c50 under the nvidia-smi kill-switch).
+            eng_hold = (((sat_b + 4) * self.M + 2 * self.N) * self.K) if packed else 0
+            budget = max(0, int(0.6 * (free_bytes - eng_hold)))
+            self.K_fused = max(self.K, min(budget // fused_pb, fused_cap))
         else:
             self.K_fused = self.K
 
@@ -446,13 +429,12 @@ class GPUSampler:
                                the completion phase faces; ~0 means support nearly determines all).
         """
         eng = self.engine
-        kern = eng._fused_kernel
-        fused_c = lookahead in ("fused", "fsoft") and kern is not None
-        # PACKED fused chunks (16|16 sat|xor state, see bcp_triton) skip reset_state+propagate
-        # entirely: the post-units-flush state is row-identical every chunk, so reset_fused
-        # broadcast-restores a cached row — no (K,M) sat/lsum writes, no per-chunk Python-round
-        # units flush. Falls back (returns False) when 2N > 65535 or no kernel: ordinary path.
-        self._last_chunk_packed = bool(fused_c and kern.reset_fused(eng, K))
+        fused_c = lookahead in ("fused", "fsoft") and eng.has_kernel
+        # PACKED fused chunks (packed sat|xor state, see gpap.engine.kernels) skip reset_state+
+        # propagate entirely: the post-units-flush state is row-identical every chunk, so
+        # reset_fused broadcast-restores a cached row — no (K,M) sat/lsum writes, no per-chunk
+        # Python-round units flush. Falls back (returns False) when ineligible: ordinary path.
+        self._last_chunk_packed = bool(fused_c and eng.reset_fused(K))
         if not self._last_chunk_packed:
             eng.reset_state(K)
             eng.propagate()                                 # process the formula's own units
@@ -481,9 +463,9 @@ class GPUSampler:
             # (each group either decides ≥1 var or exhausts the order). max_decision_rounds exists to
             # bound the v1 PYTHON loop; applying it here cripples B=1 on large-support instances
             # (measured: s832 T=25 support=450 → the 300 cap truncated every trajectory, 2× loss).
-            rounds = kern.run_trajectory(eng, order, n_support, B, seed, None,
-                                         soft=(lookahead == "fsoft"),
-                                         packed=self._last_chunk_packed)
+            rounds = eng.run_trajectory(order, n_support, B, seed, None,
+                                        soft=(lookahead == "fsoft"),
+                                        packed=self._last_chunk_packed)
             fr = self._free_mask()
             if support_mask is not None:
                 support_complete = eng.active & ~(fr & support_mask).any(dim=1)
@@ -733,6 +715,14 @@ class GPUSampler:
         def _norm(c):
             return (c[0], max(1, c[1]), (c[2] if len(c) > 2 else False))
         plan = [_norm(c) for c in configs] if configs else [(random_var, B, lookahead)]
+        # NOTE: the packed K_fused keeps the conservative eng_hold deduction (__init__) even for an
+        # ALL-fused portfolio. In theory an all-fused run never allocates the engine's base-K
+        # sat/lsum, so skipping the deduction would recover ~9% K (measured on b12-c25). But that
+        # headroom was ACCIDENTALLY covering the fixed 4096×M soundness-check temporary (~3.3 GB on
+        # b05-c50's M=201k); skipping it SPILLED the big c50 wide instances under the kill-switch
+        # (11.7 GB on the 12 GB 4080, b05-c50). Keeping it costs ≤0.97× on the small c25 instances —
+        # within the 0.9× bar — and stays safe on the big ones. If the ~9% is ever wanted back, it
+        # must go with an explicit 4096·M reservation, then re-validated under the kill-switch.
         # If ANY config in the plan uses "full" lookahead, halve K for the whole run (the fixed
         # per-chunk allocation must fit the most memory-hungry config's snapshot).
         need_full = any(c[2] in (True, "full") for c in plan)
@@ -825,13 +815,10 @@ class GPUSampler:
                     # means "not yet violated". We gate on `fully`, so it's valid.) Redundant with
                     # `active` (cleared the instant a clause hits 0); CPU `_satisfies()` is the real check.
                     # Capped to 4096 rows: it's a diagnostic, and an uncapped slice materialises an
-                    # (n_done, M) temp that can reach GBs at the fused K. Packed fused chunks keep
-                    # their counters in the kernel's packed tensor, not engine.sat_count.
+                    # (n_done, M) temp that can reach GBs at the fused K. engine.sat_rows() is
+                    # transparent to the packed fused state (counters live in the kernel there).
                     idx = fully.nonzero().view(-1)[:4096]
-                    if getattr(self, "_last_chunk_packed", False):
-                        sat_rows = self.engine._fused_kernel.packed_sat_rows(idx)
-                    else:
-                        sat_rows = self.engine.sat_count[idx]
+                    sat_rows = self.engine.sat_rows(idx)
                     if not bool((sat_rows > 0).all()):
                         gpu_unsound += int((sat_rows <= 0).any(dim=1).sum().item())
                 if n_done and keep_rows:
@@ -971,7 +958,7 @@ def simplify_cnf(nv: int, clauses: list, support: list | None):
     """
     import numpy as np
     from itertools import chain
-    from gpap.solver.preprocess import unit_closure
+    from gpap.sampling.preprocess import unit_closure
     out, assigned, status = unit_closure(clauses, [])   # reads only — no defensive copy needed
     if status == "unsat":
         return None
@@ -1021,8 +1008,8 @@ def simplify_cnf_els(nv: int, clauses: list, support: list | None):
       new_of_new   : {rep_var: compacted_idx(1-based)} — reps that survive as decided/propagated vars.
       forced_map   : {var: bool} — vars pinned by either unit-closure pass.
     """
-    from gpap.clsdata.occ_list import ext_lit_to_lit_index
-    from gpap.solver.preprocess import equivalent_literal_substitution, unit_closure
+    from gpap.engine.formula import ext_lit_to_lit_index
+    from gpap.sampling.preprocess import equivalent_literal_substitution, unit_closure
 
     # Pass 1: unit closure over the original variables (reads only — no copy).
     out1, assigned1, st1 = unit_closure(clauses, [])
