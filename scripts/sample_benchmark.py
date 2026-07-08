@@ -381,6 +381,12 @@ def main():
                     help="decisions per round (8 is the throughput sweet spot: fewer rounds while "
                          "success barely drops; B>=16 over-constrains and collapses success)")
     ap.add_argument("--k-cap", type=int, default=49152)
+    ap.add_argument("--use-kernel", choices=["auto", "wide", "mono"], default="auto",
+                    help="big-instance kernel variants (post-simplify 2N > 65535; small instances "
+                         "keep the proven 16|16 path in all modes). 'wide' = 8|24 packed word "
+                         "(same 4B state, half the traffic of the unpacked fallback). 'mono' = "
+                         "1-byte count-only state + unit-time clause scan (4x smaller state, "
+                         "bigger K_fused, no size ceiling). 'auto' = today's dispatch")
     ap.add_argument("--no-simplify", dest="simplify", action="store_false", default=True)
     ap.add_argument("--els", action="store_true",
                     help="also do equivalent-literal substitution (removes vars: faster propagate + "
@@ -416,7 +422,7 @@ def main():
         g = gpap_sample(path, device, simplify=args.simplify, els=args.els, n_time=args.n_time,
                         n_cov=args.n_cov, b=args.b, k_cap=args.k_cap, verify_cpu=args.verify_cpu,
                         configs=portfolio, max_chunks=args.max_chunks,
-                        time_limit=args.time_limit)
+                        time_limit=args.time_limit, use_kernel=args.use_kernel)
         sup1 = g["sup1"]                       # metadata from gpap_sample's single parse
         twg = two_wise_coverage(g["models"], sup1) if quality else None
         snd = "OK" if g["gpu_sound"] and (g["cpu_sound"] in (None, True)) else "BAD"

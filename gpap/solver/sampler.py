@@ -65,13 +65,26 @@ class GPUSampler:
         # Fused Triton apply+propagate kernel (one launch to fixpoint — kills the Python BCP round
         # loop's launch/sync/unique overhead + its temporary churn; see bcp_triton). "auto" = on when
         # CUDA + triton compile are available; the PyTorch engine remains the fallback/oracle.
-        if use_kernel == "auto":
+        wide = use_kernel == "wide"     # opt-in 8|24 packed kernel: extends the packed fused
+        #                                 path to 65535 < 2N <= 0xFFFFFF (see bcp_triton_wide)
+        mono = use_kernel == "mono"     # opt-in 1-byte count-only kernel: unit literal recovered
+        #                                 by a clause scan; no size ceiling (see bcp_triton_wide)
+        if use_kernel == "auto" or wide or mono:
             from gpap.solver.bcp_triton import TritonBCP
             use_kernel = device.type == "cuda" and self.M > 0 and TritonBCP.available()
         if use_kernel:
-            from gpap.solver.bcp_triton import TritonBCP
-            self.engine.attach_kernel(TritonBCP())
+            if mono:
+                from gpap.solver.bcp_triton_wide import TritonBCPMono
+                self.engine.attach_kernel(TritonBCPMono())
+            elif wide:
+                from gpap.solver.bcp_triton_wide import TritonBCPWide
+                self.engine.attach_kernel(TritonBCPWide())
+            else:
+                from gpap.solver.bcp_triton import TritonBCP
+                self.engine.attach_kernel(TritonBCP())
         self.use_kernel = bool(use_kernel)
+        self._wide = wide and self.use_kernel
+        self._mono = mono and self.use_kernel
         self._max_cls = int(formula.clause_sizes.max().item()) if self.M else 1
         self._total_lits = int(formula.clause_sizes.sum().item()) if self.M else 0
         # RNG + state must exist before K calibration (the probe chunk in _calibrate_k uses _gen).
@@ -106,7 +119,17 @@ class GPUSampler:
             # raise the ceiling — the memory-safe `budget // fused_pb` below still bounds the actual K.
             # No-op on the 4080 (its k_cap < 262,144); unlocks A100 fused headroom for the K-scaling story.
             fused_cap = max(262_144, k_cap or 0)
-            if 2 * self.N <= 65535:
+            if self._mono and 2 * self.N > 65535 and self._max_cls <= 127:
+                # MONO fused chunks: clause state is ONE (K,M) int8 — 4x below the packed
+                # budget's int32, so the same VRAM buys ~1.5-2x more trajectories.
+                eng_hold = ((sat_b + 4) * self.M + 2 * self.N) * self.K
+                fused_pb = 1 * self.M + 10 * self.N + 300
+                budget = max(0, int(0.6 * (free_bytes - eng_hold)))
+                self.K_fused = max(self.K, min(budget // fused_pb, fused_cap))
+            # The wide (8|24) packed kernel keeps the same one-int32-per-clause state, so the
+            # packed K_fused budget applies to its extended eligibility range too.
+            elif 2 * self.N <= 65535 or (self._wide and 2 * self.N <= 0xFFFFFF
+                                         and self._max_cls <= 255):
                 # PACKED fused chunks (mirrors TritonBCP eligibility): clause state is ONE (K,M)
                 # int32 (vs sat+lsum's (sat_b+4)·M), and the engine's sat/lsum stay allocated at
                 # the BASE K for the other configs — deduct that held block from the budget.

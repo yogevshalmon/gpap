@@ -18,8 +18,8 @@ Pipeline:
 
 Usage:
   # single instance
-  python scripts/bench_to_cnf.py --bench s386.bench --cycles 25 --out s386_c25.cnf --seed 1
-  # whole folder of .bench files -> folder of .cnf files (named <stem>_c<cycles>.cnf)
+  python scripts/bench_to_cnf.py --bench s386.bench --cycles 25 --out s386-c25.cnf --seed 1
+  # whole folder of .bench files -> folder of .cnf files (named <stem>-c<cycles>.cnf)
   python scripts/bench_to_cnf.py --bench benches/ --cycles 25 --out cnf_out/ --seed 1
 """
 import argparse
@@ -240,7 +240,7 @@ def main():
     ap.add_argument("--cycles", type=int, default=25)
     ap.add_argument("--out", required=True,
                      help="output .cnf path (single file) or output folder (when --bench is a "
-                          "folder). Each instance is written as <stem>_c<cycles>.cnf.")
+                          "folder). Each instance is written as <stem>-c<cycles>.cnf.")
     ap.add_argument("--seed", type=int, default=1)
     ap.add_argument("--pin-outputs", type=int, default=None,
                      help="constrain only this many final-cycle outputs (default: all). Use a small "
@@ -256,7 +256,7 @@ def main():
         n_ok = 0
         for bench_path in bench_files:
             stem = os.path.splitext(os.path.basename(bench_path))[0]
-            out_path = os.path.join(args.out, f"{stem}_c{args.cycles}.cnf")
+            out_path = os.path.join(args.out, f"{stem}-c{args.cycles}.cnf")
             try:
                 convert_one(bench_path, out_path, args.cycles, args.seed,
                             pin_outputs=args.pin_outputs)
