@@ -17,9 +17,14 @@ Pipeline:
            (the independent support GPAP/CMSGen sample over).
 
 Usage:
+  # single instance
   python scripts/bench_to_cnf.py --bench s386.bench --cycles 25 --out s386_c25.cnf --seed 1
+  # whole folder of .bench files -> folder of .cnf files (named <stem>_c<cycles>.cnf)
+  python scripts/bench_to_cnf.py --bench benches/ --cycles 25 --out cnf_out/ --seed 1
 """
 import argparse
+import glob
+import os
 import random
 import re
 import sys
@@ -215,23 +220,52 @@ def write_dimacs(path, builder, support):
             f.write(" ".join(map(str, c)) + " 0\n")
 
 
+def convert_one(bench_path, out_path, cycles, seed, pin_outputs=None):
+    """Convert a single .bench file to a DIMACS CNF at out_path. Returns the CnfBuilder."""
+    circ = parse_bench(bench_path)
+    inputs, outputs, dffs, gates = circ
+    b, support, target = build_cnf(circ, cycles, seed, pin_outputs=pin_outputs)
+    write_dimacs(out_path, b, support)
+    print(f"{bench_path} -> {out_path}: PI={len(inputs)} PO={len(outputs)} DFF={len(dffs)} "
+          f"gates={len(gates)} | cycles={cycles} -> vars={b.nv} clauses={len(b.clauses)} "
+          f"support={len(support)}")
+    return b
+
+
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument("--bench", required=True)
+    ap.add_argument("--bench", required=True,
+                     help="a single .bench file OR a folder containing .bench files (processed "
+                          "recursively).")
     ap.add_argument("--cycles", type=int, default=25)
-    ap.add_argument("--out", required=True)
+    ap.add_argument("--out", required=True,
+                     help="output .cnf path (single file) or output folder (when --bench is a "
+                          "folder). Each instance is written as <stem>_c<cycles>.cnf.")
     ap.add_argument("--seed", type=int, default=1)
     ap.add_argument("--pin-outputs", type=int, default=None,
                      help="constrain only this many final-cycle outputs (default: all). Use a small "
                           "value (e.g. 1) for combinational circuits with many outputs, where pinning "
                           "all of them over-constrains to a tiny solution set.")
     args = ap.parse_args()
-    circ = parse_bench(args.bench)
-    inputs, outputs, dffs, gates = circ
-    b, support, target = build_cnf(circ, args.cycles, args.seed, pin_outputs=args.pin_outputs)
-    write_dimacs(args.out, b, support)
-    print(f"{args.bench}: PI={len(inputs)} PO={len(outputs)} DFF={len(dffs)} gates={len(gates)} "
-          f"| cycles={args.cycles} -> vars={b.nv} clauses={len(b.clauses)} support={len(support)}")
+
+    if os.path.isdir(args.bench):
+        bench_files = sorted(glob.glob(os.path.join(args.bench, "**", "*.bench"), recursive=True))
+        if not bench_files:
+            sys.exit(f"no .bench files found under {args.bench}")
+        os.makedirs(args.out, exist_ok=True)
+        n_ok = 0
+        for bench_path in bench_files:
+            stem = os.path.splitext(os.path.basename(bench_path))[0]
+            out_path = os.path.join(args.out, f"{stem}_c{args.cycles}.cnf")
+            try:
+                convert_one(bench_path, out_path, args.cycles, args.seed,
+                            pin_outputs=args.pin_outputs)
+                n_ok += 1
+            except Exception as e:                        # keep going on a bad instance
+                print(f"{bench_path}: SKIPPED ({type(e).__name__}: {e})", file=sys.stderr)
+        print(f"\nconverted {n_ok}/{len(bench_files)} instances -> {args.out}")
+    else:
+        convert_one(args.bench, args.out, args.cycles, args.seed, pin_outputs=args.pin_outputs)
 
 
 if __name__ == "__main__":
