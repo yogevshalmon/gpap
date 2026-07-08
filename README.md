@@ -1,133 +1,114 @@
-# GPAP - GPU Parallel Assumption Propagation
+# GPAP — GPU-Parallel Assumption Propagation & CircuitSAT Sampling
 
-GPU-accelerated Boolean Constraint Propagation (BCP) for SAT formulas using PyTorch.  
-Check **multiple assumption sets simultaneously** on GPU.
+GPAP is a GPU primitive for **Boolean Constraint Propagation (BCP) over millions of independent
+assumption sets at once** (PyTorch + fused Triton kernels), and a flagship application built on it:
+**guaranteed-valid SAT solution sampling** for CircuitSAT and projected sampling.
 
-## Overview
+- **The engine** ([`gpap.engine`](gpap/engine/)) — the novelty. K independent assumption sets are
+  BCP'd to fixpoint in parallel with no clause scanning, via *negated occurrence lists* + two
+  per-clause counters and **the sum trick** (below). A fused Triton kernel runs a whole randomized
+  decide+propagate trajectory per GPU thread in one launch.
+- **The sampler** ([`gpap.sampling`](gpap/sampling/)) — GPU-parallel CMSGen: K randomized
+  BCP-completions per chunk, every emitted model provably satisfies the formula (no
+  gradient/rounding/repair). It samples the primary-input support of unrolled sequential/
+  combinational circuits, the setup of the recent GPU-sampling papers (DEMOTIC, Recurrent
+  CircuitSAT).
 
-GPAP provides infrastructure for propagating assumptions on CNF (SAT) formulas, where the core feature is fast parallel checking of K assumption sets on GPU.
+> Hardware caveat for the numbers below: they were measured on a laptop RTX 4080 (12 GB, WSL2),
+> often under a 40 W power cap. Ratios (GPAP vs CMSGen, config A vs B) hold within one power state;
+> absolute rates are not comparable across states or GPUs. See [`docs/BENCHMARKING.md`](docs/BENCHMARKING.md).
 
-**Key features:**
-- **Occurrence lists** (CSR format) for O(1) lookup of affected clauses when a literal is set
-- **Clause sat_count + lit_sum counters** for O(1) unit and conflict detection
-- **The sum trick**: unit literal found via arithmetic — no clause scanning needed
-- **Batched BCP** across K assumption sets sharing the same formula
-
-## Quick Start
-
-```python
-from gpap.solver.assumption_checker import AssumptionChecker
-
-checker = AssumptionChecker("formula.cnf")
-results = checker.check_assumptions([
-    [1, -2, 3],     # assumption set 1: x1=T, x2=F, x3=T
-    [-1, 2, -3],    # assumption set 2: x1=F, x2=T, x3=F
-    [1, 2, 3],      # assumption set 3: x1=T, x2=T, x3=T
-])
-
-print(results['conflict'])       # (K,) bool tensor
-print(results['num_propagated']) # (K,) how many literals BCP propagated
-print(results['assignment'])     # (K, 2*N) final assignment state
-```
-
-## Run on Colab (benchmark any GPU)
-
-Open [`notebooks/gpap_colab_benchmark.ipynb`](notebooks/gpap_colab_benchmark.ipynb) in Google
-Colab, pick a GPU runtime (`Runtime ▸ Change runtime type ▸ GPU`), and run all cells. It clones
-this repo and benchmarks the attached GPU on the bundled CNFs in `benchmarks/cnf/`, measuring
-**how fast GPAP propagates assumption sets (sets/s) vs a sequential CPU PySAT baseline**, two ways:
-
-- **Pairs anchor** — exhaustive (±v1,±v2) sets, no cutoff: the deterministic headline sets/s plus a
-  conflict-count sanity check against PySAT.
-- **Random-L × soft-stop grid** — for each assumption-set size `L`, random sets are streamed in
-  `target_chunks × K` batches and run with no cutoff and several `soft_stop_frac` values
-  (`min_rounds=5`). It reports both `sets/s` and `successful_sets/s` (finished = not timed-out), so
-  you can see when an aggressive soft-stop trades a few cut-off batches for higher useful throughput.
-
-Batch size `K` auto-sizes to **all** the GPU's free VRAM, so the same notebook works on a T4 or an
-A100. Results + plots are saved per-GPU to `benchmarks/colab_results/<gpu>.json` (+ PNGs); the last
-cell ranks every saved GPU so you can say "GPU A is N× faster than GPU B." The driver runs headless:
+## Install
 
 ```bash
-PYTHONPATH=. python scripts/colab_benchmark.py --quick     # fast: subset, trimmed grid
-PYTHONPATH=. python scripts/colab_benchmark.py            # full grid (minutes to ~1 h)
-PYTHONPATH=. python scripts/colab_benchmark.py --compare   # rank saved per-GPU results
+pip install -e ".[cuda]"     # CUDA + the fused Triton kernels (ships with torch on Linux/Colab)
+pip install -e ".[dev]"      # + pytest, ruff  (for tests/lint)
 ```
 
-## Architecture
+CPU-only works too (the PyTorch engine is the oracle/fallback) — the fused kernels simply switch off.
 
+## Quickstart — Python API
+
+```python
+import gpap
+
+# Sample a DIMACS CNF (support read from `c ind` header lines if present)
+models, info = gpap.sample("formula.cnf", n=50_000, seed=5, device="cuda", n_cov=5_000)
+print(info["samples_per_s"], info["success_rate"], info["gpu_sound"])
+
+# Sample a sequential circuit: unroll T cycles, pin outputs to a reachable pattern, sample inputs
+models, info = gpap.sample_circuit("b10.bench", cycles=25, n=50_000)
+
+# In-memory clauses
+models, info = gpap.sample_clauses(nv=3, clauses=[[1, 2], [-1, 3], [-2, -3]], n=1_000,
+                                   support=[0, 1, 2], device="cuda", n_cov=1_000)
+
+# The engine as a primitive — batched assumption checking (the reusable core):
+from gpap.engine import AssumptionChecker
+checker = AssumptionChecker("formula.cnf")
+r = checker.check_assumptions([[1, -2, 3], [-1, 2, -3]])   # K sets at once
+print(r["conflict"])          # (K,) bool
 ```
-CNF file
-  |
-  v
-CnfFormula  ──>  OccurrenceList (CSR: literal -> negated clauses)
-  |                + clause_sizes, init_lit_sum
-  v
-BCPEngine   ──>  sat_count (K, M)  +  lit_sum (K, M)
-  |                + assignment (K, 2N)
-  v
-Results: conflict, assignment, num_propagated per batch
+
+`info` is a rich dict: throughput (`samples_per_s` steady-state, `sps_e2e_total` incl. setup),
+`success_rate`, per-phase timings, mining stats, and soundness flags. `models` come from the
+optional coverage pass (`n_cov > 0`); the timed run itself collects nothing (throughput only).
+
+## Quickstart — CLI
+
+```bash
+gpap info                                   # device, triton availability, power-limit warning
+gpap sample formula.cnf -n 50000 --json out.json
+gpap sample b10.bench --cycles 25 -n 50000  # unrolls the circuit, then samples
+gpap circuit2cnf benches/ cnf_out/ --cycles 25 --pin-outputs 1   # .bench dir -> CNF dir
+gpap bench 'benchmarks/circuits/*.cnf' --cmsgen /path/to/cmsgen --n-cov 5000
 ```
 
-### Data Flow
+## The core idea (no clause scanning)
 
-1. **Parse**: DIMACS CNF file -> occurrence lists + per-clause lit_sum
-2. **Initialize**: K copies of clause counters (sat_count = clause_sizes, lit_sum = init_lit_sum)
-3. **Apply assumptions**: For each assumed literal `l`, decrement sat_count and subtract `~l` from lit_sum for all clauses in `occ[l]`
-4. **BCP loop**: Detect unit clauses (sat_count == 1), read forced literal directly from lit_sum, propagate, repeat until fixpoint or conflict
+Instead of a clause matrix, GPAP keeps:
 
-### The Sum Trick
+1. **Negated occurrence lists** (CSR): `occ[l]` = clauses where `~l` appears. Setting `l` TRUE
+   falsifies `~l` in exactly those clauses.
+2. **Two per-clause counters**, batched over K assumption sets:
+   - `sat_count (K, M)` — remaining non-falsified literals (init = clause size). Decrement on
+     falsification. `== 0` ⇒ conflict, `== 1` ⇒ unit.
+   - `lit_sum (K, M)` — running sum of non-falsified literal *indices*.
+3. **The sum trick**: when `sat_count == 1`, the surviving literal's index **is** `lit_sum`. No
+   scan, no gather — pure arithmetic. (The fused kernel packs both counters into one 32-bit word,
+   replacing the sum with an XOR that never overflows; see [`gpap/engine/kernels.py`](gpap/engine/kernels.py).)
 
-Each clause maintains `lit_sum` = sum of non-falsified literal indices. When a literal is falsified, its index is subtracted. When `sat_count` reaches 1, `lit_sum` **is** the remaining literal's index.
+Literal indexing (2N scheme): `+v → 2(v-1)`, `-v → 2(v-1)+1`, negation `l ^ 1`.
 
-**Zero clause scanning. Zero gather. Pure arithmetic.**
-
-### Literal Indexing (2N scheme)
-
-- N variables -> 2N literal indices
-- Positive literal `v` -> index `2*(v-1)`
-- Negative literal `-v` -> index `2*(v-1) + 1`
-- Negation: `lit_index ^ 1`
-- `occ[l]` stores clauses where `~l` appears (negated occurrence)
-
-## Project Structure
+## Layout
 
 ```
 gpap/
-  gpap/
-    clsdata/           # CNF formula + occurrence lists
-      cnf_formula.py   # DIMACS parser, clause data
-      occ_list.py      # CSR occurrence list
-    solver/            # BCP engine + checker API
-      bcp_engine.py    # Core BCP loop
-      assumption_checker.py  # High-level API
-      external_solver.py     # PySAT validation
-    analyzer/          # Analysis tools
-    utils/             # Type definitions, timing
-    vis/               # Visualization
-  tests/               # Test suite
-  scripts/             # Examples, benchmarks
-  benchmarks/          # Benchmark data
+  engine/       # THE PRIMITIVE — formula, bcp_engine (oracle), kernels (fused Triton), calibrate, checker
+  sampling/     # THE FLAGSHIP — sampler, pipeline (e2e flow), miner, preprocess, metrics
+  circuits/     # bench.py: parse/unroll/Tseitin/pin .bench circuits -> projected-sampling CNF
+  cli.py        # `gpap` subcommands
+eval/           # reproducible cross-GPU sampling benchmark driver + plots (Colab / A100)
+docs/findings/  # settled results: INSIGHTS.md + the deep *_FINDINGS.md write-ups
+tests/          # pytest suite (CPU smoke + `gpu`/`slow` markers); circuit CNFs generated on demand
+benchmarks/circuits/bench/  # tiny committed .bench sources (CNFs are generated, never committed)
+archive/        # concluded experiment lines (not maintained; see archive/README.md)
 ```
 
-## Requirements
+## Tests
 
-- Python 3.10+
-- PyTorch
-- python-sat (for external solver validation)
+```bash
+pytest -m "not gpu and not slow"   # portable CPU smoke suite (runs anywhere)
+pytest                             # full suite (GPU tests auto-skip off-CUDA; `slow` = deep unrolls)
+```
 
-## Relation to GPSS
+## Citation
 
-GPAP is a companion project to [GPSS](https://github.com/yshalmon/GPSS) (GPU SAT Solver).
-
-| | GPSS | GPAP |
-|---|---|---|
-| **Approach** | Clause matrix multiplication | Occurrence lists + counters |
-| **Use case** | Local search / genetic SAT solving | BCP / assumption propagation |
-| **Formula repr** | Sparse COO tensor (clauses x vars) | CSR occurrence lists (lits -> clauses) |
-| **Evaluation** | `score = clause_size + cls_matrix * assg` | `sat_count` counter per clause |
-| **Unit detection** | `score == 1` | `sat_count == 1`, literal = `lit_sum` |
+A citation stub is in [`CITATION.cff`](CITATION.cff). The engine's defensible novelty: the
+K-independent-assumption-set BCP primitive + the incremental occurrence-list/sum-trick propagation
++ the one-trajectory-per-thread fused kernel (prior GPU-SAT work uses watched-literals or
+gradient relaxation — orthogonal mechanisms).
 
 ## License
 
-MIT License - Yogev Shalmon
+MIT — see [`LICENSE`](LICENSE).

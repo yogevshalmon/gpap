@@ -1,0 +1,15 @@
+cff-version: 1.2.0
+message: "If you use GPAP, please cite it as below."
+title: "GPAP: GPU-Parallel Assumption Propagation and CircuitSAT Sampling"
+authors:
+  - family-names: Shalmon
+    given-names: Yogev
+version: 0.1.0
+date-released: 2026-07-08
+keywords:
+  - SAT
+  - constraint propagation
+  - GPU
+  - sampling
+  - CircuitSAT
+# TODO before publication: add DOI, repository URL, and any preprint/paper reference.

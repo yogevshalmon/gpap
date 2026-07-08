@@ -1,0 +1,52 @@
+[build-system]
+requires = ["setuptools>=64"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "gpap"
+version = "0.1.0"
+description = "GPU-parallel BCP over independent assumption sets, and GPU CircuitSAT solution sampling"
+readme = "README.md"
+requires-python = ">=3.10"
+authors = [{ name = "Yogev Shalmon" }]
+keywords = ["SAT", "sampling", "GPU", "BCP", "CircuitSAT", "triton", "pytorch"]
+classifiers = [
+    "Programming Language :: Python :: 3",
+    "Topic :: Scientific/Engineering",
+    "Environment :: GPU :: NVIDIA CUDA",
+]
+dependencies = [
+    "torch>=2.1",
+    "numpy>=1.24",
+    "python-sat>=0.1.8",
+    "tqdm>=4.65",
+]
+
+[project.optional-dependencies]
+cuda = ["triton>=3.0"]        # the fused trajectory kernels (ships with torch on Linux/Colab)
+eval = ["matplotlib>=3.7"]    # eval/ plots
+dev = ["pytest>=7.4", "ruff>=0.4"]
+
+[project.scripts]
+gpap = "gpap.cli:main"
+
+[tool.setuptools.packages.find]
+include = ["gpap*"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+markers = [
+    "gpu: requires CUDA + a working triton (skipped off-CUDA)",
+    "slow: slow deep-unroll case (c25)",
+]
+
+[tool.ruff]
+line-length = 100
+target-version = "py310"
+extend-exclude = ["archive", "notebooks", ".cmsgen"]
+
+[tool.ruff.lint]
+# Keep the net light: real errors + unused-import hygiene (F, E9), NOT style churn on this
+# math-dense code — the compact `a; b` statements and `x == True` tensor checks are deliberate.
+select = ["E4", "E9", "F"]
+ignore = ["E741"]   # `l` is the conventional literal variable throughout the BCP code
