@@ -1,4 +1,4 @@
-"""A/B tests for the fused Triton BCP kernel (gpap/solver/bcp_triton.py) vs the PyTorch oracle.
+"""A/B tests for the fused Triton BCP kernel (gpap/engine/kernels.py) vs the PyTorch oracle.
 
 Contract (BCP fixpoints are confluent, so this is exact):
   * conflict/active flags identical everywhere;
@@ -12,10 +12,10 @@ import random
 import pytest
 import torch
 
-from gpap.clsdata.cnf_formula import CnfFormula
-from gpap.solver.bcp_engine import BCPEngine
-from gpap.solver.bcp_triton import TritonBCP
-from gpap.solver.sampler import GPUSampler, _satisfies
+from gpap.engine.formula import CnfFormula
+from gpap.engine.bcp_engine import BCPEngine
+from gpap.engine.kernels import TritonBCP
+from gpap.sampling.sampler import GPUSampler, _satisfies
 
 CUDA = torch.cuda.is_available()
 AVAIL = CUDA and TritonBCP.available()
@@ -93,7 +93,7 @@ def test_ab_random_cnfs():
 
 def test_ab_circuit_cnf(tmp_path):
     """A/B on a real unrolled circuit (deep propagation cascades)."""
-    from scripts.bench_to_cnf import parse_bench, build_cnf, write_dimacs
+    from gpap.circuits.bench import parse_bench, build_cnf, write_dimacs
     circ = parse_bench("benchmarks/circuits/bench/seq/s386.bench")
     b, support, _ = build_cnf(circ, T=3, seed=1)
     p = tmp_path / "s386c3.cnf"
@@ -163,7 +163,7 @@ def test_fused_phase_boundary(tmp_path):
     """A fused decision group must NOT straddle the support→completion boundary: on a circuit whose
     support fully determines the rest, huge-B fused must match v1's success (~100%), not collapse
     (the pre-fix straddle bug measured 100%→0% here)."""
-    from scripts.bench_to_cnf import parse_bench, build_cnf, write_dimacs
+    from gpap.circuits.bench import parse_bench, build_cnf, write_dimacs
     circ = parse_bench("benchmarks/circuits/bench/seq/s386.bench")
     b, support, _ = build_cnf(circ, T=2, seed=1)
     p = tmp_path / "s386c2.cnf"
@@ -222,7 +222,7 @@ def test_packed_vs_unpacked_identical_models():
 
 def test_packed_circuit_identical_models(tmp_path):
     """Packed vs unpacked on a real unrolled circuit (deep cascades + a pinned-output unit)."""
-    from scripts.bench_to_cnf import parse_bench, build_cnf, write_dimacs
+    from gpap.circuits.bench import parse_bench, build_cnf, write_dimacs
     circ = parse_bench("benchmarks/circuits/bench/seq/s386.bench")
     b, support, _ = build_cnf(circ, T=2, seed=1)
     p = tmp_path / "s386c2.cnf"
@@ -264,7 +264,7 @@ def test_miner_entailed_and_model_preserving():
     """Every clause mine_entailed() learns must be ENTAILED (formula ∧ ¬clause UNSAT), and the
     augmented formula must have EXACTLY the original model set."""
     from pysat.solvers import Minisat22
-    from gpap.solver.miner import mine_entailed
+    from gpap.sampling.miner import mine_entailed
 
     def models(cls_):
         out = set()

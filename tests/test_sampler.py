@@ -10,7 +10,7 @@ import torch
 from pysat.formula import CNF
 from pysat.solvers import Solver
 
-from gpap.solver.sampler import GPUSampler, simplify_cnf, simplify_cnf_els, _satisfies
+from gpap.sampling.sampler import GPUSampler, simplify_cnf, simplify_cnf_els
 
 DEV = torch.device("cpu")  # tests run on CPU for determinism/portability
 

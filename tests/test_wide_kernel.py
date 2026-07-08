@@ -1,19 +1,19 @@
-"""A/B tests for the WIDE (8|24) packed trajectory kernel (gpap/solver/bcp_triton_wide.py).
+"""A/B tests for the WIDE (8|24) packed field split of the merged trajectory kernel
+(gpap/engine/kernels.py::_bcp_trajectory_packed_kernel, SHIFT=8).
 
-The wide kernel must be trajectory-identical to the proven paths: same seed => the SAME model
-set as both the 16|16 packed kernel and the unpacked kernel (order walk, hash polarity and
-propagation semantics are shared; only the packed word's bit split differs). `_force_wide`
-packs 8|24 on formulas the 16|16 word could handle, so the equality tests run on small CNFs;
-the boundary test builds a real 2N > 65535 formula where wide mode engages naturally.
+The 8|24 split must be trajectory-identical to the proven paths: same seed => the SAME model set
+as both the 16|16 split and the unpacked kernel (order walk, hash polarity and propagation
+semantics are shared; only the packed word's bit split differs). `_force_wide` selects 8|24 on
+formulas the 16|16 word could handle, so the equality tests run on small CNFs; the boundary test
+builds a real 2N > 65535 formula where wide mode engages naturally.
 """
 import random
 
 import pytest
 import torch
 
-from gpap.solver.bcp_triton import TritonBCP
-from gpap.solver.bcp_triton_wide import TritonBCPWide
-from gpap.solver.sampler import GPUSampler, _satisfies
+from gpap.engine.kernels import TritonBCP
+from gpap.sampling.sampler import GPUSampler
 
 CUDA = torch.cuda.is_available()
 AVAIL = CUDA and TritonBCP.available()
@@ -64,29 +64,33 @@ def test_wide_matches_base_random():
         done += 1
 
 
-def _sample_ladder(nv, clauses, cfg, kernel):
+def _sample_ladder(nv, clauses, cfg, *, force_unpacked=False):
     """Boundary-formula run at a SMALL fixed K (K_fused pinned to K so the test stays fast and
-    both variants launch identical grids)."""
-    smp = GPUSampler.from_clauses(nv, clauses, DEV, k_cap=32, seed=23, use_kernel=kernel)
+    both variants launch identical grids). `force_unpacked` disables the packed path so the run
+    uses the UNPACKED kernel on the engine's own tensors — the A/B baseline."""
+    smp = GPUSampler.from_clauses(nv, clauses, DEV, k_cap=32, seed=23, use_kernel="auto")
     smp.K_fused = smp.K
+    if force_unpacked:
+        smp.engine._fused_kernel._packed_mode = False   # reset_fused declines -> unpacked kernel
     out = smp.sample(10 ** 9, configs=[cfg], max_chunks=1, collect=True, verify_clauses=clauses)
     wide_ran = bool(getattr(smp.engine._fused_kernel, "_wide_mode", False))
+    packed_ran = bool(getattr(smp, "_last_chunk_packed", False))
     assert out["all_valid"] and out["gpu_sound"]
-    return sorted(tuple(m) for m in out["models"]), out, wide_ran
+    return sorted(tuple(m) for m in out["models"]), out, wide_ran, packed_ran
 
 
 def test_wide_engages_past_16bit_boundary():
-    """A real 2N > 65535 formula: wide mode must engage WITHOUT forcing, produce valid models,
-    and match the unpacked baseline's model set (same seed). Formula: an implication ladder
-    x_i -> x_{i+1} over 40k vars — binary clauses, solutions = monotone suffixes, and every
-    forced literal exercises the 24-bit XOR recovery on indices far above 65535."""
+    """A real 2N > 65535 formula: auto must select the 8|24 WIDE split (no forcing), produce valid
+    models, and match the UNPACKED fallback's model set (same seed). Formula: an implication ladder
+    x_i -> x_{i+1} over 40k vars — binary clauses, solutions = monotone suffixes, and every forced
+    literal exercises the 24-bit XOR recovery on indices far above 65535."""
     nv = 40_000
     clauses = [[-i, i + 1] for i in range(1, nv)]
     for cfg in [(True, 4, "fused"), (True, 4, "fsoft")]:
-        m_wide, ow, wide_ran = _sample_ladder(nv, clauses, cfg, "wide")
-        assert wide_ran, "wide mode should engage naturally at 2N=80,000"
-        m_base, ob, base_wide = _sample_ladder(nv, clauses, cfg, True)
-        assert not base_wide                       # baseline runs the UNPACKED fallback
+        m_wide, ow, wide_ran, packed_ran = _sample_ladder(nv, clauses, cfg)
+        assert wide_ran and packed_ran, "auto should select the 8|24 wide split at 2N=80,000"
+        m_base, ob, base_wide, base_packed = _sample_ladder(nv, clauses, cfg, force_unpacked=True)
+        assert not base_packed                     # baseline runs the UNPACKED fallback
         assert ow["n_models"] > 0
         assert m_wide == m_base, f"wide kernel diverged from unpacked baseline for {cfg}"
         assert ow["n_models"] == ob["n_models"]

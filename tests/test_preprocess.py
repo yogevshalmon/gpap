@@ -1,115 +1,29 @@
-"""Tests for the GPU preprocessing pipeline (gpap/solver/preprocess.py + vivify_clauses).
+"""Tests for the kept CPU preprocessing primitives (gpap preprocessing for SAMPLING):
+unit_closure (formula-level unit propagation) and equivalent_literal_substitution (ELS).
 
-Two kinds of check:
-  1. Hand-checkable reductions on tiny CNFs whose vivified / unit-closed form is known.
-  2. A RANDOMIZED EQUIVALENCE GATE — the load-bearing soundness test. Every operation here is
-     supposed to preserve the model set, so for many random CNFs the preprocessed formula must
-     have the *same* SAT/UNSAT verdict as the original (checked with CaDiCaL), and any model of
-     the preprocessed formula must satisfy the original. A single mismatch means an unsound
-     reduction.
+The full end-to-end ELS soundness gates (projection-set equality vs CaDiCaL enumeration,
+class-consistent reconstruction) live in tests/test_sampler.py (test_els_*); these are the
+unit-level checks on the primitives themselves. Binary-implication edges are built exactly
+the way simplify_cnf_els builds them: (l1 ∨ l2) ⇒ ¬l1→l2 and ¬l2→l1.
 """
-import random
-
-import torch
-from pysat.formula import CNF
-from pysat.solvers import Cadical195
-
-from gpap.solver.inprocess import GPUInprocessor
-from gpap.solver.preprocess import (
-    apply_learned_subsumption,
-    equivalent_literal_substitution,
-    preprocess,
-    subsume_all,
-    unit_closure,
-)
-
-CPU = torch.device("cpu")
+from gpap.sampling.preprocess import equivalent_literal_substitution, unit_closure
+from gpap.engine.formula import ext_lit_to_lit_index
 
 
 def _norm(clauses):
     return sorted(tuple(sorted(set(c))) for c in clauses)
 
 
-def _verdict(clauses, nv):
-    with Cadical195(bootstrap_with=CNF(from_clauses=[list(c) for c in clauses])) as s:
-        r = s.solve()
-        model = s.get_model() if r else None
-    return ("SAT" if r else "UNSAT"), model
-
-
-def _satisfies(clauses, model):
-    """Does `model` (list of signed vars) satisfy every clause?"""
-    truth = {abs(l): (l > 0) for l in model}
+def _binary_edges(clauses):
+    """Implication edges from the binary clauses (the sampler's ELS edge source)."""
+    edges = []
     for c in clauses:
-        if not any(truth.get(abs(l), l > 0) == (l > 0) for l in c):
-            return False
-    return True
+        if len(c) == 2:
+            i1, i2 = ext_lit_to_lit_index(c[0]), ext_lit_to_lit_index(c[1])
+            edges.append((i1 ^ 1, i2))
+            edges.append((i2 ^ 1, i1))
+    return edges
 
-
-def _lift(model, var_map, nv):
-    """Lift a model of the ELS-reduced formula back to the original variables.
-
-    `var_map[v] = rep_literal` (DIMACS) means original variable v equals that literal's value;
-    variables not in `var_map` keep the reduced model's assignment (default True if absent)."""
-    truth = {abs(l): (l > 0) for l in model}
-    full = []
-    for v in range(1, nv + 1):
-        if v in var_map:
-            rep = var_map[v]
-            rep_true = truth.get(abs(rep), True) == (rep > 0)   # value of the rep literal
-            full.append(v if rep_true else -v)
-        else:
-            full.append(v if truth.get(v, True) else -v)
-    return full
-
-
-# --------------------------------------------------------------------------- vivification
-
-class TestVivify:
-    def test_drops_redundant_literal(self):
-        # (¬3 ∨ ¬4 ∨ 5) ∧ (¬3 ∨ ¬4 ∨ ¬5): assuming 3,4 forces 5 and ¬5 → conflict, so both
-        # clauses vivify to (¬3 ∨ ¬4) [the 5 / ¬5 literal is redundant].
-        clauses = [[-3, -4, 5], [-3, -4, -5]]
-        inp = GPUInprocessor.from_clauses(5, clauses, CPU)
-        new, stats = inp.vivify_clauses(clauses)
-        assert _norm(new) == _norm([[-3, -4], [-3, -4]])
-        assert stats["n_vivified"] == 2
-        assert stats["lits_removed"] == 2
-
-    def test_shortens_to_unit(self):
-        # (¬1 ∨ 2) ∧ (¬1 ∨ ¬2): assuming 1 forces 2 and ¬2 → conflict, so assuming ¬1-prefix on
-        # each clause conflicts at p=1 → both shorten to the unit (¬1).
-        clauses = [[-1, 2], [-1, -2]]
-        inp = GPUInprocessor.from_clauses(2, clauses, CPU)
-        new, _ = inp.vivify_clauses(clauses)
-        assert _norm(new) == _norm([[-1], [-1]])
-
-    def test_leaves_irreducible_clause(self):
-        clauses = [[1, 2, 3]]            # nothing entailed → unchanged
-        inp = GPUInprocessor.from_clauses(3, clauses, CPU)
-        new, stats = inp.vivify_clauses(clauses)
-        assert _norm(new) == _norm(clauses)
-        assert stats["n_vivified"] == 0
-
-    def test_asymmetric_removes_redundant_interior_literal(self):
-        # 2→1 and 3→1 (¬2∨1)(¬3∨1): assuming ¬1 forces ¬2,¬3 → (1∨2∨3) conflicts, so 1 is
-        # entailed and (1∨2∨3) vivifies to the unit (1) — interior/whole-clause reduction the
-        # plain prefix test alone would only partially catch.
-        clauses = [[1, 2, 3], [-2, 1], [-3, 1]]
-        inp = GPUInprocessor.from_clauses(3, clauses, CPU)
-        new, stats = inp.vivify_clauses(clauses, asymmetric=True)
-        assert _norm(new) == _norm([[1], [1], [1]])
-
-    def test_asymmetric_is_sound_subset(self):
-        # asymmetric output literals must always be a subset of the originals (never invents lits)
-        clauses = [[1, 2, 3, 4], [-1, 2], [-3, -4], [2, -3]]
-        inp = GPUInprocessor.from_clauses(4, clauses, CPU)
-        new, _ = inp.vivify_clauses(clauses, asymmetric=True)
-        for o, n in zip(clauses, new):
-            assert set(n) <= set(o)
-
-
-# --------------------------------------------------------------------------- CPU reductions
 
 class TestUnitClosure:
     def test_propagates_and_keeps_units(self):
@@ -126,34 +40,18 @@ class TestUnitClosure:
         # units (1) and (¬1) contradict.
         out, _, status = unit_closure([[5, 6]], units=[[1], [-1]])
         assert status == "unsat"
-        assert _verdict(out, 6)[0] == "UNSAT"
 
+    def test_existing_units_picked_up(self):
+        # unit clauses already in the formula cascade the same way
+        clauses = [[1], [-1, 2], [-2, 3], [3, 4, 5]]
+        out, assigned, status = unit_closure(clauses, units=[])
+        assert status == "ok"
+        assert assigned == {1: True, 2: True, 3: True}
 
-class TestSubsumption:
-    def test_learned_binary_replaces_longer_clause(self):
-        clauses = [[1, 2, 3], [4, 5]]
-        out, stats = apply_learned_subsumption(clauses, learned=[[1, 2]])
-        assert stats["subsumed"] == 1 and stats["added"] == 1
-        assert _norm(out) == _norm([[4, 5], [1, 2]])    # (1∨2∨3) replaced by (1∨2)
-
-    def test_unsubsuming_learned_clause_discarded(self):
-        clauses = [[1, 2, 3]]
-        out, stats = apply_learned_subsumption(clauses, learned=[[7, 8]])
-        assert stats["added"] == 0                      # subsumes nothing → not added (no bloat)
-        assert _norm(out) == _norm(clauses)
-
-    def test_subsume_all_drops_supersets_and_dups(self):
-        out = subsume_all([[1, 2], [1, 2, 3], [1, 2], [4]])
-        assert _norm(out) == _norm([[1, 2], [4]])
-
-
-# --------------------------------------------------------------------------- ELS
 
 class TestELS:
     def _els(self, clauses, nv):
-        inp = GPUInprocessor.from_clauses(nv, clauses, CPU)
-        edges, _units, _ = inp.discover_implications()
-        return equivalent_literal_substitution(clauses, edges, nv)
+        return equivalent_literal_substitution(clauses, _binary_edges(clauses), nv)
 
     def test_merges_equivalent_pair(self):
         # (¬1∨2)∧(¬2∨1) ⇒ 1≡2; the extra clause (1∨3) keeps 1 alive. Var 2 is removed.
@@ -178,54 +76,8 @@ class TestELS:
         assert stats["status"] == "unsat"
 
     def test_no_equivalences_is_noop(self):
-        # All clauses ≥3 literals → assuming a single literal never unit-propagates → no edges.
+        # All clauses ≥3 literals → no binary edges → nothing merges.
         clauses = [[1, 2, 3], [2, 3, 4], [-1, 4, 5]]
         red, var_map, stats = self._els(clauses, 5)
         assert stats["vars_removed"] == 0 and var_map == {}
         assert _norm(red) == _norm(clauses)
-
-
-# --------------------------------------------------------------------------- equivalence gate
-
-def _rand_cnf(rng, nv, m, k=3):
-    clauses = []
-    for _ in range(m):
-        vs = rng.sample(range(1, nv + 1), min(k, nv))
-        clauses.append([v if rng.random() < 0.5 else -v for v in vs])
-    return clauses
-
-
-class TestEquivalenceGate:
-    """The preprocessed formula must be logically equivalent to the original (same models)."""
-
-    def test_random_cnfs_preserve_verdict_and_models(self, tmp_path):
-        rng = random.Random(20260605)
-        n_sat = n_unsat = 0
-        for t in range(60):
-            nv = rng.randint(4, 14)
-            m = rng.randint(nv, nv * 4)            # span the SAT/UNSAT threshold
-            clauses = _rand_cnf(rng, nv, m, k=rng.choice([2, 3, 3, 4]))
-            path = str(tmp_path / f"r{t}.cnf")
-            CNF(from_clauses=clauses).to_file(path)
-
-            base_v, _ = _verdict(clauses, nv)
-            res = preprocess(path, CPU, vivify_max_len=14)
-            assert res["status"] in ("ok", "unsat")
-            if res["status"] == "unsat":
-                assert base_v == "UNSAT", f"preprocess claimed UNSAT but base is {base_v}"
-                n_unsat += 1
-                continue
-
-            pre = res["clauses"]
-            pre_v, pre_model = _verdict(pre, nv)
-            assert pre_v == base_v, f"verdict changed {base_v}→{pre_v} on seed {t}"
-            # reduction must never grow the formula
-            assert res["lits_final"] <= res["lits_orig"]
-            if base_v == "SAT":
-                n_sat += 1
-                lifted = _lift(pre_model, res.get("var_map", {}), nv)
-                assert _satisfies(clauses, lifted), f"pre model violates original (seed {t})"
-            else:
-                n_unsat += 1
-        # the suite must actually exercise both verdicts
-        assert n_sat > 0 and n_unsat > 0

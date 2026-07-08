@@ -2,7 +2,7 @@ import os
 import torch
 import pytest
 
-from gpap.solver.assumption_checker import AssumptionChecker
+from gpap.engine.checker import AssumptionChecker
 
 TEST_DATA_DIR = os.path.join(os.path.dirname(__file__), "test_data")
 

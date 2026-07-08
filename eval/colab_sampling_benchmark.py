@@ -18,7 +18,7 @@ Three measurements, all on the projected-sampling sk_ benchmarks (independent su
      Throughput scales ~linearly with K until the GPU's compute saturates — a big-VRAM GPU (A100
      80 GB) can hold a far larger K, so it lands further up the line. The plot marks this GPU's auto-K.
 
-K auto-sizes to the GPU's free VRAM: importing gpap.solver.sampler enables CUDA `expandable_segments`
+K auto-sizes to the GPU's free VRAM: importing gpap.sampling.sampler enables CUDA `expandable_segments`
 (one growable segment instead of many fixed blocks) which removed the allocator fragmentation that
 used to inflate reserved memory ~2.3× and forced a small K; K is then set to 4× a proven-safe floor,
 bounded by a VRAM-PROPORTIONAL cap (default_k_cap) so an 80 GB A100 gets ~7× the K of a 12 GB laptop
@@ -50,12 +50,45 @@ REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 if REPO_ROOT not in sys.path:
     sys.path.insert(0, REPO_ROOT)
 
-from gpap.solver.sampler import GPUSampler, parse_independent_support   # sets expandable_segments
-from gpap.utils.gpu_budget import gpu_mem_available
-from scripts.colab_benchmark import _slug, gpu_info       # reuse device-info helpers
-from scripts.sample_benchmark import (
-    cmsgen_sample, distinct_projections, gpap_sample, two_wise_coverage,
-)
+from gpap.sampling.sampler import GPUSampler, parse_independent_support   # sets expandable_segments
+from gpap.engine.calibrate import gpu_mem_available
+from scripts.sample_benchmark import cmsgen_sample
+from gpap.sampling.metrics import distinct_projections, two_wise_coverage
+from gpap.sampling.pipeline import sample_file as gpap_sample
+
+
+def gpu_info(device: torch.device) -> dict:
+    """Describe the device this run executed on (name, VRAM, CUDA/torch versions)."""
+    import platform
+    info = {
+        "device":        str(device),
+        "torch_version": torch.__version__,
+        "cuda_version":  torch.version.cuda,
+        "platform":      platform.platform(),
+    }
+    if device.type == "cuda":
+        props = torch.cuda.get_device_properties(device)
+        free, total = torch.cuda.mem_get_info(device)
+        info.update({
+            "name":             props.name,
+            "total_gb":         round(props.total_memory / 1e9, 2),
+            "free_gb":          round(free / 1e9, 2),
+            "capability":       f"{props.major}.{props.minor}",
+            "multiprocessors":  props.multi_processor_count,
+        })
+    else:
+        info.update({
+            "name":       f"CPU ({platform.processor() or platform.machine()})",
+            "total_gb":   None,
+            "free_gb":    None,
+            "capability": None,
+        })
+    return info
+
+
+def _slug(name: str) -> str:
+    import re
+    return re.sub(r"[^a-z0-9]+", "-", (name or "cpu").lower()).strip("-") or "cpu"
 
 DEFAULT_SAMPLING_DIR = os.path.join(REPO_ROOT, "benchmarks", "sampling")
 DEFAULT_OUT_DIR = os.path.join(REPO_ROOT, "benchmarks", "colab_sampling_results")
@@ -246,7 +279,7 @@ CIRCUIT_ITC_QUICK = ["b01", "b03", "b06", "b08", "b10", "b13"]
 # groups; the cap is a v1-Python-loop artifact that truncated B=1 on large supports). Per-trajectory
 # BCP work is ~UNIFORM on circuits ⇒ straggler early-stop has no tail to trim (measured; not an
 # option). Fused/orac degrade gracefully to plain (rv,B) when the Triton kernel is unavailable.
-from scripts.sample_benchmark import CIRCUIT_PORTFOLIO  # single source of truth (same list)
+from gpap.sampling.pipeline import CIRCUIT_PORTFOLIO  # single source of truth (same list)
 
 
 def run_circuits(device: torch.device, *, cmsgen_bin: str | None, n_time: int, n_cov: int, b: int,
@@ -268,7 +301,7 @@ def run_circuits(device: torch.device, *, cmsgen_bin: str | None, n_time: int, n
     EACH (inst, T) completes so callers can persist incrementally (the Colab idle-disconnect
     mitigation — see run_family). A single (inst, T) that raises is recorded as an error row and the
     sweep continues (one WSL2/CUDA hiccup never loses the rest of the family)."""
-    from scripts.bench_to_cnf import parse_bench, build_cnf, write_dimacs
+    from gpap.circuits.bench import parse_bench, build_cnf, write_dimacs
     cycles = cycles or CIRCUIT_CYCLES
     insts = insts or (CIRCUIT_SEQ + CIRCUIT_ITC + CIRCUIT_COMB)
     skip_keys = skip_keys or set()
@@ -679,7 +712,7 @@ def run_all(quick: bool = False, device=None, sampling_dir: str = DEFAULT_SAMPLI
         _print_headline(payload)
     if do_plots:
         try:
-            from scripts.colab_sampling_plots import make_plots
+            from eval.colab_sampling_plots import make_plots
             paths = make_plots(payload, out_dir)
             if verbose and paths:
                 print("\nPlots:")
@@ -862,7 +895,7 @@ def finalize_families(*, device=None, out_dir: str = DEFAULT_OUT_DIR, do_plots: 
     save_results(payload, out_dir)
     if do_plots:
         try:
-            from scripts.colab_sampling_plots import make_plots
+            from eval.colab_sampling_plots import make_plots
             for p in make_plots(payload, out_dir):
                 print(f"  plot: {p}")
         except Exception as e:  # noqa: BLE001
@@ -914,7 +947,7 @@ def run_ksweep(payload: dict | None = None, *, device=None, out_dir: str = DEFAU
         save_results(payload, out_dir)
         if do_plots:
             try:
-                from scripts.colab_sampling_plots import make_plots
+                from eval.colab_sampling_plots import make_plots
                 for pp in make_plots(payload, out_dir):
                     print(f"  plot: {pp}")
             except Exception as e:  # noqa: BLE001

@@ -14,12 +14,11 @@ import time
 import torch
 
 sys.path.insert(0, ".")
-from gpap.clsdata.cnf_formula import CnfFormula
-from gpap.clsdata.occ_list import ext_lit_to_lit_index
-from gpap.solver.bcp_engine import BCPEngine, make_assumption_tensor
-from gpap.solver.clause_learner import extract_conflict_clauses_tensor
-from gpap.solver.external_solver import ExternalSolver
-from gpap.utils.gpu_budget import compute_k_safe, gpu_mem_available
+from gpap.engine.formula import CnfFormula
+from gpap.engine.formula import ext_lit_to_lit_index
+from gpap.engine.bcp_engine import BCPEngine, make_assumption_tensor
+from gpap.engine.external_solver import ExternalSolver
+from gpap.engine.calibrate import compute_k_safe, gpu_mem_available
 
 
 # ---------------------------------------------------------------------------
@@ -679,10 +678,10 @@ def run_e2e_gpu(
         _reset_peak()
 
         _sync(device); e0 = time.perf_counter()
-        raw = extract_conflict_clauses_tensor(chunk_t, engine.real_conflict)
+        n_real = int(engine.real_conflict.sum().item())   # BCP-derived conflicts this chunk
         _sync(device); t_extract += (time.perf_counter() - e0) * 1e3
 
-        conflicts_found += len(raw)
+        conflicts_found += n_real
         total_sets += K_chunk
         n_chunks += 1
         if is_last:
@@ -912,7 +911,7 @@ def main():
         print(f"    wall total  : {gpu['total_ms']:>9.1f} ms          {gpu_sps:,.0f} sets/s")
         print(f"    conflicts   : {gpu['conflicts_found']:,}  ({gpu['conflicts_found']/gpu['total_sets']:.2%} conflict rate)")
         if device.type == "cuda":
-            from gpap.utils.gpu_budget import formula_mem_bytes, per_batch_mem_bytes
+            from gpap.engine.calibrate import formula_mem_bytes, per_batch_mem_bytes
             M_formula = formula.num_clauses
             max_cls    = int(formula.clause_sizes.max().item())
             tl         = int(formula.clause_sizes.sum().item())

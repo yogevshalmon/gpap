@@ -2,8 +2,8 @@ import os
 import torch
 import pytest
 
-from gpap.clsdata.cnf_formula import CnfFormula
-from gpap.clsdata.occ_list import OccurrenceList, ext_lit_to_lit_index, lit_index_negation
+from gpap.engine.formula import CnfFormula
+from gpap.engine.formula import OccurrenceList, ext_lit_to_lit_index, lit_index_negation
 
 TEST_DATA_DIR = os.path.join(os.path.dirname(__file__), "test_data")
 

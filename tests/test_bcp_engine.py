@@ -2,9 +2,9 @@ import os
 import torch
 import pytest
 
-from gpap.clsdata.cnf_formula import CnfFormula
-from gpap.clsdata.occ_list import ext_lit_to_lit_index
-from gpap.solver.bcp_engine import BCPEngine, make_assumption_tensor
+from gpap.engine.formula import CnfFormula
+from gpap.engine.formula import ext_lit_to_lit_index
+from gpap.engine.bcp_engine import BCPEngine, make_assumption_tensor
 
 TEST_DATA_DIR = os.path.join(os.path.dirname(__file__), "test_data")
 
