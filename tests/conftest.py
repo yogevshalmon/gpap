@@ -30,12 +30,13 @@ _COMB = ["c432", "c880"]
 def _emit(out, d, stem, comb, cycles, pin):
     from gpap.circuits.bench import parse_bench, build_cnf, write_dimacs
     circ = parse_bench(os.path.join(BENCH_DIR, "comb" if comb else "seq", f"{stem}.bench"))
-    b, support, _ = build_cnf(circ, cycles, seed=1, pin_outputs=pin)
+    b, support, _, labels = build_cnf(circ, cycles, seed=1, pin_outputs=pin)
     name = f"{stem}-c{cycles}"
     path = str(d / f"{name}.cnf")
-    write_dimacs(path, b, support)
+    write_dimacs(path, b, support, labels)              # embed the wire map (c wire ...)
     out[name] = {"path": path, "nv": b.nv, "clauses": b.clauses,
-                 "support": [v - 1 for v in support], "cycles": cycles, "comb": comb}
+                 "support": [v - 1 for v in support], "labels": labels,
+                 "cycles": cycles, "comb": comb}
 
 
 @pytest.fixture(scope="session")

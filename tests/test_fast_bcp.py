@@ -95,7 +95,7 @@ def test_ab_circuit_cnf(tmp_path):
     """A/B on a real unrolled circuit (deep propagation cascades)."""
     from gpap.circuits.bench import parse_bench, build_cnf, write_dimacs
     circ = parse_bench("benchmarks/circuits/bench/seq/s386.bench")
-    b, support, _ = build_cnf(circ, T=3, seed=1)
+    b, support, _, _ = build_cnf(circ, T=3, seed=1)
     p = tmp_path / "s386c3.cnf"
     write_dimacs(str(p), b, support)
     from pysat.formula import CNF
@@ -165,7 +165,7 @@ def test_fused_phase_boundary(tmp_path):
     (the pre-fix straddle bug measured 100%→0% here)."""
     from gpap.circuits.bench import parse_bench, build_cnf, write_dimacs
     circ = parse_bench("benchmarks/circuits/bench/seq/s386.bench")
-    b, support, _ = build_cnf(circ, T=2, seed=1)
+    b, support, _, _ = build_cnf(circ, T=2, seed=1)
     p = tmp_path / "s386c2.cnf"
     write_dimacs(str(p), b, support)
     smp = GPUSampler.from_cnf_file(str(p), DEV, simplify=True, els=True, k_cap=512, seed=5,
@@ -224,7 +224,7 @@ def test_packed_circuit_identical_models(tmp_path):
     """Packed vs unpacked on a real unrolled circuit (deep cascades + a pinned-output unit)."""
     from gpap.circuits.bench import parse_bench, build_cnf, write_dimacs
     circ = parse_bench("benchmarks/circuits/bench/seq/s386.bench")
-    b, support, _ = build_cnf(circ, T=2, seed=1)
+    b, support, _, _ = build_cnf(circ, T=2, seed=1)
     p = tmp_path / "s386c2.cnf"
     write_dimacs(str(p), b, support)
     from pysat.formula import CNF

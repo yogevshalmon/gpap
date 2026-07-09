@@ -54,16 +54,20 @@ def sample_file(path, device, **kw):
     cnf0 = CNF(from_file=path)
     sup0 = parse_independent_support(path)
     phases["parse"] = time.perf_counter() - t_start
+    # Wire map (var -> input@cycle) embedded by a .bench conversion — lets sample output name each
+    # column by its circuit wire. Empty for a plain (non-circuit) CNF.
+    from gpap.circuits.bench import parse_support_labels
+    wire_map = parse_support_labels(path)
     return sample_clauses(cnf0.nv, cnf0.clauses, sup0, device,
-                          _t_start=t_start, _phases=phases, **kw)
+                          _t_start=t_start, _phases=phases, _wire_map=wire_map, **kw)
 
 
 def sample_clauses(nv, clauses, support, device, *, simplify=True, els=False, n_time=50_000,
-                   n_cov=0, b=8, k_cap=49152, max_chunks=None, time_limit=60.0, cov_chunks=4,
-                   max_rounds=300, lookahead=False, verify_clauses=None, verify_cpu=False,
-                   cov_k_cap=2048, random_var="auto", configs="default", use_kernel="auto",
-                   mine="auto", mine_gate=0.15, min_measure_chunks=3, seed=5,
-                   _t_start=None, _phases=None):
+                   n_cov=0, out_cap=0, b=8, k_cap=49152, max_chunks=None, time_limit=60.0,
+                   cov_chunks=4, max_rounds=300, lookahead=False, verify_clauses=None,
+                   verify_cpu=False, cov_k_cap=2048, random_var="auto", configs="default",
+                   use_kernel="auto", mine="auto", mine_gate=0.15, min_measure_chunks=3, seed=5,
+                   _t_start=None, _phases=None, _wire_map=None):
     """Throughput run timed end-to-end (construction + simplify + sample, to match CMSGen's
     'produce N samples' wall clock) + a small collect run for coverage/soundness. `n_time` is a
     CONTRACT: the timed run keeps sampling until it has delivered that many models. Safety
@@ -228,6 +232,17 @@ def sample_clauses(nv, clauses, support, device, *, simplify=True, els=False, n_
         tuned_rv, tuned_b = t["random_var"], t["B"]
         tuned_la = t.get("lookahead", lookahead)
         succ = t["success_rate"]
+    # Sample OUTPUT: collect up to `out_cap` support-projection bit-rows with the winning config —
+    # efficient GPU projection (only the (n, S) bit matrix crosses to host, not full N-var models).
+    # Off the timing path (samples/s already measured). Kept BEFORE the coverage run's K-lowering so
+    # it runs at full throughput K.
+    samples = cols = None
+    phases["output"] = 0.0
+    if out_cap:
+        _to = time.perf_counter()
+        samples, cols = smp.sample_bits(out_cap, config=(tuned_rv, tuned_b, tuned_la),
+                                        max_decision_rounds=max_rounds)
+        phases["output"] = time.perf_counter() - _to
     if n_cov:
         smp.K = min(smp.K, cov_k_cap)                # bound host RAM from collected/reconstructed models
     # Coverage / UNIQUE-solution run: collect models with the winning config and count distinct
@@ -274,5 +289,9 @@ def sample_clauses(nv, clauses, support, device, *, simplify=True, els=False, n_
             "gpu_sound": c.get("gpu_sound", t.get("gpu_sound", True)),
             "cpu_sound": c.get("all_valid"), "models": c.get("models", []),
             "n_distinct": c.get("n_distinct"), "n_collected": n_coll,
+            # Sample OUTPUT (present when out_cap>0): `samples` = numpy uint8 (n, S) 0/1 matrix of
+            # support projections; `cols` = the ORIGINAL variable id of each column; `wire_map` =
+            # {var: input@cycle} for a circuit CNF (empty otherwise). See gpap.sampling.output.
+            "samples": samples, "cols": cols, "wire_map": _wire_map or {},
             "tuned_rv": tuned_rv, "tuned_b": tuned_b, "tuned_la": tuned_la,
             "config_breakdown": t.get("config_breakdown")}

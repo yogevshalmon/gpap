@@ -631,6 +631,131 @@ class GPUSampler:
             projs.append(tuple((v + 1) if (v + 1) in sset else -(v + 1) for v in orig_support))
         return out_models, projs
 
+    # --------------------------------------------------- efficient bit-projection output
+
+    def _build_projection_plan(self) -> dict:
+        """Precompute a per-output-column plan so a chunk's support projection is a GPU gather +
+        constant fill + random fill — NO Python per-row reconstruct (the measured delivery
+        bottleneck). One-time per formula; the reconstruction rules (simplify / ELS / plain)
+        become tensors over the S output columns:
+          gcol[i]   = compacted variable column to gather for output column i (-1 if not a gather)
+          flip[i]   = XOR applied to the gathered/random bit (ELS negated-representative polarity)
+          const[i]  = constant 0/1 for a forced (unit-propagated) column
+          rgroup[i] = random-draw group id (-1 if none); ELS columns sharing a representative share
+                      a group so equivalent variables stay EQUAL (a hard validity requirement).
+        Output columns default to the original support (the sampled object); with no support they
+        are all original variables (the full model). Returns/caches the plan dict."""
+        if getattr(self, "_proj_plan", None) is not None:
+            return self._proj_plan
+        dev = self.device
+        r = self._recon
+        if r is not None and r.get("orig_support"):
+            cols = list(r["orig_support"])                                 # 0-based support vars
+        elif r is not None:
+            cols = list(range(r["orig_nv"]))                              # full model
+        elif self.support:
+            cols = list(self.support)
+        else:
+            cols = list(range(self.N))
+        S = len(cols)
+        gcol, flip, const, rgroup = [-1] * S, [0] * S, [0] * S, [-1] * S
+        groups: dict = {}
+
+        def _group(key):
+            return groups.setdefault(key, len(groups))
+
+        if r is None:                                          # sampler decided ORIGINAL vars
+            for i, v0 in enumerate(cols):
+                gcol[i] = v0                                   # compacted == original
+        elif r.get("els"):
+            rep_of, nn, fm = r["rep_of"], r["new_of_new"], r["forced_map"]
+            for i, v0 in enumerate(cols):
+                v = v0 + 1
+                if v in fm:
+                    const[i] = 1 if fm[v] else 0
+                    continue
+                rv, pol = rep_of[v - 1]
+                if rv in fm:
+                    const[i] = 1 if (fm[rv] if pol else not fm[rv]) else 0
+                elif rv in nn:
+                    gcol[i], flip[i] = nn[rv] - 1, (0 if pol else 1)
+                else:                                          # don't-care rep: one draw per class
+                    rgroup[i], flip[i] = _group(("els", rv)), (0 if pol else 1)
+        else:                                                  # plain unit-prop simplification
+            new_of_old = {int(o): j for j, o in enumerate(r["old_of_new"])}
+            fm = {abs(l): (l > 0) for l in r["forced"]}
+            for i, v0 in enumerate(cols):
+                v = v0 + 1
+                if v in fm:                                    # unit-forced -> constant
+                    const[i] = 1 if fm[v] else 0
+                elif v in new_of_old:                          # survives compacted -> gather
+                    gcol[i] = new_of_old[v]
+                else:                                          # in no surviving clause == free_support
+                    rgroup[i] = _group(("free", v0))
+        self._proj_plan = {
+            "cols_1based": [v0 + 1 for v0 in cols], "S": S, "n_groups": len(groups),
+            "gcol": torch.tensor(gcol, dtype=torch.long, device=dev),
+            "flip": torch.tensor(flip, dtype=torch.uint8, device=dev),
+            "const": torch.tensor(const, dtype=torch.uint8, device=dev),
+            "rgroup": torch.tensor(rgroup, dtype=torch.long, device=dev),
+        }
+        return self._proj_plan
+
+    @torch.inference_mode()
+    def _project(self, fully: torch.Tensor) -> torch.Tensor:
+        """(n_done, S) uint8 support projection for the fully-assigned rows, via the cached plan.
+        Pure GPU tensor ops — the whole point is to avoid the per-row Python reconstruct."""
+        plan = self._build_projection_plan()
+        pos = self.engine.assignment[fully][:, 0::2] == 1        # (n, N) bool: var TRUE
+        n, dev = pos.size(0), self.device
+        proj = plan["const"].unsqueeze(0).expand(n, -1).clone()  # (n, S) uint8
+        g = plan["gcol"] >= 0
+        if bool(g.any()):
+            proj[:, g] = pos[:, plan["gcol"][g]].to(torch.uint8) ^ plan["flip"][g]
+        rm = plan["rgroup"] >= 0
+        if plan["n_groups"] and bool(rm.any()):
+            bits = torch.randint(0, 2, (n, plan["n_groups"]), generator=self._gen,
+                                 device=dev).to(torch.uint8)
+            proj[:, rm] = bits[:, plan["rgroup"][rm]] ^ plan["flip"][rm]
+        return proj
+
+    @torch.inference_mode()
+    def sample_bits(self, n_target: int, *, config=(True, 8, "fused"),
+                    max_decision_rounds: "int | None" = 300, max_chunks: "int | None" = None):
+        """Collect up to `n_target` support-projection bit-rows efficiently. Only the small
+        (n, S) bit matrix crosses to host RAM per chunk (not full N-var models), so a big output
+        is cheap. Returns (matrix, cols_1based): matrix is a numpy uint8 (got, S) array of 0/1,
+        cols_1based lists the ORIGINAL variable id of each column. Sound: every row is a valid
+        support projection (forced pinned, compacted vars from a real model, don't-cares free,
+        ELS-equivalent vars kept equal via shared random groups)."""
+        import numpy as np
+        rv, B, la = config[0], max(1, config[1]), (config[2] if len(config) > 2 else False)
+        plan = self._build_projection_plan()
+        support_mask = None
+        if self.support:
+            support_mask = torch.zeros(self.N, dtype=torch.bool, device=self.device)
+            support_mask[torch.tensor(self.support, dtype=torch.long, device=self.device)] = True
+        K = self.K_fused if (la in ("fused", "fsoft") and self.K >= self._K_init) else self.K
+        mats: list = []
+        got = chunk = 0
+        while got < n_target:
+            if max_chunks is not None and chunk >= max_chunks:
+                break
+            chunk += 1
+            fully, _, _, _ = self._run_chunk(K, B, rv, max_decision_rounds,
+                                             support_mask, True, la)
+            n_done = int(fully.sum().item())
+            if n_done == 0:
+                if chunk >= 3:                    # cold start + grace: instance is producing nothing
+                    break
+                continue
+            take = min(n_done, n_target - got)
+            mats.append(self._project(fully)[:take].cpu())
+            got += take
+        M = (torch.cat(mats).numpy() if mats
+             else np.zeros((0, plan["S"]), dtype=np.uint8))
+        return M, plan["cols_1based"]
+
     # ----------------------------------------------------------------- public
 
     @torch.inference_mode()

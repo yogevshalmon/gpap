@@ -43,7 +43,7 @@ def sample_circuit(bench_path, cycles=25, n=50_000, *, pin_outputs=None, seed=5,
     pattern) and sample the primary-input support. Returns (models, info)."""
     from gpap.circuits.bench import parse_bench, build_cnf
     circ = parse_bench(bench_path)
-    b, support, _target = build_cnf(circ, cycles, seed, pin_outputs=pin_outputs)
+    b, support, _target, _labels = build_cnf(circ, cycles, seed, pin_outputs=pin_outputs)
     return sample_clauses(b.nv, b.clauses, n, support=[v - 1 for v in support],
                           device=device, seed=seed, **kw)
 

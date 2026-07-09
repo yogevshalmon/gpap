@@ -321,7 +321,7 @@ def run_circuits(device: torch.device, *, cmsgen_bin: str | None, n_time: int, n
             cnfp = os.path.join(gen_dir, f"{inst}.c{T}.cnf")
             if not os.path.exists(cnfp):
                 # combinational (ISCAS-85): pin ONE output to keep a large samplable solution space
-                builder, support, _ = build_cnf(circ, T, seed=1,
+                builder, support, _, _ = build_cnf(circ, T, seed=1,
                                                 pin_outputs=1 if combinational else None)
                 if len(builder.clauses) > max_clauses:  # keep the unrolled CNF within budget
                     if verbose:

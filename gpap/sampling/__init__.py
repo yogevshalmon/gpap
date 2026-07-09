@@ -6,5 +6,6 @@ parallel); every emitted model is guaranteed valid. `pipeline` is the full end-t
 the benchmark script and the Colab driver all share.
 """
 from gpap.sampling.sampler import GPUSampler, parse_independent_support
+from gpap.sampling.output import write_samples
 
-__all__ = ["GPUSampler", "parse_independent_support"]
+__all__ = ["GPUSampler", "parse_independent_support", "write_samples"]

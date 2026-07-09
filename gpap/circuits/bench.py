@@ -206,26 +206,50 @@ def build_cnf(circ, T, seed, pin_outputs=None):
         b.add(v if target[o] else -v)
 
     support = [input_vars[(inp, t)] for inp in inputs for t in range(T)]
-    return b, support, target
+    # A human label per support variable: the primary-input wire and the cycle it belongs to.
+    support_labels = [f"{inp}@{t}" for inp in inputs for t in range(T)]
+    return b, support, target, support_labels
 
 
-def write_dimacs(path, builder, support):
+def write_dimacs(path, builder, support, support_labels=None):
+    """Write the projected-sampling CNF. The `c ind` header lists the support variables; when
+    `support_labels` is given (from a .bench conversion) a `c wire <var> <input@cycle>` map is
+    embedded too, so sample output can be reported in circuit-wire terms and the map travels WITH
+    the CNF (readable back via parse_support_labels)."""
     with open(path, "w") as f:
         f.write("c unrolled CircuitSAT sampling instance (support = primary inputs x cycles)\n")
         # `c ind ... 0` lines (UniGen/QuickSampler convention), chunked
         for i in range(0, len(support), 10):
             f.write("c ind " + " ".join(map(str, support[i:i + 10])) + " 0\n")
+        if support_labels:                                 # wire map: var -> input@cycle
+            for v, lbl in zip(support, support_labels):
+                f.write(f"c wire {v} {lbl}\n")
         f.write(f"p cnf {builder.nv} {len(builder.clauses)}\n")
         for c in builder.clauses:
             f.write(" ".join(map(str, c)) + " 0\n")
+
+
+def parse_support_labels(path):
+    """Read the `c wire <var> <label>` map embedded by write_dimacs. Returns {var(int): label} or
+    an empty dict for a CNF without a wire map (e.g. a non-circuit instance)."""
+    out = {}
+    with open(path) as f:
+        for line in f:
+            if line.startswith("c wire "):
+                parts = line.split()
+                if len(parts) >= 4:
+                    out[int(parts[2])] = parts[3]
+            elif line and line[0] not in "c":
+                break                                      # past the header
+    return out
 
 
 def convert_one(bench_path, out_path, cycles, seed, pin_outputs=None):
     """Convert a single .bench file to a DIMACS CNF at out_path. Returns the CnfBuilder."""
     circ = parse_bench(bench_path)
     inputs, outputs, dffs, gates = circ
-    b, support, target = build_cnf(circ, cycles, seed, pin_outputs=pin_outputs)
-    write_dimacs(out_path, b, support)
+    b, support, target, labels = build_cnf(circ, cycles, seed, pin_outputs=pin_outputs)
+    write_dimacs(out_path, b, support, labels)
     print(f"{bench_path} -> {out_path}: PI={len(inputs)} PO={len(outputs)} DFF={len(dffs)} "
           f"gates={len(gates)} | cycles={cycles} -> vars={b.nv} clauses={len(b.clauses)} "
           f"support={len(support)}")

@@ -23,16 +23,20 @@ def _cmd_sample(args):
     path = args.input
     tmp = None
     if path.endswith(".bench"):
-        # unroll to a temporary CNF first
+        # unroll to a temporary CNF first (convert_one embeds the wire map as `c wire ...` comments,
+        # so the sample output can name each column by its circuit wire).
         import tempfile
         from gpap.circuits.bench import convert_one
         tmp = tempfile.NamedTemporaryFile(suffix=".cnf", delete=False).name
         convert_one(path, tmp, args.cycles, args.seed, pin_outputs=args.pin_outputs)
         path = tmp
     portfolio = CIRCUIT_PORTFOLIO if args.portfolio == "circuit" else DEFAULT_PORTFOLIO
-    info = sample_file(path, device, n_time=args.n, n_cov=args.n_cov, seed=args.seed,
-                       simplify=not args.no_simplify, els=args.els, configs=portfolio,
-                       time_limit=args.time_limit, use_kernel=args.use_kernel)
+    # Only collect sample bits when an output file is requested: up to `-n` solutions, never more
+    # than the --max-samples safety ceiling (default 100k; raise it for a full dump).
+    out_cap = min(args.n, args.max_samples) if args.out else 0
+    info = sample_file(path, device, n_time=args.n, n_cov=args.n_cov, out_cap=out_cap,
+                       seed=args.seed, simplify=not args.no_simplify, els=args.els,
+                       configs=portfolio, time_limit=args.time_limit, use_kernel=args.use_kernel)
     capped = "<" if info.get("chunk_capped") else ""
     print(f"{os.path.basename(args.input)}: N={info['nv']} M={info['n_clauses']} "
           f"|sup|={info['support_size']}")
@@ -45,10 +49,24 @@ def _cmd_sample(args):
         m = info["mined"]
         print(f"  mined {m['n_units']} units / {m['n_binary']} binary / {m['n_ternary']} ternary "
               f"in {m['seconds']:.1f}s")
-    if args.json:
-        info.pop("models", None)
-        json.dump(info, open(args.json, "w"), indent=1, default=str)
-        print(f"  wrote {args.json}")
+    if args.out:
+        from gpap.sampling.output import write_samples
+        mat, cols = info.get("samples"), info.get("cols")
+        if mat is None or len(mat) == 0:
+            print("  no samples to write (0 models produced)")
+        else:
+            meta = {"instance": os.path.basename(args.input), "seed": args.seed,
+                    "success_rate": round(info["success_rate"], 4)}
+            write_samples(args.out, mat, cols, fmt=args.out_format,
+                          wire_map=info.get("wire_map"), meta=meta)
+            print(f"  wrote {len(mat):,} samples ({mat.shape[1]} cols) -> {args.out} "
+                  f"[{args.out_format}]")
+    stats_path = args.stats or args.json
+    if stats_path:
+        # Drop the bulky arrays from the JSON — it is the stats/info sidecar, not the samples.
+        stats = {k: v for k, v in info.items() if k not in ("samples", "models", "cols")}
+        json.dump(stats, open(stats_path, "w"), indent=1, default=str)
+        print(f"  wrote stats -> {stats_path}")
     if tmp:
         os.unlink(tmp)
 
@@ -143,7 +161,16 @@ def main(argv=None):
     s.add_argument("--use-kernel", default="auto")
     s.add_argument("--cycles", type=int, default=25, help="unroll depth (only for .bench input)")
     s.add_argument("--pin-outputs", type=int, default=None, help="outputs to pin (.bench input)")
-    s.add_argument("--json", default=None, help="write the full info dict here")
+    s.add_argument("--out", default=None,
+                   help="write the sampled solutions here (compact support projections, one per "
+                        "sample). For a .bench input each column is a primary-input wire@cycle")
+    s.add_argument("--out-format", choices=["bits", "npy", "dimacs"], default="bits",
+                   help="--out format: 'bits' (0/1 text, default) | 'npy' (numpy uint8 array) | "
+                        "'dimacs' (signed lits, CMSGen-style)")
+    s.add_argument("--max-samples", type=int, default=100_000,
+                   help="cap on solutions written to --out (default 100k; raise for a full dump)")
+    s.add_argument("--stats", default=None, help="write the run's info/stats JSON here")
+    s.add_argument("--json", default=None, help=argparse.SUPPRESS)   # deprecated alias for --stats
     s.set_defaults(func=_cmd_sample)
 
     b = sub.add_parser("bench", help="benchmark a glob of instances (vs CMSGen if given)")

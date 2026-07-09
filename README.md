@@ -58,11 +58,21 @@ optional coverage pass (`n_cov > 0`); the timed run itself collects nothing (thr
 
 ```bash
 gpap info                                   # device, triton availability, power-limit warning
-gpap sample formula.cnf -n 50000 --json out.json
-gpap sample b10.bench --cycles 25 -n 50000  # unrolls the circuit, then samples
+gpap sample formula.cnf -n 50000 --out samples.out --stats run.json
+gpap sample b10.bench --cycles 25 -n 50000 --out stim.out   # unroll, sample, write input stimuli
 gpap circuit2cnf benches/ cnf_out/ --cycles 25 --pin-outputs 1   # .bench dir -> CNF dir
 gpap bench 'benchmarks/circuits/*.cnf' --cmsgen /path/to/cmsgen --n-cov 5000
 ```
+
+**Writing solutions.** `--out FILE` writes the sampled solutions as compact **support projections**
+— one row per sample, one bit per support variable (for a `.bench` input, one primary-input
+`wire@cycle` per column, named in the header). The projection is built on the GPU and only the bit
+matrix crosses to host RAM, so a large dump is cheap. Formats via `--out-format`: `bits` (0/1 text,
+default), `npy` (numpy `uint8` array — `numpy.load`), `dimacs` (signed literals). Output is capped at
+`--max-samples` (default 100k; raise for a full dump). `--stats FILE` writes the run's info/stats
+JSON (rates, phases, mining, soundness) — separate from the samples. In Python the same matrix is
+`info["samples"]` (with `info["cols"]` / `info["wire_map"]`), and `gpap.sampling.write_samples()`
+writes any of the formats.
 
 ## The core idea (no clause scanning)
 

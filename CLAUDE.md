@@ -32,6 +32,7 @@ gpap/
     miner.py               # entailed-clause mining (the lose-set killer)
     preprocess.py          # unit_closure / equivalent_literal_substitution (ELS) primitives
     metrics.py             # distinct_projections / two_wise_coverage (off the timing path)
+    output.py              # compact sample writers (bits / npy / dimacs) — GPU bit-projection out
   circuits/bench.py        # parse/unroll/Tseitin/pin .bench -> projected-sampling CNF
   cli.py                   # `gpap` subcommands (sample / bench / circuit2cnf / info)
 eval/                      # cross-GPU sampling benchmark driver + plots (Colab / A100)
@@ -76,10 +77,14 @@ pytest -m "not gpu and not slow"      # portable CPU smoke (any platform)
 pytest                                # full suite (gpu tests skip off-CUDA; slow = deep unrolls)
 
 gpap info                             # device / triton / power-limit warning
-gpap sample formula.cnf -n 50000 --json out.json
-gpap sample b10.bench --cycles 25 -n 50000
+gpap sample formula.cnf -n 50000 --out samples.out --stats run.json
+gpap sample b10.bench --cycles 25 -n 50000 --out stim.out    # .bench: columns = wire@cycle
 gpap bench 'path/*.cnf' --cmsgen /path/to/cmsgen --n-cov 5000
 ```
+Sample output = compact support projections (1 bit/support var; GPU-projected so only the bit
+matrix leaves the device). `--out-format bits|npy|dimacs`, `--max-samples` cap (default 100k),
+`--stats` for the info JSON. Sound: every row extends to a full model (test_output.py). Circuit
+CNFs embed a `c wire <var> <input@cycle>` map (bench.py) so output columns are named by wire.
 
 Benchmark suite driver (thin table over `gpap.sampling.pipeline`):
 ```bash
