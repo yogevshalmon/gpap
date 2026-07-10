@@ -22,21 +22,38 @@ def _cmd_sample(args):
         "cuda" if torch.cuda.is_available() else "cpu")
     path = args.input
     tmp = None
-    if path.endswith(".bench"):
-        # unroll to a temporary CNF first (convert_one embeds the wire map as `c wire ...` comments,
-        # so the sample output can name each column by its circuit wire).
+    encode_s = None
+    if path.endswith((".bench", ".aig", ".aag")):
+        # unroll to a temporary CNF first (the conversion embeds the wire map as `c wire ...` and
+        # the encoder provenance as `c encoder ...`, so sample output can name each column by its
+        # circuit wire and the pipeline can skip work the encoder already did).
         import tempfile
-        from gpap.circuits.bench import convert_one
+        import time as _time
         tmp = tempfile.NamedTemporaryFile(suffix=".cnf", delete=False).name
-        convert_one(path, tmp, args.cycles, args.seed, pin_outputs=args.pin_outputs)
+        _t0 = _time.perf_counter()
+        if path.endswith(".bench"):
+            from gpap.circuits.bench import convert_one
+            convert_one(path, tmp, args.cycles, args.seed, pin_outputs=args.pin_outputs,
+                        encoder=args.encoder, abc_path=args.abc, abc_opt=args.abc_opt)
+        else:
+            from gpap.circuits.aig2cnf import convert_aig_one
+            convert_aig_one(path, tmp, args.cycles, args.seed, pin_outputs=args.pin_outputs,
+                            encoder=args.encoder, abc_path=args.abc, abc_opt=args.abc_opt)
+        encode_s = _time.perf_counter() - _t0
+        print(f"  encoded in {encode_s:.1f}s [{args.encoder}"
+              f"{'/' + args.abc_opt if args.encoder != 'tseitin' else ''}]")
         path = tmp
     portfolio = CIRCUIT_PORTFOLIO if args.portfolio == "circuit" else DEFAULT_PORTFOLIO
     # Only collect sample bits when an output file is requested: up to `-n` solutions, never more
     # than the --max-samples safety ceiling (default 100k; raise it for a full dump).
     out_cap = min(args.n, args.max_samples) if args.out else 0
+    mine = {"auto": "auto", "on": True, "off": False}[args.mine]
     info = sample_file(path, device, n_time=args.n, n_cov=args.n_cov, out_cap=out_cap,
-                       seed=args.seed, simplify=not args.no_simplify, els=args.els,
+                       seed=args.seed, simplify=not args.no_simplify, els=args.els, mine=mine,
                        configs=portfolio, time_limit=args.time_limit, use_kernel=args.use_kernel)
+    if encode_s is not None:
+        info["encode_s"] = encode_s          # circuit->CNF encode wall (stats sidecar honesty)
+        info["encoder"] = args.encoder
     capped = "<" if info.get("chunk_capped") else ""
     print(f"{os.path.basename(args.input)}: N={info['nv']} M={info['n_clauses']} "
           f"|sup|={info['support_size']}")
@@ -86,21 +103,44 @@ def _cmd_bench(args):
     sample_benchmark.main()
 
 
+def _convert_circuit(path, outp, args):
+    """Dispatch one circuit file (.bench or .aig/.aag) to its converter."""
+    if path.endswith(".bench"):
+        from gpap.circuits.bench import convert_one
+        convert_one(path, outp, args.cycles, args.seed, pin_outputs=args.pin_outputs,
+                    encoder=args.encoder, abc_path=args.abc, abc_opt=args.abc_opt)
+    else:
+        from gpap.circuits.aig2cnf import convert_aig_one
+        convert_aig_one(path, outp, args.cycles, args.seed, pin_outputs=args.pin_outputs,
+                        encoder=args.encoder, abc_path=args.abc, abc_opt=args.abc_opt)
+
+
 def _cmd_circuit2cnf(args):
-    from gpap.circuits.bench import convert_one
     import glob as _glob
     if os.path.isdir(args.input):
         os.makedirs(args.output, exist_ok=True)
-        benches = sorted(_glob.glob(os.path.join(args.input, "**", "*.bench"), recursive=True))
-        for bp in benches:
-            stem = os.path.splitext(os.path.basename(bp))[0]
+        files = sorted(f for pat in ("*.bench", "*.aig", "*.aag")
+                       for f in _glob.glob(os.path.join(args.input, "**", pat), recursive=True))
+        for fp in files:
+            stem = os.path.splitext(os.path.basename(fp))[0]
             outp = os.path.join(args.output, f"{stem}-c{args.cycles}.cnf")
             try:
-                convert_one(bp, outp, args.cycles, args.seed, pin_outputs=args.pin_outputs)
+                _convert_circuit(fp, outp, args)
             except Exception as e:  # noqa: BLE001
-                print(f"{bp}: SKIPPED ({type(e).__name__}: {e})", file=sys.stderr)
+                print(f"{fp}: SKIPPED ({type(e).__name__}: {e})", file=sys.stderr)
     else:
-        convert_one(args.input, args.output, args.cycles, args.seed, pin_outputs=args.pin_outputs)
+        _convert_circuit(args.input, args.output, args)
+
+
+def _print_abc_status():
+    """Report the OPTIONAL berkeley-abc circuit encoder (--encoder abc)."""
+    from gpap.circuits.abc_backend import find_abc
+    exe = find_abc()
+    if exe:
+        print(f"abc circuit encoder: {exe}  (use --encoder abc)")
+    else:
+        print("abc circuit encoder: not found — native Tseitin only "
+              "(build with scripts/build_abc.sh to enable --encoder abc)")
 
 
 def _cmd_info(args):
@@ -108,6 +148,7 @@ def _cmd_info(args):
     print(f"torch {torch.__version__}  (CUDA {torch.version.cuda})")
     if not torch.cuda.is_available():
         print("device: CPU (no CUDA) — the PyTorch BCP oracle runs; fused kernels are off")
+        _print_abc_status()
         return
     dev = torch.device("cuda")
     props = torch.cuda.get_device_properties(dev)
@@ -119,6 +160,7 @@ def _cmd_info(args):
         print(f"triton fused kernels: {'available' if TritonBCP.available() else 'UNAVAILABLE'}")
     except Exception as e:  # noqa: BLE001
         print(f"triton fused kernels: import failed ({e})")
+    _print_abc_status()
     # Power-limit / clock warning (the measured 40 W-vs-80 W + battery-clock gotchas). Before any
     # headline benchmark, confirm the card isn't power-capped or downclocked — ratios in one state
     # are valid but absolute numbers across states are not.
@@ -144,12 +186,26 @@ def _cmd_info(args):
         pass
 
 
+def _add_encoder_args(sp):
+    """Circuit-encoder flags, shared by `sample` (circuit input) and `circuit2cnf`."""
+    sp.add_argument("--encoder", choices=["tseitin", "abc", "auto"], default="tseitin",
+                    help="circuit->CNF encoder: 'tseitin' (native, default) | 'abc' (unroll + "
+                         "dc2/fraig via berkeley-abc, 2-8x fewer clauses, same solution space; "
+                         "needs an abc binary — see scripts/build_abc.sh) | 'auto' (abc if found)")
+    sp.add_argument("--abc", default=None,
+                    help="path to an `abc` binary (else $GPAP_ABC, PATH, ~/.cache/gpap/bin/abc)")
+    sp.add_argument("--abc-opt", choices=["full", "fast", "auto"], default="auto",
+                    help="abc optimization effort: 'full' (optimize the unrolled AIG — best "
+                         "shrink, expensive on big unrolls) | 'fast' (optimize pre-unroll + one "
+                         "cheap post sweep) | 'auto' (full when small, fast when big; default)")
+
+
 def main(argv=None):
     p = argparse.ArgumentParser(prog="gpap", description=__doc__.splitlines()[0])
     sub = p.add_subparsers(dest="cmd", required=True)
 
-    s = sub.add_parser("sample", help="sample models from one CNF or .bench file")
-    s.add_argument("input", help="a DIMACS .cnf or a .bench circuit (unrolled first)")
+    s = sub.add_parser("sample", help="sample models from one CNF, .bench or .aig/.aag file")
+    s.add_argument("input", help="a DIMACS .cnf, or a circuit (.bench / .aig / .aag — unrolled first)")
     s.add_argument("-n", type=int, default=50_000, help="models to deliver (a contract; default 50k)")
     s.add_argument("--time-limit", type=float, default=60.0, help="per-instance sampling wall cap (s)")
     s.add_argument("--seed", type=int, default=5)
@@ -159,8 +215,14 @@ def main(argv=None):
     s.add_argument("--no-simplify", action="store_true")
     s.add_argument("--els", action="store_true", help="equivalent-literal substitution (removes vars)")
     s.add_argument("--use-kernel", default="auto")
-    s.add_argument("--cycles", type=int, default=25, help="unroll depth (only for .bench input)")
-    s.add_argument("--pin-outputs", type=int, default=None, help="outputs to pin (.bench input)")
+    s.add_argument("--cycles", type=int, default=25,
+                   help="unroll depth (circuit inputs; combinational AIGs clamp to 1)")
+    s.add_argument("--pin-outputs", type=int, default=None, help="outputs to pin (circuit input)")
+    s.add_argument("--mine", choices=["auto", "on", "off"], default="auto",
+                   help="entailed-clause mining: 'auto' (on, except for ABC-encoded CNFs, whose "
+                        "backbone dc2/fraig already removed — measured 0-45 units for a full 5s "
+                        "budget) | 'on' (force) | 'off'")
+    _add_encoder_args(s)
     s.add_argument("--out", default=None,
                    help="write the sampled solutions here (compact support projections, one per "
                         "sample). For a .bench input each column is a primary-input wire@cycle")
@@ -185,12 +247,14 @@ def main(argv=None):
     b.add_argument("--output", default=None)
     b.set_defaults(func=_cmd_bench)
 
-    c = sub.add_parser("circuit2cnf", help="unroll a .bench (or a dir of them) to projected CNF")
-    c.add_argument("input", help="a .bench file or a directory of them")
+    c = sub.add_parser("circuit2cnf",
+                       help="unroll a circuit (.bench/.aig/.aag, or a dir of them) to projected CNF")
+    c.add_argument("input", help="a .bench/.aig/.aag file or a directory of them")
     c.add_argument("output", help="output .cnf (single) or output directory")
     c.add_argument("--cycles", type=int, default=25)
     c.add_argument("--seed", type=int, default=1)
     c.add_argument("--pin-outputs", type=int, default=None)
+    _add_encoder_args(c)
     c.set_defaults(func=_cmd_circuit2cnf)
 
     i = sub.add_parser("info", help="device, triton availability, power-limit warning")

@@ -56,8 +56,15 @@ def sample_file(path, device, **kw):
     phases["parse"] = time.perf_counter() - t_start
     # Wire map (var -> input@cycle) embedded by a .bench conversion — lets sample output name each
     # column by its circuit wire. Empty for a plain (non-circuit) CNF.
-    from gpap.circuits.bench import parse_support_labels
+    from gpap.circuits.bench import parse_encoder_comment, parse_support_labels
     wire_map = parse_support_labels(path)
+    # Encoder provenance gate (2026-07-10): on an ABC-encoded CNF the entailed-clause miner is
+    # pure overhead — dc2/fraig already removed the backbone L1 harvests structurally (measured:
+    # 0-45 units found vs 59-1007 on the same circuits' Tseitin CNFs, while costing its full 5 s
+    # budget; b15-c25: 4.8 s of a 9.4 s e2e wall for 45 units on a 222k-clause formula). The gate
+    # only downgrades the DEFAULT ("auto"); pass mine=True to force probing anyway.
+    if kw.get("mine", "auto") == "auto" and parse_encoder_comment(path) == "abc":
+        kw["mine"] = False
     return sample_clauses(cnf0.nv, cnf0.clauses, sup0, device,
                           _t_start=t_start, _phases=phases, _wire_map=wire_map, **kw)
 
@@ -137,7 +144,7 @@ def sample_clauses(nv, clauses, support, device, *, simplify=True, els=False, n_
         # (M >= 3000; below that the whole timed run is ~instant and even 0.3s of probing would
         # dominate the e2e wall). The warmup success rate (< mine_gate = truly stuck) FORCES the
         # full L2/L3 tiers even without L1 yield — the original service-family behaviour.
-        if mine == "auto" and smp.M >= 3000:
+        if mine in ("auto", True) and smp.M >= 3000:   # True = forced (bypasses provenance gate)
             try:
                 from gpap.sampling.miner import mine_entailed
                 # Two-stage mining. Stage 1: L1 backbone units ALWAYS (cheap fixpoint, THE

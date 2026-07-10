@@ -33,10 +33,14 @@ gpap/
     preprocess.py          # unit_closure / equivalent_literal_substitution (ELS) primitives
     metrics.py             # distinct_projections / two_wise_coverage (off the timing path)
     output.py              # compact sample writers (bits / npy / dimacs) — GPU bit-projection out
-  circuits/bench.py        # parse/unroll/Tseitin/pin .bench -> projected-sampling CNF
+  circuits/
+    bench.py               # parse/unroll/Tseitin/pin .bench -> projected-sampling CNF
+    aiger.py               # AIGER reader: binary aig + ASCII aag, latches + reset values
+    aig2cnf.py             # NATIVE .aig/.aag input: simulate/unroll/Tseitin (no external tool)
+    abc_backend.py         # OPTIONAL berkeley-abc encoder (unroll + dc2/fraig -> AIG -> Tseitin)
   cli.py                   # `gpap` subcommands (sample / bench / circuit2cnf / info)
 eval/                      # cross-GPU sampling benchmark driver + plots (Colab / A100)
-scripts/                   # thin CLI wrappers (sample_benchmark, bench_to_cnf) + profile_engine
+scripts/                   # thin CLI wrappers (sample_benchmark, bench_to_cnf) + build_abc.sh
 docs/findings/             # INSIGHTS.md (settled results index) + *_FINDINGS.md deep dives
 tests/                     # pytest; circuit CNFs GENERATED from benchmarks/circuits/bench/ at test time
 archive/                   # concluded experiments (not maintained; see archive/README.md)
@@ -79,8 +83,31 @@ pytest                                # full suite (gpu tests skip off-CUDA; slo
 gpap info                             # device / triton / power-limit warning
 gpap sample formula.cnf -n 50000 --out samples.out --stats run.json
 gpap sample b10.bench --cycles 25 -n 50000 --out stim.out    # .bench: columns = wire@cycle
+gpap sample b10.bench --cycles 25 --encoder abc              # ABC-encoded CNF (2-8x fewer clauses)
 gpap bench 'path/*.cnf' --cmsgen /path/to/cmsgen --n-cov 5000
+scripts/build_abc.sh                                         # optional: pinned abc -> ~/.cache/gpap/bin
 ```
+
+**Circuit inputs**: `.bench` AND AIGER `.aig`/`.aag` (aig2cnf.py — native parse/simulate/unroll;
+latch resets 0/1 honoured, `x` rejected, combinational clamps to T=1; labels from the symbol
+table or `i<k>`).
+
+**Circuit encoder** (`--encoder tseitin|abc|auto`, default `tseitin`). `abc` = strash + `zero` +
+`frames -F T -i` + dc2/fraig then Tseitin its AIG (only 2-/3-literal clauses — what the
+sum-trick BCP wants). Same projected solution space: those passes are function-preserving and
+`zero`+`frames -i` IS our reset-state-0 unroll (gated by tests/test_abc_encoder.py, which
+enumerates projections under both encoders). `zero` is MANDATORY — without it ABC turns the T=0
+register state into free PIs (and it is why reset-1 AIGs are refused on the abc route). Default
+stays `tseitin` so results never shift silently with ABC's presence. AIGER (not `write_cnf`) is
+the route: `write_cnf` is ~1.5x tighter but exposes no primary-input→CNF-var map; the framed
+CI/CO mapping is POSITIONAL (frame-major), name-verified when symbols exist.
+`--abc-opt full|fast|auto`: post-unroll fraig is the whole encode cost (~99s on b15-c25) and the
+whole cross-frame win (b12's 12-14x NEEDS an equivalence sweep; dc2-only gets 1.4x) — `auto`
+runs `full` below ~50k estimated unrolled ANDs, `fast` (pre-unroll opt + cheap post) above.
+Encode wall is printed + in stats (`encode_s`) — it is NOT inside the pipeline's e2e rate.
+**Miner overlap**: dc2/fraig removes the backbone L1 mines (0-45 units on ABC CNFs vs 59-1007 on
+Tseitin, for the same 5s budget) ⇒ `sample_file` auto-disables mining on `c encoder abc` CNFs
+(`--mine on` forces).
 Sample output = compact support projections (1 bit/support var; GPU-projected so only the bit
 matrix leaves the device). `--out-format bits|npy|dimacs`, `--max-samples` cap (default 100k),
 `--stats` for the info JSON. Sound: every row extends to a full model (test_output.py). Circuit
@@ -101,6 +128,11 @@ Cross-GPU (Colab/A100): `eval/colab_sampling_benchmark.py` + `notebooks/gpap_col
 - `mono` kernel (0.93× vs wide), `orac` circuit config (0/64 wins), full/soft global lookahead:
   measured out — soft stays a per-instance bandit option (regime-dependent), never a global default.
 - `--n-time` is a delivery contract; safety valves are `--time-limit` + the zero-progress stop.
+- **VACUOUS-PIN instances**: at T=25 the last-cycle outputs of `b02`, `b05`, `b07`, `s526` are
+  CONSTANT for every input sequence ⇒ pinning them is a tautology and "sampling" is a free
+  hypercube over |PI|·T bits (any sampler gets ~100% success; ABC collapses the whole output cone,
+  so its "shrink" there is instance degeneracy, not encoder merit). Exclude them from headline
+  encoder/sampler comparisons, or report them separately. `b01`/`b09` are near-vacuous (2 patterns).
 - Measurement protocol: [`docs/BENCHMARKING.md`](docs/BENCHMARKING.md).
 
 ## Tests / methodology

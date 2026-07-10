@@ -211,13 +211,17 @@ def build_cnf(circ, T, seed, pin_outputs=None):
     return b, support, target, support_labels
 
 
-def write_dimacs(path, builder, support, support_labels=None):
+def write_dimacs(path, builder, support, support_labels=None, encoder=None):
     """Write the projected-sampling CNF. The `c ind` header lists the support variables; when
     `support_labels` is given (from a .bench conversion) a `c wire <var> <input@cycle>` map is
     embedded too, so sample output can be reported in circuit-wire terms and the map travels WITH
-    the CNF (readable back via parse_support_labels)."""
+    the CNF (readable back via parse_support_labels). `encoder` records provenance as a
+    `c encoder <name>` line — the sampling pipeline reads it to skip work the encoder already did
+    (ABC's dc2/fraig removes the backbone the entailed-clause miner would otherwise re-probe)."""
     with open(path, "w") as f:
         f.write("c unrolled CircuitSAT sampling instance (support = primary inputs x cycles)\n")
+        if encoder:
+            f.write(f"c encoder {encoder}\n")
         # `c ind ... 0` lines (UniGen/QuickSampler convention), chunked
         for i in range(0, len(support), 10):
             f.write("c ind " + " ".join(map(str, support[i:i + 10])) + " 0\n")
@@ -244,15 +248,50 @@ def parse_support_labels(path):
     return out
 
 
-def convert_one(bench_path, out_path, cycles, seed, pin_outputs=None):
-    """Convert a single .bench file to a DIMACS CNF at out_path. Returns the CnfBuilder."""
+def parse_encoder_comment(path):
+    """Read the `c encoder <name>` provenance line embedded by write_dimacs (None if absent)."""
+    with open(path) as f:
+        for line in f:
+            if line.startswith("c encoder "):
+                return line.split()[2]
+            if line and line[0] not in "c":
+                break                                      # past the header
+    return None
+
+
+def convert_one(bench_path, out_path, cycles, seed, pin_outputs=None, encoder="tseitin",
+                abc_path=None, quiet=False, abc_opt="auto"):
+    """Convert a single .bench file to a DIMACS CNF at out_path. Returns the CnfBuilder.
+
+    `encoder`:
+      "tseitin" (default) — the native gate-by-gate Tseitin of the unrolled circuit.
+      "abc"               — unroll + logic-optimize with berkeley-abc, then Tseitin its AIG
+                            (2-8x fewer clauses; see gpap/circuits/abc_backend.py). Raises if no
+                            `abc` binary is found. `abc_opt` picks the optimization preset
+                            (full | fast | auto — see abc_backend.ABC_OPT_PRESETS).
+      "auto"              — "abc" when a binary is available, else "tseitin".
+    The two encoders describe the SAME projected solution space over the primary inputs (same seed
+    => same simulated output target); only the internal gate variables differ. The default stays
+    "tseitin" so results never depend silently on whether abc happens to be installed."""
     circ = parse_bench(bench_path)
     inputs, outputs, dffs, gates = circ
-    b, support, target, labels = build_cnf(circ, cycles, seed, pin_outputs=pin_outputs)
-    write_dimacs(out_path, b, support, labels)
-    print(f"{bench_path} -> {out_path}: PI={len(inputs)} PO={len(outputs)} DFF={len(dffs)} "
-          f"gates={len(gates)} | cycles={cycles} -> vars={b.nv} clauses={len(b.clauses)} "
-          f"support={len(support)}")
+    if encoder == "auto":
+        from gpap.circuits.abc_backend import abc_available
+        encoder = "abc" if abc_available(abc_path) else "tseitin"
+    if encoder == "abc":
+        from gpap.circuits.abc_backend import build_cnf_abc
+        b, support, target, labels = build_cnf_abc(circ, bench_path, cycles, seed,
+                                                   pin_outputs=pin_outputs, abc=abc_path,
+                                                   opt=abc_opt)
+    elif encoder == "tseitin":
+        b, support, target, labels = build_cnf(circ, cycles, seed, pin_outputs=pin_outputs)
+    else:
+        raise ValueError(f"unknown encoder {encoder!r} (tseitin | abc | auto)")
+    write_dimacs(out_path, b, support, labels, encoder=encoder)
+    if not quiet:
+        print(f"{bench_path} -> {out_path}: PI={len(inputs)} PO={len(outputs)} DFF={len(dffs)} "
+              f"gates={len(gates)} | cycles={cycles} enc={encoder} -> vars={b.nv} "
+              f"clauses={len(b.clauses)} support={len(support)}")
     return b
 
 

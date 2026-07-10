@@ -127,6 +127,42 @@ randomization would emit invalid projections).
 **Unit-prop simplification is model-preserving and is what wins** (unlike the VE/BCE CMSGen
 disables). GPAP-plain = 0.76× CMSGen; GPAP-simplified = 3.4×+.
 
+## Circuit encoding (the ABC pass)
+
+**The ABC encoder is a clean ~5.9× e2e sampling win — and it helps CMSGen almost as much
+(2026-07-10).** `strash; zero; frames; dc2/fraig` + Tseitin-of-the-AIG shrinks unrolled-circuit
+CNFs 5.1× geomean (1.5× s1196 … 33× b13) over our Tseitin+unit_closure; with mining handled
+(below) GPAP e2e improves 5.89× geomean with zero regressions, all sound. But the shrink is
+encoder-side, not sampler-side: CMSGen gains 2.96× on the same CNFs, so the GPAP-vs-CMSGen ratio
+only widens 1.12×. Route = `write_aiger -s` (positional frame-major CI/CO map, name-verified),
+NOT `write_cnf` (~1.5× tighter, no input map). `zero` is mandatory (else the T=0 state becomes
+free PIs and the solution space changes). Soundness is gated by projected-solution-SET equality
+tests, both presets.
+
+**Encode cost lives in the post-unroll fraig; the `fast` preset moves optimization pre-unroll
+(2026-07-10).** `full` (post-unroll `dc2;dc2;fraig`) cost ~99 s on b15-c25 — the fraig/`&fraig`
+sweep of a 160k-AND unroll is unbounded in practice (`&fraig` >300 s there). Optimizing the
+sequential AIG FIRST (T× smaller) + one post `dc2` is ≤4 s everywhere measured and matches full
+on b14 (1.47× vs 1.46×) but forgoes the cross-frame equivalence collapse (b15 1.18× vs 2.17×;
+b12's 12–14× NEEDS a post sweep). `auto` resolves the tension: cross-frame-collapse instances
+are small (b12 est 26k unrolled ANDs), so full-below-50k / fast-above keeps every measured win.
+b15 e2e (encode+sample, n=100): 1m47s → 9.6s.
+
+**The miner and ABC do overlapping work — gate mining on encoder provenance (2026-07-10).**
+dc2/fraig structurally removes exactly the backbone the miner's L1 sweep harvests: 59–1007 units
+learned on Tseitin CNFs vs 0–45 on the same circuits' ABC CNFs, while still paying the full 5 s
+budget (b15: 4.8 s of a 9.4 s e2e wall for 45 units on 222k clauses; b10/b04 regressed 0.40×/
+0.86× e2e because the post-ABC success dip also tripped the stuck gate into stage-2 tiers). The
+CNF carries `c encoder abc` and `sample_file` defaults mining OFF there (`--mine on` forces).
+The miner stays THE lever for Tseitin circuit CNFs and plain projected CNFs (service family).
+
+**Benchmark degeneracy: vacuous output pins (2026-07-10).** At T=25 the last-cycle outputs of
+b02, b05, b07, s526 are CONSTANT over all input sequences ⇒ pinning them is a tautology and the
+instance is a free-hypercube throughput test, not constrained sampling (ABC collapses the whole
+cone — its huge "shrink" there is degeneracy, not merit). b01/b09 are near-vacuous (2 patterns).
+Exclude from headline comparisons. (b12 is NOT vacuous: 5 patterns at 200 trials — small probes
+undersample.)
+
 ## Measurement methodology (the traps that actually bit)
 
 **Same-seed repeats measure TIMING noise only, not DRAW noise.** Portfolio-membership changes
