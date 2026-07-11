@@ -31,7 +31,7 @@ gpap/
     pipeline.py            # sample_file / sample_clauses: the full e2e flow + the two portfolios
     miner.py               # entailed-clause mining (the lose-set killer)
     preprocess.py          # unit_closure / equivalent_literal_substitution (ELS) primitives
-    metrics.py             # distinct_projections / two_wise_coverage (off the timing path)
+    metrics.py             # distinct/two-wise + UNIFORMITY (exact chi2/TV or collision l2_ratio)
     output.py              # compact sample writers (bits / npy / dimacs) — GPU bit-projection out
   circuits/
     bench.py               # parse/unroll/Tseitin/pin .bench -> projected-sampling CNF
@@ -39,8 +39,9 @@ gpap/
     aig2cnf.py             # NATIVE .aig/.aag input: simulate/unroll/Tseitin (no external tool)
     abc_backend.py         # OPTIONAL berkeley-abc encoder (unroll + dc2/fraig -> AIG -> Tseitin)
   cli.py                   # `gpap` subcommands (sample / bench / circuit2cnf / info)
+  benchmark.py             # the `gpap bench` suite driver (in-package so it works installed)
 eval/                      # cross-GPU sampling benchmark driver + plots (Colab / A100)
-scripts/                   # thin CLI wrappers (sample_benchmark, bench_to_cnf) + build_abc.sh
+scripts/                   # shims (sample_benchmark -> gpap.benchmark), bench_to_cnf, build_abc.sh
 docs/findings/             # INSIGHTS.md (settled results index) + *_FINDINGS.md deep dives
 tests/                     # pytest; circuit CNFs GENERATED from benchmarks/circuits/bench/ at test time
 archive/                   # concluded experiments (not maintained; see archive/README.md)
@@ -108,15 +109,35 @@ Encode wall is printed + in stats (`encode_s`) — it is NOT inside the pipeline
 **Miner overlap**: dc2/fraig removes the backbone L1 mines (0-45 units on ABC CNFs vs 59-1007 on
 Tseitin, for the same 5s budget) ⇒ `sample_file` auto-disables mining on `c encoder abc` CNFs
 (`--mine on` forces).
+
+**Uniformity readout** (`--uniformity off|fast|exact`, default **off** — the readout costs an
+extra sampling pass, so it is opt-in; always off the timing path).
+`fast` = repeat-rate check only, NO solver work: distribution-free `l2_ratio` = p̂₂·d — >1.5
+certifies skew for ANY |S| (uniform ⇒ ||p||₂² = 1/|S| ≤ 1/d); ≤1 prints OK but is a GROSS-skew
+check only (it does NOT see b06-c4-class subtle bias, l2 1.14 there); collision-free prints the
+95% birthday floor on |S|. `exact` adds
+enumeration (≤4096 sols / 2s / M≤200k) + chi2 p (needs n≥5·|S|) + TV over ALL |S| solutions + an
+observed⊆enumerated soundness cross-check — the sensitive test (catches TV=0.17 at p=0.000);
+when the space/formula defeats enumeration it falls back to the repeat-rate line with an
+honest "barbarik for certification" hint (`enum_status` capped/timeout/skipped-large).
+Certificates on big spaces = conditional sampling = Barbarik (`eval/barbarik_gpap.py`, GPAP
+hooked in-process, SPUR reference; Accept 2/2 so far). chi2 sf is native (`metrics._gammq`) —
+no scipy dep. **2-wise coverage** (CMSGen-paper spread metric, NOT uniformity) is opt-in via
+`gpap bench --twise` (auto-bumps n_cov to 2000) and vectorised (one matmul; the old O(S²·n)
+pair loop dominated the quality pass).
 Sample output = compact support projections (1 bit/support var; GPU-projected so only the bit
 matrix leaves the device). `--out-format bits|npy|dimacs`, `--max-samples` cap (default 100k),
 `--stats` for the info JSON. Sound: every row extends to a full model (test_output.py). Circuit
 CNFs embed a `c wire <var> <input@cycle>` map (bench.py) so output columns are named by wire.
 
-Benchmark suite driver (thin table over `gpap.sampling.pipeline`):
+Benchmark suite driver (thin table over `gpap.sampling.pipeline`; the glob may mix CNFs with
+circuits — .bench/.aig/.aag are converted first with the same --encoder/--abc-opt flags, encode
+wall reported per instance as t_enc, never folded into either sampler's rate):
 ```bash
 PYTHONPATH=. .venv/bin/python scripts/sample_benchmark.py \
     --glob '/path/to/circuits/*.cnf' --use-kernel auto --output .experiments/out.json
+PYTHONPATH=. .venv/bin/python scripts/sample_benchmark.py \
+    --glob 'benchmarks/circuits/bench/seq/*.bench' --encoder abc --cycles 25
 ```
 Cross-GPU (Colab/A100): `eval/colab_sampling_benchmark.py` + `notebooks/gpap_colab_sampling.ipynb`.
 

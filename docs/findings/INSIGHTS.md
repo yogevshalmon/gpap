@@ -156,6 +156,42 @@ budget (b15: 4.8 s of a 9.4 s e2e wall for 45 units on 222k clauses; b10/b04 reg
 CNF carries `c encoder abc` and `sample_file` defaults mining OFF there (`--mine on` forces).
 The miner stays THE lever for Tseitin circuit CNFs and plain projected CNFs (service family).
 
+**Uniformity measurement: exact where enumerable, distribution-free skew detection elsewhere,
+Barbarik for certificates (2026-07-11).** The readout (`info["uniformity"]`, off the timing
+path) has three tiers, because they are the only three that exist — and it is OPT-IN
+(`--uniformity off` is the default: even off the timing path the readout costs an extra
+sampling pass, ~seconds of wall on slow instances). `fast` = tier 2 (repeat-rate only, no
+solver work — the cheap explainable number); `exact` = tier 1; the sensitive machinery is a
+flag away. When `exact` is requested but enumeration is defeated (cap/timeout, or M > 200k
+skips it), the line falls back to the repeat-rate readout with an `enum_status`-aware hint —
+never re-suggesting `exact` to someone already running it. (1) exact: if the projected space enumerates within budget
+(≤4096 sols / 2 s / M ≤ 200k), a REAL goodness-of-fit test — chi2 p (valid when n ≥ 5|S|; the
+sf is a native incomplete-gamma, no scipy) + TV + an observed⊆enumerated soundness cross-check;
+measured live: b03-c2, |S|=256, chi2 p=0.79 at 27 ms.
+(2) fast/unknown-|S|: NO black-box statistic can certify uniformity (that is Barbarik's raison
+d'être), but skew IS detectable distribution-free: p̂₂ = Σc(c-1)/(n(n-1)) estimates ||p||₂²
+unbiasedly and every uniform distribution has ||p||₂² = 1/|S| ≤ 1/d, so l2_ratio = p̂₂·d > ~1.5
+certifies non-uniformity for ANY |S|; collision-free runs report the 95% birthday floor on |S|.
+KNOWN sensitivity gap (by design): b06-c4's TV=0.17 bias reads l2_ratio 1.14 → fast says OK,
+exact says p=0.000 — gross-skew detector vs goodness-of-fit test.
+(3) certificates on large spaces = conditional sampling = Barbarik (AAAI'19): eval/barbarik_gpap.py
+monkeypatches meelgroup/barbarik's SolutionRetriever to call GPAP IN-PROCESS (one torch init, not
+a subprocess per call; SPUR stays the trusted reference). Notes: their repo needs
+`git submodule update --init` (interfaces/convert); barbarik.py's own SAMPLER_* table is stale —
+drive `interfaces.cnf.cnf_test` directly with `SAMPLER_CUSTOM=7`. FIRST RESULTS: **Barbarik
+Accept:1 on BOTH b03-c2 (70,471 samples) and their canonical blasted_case110 (70,596 samples)
+at eta=0.9 eps=0.1 delta=0.05, GPAP B=8** — 2/2 certified.
+
+**Uniform-LIKE means instance-dependent skew — and the readout sees it (2026-07-11).** On most
+tested instances GPAP's distribution is indistinguishable from uniform (b03-c2 |S|=256 p=0.79;
+b06-c4/seed1 |S|=64 p=0.47-0.83). On b06-c4/seed5 (|S|=96) it is decisively skewed: TV≈0.17,
+p=0.000, replicated across sampler seeds — and **CMSGen shows the SAME signature on the identical
+CNF (TV=0.139, p=0.000)**. The skew is a property of the BCP-completion family (solution weight ∝
+attraction basin), not a GPAP bug, and it is target/instance-dependent (same circuit, different
+pinned output pattern flips it). This is precisely the CMSGen "uniform-like" trade-off from
+FMCAD'21; comparisons vs CMSGen at equal uniformity remain apples-to-apples, and the opt-in
+readout now quantifies it per run instead of assuming it.
+
 **Benchmark degeneracy: vacuous output pins (2026-07-10).** At T=25 the last-cycle outputs of
 b02, b05, b07, s526 are CONSTANT over all input sequences ⇒ pinning them is a tautology and the
 instance is a free-hypercube throughput test, not constrained sampling (ABC collapses the whole

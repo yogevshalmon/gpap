@@ -64,6 +64,7 @@ gpap sample design.aig --cycles 25 -n 50000                 # AIGER input (.aig/
 gpap sample b10.bench --cycles 25 --encoder abc             # smaller CNF via berkeley-abc (below)
 gpap circuit2cnf benches/ cnf_out/ --cycles 25 --pin-outputs 1   # circuit dir -> CNF dir
 gpap bench 'benchmarks/circuits/*.cnf' --cmsgen /path/to/cmsgen --n-cov 5000
+gpap bench 'benches/*.bench' --encoder abc --cycles 25      # circuits benchmark, ABC-encoded
 ```
 
 **Circuit inputs.** `.bench` (ISCAS-85/89, ITC'99) and AIGER `.aig`/`.aag` (binary and ASCII,
@@ -72,6 +73,22 @@ are unrolled `--cycles` times from the reset state (AIGER latch reset values 0/1
 `.bench` flip-flops reset to 0; combinational AIGs clamp to one cycle), the last-cycle outputs are
 pinned to a simulated reachable pattern, and the primary inputs across cycles become the sampling
 support (named `wire@cycle` in the output).
+
+**Uniformity.** Opt-in (default `off` — the readout costs an extra sampling pass, so it is not
+run unless asked for). `--uniformity fast` prints a one-line **repeat-rate check**: draw ~2k
+samples and see whether some solutions repeat far more often than any uniform sampler would
+allow (`l2_ratio` ≈ 1 is uniform-consistent, > 1.5 is `SKEWED`; collision-free samples report
+the implied solution-space floor — no solver work, catches gross bias only). Two deeper levels:
+
+- `--uniformity exact` — enumerate the projected solution space when small (≤4096 solutions) and
+  run a real goodness-of-fit test: chi-square p-value + total-variation distance over all `|S|`
+  solutions (e.g. `TV=0.136 chi2(255)=236 p=0.792 [exact: n=2,000 over |S|=256]`). This is the
+  sensitive check — subtle instance-dependent bias invisible to the repeat-rate check shows here.
+- `eval/barbarik_gpap.py` — a standalone harness running the
+  [Barbarik](https://github.com/meelgroup/barbarik) (AAAI'19) conditional-sampling tester with
+  GPAP hooked in-process (SPUR as the trusted reference); the only way to *certify* uniformity on
+  large spaces. Barbarik **accepts** GPAP (η=0.9, ε=0.1, δ=0.05; ~70k samples per instance) on
+  both instances tested so far.
 
 **Writing solutions.** `--out FILE` writes the sampled solutions as compact **support projections**
 — one row per sample, one bit per support variable (for a `.bench` input, one primary-input

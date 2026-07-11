@@ -50,3 +50,8 @@ extend-exclude = ["archive", "notebooks", ".cmsgen"]
 # math-dense code — the compact `a; b` statements and `x == True` tensor checks are deliberate.
 select = ["E4", "E9", "F"]
 ignore = ["E741"]   # `l` is the conventional literal variable throughout the BCP code
+
+[tool.ruff.lint.per-file-ignores]
+# Repo-root drivers bootstrap sys.path before importing gpap (Colab / PYTHONPATH-less runs).
+"eval/*" = ["E402"]
+"scripts/*" = ["E402"]

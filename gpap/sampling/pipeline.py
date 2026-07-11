@@ -40,6 +40,54 @@ CIRCUIT_PORTFOLIO = [(True, 8, "fused"), (True, 1, "fused"), (True, 8, "fsoft")]
 DEFAULT_PORTFOLIO = [(True, 8, False), (True, 1, "fused"), (False, 1, False)]
 
 
+def _uniformity_readout(smp, clauses, sup1, rate, config, max_rounds, mode="fast", target=2000):
+    """The uniformity readout (OFF the timing path; see metrics.py for the statistics).
+
+    mode="fast" (the default): collect a small sample of projections and check their REPEAT
+    behaviour — no SAT solver, no enumeration, one cheap sample_bits call. Catches gross skew
+    (l2_ratio) with zero setup; cannot certify uniformity or see subtle bias.
+    mode="exact": additionally try to ENUMERATE the projected solution space (small formulas
+    only: M <= 200k, <= 4096 projections, <= 2 s); when enumeration completes, run the real
+    goodness-of-fit test (chi-square p + TV) over all |S| solutions + a soundness cross-check.
+
+    The sample size is clamped to ~2 s of the measured steady rate either way (a 100/s stuck
+    instance gets a 256-sample readout, a 1M/s instance its full target in milliseconds)."""
+    import numpy as np
+    from collections import Counter
+    from gpap.sampling.metrics import enumerate_projections, uniformity_stats
+
+    projs, status = (None, "not-attempted")
+    if mode == "exact":
+        if len(clauses) <= 200_000:
+            projs, status = enumerate_projections(clauses, sup1, cap=4096, budget_s=2.0)
+        else:                                      # exact REQUESTED but the formula defeats it —
+            status = "skipped-large"               # the hint must not suggest exact again
+    S = len(projs) if (projs is not None and status == "complete") else None
+    if S is not None:
+        target = min(max(target, 5 * S), 20_000)   # n >= 5*S makes the chi-square p valid
+    if rate:
+        target = max(256, min(target, int(rate * 2.0)))
+    bits, cols = smp.sample_bits(target, config=config, max_decision_rounds=max_rounds,
+                                 max_chunks=40)
+    if bits is None or len(bits) == 0:
+        return {"mode": "empty", "n": 0, "note": "no samples collected", "enum_status": status}
+    ci = {v: i for i, v in enumerate(cols)}
+    arr = np.ascontiguousarray(np.asarray(bits, dtype=np.uint8)[:, [ci[v] for v in sup1]])
+    packed = np.packbits(arr, axis=1)
+    counter = Counter(packed[i].tobytes() for i in range(packed.shape[0]))
+    unsound = 0
+    if S is not None:
+        pmat = np.array(sorted(projs), dtype=np.uint8)
+        pkeys = {row.tobytes() for row in np.packbits(pmat, axis=1)}
+        unsound = sum(1 for k in counter if k not in pkeys)   # must be 0 (soundness cross-check)
+    out = uniformity_stats(list(counter.values()), int(arr.shape[0]), S=S)
+    out["enum_status"] = status
+    if unsound:
+        out["unsound_projections"] = unsound
+        out["note"] = f"{unsound} observed projections NOT in the enumerated solution set (BUG)"
+    return out
+
+
 def sample_file(path, device, **kw):
     """Run the full sampling pipeline on a DIMACS CNF file (support read from `c ind` lines).
     Returns the same rich dict as sample_clauses; the parse is charged to phases["parse"] and
@@ -70,10 +118,11 @@ def sample_file(path, device, **kw):
 
 
 def sample_clauses(nv, clauses, support, device, *, simplify=True, els=False, n_time=50_000,
-                   n_cov=0, out_cap=0, b=8, k_cap=49152, max_chunks=None, time_limit=60.0,
-                   cov_chunks=4, max_rounds=300, lookahead=False, verify_clauses=None,
-                   verify_cpu=False, cov_k_cap=2048, random_var="auto", configs="default",
-                   use_kernel="auto", mine="auto", mine_gate=0.15, min_measure_chunks=3, seed=5,
+                   n_cov=0, out_cap=0, uniformity="off", n_uni=2000, b=8, k_cap=49152,
+                   max_chunks=None, time_limit=60.0, cov_chunks=4, max_rounds=300,
+                   lookahead=False, verify_clauses=None, verify_cpu=False, cov_k_cap=2048,
+                   random_var="auto", configs="default", use_kernel="auto", mine="auto",
+                   mine_gate=0.15, min_measure_chunks=3, seed=5,
                    _t_start=None, _phases=None, _wire_map=None):
     """Throughput run timed end-to-end (construction + simplify + sample, to match CMSGen's
     'produce N samples' wall clock) + a small collect run for coverage/soundness. `n_time` is a
@@ -260,6 +309,21 @@ def sample_clauses(nv, clauses, support, device, *, simplify=True, els=False, n_
     c = (smp.sample(n_cov, decisions_per_round=tuned_b, random_var=tuned_rv, max_decision_rounds=max_rounds,
                     max_chunks=cov_chunks, collect=True, verify_clauses=vc,
                     lookahead=tuned_la) if n_cov else {})
+    # Uniformity readout, OPT-IN (default "off": it costs an extra ~2s sampling pass even off the
+    # timing path). "fast" = collision/repeat check only (no solver work, gross-skew detector).
+    # "exact" adds enumeration + chi-square on small spaces (the sensitive test — subtle bias like
+    # b06-c4's TV=0.17 is only visible here). See _uniformity_readout / metrics.py.
+    sup1 = [v + 1 for v in (support or range(nv))]
+    uni = None
+    phases["uniformity"] = 0.0
+    if uniformity and uniformity != "off":
+        _tu = time.perf_counter()
+        try:
+            uni = _uniformity_readout(smp, clauses, sup1, sps, (tuned_rv, tuned_b, tuned_la),
+                                      max_rounds, mode=uniformity, target=int(n_uni))
+        except Exception as e:  # noqa: BLE001 — a diagnostic must never kill the run
+            uni = {"mode": "error", "note": f"{type(e).__name__}: {e}"}
+        phases["uniformity"] = time.perf_counter() - _tu
     del smp
     if device.type == "cuda":
         torch.cuda.empty_cache()
@@ -272,7 +336,8 @@ def sample_clauses(nv, clauses, support, device, *, simplify=True, els=False, n_
     phases["timed"] = wall
     return {"samples_per_s": sps, "success_rate": succ,
             "nv": nv, "n_clauses": len(clauses),              # ORIGINAL sizes (pre-simplify)
-            "sup1": [v + 1 for v in (support or range(nv))],
+            "sup1": sup1,
+            "uniformity": uni,                                # opt-in readout (see metrics.py)
             "sps_e2e_total": sps_e2e_total,                   # incl. construction+simplify+mining
             "phases": phases,                                 # per-phase seconds of the e2e wall
             "n_models": t["n_models"],                        # total solutions found in the timed run

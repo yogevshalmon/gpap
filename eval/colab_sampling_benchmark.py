@@ -50,7 +50,7 @@ REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 if REPO_ROOT not in sys.path:
     sys.path.insert(0, REPO_ROOT)
 
-from gpap.sampling.sampler import GPUSampler, parse_independent_support   # sets expandable_segments
+from gpap.sampling.sampler import GPUSampler   # sets expandable_segments
 from gpap.engine.calibrate import gpu_mem_available
 from scripts.sample_benchmark import cmsgen_sample
 from gpap.sampling.metrics import distinct_projections, two_wise_coverage
@@ -549,7 +549,7 @@ def _print_headline(payload: dict) -> None:
               f"(1.0 = throughput ∝ K; peak {a['kscale_peak_sps']:,.0f}/s at K-sweep)")
     print(f"\n  → On {name}, GPAP samples at up to {a['gpap_sps_peak']:,.0f} models/s"
           + (f", {a['ratio_geomean']:.1f}× CMSGen (geomean)" if a.get("ratio_geomean") else "") + ";")
-    print(f"    throughput scales ~linearly with K, so larger-VRAM GPUs sit further up the curve.")
+    print("    throughput scales ~linearly with K, so larger-VRAM GPUs sit further up the curve.")
     print("=" * 74)
 
 

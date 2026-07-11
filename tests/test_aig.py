@@ -109,6 +109,22 @@ def test_uninitialized_latch_rejected(tmp_path):
         read_aiger(p)
 
 
+def test_binary_writer_roundtrip(tmp_path):
+    """write_aiger_binary -> read_aiger must preserve circuit BEHAVIOUR (simulation equality on
+    every input sequence) and the I/O symbol names, across renumbering/topo-sorting."""
+    from gpap.circuits.aiger import write_aiger_binary
+    src = read_aiger(_write(tmp_path, "t.aag", AAG_SEQ))
+    p = str(tmp_path / "t.aig")
+    write_aiger_binary(src, p)
+    back = read_aiger(p)
+    assert (back.n_inputs, back.n_latches, back.n_outputs) == (2, 1, 1)
+    assert back.input_names == src.input_names and back.output_names == src.output_names
+    T = 4
+    for bits in itertools.product((0, 1), repeat=2 * T):
+        seq = [[bool(bits[k * T + t]) for k in range(2)] for t in range(T)]
+        assert simulate_aig(src, seq, T) == simulate_aig(back, seq, T)
+
+
 def test_provenance_comment(tmp_path):
     from gpap.circuits.bench import parse_encoder_comment
     p = _write(tmp_path, "t.aag", AAG_SEQ)
@@ -171,6 +187,20 @@ def test_abc_route_on_aig_input_preserves_projections(tmp_path):
     bn, sn, tn, ln = build_cnf_aig(aig, T, seed)
     ba, sa, ta, la = build_cnf_abc_aig(aig, path, T, seed)
     assert (tn, ln) == (ta, la)                    # same simulated target, same label order
+    assert _enum_projections(bn.clauses, sn) == _enum_projections(ba.clauses, sa)
+
+
+@needs_abc
+def test_abc_route_on_ascii_aag_input(tmp_path):
+    """ABC's read_aiger does NOT accept ASCII `aag`; the abc route must still work on .aag input
+    (it rewrites the parsed circuit as canonical binary first) and preserve the projection set."""
+    from gpap.circuits.abc_backend import build_cnf_abc_aig
+    p = _write(tmp_path, "t.aag", AAG_SEQ)
+    aig = read_aiger(p)
+    T, seed = 3, 5
+    bn, sn, tn, ln = build_cnf_aig(aig, T, seed)
+    ba, sa, ta, la = build_cnf_abc_aig(aig, p, T, seed)
+    assert (tn, ln) == (ta, la)
     assert _enum_projections(bn.clauses, sn) == _enum_projections(ba.clauses, sa)
 
 

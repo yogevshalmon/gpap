@@ -157,6 +157,64 @@ def read_aiger(path: str) -> Aig:
     raise ValueError(f"{path}: not an AIGER file (magic={magic!r})")
 
 
+def write_aiger_binary(aig: Aig, path: str) -> None:
+    """Write `aig` in CANONICAL binary AIGER form: inputs renumbered 1..I (in order), latches
+    I+1..I+L, ANDs topologically sorted I+L+1..M, rhs0 >= rhs1. Used to hand a parsed circuit to
+    berkeley-abc — ABC's `read_aiger` only accepts the binary format (not ASCII `aag`), and
+    canonicalizing also shields it from valid-but-exotic variable numberings."""
+    newv = {0: 0}
+    for k, lit in enumerate(aig.inputs):
+        newv[lit >> 1] = k + 1
+    for i, (cur, _nxt, _r) in enumerate(aig.latches):
+        newv[cur >> 1] = aig.n_inputs + 1 + i
+    and_def = aig.and_defs()
+    order = []                                     # topo order over AND vars (iterative)
+    for lhs, _r0, _r1 in aig.ands:
+        stack = [lhs >> 1]
+        while stack:
+            v = stack[-1]
+            if v in newv:
+                stack.pop()
+                continue
+            need = [u >> 1 for u in and_def[v] if (u >> 1) not in newv]
+            if need:
+                stack.extend(need)
+                continue
+            newv[v] = aig.n_inputs + aig.n_latches + 1 + len(order)
+            order.append(v)
+            stack.pop()
+
+    def lit(old: int) -> int:
+        return 2 * newv[old >> 1] + (old & 1)
+
+    def leb(x: int) -> bytes:
+        out = bytearray()
+        while x >= 0x80:
+            out.append((x & 0x7F) | 0x80)
+            x >>= 7
+        out.append(x)
+        return bytes(out)
+
+    I, L, A = aig.n_inputs, aig.n_latches, len(order)  # noqa: E741
+    with open(path, "wb") as f:
+        f.write(f"aig {I + L + A} {I} {L} {aig.n_outputs} {A}\n".encode())
+        for _cur, nxt, r in aig.latches:           # reset omitted when 0 (the AIGER default)
+            f.write((f"{lit(nxt)} {r}\n" if r else f"{lit(nxt)}\n").encode())
+        for o in aig.outputs:
+            f.write(f"{lit(o)}\n".encode())
+        for j, v in enumerate(order):
+            lhs = 2 * (I + L + 1 + j)
+            r0, r1 = (lit(u) for u in and_def[v])
+            if r0 < r1:
+                r0, r1 = r1, r0                    # binary format requires rhs0 >= rhs1
+            f.write(leb(lhs - r0) + leb(r0 - r1))
+        for k in range(I):                         # symbol table (frames name-verify reads it)
+            f.write(f"i{k} {aig.input_names.get(k, f'i{k}')}\n".encode())
+        for k in range(aig.n_outputs):
+            f.write(f"o{k} {aig.output_names.get(k, f'o{k}')}\n".encode())
+        f.write(b"c\ngpap write_aiger_binary\n")
+
+
 def split_frame_name(name: str) -> tuple[str, int] | None:
     """Split ABC `frames` signal names `<orig>_<frame>` -> (orig, frame). Returns None when the
     trailing field is not a frame number. Original names may themselves contain (or end with)

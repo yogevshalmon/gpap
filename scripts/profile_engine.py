@@ -901,7 +901,7 @@ def main():
         w = gpu["total_ms"]
         def _pct(ms): return f"{100*ms/w:.1f}%" if w else "—"
 
-        print(f"  GPU ─────────────────────────────────────────────────────")
+        print("  GPU ─────────────────────────────────────────────────────")
         print(f"    generation  : {gpu['t_gen_ms']:>9.1f} ms  {_pct(gpu['t_gen_ms']):>6}  (on-GPU tensor creation)")
         print(f"    reset       : {gpu['t_reset_ms']:>9.1f} ms  {_pct(gpu['t_reset_ms']):>6}  ({gpu['n_chunks']} chunks × {gpu['t_reset_ms']/gpu['n_chunks']:.1f} ms/chunk)")
         print(f"    apply       : {gpu['t_apply_ms']:>9.1f} ms  {_pct(gpu['t_apply_ms']):>6}")
@@ -911,14 +911,14 @@ def main():
         print(f"    wall total  : {gpu['total_ms']:>9.1f} ms          {gpu_sps:,.0f} sets/s")
         print(f"    conflicts   : {gpu['conflicts_found']:,}  ({gpu['conflicts_found']/gpu['total_sets']:.2%} conflict rate)")
         if device.type == "cuda":
-            from gpap.engine.calibrate import formula_mem_bytes, per_batch_mem_bytes
+            from gpap.engine.calibrate import per_batch_mem_bytes
             M_formula = formula.num_clauses
             max_cls    = int(formula.clause_sizes.max().item())
             tl         = int(formula.clause_sizes.sum().item())
             sat_b = 1 if max_cls <= 127 else (2 if max_cls <= 32767 else 4)
             est_static_gb = K * ((sat_b + 4) * M_formula + 2 * N) / 1e9
             est_budget_gb = K * per_batch_mem_bytes(M_formula, N, max_cls, tl) / 1e9
-            print(f"\n  Memory (first chunk, measured vs. model):")
+            print("\n  Memory (first chunk, measured vs. model):")
             print(f"    static tensors    : {gpu['mem_static_gb']:.2f} GB  (model: {est_static_gb:.2f} GB)")
             print(f"    peak after reset  : {gpu['peak_reset_gb']:.2f} GB")
             print(f"    peak after apply  : {gpu['peak_apply_gb']:.2f} GB")
@@ -927,10 +927,10 @@ def main():
 
         cpu: dict | None = None
         if not args.e2e_no_cpu:
-            print(f"\nRunning CPU (sequential, single PySAT instance) ...")
+            print("\nRunning CPU (sequential, single PySAT instance) ...")
             cpu = run_e2e_cpu(args.cnf, mode, N, max_sets=max_sets)
             cpu_sps = cpu["total_sets"] / (cpu["total_ms"] / 1e3) if cpu["total_ms"] else 0
-            print(f"  CPU ─────────────────────────────────────────────────────")
+            print("  CPU ─────────────────────────────────────────────────────")
             print(f"    wall total  : {cpu['total_ms']:>9.1f} ms          {cpu_sps:,.0f} sets/s   (sequential)")
             print(f"    conflicts   : {cpu['conflicts_found']:,}  ({cpu['conflicts_found']/cpu['total_sets']:.2%} conflict rate)")
 

@@ -103,8 +103,11 @@ def unroll_optimize_to_aig(input_path: str, cycles: int, aig_path: str, *,
     pre = f"{pre}; " if pre else ""
     post = f"{post}; " if post else ""
     input_path, aig_path = os.path.abspath(input_path), os.path.abspath(aig_path)
-    _run_abc(exe, f"{reader} {input_path}; strash; zero; {pre}frames -F {cycles} -i; {post}"
-                  f"write_aiger -s {aig_path}")
+    out = _run_abc(exe, f"{reader} {input_path}; strash; zero; {pre}frames -F {cycles} -i; {post}"
+                        f"write_aiger -s {aig_path}")
+    if not os.path.exists(aig_path) or os.path.getsize(aig_path) == 0:
+        # abc reports command failures on stdout with exit code 0 — surface its message.
+        raise _AbcError(f"abc produced no framed AIG for {input_path}: {out.strip()[-300:]}")
 
 
 def _read_framed(input_path: str, cycles: int, abc, opt) -> Aig:
@@ -212,7 +215,17 @@ def build_cnf_abc_aig(aig: Aig, aig_path: str, cycles: int, seed: int,
     target = simulate_aig(aig, in_seq, T)
 
     opt = resolve_opt(opt, len(aig.ands) * T)
-    faig = _read_framed(aig_path, T, abc, opt)
+    # Hand ABC a canonical BINARY rewrite of the parsed circuit rather than the original file:
+    # ABC's read_aiger does not accept ASCII `aag`, and canonicalization also normalizes exotic
+    # (valid) variable numberings. Symbols are preserved so the frames name-verify still applies.
+    from gpap.circuits.aiger import write_aiger_binary
+    tmp = tempfile.NamedTemporaryFile(suffix=".aig", delete=False).name
+    try:
+        write_aiger_binary(aig, tmp)
+        faig = _read_framed(tmp, T, abc, opt)
+    finally:
+        if os.path.exists(tmp):
+            os.unlink(tmp)
     names = input_labels(aig)
     out_names = [aig.output_names.get(j, f"o{j}") for j in range(aig.n_outputs)]
     b, support, labels = _framed_to_cnf(faig, T, names, out_names, target, pin_outputs)

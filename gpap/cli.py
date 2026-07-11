@@ -1,21 +1,26 @@
 """`gpap` command-line entry point.
 
 Subcommands:
-  gpap sample <cnf|bench> [-n] [--time-limit] [--seed] [--json out.json]  — sample one instance
-  gpap bench  <glob> [--cmsgen PATH] [--n-cov] ...                         — benchmark a suite
-  gpap circuit2cnf <bench|dir> --cycles T [--pin-outputs k]                — unroll .bench -> CNF
-  gpap info                                                                — device / triton / power
+  gpap sample <cnf|bench|aig|aag> [-n] [--out FILE] [--stats FILE] [--encoder abc]  — sample one instance
+  gpap bench  <glob> [--cmsgen PATH] [--encoder abc] [--n-cov] ...  — benchmark a suite (CNFs and/or circuits)
+  gpap circuit2cnf <circuit|dir> --cycles T [--encoder abc]         — .bench/.aig/.aag -> projected CNF
+  gpap info                                                         — device / triton / abc / power
 
+Circuit-encoder flags (--encoder tseitin|abc|auto, --abc PATH, --abc-opt full|fast|auto) are shared
+by sample / bench / circuit2cnf; --mine auto|on|off by sample / bench.
 Library code uses `logging`; user-facing output lives here (this is the print layer).
 """
 import argparse
 import os
 import sys
 
+CIRCUIT_EXTS = (".bench", ".aig", ".aag")   # the single source for "is this a circuit input?"
+
 
 def _cmd_sample(args):
     import json
     import torch
+    from gpap.sampling.metrics import format_uniformity
     from gpap.sampling.pipeline import sample_file, CIRCUIT_PORTFOLIO, DEFAULT_PORTFOLIO
 
     device = torch.device(args.device) if args.device else torch.device(
@@ -23,7 +28,7 @@ def _cmd_sample(args):
     path = args.input
     tmp = None
     encode_s = None
-    if path.endswith((".bench", ".aig", ".aag")):
+    if path.endswith(CIRCUIT_EXTS):
         # unroll to a temporary CNF first (the conversion embeds the wire map as `c wire ...` and
         # the encoder provenance as `c encoder ...`, so sample output can name each column by its
         # circuit wire and the pipeline can skip work the encoder already did).
@@ -48,15 +53,21 @@ def _cmd_sample(args):
     # than the --max-samples safety ceiling (default 100k; raise it for a full dump).
     out_cap = min(args.n, args.max_samples) if args.out else 0
     mine = {"auto": "auto", "on": True, "off": False}[args.mine]
+    use_kernel = False if args.use_kernel == "off" else args.use_kernel
     info = sample_file(path, device, n_time=args.n, n_cov=args.n_cov, out_cap=out_cap,
                        seed=args.seed, simplify=not args.no_simplify, els=args.els, mine=mine,
-                       configs=portfolio, time_limit=args.time_limit, use_kernel=args.use_kernel)
+                       uniformity=args.uniformity, configs=portfolio,
+                       time_limit=args.time_limit, use_kernel=use_kernel)
     if encode_s is not None:
         info["encode_s"] = encode_s          # circuit->CNF encode wall (stats sidecar honesty)
         info["encoder"] = args.encoder
     capped = "<" if info.get("chunk_capped") else ""
+    # |sup| = the DECLARED support (len(sup1)) — the width of every printed solution row: sample
+    # output emits one bit per declared support var even when simplification forced some of them.
+    # Matches `gpap bench`'s |sup| column; the post-simplify ACTIVE support is in the stats JSON
+    # as support_size.
     print(f"{os.path.basename(args.input)}: N={info['nv']} M={info['n_clauses']} "
-          f"|sup|={info['support_size']}")
+          f"|sup|={len(info['sup1'])}")
     print(f"  {info['n_models']:,}{capped} models in {info['wall_total_s']:.1f}s e2e "
           f"({info['wall_timed_s']:.1f}s sampling)")
     print(f"  {info['samples_per_s']:,.0f} samples/s (steady-state), "
@@ -66,6 +77,8 @@ def _cmd_sample(args):
         m = info["mined"]
         print(f"  mined {m['n_units']} units / {m['n_binary']} binary / {m['n_ternary']} ternary "
               f"in {m['seconds']:.1f}s")
+    if info.get("uniformity") is not None:
+        print(f"  uniformity: {format_uniformity(info['uniformity'], verbose=True)}")
     if args.out:
         from gpap.sampling.output import write_samples
         mat, cols = info.get("samples"), info.get("cols")
@@ -89,38 +102,51 @@ def _cmd_sample(args):
 
 
 def _cmd_bench(args):
-    # Delegate to the benchmark table script (kept thin around the pipeline).
-    from scripts import sample_benchmark
-    sys.argv = ["gpap bench", "--glob", args.glob, "--n-time", str(args.n),
-                "--time-limit", str(args.time_limit), "--n-cov", str(args.n_cov),
-                "--portfolio", args.portfolio, "--use-kernel", args.use_kernel]
+    # Delegate to the benchmark table driver (gpap/benchmark.py — inside the package, so this
+    # works from any directory; scripts/sample_benchmark.py is a shim around the same module).
+    from gpap import benchmark
+    argv = ["--glob", args.glob, "--n-time", str(args.n),
+            "--time-limit", str(args.time_limit), "--n-cov", str(args.n_cov),
+            "--portfolio", args.portfolio, "--use-kernel", args.use_kernel,
+            "--encoder", args.encoder, "--abc-opt", args.abc_opt, "--mine", args.mine,
+            "--uniformity", args.uniformity,
+            "--cycles", str(args.cycles), "--seed", str(args.seed)]
+    if args.twise:
+        argv += ["--twise"]
+    if args.abc:
+        argv += ["--abc", args.abc]
+    if args.pin_outputs is not None:
+        argv += ["--pin-outputs", str(args.pin_outputs)]
     if args.cmsgen:
-        sys.argv += ["--cmsgen", args.cmsgen]
+        argv += ["--cmsgen", args.cmsgen]
     if args.device:
-        sys.argv += ["--device", args.device]
+        argv += ["--device", args.device]
     if args.output:
-        sys.argv += ["--output", args.output]
-    sample_benchmark.main()
+        argv += ["--output", args.output]
+    benchmark.main(argv)
 
 
-def _convert_circuit(path, outp, args):
-    """Dispatch one circuit file (.bench or .aig/.aag) to its converter."""
+def _convert_circuit(path, outp, args, quiet=False):
+    """Dispatch one circuit file (.bench or .aig/.aag) to its converter. `args` needs the shared
+    conversion attributes: cycles, seed, pin_outputs, encoder, abc, abc_opt (see
+    _add_encoder_args) — scripts/sample_benchmark.py reuses this for circuit globs."""
     if path.endswith(".bench"):
         from gpap.circuits.bench import convert_one
         convert_one(path, outp, args.cycles, args.seed, pin_outputs=args.pin_outputs,
-                    encoder=args.encoder, abc_path=args.abc, abc_opt=args.abc_opt)
+                    encoder=args.encoder, abc_path=args.abc, abc_opt=args.abc_opt, quiet=quiet)
     else:
         from gpap.circuits.aig2cnf import convert_aig_one
         convert_aig_one(path, outp, args.cycles, args.seed, pin_outputs=args.pin_outputs,
-                        encoder=args.encoder, abc_path=args.abc, abc_opt=args.abc_opt)
+                        encoder=args.encoder, abc_path=args.abc, abc_opt=args.abc_opt, quiet=quiet)
 
 
 def _cmd_circuit2cnf(args):
     import glob as _glob
     if os.path.isdir(args.input):
         os.makedirs(args.output, exist_ok=True)
-        files = sorted(f for pat in ("*.bench", "*.aig", "*.aag")
-                       for f in _glob.glob(os.path.join(args.input, "**", pat), recursive=True))
+        files = sorted(f for ext in CIRCUIT_EXTS
+                       for f in _glob.glob(os.path.join(args.input, "**", "*" + ext),
+                                           recursive=True))
         for fp in files:
             stem = os.path.splitext(os.path.basename(fp))[0]
             outp = os.path.join(args.output, f"{stem}-c{args.cycles}.cnf")
@@ -214,7 +240,9 @@ def main(argv=None):
     s.add_argument("--portfolio", choices=["circuit", "default"], default="circuit")
     s.add_argument("--no-simplify", action="store_true")
     s.add_argument("--els", action="store_true", help="equivalent-literal substitution (removes vars)")
-    s.add_argument("--use-kernel", default="auto")
+    s.add_argument("--use-kernel", choices=["auto", "off"], default="auto",
+                   help="fused Triton BCP kernels: 'auto' (per-formula dispatch) | 'off' (PyTorch "
+                        "oracle path)")
     s.add_argument("--cycles", type=int, default=25,
                    help="unroll depth (circuit inputs; combinational AIGs clamp to 1)")
     s.add_argument("--pin-outputs", type=int, default=None, help="outputs to pin (circuit input)")
@@ -222,6 +250,12 @@ def main(argv=None):
                    help="entailed-clause mining: 'auto' (on, except for ABC-encoded CNFs, whose "
                         "backbone dc2/fraig already removed — measured 0-45 units for a full 5s "
                         "budget) | 'on' (force) | 'off'")
+    s.add_argument("--uniformity", choices=["off", "fast", "exact"], default="off",
+                   help="uniformity readout: 'off' (default — the readout costs an extra "
+                        "sampling pass) | 'fast' (repeat-rate check: l2_ratio, ~1.0 = uniform, "
+                        ">1.5 = certified skew; no solver work) | 'exact' (also enumerate small "
+                        "solution spaces and run a chi-square test vs uniform — the sensitive "
+                        "check). Real certificates on big spaces: eval/barbarik_gpap.py")
     _add_encoder_args(s)
     s.add_argument("--out", default=None,
                    help="write the sampled solutions here (compact support projections, one per "
@@ -236,15 +270,31 @@ def main(argv=None):
     s.set_defaults(func=_cmd_sample)
 
     b = sub.add_parser("bench", help="benchmark a glob of instances (vs CMSGen if given)")
-    b.add_argument("glob")
+    b.add_argument("glob", help="DIMACS .cnf and/or circuits (.bench/.aig/.aag, converted first)")
     b.add_argument("-n", "--n-time", dest="n", type=int, default=50_000)
     b.add_argument("--time-limit", type=float, default=60.0)
     b.add_argument("--n-cov", type=int, default=0)
     b.add_argument("--cmsgen", default=None, help="path to a cmsgen binary (enables comparison)")
     b.add_argument("--portfolio", choices=["circuit", "default"], default="circuit")
-    b.add_argument("--use-kernel", default="auto")
+    b.add_argument("--use-kernel", choices=["auto", "off"], default="auto",
+                   help="fused Triton BCP kernels: 'auto' (per-formula dispatch) | 'off' (PyTorch "
+                        "oracle path)")
     b.add_argument("--device", default=None)
     b.add_argument("--output", default=None)
+    b.add_argument("--cycles", type=int, default=25,
+                   help="unroll depth (circuit inputs; combinational AIGs clamp to 1)")
+    b.add_argument("--seed", type=int, default=5, help="conversion + sampling seed")
+    b.add_argument("--pin-outputs", type=int, default=None, help="outputs to pin (circuit input)")
+    b.add_argument("--mine", choices=["auto", "on", "off"], default="auto",
+                   help="entailed-clause mining: 'auto' (on, except ABC-encoded CNFs) | 'on' | 'off'")
+    b.add_argument("--uniformity", choices=["off", "fast", "exact"], default="off",
+                   help="per-instance uniformity readout: 'off' (default — costs an extra "
+                        "sampling pass) | 'fast' (repeat-rate check) | 'exact' (chi-square on "
+                        "enumerable spaces)")
+    b.add_argument("--twise", action="store_true",
+                   help="also compute 2-wise coverage (the CMSGen paper's spread metric; needs "
+                        "the --n-cov quality pass — auto-enables n_cov=2000 if unset)")
+    _add_encoder_args(b)
     b.set_defaults(func=_cmd_bench)
 
     c = sub.add_parser("circuit2cnf",
