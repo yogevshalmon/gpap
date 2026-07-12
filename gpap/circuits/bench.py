@@ -158,17 +158,28 @@ class CnfBuilder:
             self.add(-o, -y); self.add(o, y)  # o <-> ¬y
 
 
-def build_cnf(circ, T, seed, pin_outputs=None):
+def random_target(circ, T, seed):
+    """The default pinned target: simulate ONE random input sequence (reset state 0) and take the
+    last-cycle outputs. NOTE this draws the target from the circuit's own output DISTRIBUTION, so
+    it is size-biased toward high-probability (rejection-easy) patterns — see
+    gpap/circuits/simulate.py's rare_target for the adversarial alternative."""
+    inputs = circ[0]
+    rng = random.Random(seed)
+    in_seq = [{inp: (rng.random() < 0.5) for inp in inputs} for _ in range(T)]
+    return simulate(circ, in_seq, T)
+
+
+def build_cnf(circ, T, seed, pin_outputs=None, target=None):
     """Unroll T cycles → Tseitin CNF; sample the primary inputs (support). `pin_outputs` = how many
     final-cycle primary outputs to constrain to the simulated target: None = all (sequential circuits,
     where the whole output pattern is the spec). For COMBINATIONAL circuits (ISCAS-85, many outputs vs
     inputs) pinning all outputs over-constrains to a tiny solution set — pass a small count (e.g. 1) so
     the CircuitSAT problem keeps a large, samplable solution space (the DEMOTIC-style single-output
-    setup)."""
+    setup). `target` overrides the pinned pattern ({output: bool}, e.g. simulate.rare_target);
+    it MUST be a simulation-reachable pattern or the CNF is UNSAT — default = random_target(seed)."""
     inputs, outputs, dffs, gates = circ
-    rng = random.Random(seed)
-    in_seq = [{inp: (rng.random() < 0.5) for inp in inputs} for _ in range(T)]
-    target = simulate(circ, in_seq, T)
+    if target is None:
+        target = random_target(circ, T, seed)
 
     b = CnfBuilder()
     false_var = b.newvar()
@@ -260,7 +271,7 @@ def parse_encoder_comment(path):
 
 
 def convert_one(bench_path, out_path, cycles, seed, pin_outputs=None, encoder="tseitin",
-                abc_path=None, quiet=False, abc_opt="auto"):
+                abc_path=None, quiet=False, abc_opt="auto", target_mode="random"):
     """Convert a single .bench file to a DIMACS CNF at out_path. Returns the CnfBuilder.
 
     `encoder`:
@@ -272,9 +283,20 @@ def convert_one(bench_path, out_path, cycles, seed, pin_outputs=None, encoder="t
       "auto"              — "abc" when a binary is available, else "tseitin".
     The two encoders describe the SAME projected solution space over the primary inputs (same seed
     => same simulated output target); only the internal gate variables differ. The default stays
-    "tseitin" so results never depend silently on whether abc happens to be installed."""
+    "tseitin" so results never depend silently on whether abc happens to be installed.
+
+    `target_mode`: "random" (default — pin the outputs of one seed-random simulated sequence;
+    size-biased toward high-probability patterns) | "rare" (pin the RAREST pattern observed in a
+    large bit-parallel simulation batch — still reachable => SAT, but adversarial for rejection
+    sampling; see gpap/circuits/simulate.py)."""
     circ = parse_bench(bench_path)
     inputs, outputs, dffs, gates = circ
+    target = rare_est = None
+    if target_mode == "rare":
+        from gpap.circuits.simulate import rare_target
+        target, rare_est = rare_target("bench", circ, cycles, seed, pin_outputs)
+    elif target_mode != "random":
+        raise ValueError(f"unknown target_mode {target_mode!r} (random | rare)")
     if encoder == "auto":
         from gpap.circuits.abc_backend import abc_available
         encoder = "abc" if abc_available(abc_path) else "tseitin"
@@ -282,15 +304,17 @@ def convert_one(bench_path, out_path, cycles, seed, pin_outputs=None, encoder="t
         from gpap.circuits.abc_backend import build_cnf_abc
         b, support, target, labels = build_cnf_abc(circ, bench_path, cycles, seed,
                                                    pin_outputs=pin_outputs, abc=abc_path,
-                                                   opt=abc_opt)
+                                                   opt=abc_opt, target=target)
     elif encoder == "tseitin":
-        b, support, target, labels = build_cnf(circ, cycles, seed, pin_outputs=pin_outputs)
+        b, support, target, labels = build_cnf(circ, cycles, seed, pin_outputs=pin_outputs,
+                                               target=target)
     else:
         raise ValueError(f"unknown encoder {encoder!r} (tseitin | abc | auto)")
     write_dimacs(out_path, b, support, labels, encoder=encoder)
     if not quiet:
+        rare_s = f" target=rare(freq~{rare_est:.2e})" if rare_est is not None else ""
         print(f"{bench_path} -> {out_path}: PI={len(inputs)} PO={len(outputs)} DFF={len(dffs)} "
-              f"gates={len(gates)} | cycles={cycles} enc={encoder} -> vars={b.nv} "
+              f"gates={len(gates)} | cycles={cycles} enc={encoder}{rare_s} -> vars={b.nv} "
               f"clauses={len(b.clauses)} support={len(support)}")
     return b
 

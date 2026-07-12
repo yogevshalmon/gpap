@@ -199,6 +199,39 @@ cone — its huge "shrink" there is degeneracy, not merit). b01/b09 are near-vac
 Exclude from headline comparisons. (b12 is NOT vacuous: 5 patterns at 200 trials — small probes
 undersample.)
 
+**THE REJECTION BASELINE: at default targets, simulate-and-filter beats every CNF sampler —
+rare targets flip it (2026-07-11, gpap/circuits/simulate.py, .experiments/simbase_*.json).**
+The vacuous-pin finding was the tip of a general phenomenon, now measured (`--sim-baseline`:
+random inputs + bit-parallel numpy simulation, 64 patterns/word, CPU single-thread; PERFECTLY
+uniform by construction; rate = p_accept × sim-throughput).
+- **Default (`--target random`) pins are size-biased**: the target is the image of one random
+  input draw, i.e. sampled from the circuit's own output distribution ⇒ typically a
+  HIGH-probability pattern. Measured over ITC'99+ISCAS c25 seed5: p_accept ≥ 0.14 on 12/19
+  instances (b12 = 0.93 — "effectively vacuous" despite 5 observed patterns), and CPU rejection
+  beats GPAP-on-4080 on ~17/19 instances, often 10–100× (b03: 9.0M/s vs 0.6M/s). GPAP
+  amplification (success/p_accept) is only 1–16×. This equally undermines the rival GPU
+  samplers' published setups (DEMOTIC-style reachable targets, pin-1 combinational ⇒
+  p_accept ≥ ~0.5 by construction).
+- **`--target rare`** (pin the rarest pattern in a 262k-sequence sim batch; observed ⇒ reachable
+  ⇒ SAT; deterministic per seed) splits the suite into the real regimes:
+  * **BCP-earns-its-keep** (amplification 500–500,000×): s1196 (p=1.6e-6, rejection 8/s vs GPAP
+    38k/s), b13 (GPAP success ROSE 35%→100%, 4.5M/s vs 123/s), s386 (161k/s vs 1.1k/s), b12
+    (17k/s vs 141/s), b04 (32k/s vs 5.4k/s — GPAP also got FASTER: the rare pattern's backbone
+    is propagation food). b14 marginal (14 sols vs ~1/s).
+  * **rejection-still-wins**: the degenerate-output family (b01/b02/b05/b06/b07/b09/s526 — rare
+    pattern is still common) and the GPAP lose-set where the rare target collapses success
+    (b10 15%→1%, s832 89%→0%, b11 7%→0% — trajectory conflicts, not propagation).
+- **Predictor**: GPAP wins where propagation retains success at rare targets (backbone-rich
+  cones); loses where success collapses with p_accept. Amplification is the per-instance
+  diagnostic — it is now a bench column (`p_acc`/`rej/s`/`amp`).
+- **Consequences**: (1) headline circuit-sampling comparisons MUST use `--target rare` (or
+  report p_accept) — random-target wins are rejection-dominated for every CNF sampler, ours and
+  CMSGen and the GPU rivals alike; (2) the rejection baseline reported is CPU numpy — a GPU
+  simulator would shift it another 10–100× in rejection's favor, so the honest GPAP niche is
+  strictly the low-p_accept regime; (3) `--sim-check` (simulate emitted samples through the
+  ORIGINAL circuit) is now the encoder-independent soundness gate — 2,000/2,000 on b03-c25
+  through both encoders.
+
 ## Measurement methodology (the traps that actually bit)
 
 **Same-seed repeats measure TIMING noise only, not DRAW noise.** Portfolio-membership changes

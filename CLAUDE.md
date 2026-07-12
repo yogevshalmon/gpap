@@ -38,6 +38,7 @@ gpap/
     aiger.py               # AIGER reader: binary aig + ASCII aag, latches + reset values
     aig2cnf.py             # NATIVE .aig/.aag input: simulate/unroll/Tseitin (no external tool)
     abc_backend.py         # OPTIONAL berkeley-abc encoder (unroll + dc2/fraig -> AIG -> Tseitin)
+    simulate.py            # bit-parallel sim: REJECTION baseline (p_accept), rare targets, sim-check
   cli.py                   # `gpap` subcommands (sample / bench / circuit2cnf / info)
   benchmark.py             # the `gpap bench` suite driver (in-package so it works installed)
 eval/                      # cross-GPU sampling benchmark driver + plots (Colab / A100)
@@ -92,6 +93,17 @@ scripts/build_abc.sh                                         # optional: pinned 
 **Circuit inputs**: `.bench` AND AIGER `.aig`/`.aag` (aig2cnf.py — native parse/simulate/unroll;
 latch resets 0/1 honoured, `x` rejected, combinational clamps to T=1; labels from the symbol
 table or `i<k>`).
+
+**Rejection baseline + targets** (simulate.py — the "why not just simulate?" answer, measured).
+`--sim-baseline` (sample + bench): random inputs + bit-parallel circuit simulation (64
+patterns/word, numpy, CPU) = the CNF-free rival; PERFECTLY uniform, rate = p_accept × sim
+throughput. Reports p_accept + accepted/s + GPAP amplification (= success/p_accept); bench
+columns p_acc / rej/s / amp. `--target random|rare` (all circuit conversions): `random` (default)
+pins the outputs of one seed-random sequence — SIZE-BIASED toward high-probability,
+rejection-easy patterns; `rare` pins the rarest pattern in a 262k-sequence sim batch (observed ⇒
+reachable ⇒ SAT, deterministic per seed). `--sim-check` (sample): simulate every emitted sample
+row through the ORIGINAL circuit and verify the pinned outputs — encoder-INDEPENDENT end-to-end
+soundness (validates unroll+Tseitin/ABC, not just CNF clauses).
 
 **Circuit encoder** (`--encoder tseitin|abc|auto`, default `tseitin`). `abc` = strash + `zero` +
 `frames -F T -i` + dc2/fraig then Tseitin its AIG (only 2-/3-literal clauses — what the

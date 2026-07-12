@@ -97,6 +97,11 @@ def main(argv=None):
     ap.add_argument("--twise", action="store_true",
                     help="also compute 2-wise coverage (the CMSGen paper's spread metric, "
                          "O(S^2) — opt-in; auto-enables n_cov=2000 if --n-cov unset)")
+    ap.add_argument("--sim-baseline", action="store_true",
+                    help="(circuit instances) measure the rejection-sampling rival per instance "
+                         "(random inputs + bit-parallel simulation, no CNF): p_acc column = "
+                         "acceptance probability of the pinned target, rej/s = accepted "
+                         "samples/s it achieves on this CPU")
     ap.add_argument("--n-time", type=int, default=50_000,
                     help="samples to PRODUCE in the timed run (a contract, not a hint). Only the "
                          "safety valves end the run short of this ('<' after sols): --time-limit, "
@@ -158,6 +163,8 @@ def main(argv=None):
         hdr += f"{'2wiseG':>8}"
     if show_unif:
         hdr += f"{'unif':>9}"
+    if args.sim_baseline:
+        hdr += f"{'p_acc':>9}{'rej/s':>11}{'amp':>9}"
     hdr += f"{'snd':>4}"
     if args.cmsgen:
         hdr += f"{'CMS/s':>9}{'GPAP/CMS':>9}{'e2e/CMS':>8}"
@@ -170,6 +177,7 @@ def main(argv=None):
     for path in files:
         name = os.path.basename(path)
         encode_s = None
+        sim = None
         if path.endswith(CIRCUIT_EXTS):
             # Convert with the shared CLI dispatcher (same flags as `gpap sample`). The encode
             # wall is reported separately — both samplers consume the identical CNF, so it is
@@ -184,6 +192,11 @@ def main(argv=None):
                       file=sys.stderr)
                 continue
             encode_s = time.perf_counter() - _t0
+            if args.sim_baseline:
+                # The rejection-sampling rival at the SAME cycles/seed/pin/target (simulate.py).
+                from gpap.circuits.simulate import sim_baseline
+                sim = sim_baseline(path, args.cycles, args.seed, pin_outputs=args.pin_outputs,
+                                   target_mode=args.target)
             path = cnf
         g = sample_file(path, device, simplify=args.simplify, els=args.els, n_time=args.n_time,
                         n_cov=args.n_cov, b=args.b, k_cap=args.k_cap, verify_cpu=args.verify_cpu,
@@ -199,7 +212,7 @@ def main(argv=None):
                "n_models": g["n_models"], "wall_timed_s": g["wall_timed_s"],
                "wall_total_s": g["wall_total_s"],
                "encode_s": encode_s, "encoder": args.encoder if encode_s is not None else None,
-               "uniformity": g.get("uniformity"),
+               "uniformity": g.get("uniformity"), "sim_baseline": sim,
                "succ": g["success_rate"], "twise_gpap": twg,
                "gpu_sound": g["gpu_sound"], "n_distinct": g["n_distinct"],
                "unique_sps_est": g.get("unique_sps_est"), "assigns_per_s": g.get("assigns_per_s"),
@@ -227,6 +240,17 @@ def main(argv=None):
             line += f"{twg:>7.1f}%"
         if show_unif:
             line += f"{format_uniformity(g.get('uniformity')):>9}"
+        if args.sim_baseline:
+            if sim is None:
+                line += f"{'—':>9}{'—':>11}{'—':>9}"
+            elif sim["hits"]:
+                amp = (g["success_rate"] / sim["p_accept"]) if sim["p_accept"] else 0.0
+                row["amplification"] = amp
+                amps = f"{amp:,.0f}x" if amp < 1e6 else f"{amp:.0e}x"
+                line += f"{sim['p_accept']:>9.1e}{sim['accepted_per_s']:>11,.0f}{amps:>9}"
+            else:                                  # no hit seen: rejection is unusable here
+                row["amplification"] = None
+                line += f"{'<' + format(sim['p_accept_lt'], '.0e'):>9}{'~0':>11}{'inf':>9}"
         line += f"{snd:>4}"
         plain = None
         if args.also_plain:
