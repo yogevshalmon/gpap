@@ -29,7 +29,6 @@ upstream commit and installs the binary into the GPAP cache; callers fall back t
 Tseitin encoders when no binary is found.
 """
 import os
-import random
 import shutil
 import subprocess
 import tempfile
@@ -178,18 +177,18 @@ def _framed_to_cnf(faig: Aig, T: int, in_names: list[str], out_names: list[str],
 
 
 def build_cnf_abc(circ, bench_path: str, cycles: int, seed: int, pin_outputs: int | None = None,
-                  *, abc: str | None = None, opt: str = "auto"):
+                  *, abc: str | None = None, opt: str = "auto", target=None):
     """ABC-encoded counterpart of `bench.build_cnf` (.bench input).
 
     Returns (builder, support, target, support_labels) exactly like the native encoder. The
-    pinned target comes from the SAME simulation of the ORIGINAL circuit with the SAME seed, so
-    the two encoders describe the same projected solution space."""
-    from gpap.circuits.bench import simulate
+    pinned target comes from the SAME simulation of the ORIGINAL circuit with the SAME seed
+    (or an explicit `target` override), so the two encoders describe the same projected
+    solution space."""
+    from gpap.circuits.bench import random_target
 
     inputs, outputs, _dffs, gates = circ
-    rng = random.Random(seed)
-    in_seq = [{inp: (rng.random() < 0.5) for inp in inputs} for _ in range(cycles)]
-    target = simulate(circ, in_seq, cycles)
+    if target is None:
+        target = random_target(circ, cycles, seed)
 
     opt = resolve_opt(opt, len(gates) * cycles)
     faig = _read_framed(bench_path, cycles, abc, opt)
@@ -200,9 +199,9 @@ def build_cnf_abc(circ, bench_path: str, cycles: int, seed: int, pin_outputs: in
 
 def build_cnf_abc_aig(aig: Aig, aig_path: str, cycles: int, seed: int,
                       pin_outputs: int | None = None, *, abc: str | None = None,
-                      opt: str = "auto"):
+                      opt: str = "auto", target=None):
     """ABC-encoded counterpart of `aig2cnf.build_cnf_aig` (.aig/.aag input)."""
-    from gpap.circuits.aig2cnf import input_labels, simulate_aig
+    from gpap.circuits.aig2cnf import input_labels, random_target_aig
 
     if any(r for _cur, _nxt, r in aig.latches):
         # ABC's `zero` (needed for .bench, harmless for all-zero resets) would silently override
@@ -210,9 +209,8 @@ def build_cnf_abc_aig(aig: Aig, aig_path: str, cycles: int, seed: int,
         raise _AbcError(f"{aig_path}: latches with reset=1 — use the native encoder "
                         "(encoder='tseitin'), which honours AIGER reset values")
     T = 1 if aig.n_latches == 0 else cycles
-    rng = random.Random(seed)
-    in_seq = [[rng.random() < 0.5 for _ in range(aig.n_inputs)] for _ in range(T)]
-    target = simulate_aig(aig, in_seq, T)
+    if target is None:
+        target = random_target_aig(aig, T, seed)
 
     opt = resolve_opt(opt, len(aig.ands) * T)
     # Hand ABC a canonical BINARY rewrite of the parsed circuit rather than the original file:

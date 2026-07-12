@@ -61,18 +61,27 @@ def simulate_aig(aig: Aig, in_seq: list[list[bool]], T: int) -> list[bool]:
     return out
 
 
-def build_cnf_aig(aig: Aig, T: int, seed: int, pin_outputs: int | None = None):
+def random_target_aig(aig: Aig, T: int, seed: int) -> list[bool]:
+    """Default pinned target: last-cycle outputs of ONE random input sequence (size-biased toward
+    high-probability patterns — see gpap/circuits/simulate.py's rare_target). T must already be
+    combinational-clamped by the caller."""
+    rng = random.Random(seed)
+    in_seq = [[rng.random() < 0.5 for _ in range(aig.n_inputs)] for _ in range(T)]
+    return simulate_aig(aig, in_seq, T)
+
+
+def build_cnf_aig(aig: Aig, T: int, seed: int, pin_outputs: int | None = None, target=None):
     """Unroll T cycles -> Tseitin CNF over the AIG structure (3 clauses per AND instance).
     Returns (builder, support, target, support_labels) exactly like `bench.build_cnf`; `target`
-    is the list of simulated last-cycle output values (all outputs, pinned or not)."""
+    is the list of simulated last-cycle output values (all outputs, pinned or not) — pass one
+    (e.g. simulate.rare_target) to override the default random_target_aig pattern."""
     from gpap.circuits.bench import CnfBuilder
 
     if aig.n_latches == 0:
         T = 1                                      # combinational: unrolling = independent copies
     names = input_labels(aig)
-    rng = random.Random(seed)
-    in_seq = [[rng.random() < 0.5 for _ in range(aig.n_inputs)] for _ in range(T)]
-    target = simulate_aig(aig, in_seq, T)
+    if target is None:
+        target = random_target_aig(aig, T, seed)
 
     b = CnfBuilder()
     false_var = b.newvar()
@@ -153,12 +162,19 @@ def build_cnf_aig(aig: Aig, T: int, seed: int, pin_outputs: int | None = None):
 
 
 def convert_aig_one(aig_path, out_path, cycles, seed, pin_outputs=None, encoder="tseitin",
-                    abc_path=None, quiet=False, abc_opt="auto"):
+                    abc_path=None, quiet=False, abc_opt="auto", target_mode="random"):
     """Convert a single .aig/.aag file to a projected-sampling DIMACS CNF. Mirrors
-    `bench.convert_one` (same encoder choices, same `c ind`/`c wire`/provenance output)."""
+    `bench.convert_one` (same encoder choices, same target_mode random|rare, same
+    `c ind`/`c wire`/provenance output)."""
     from gpap.circuits.bench import write_dimacs
 
     aig = read_aiger(aig_path)
+    target = rare_est = None
+    if target_mode == "rare":
+        from gpap.circuits.simulate import rare_target
+        target, rare_est = rare_target("aig", aig, cycles, seed, pin_outputs)
+    elif target_mode != "random":
+        raise ValueError(f"unknown target_mode {target_mode!r} (random | rare)")
     if encoder == "auto":
         from gpap.circuits.abc_backend import abc_available
         encoder = "abc" if abc_available(abc_path) else "tseitin"
@@ -166,15 +182,17 @@ def convert_aig_one(aig_path, out_path, cycles, seed, pin_outputs=None, encoder=
         from gpap.circuits.abc_backend import build_cnf_abc_aig
         b, support, target, labels = build_cnf_abc_aig(aig, aig_path, cycles, seed,
                                                        pin_outputs=pin_outputs, abc=abc_path,
-                                                       opt=abc_opt)
+                                                       opt=abc_opt, target=target)
     elif encoder == "tseitin":
-        b, support, target, labels = build_cnf_aig(aig, cycles, seed, pin_outputs=pin_outputs)
+        b, support, target, labels = build_cnf_aig(aig, cycles, seed, pin_outputs=pin_outputs,
+                                                   target=target)
     else:
         raise ValueError(f"unknown encoder {encoder!r} (tseitin | abc | auto)")
     write_dimacs(out_path, b, support, labels, encoder=encoder)
     if not quiet:
         T = 1 if aig.n_latches == 0 else cycles
+        rare_s = f" target=rare(freq~{rare_est:.2e})" if rare_est is not None else ""
         print(f"{aig_path} -> {out_path}: PI={aig.n_inputs} PO={aig.n_outputs} "
-              f"L={aig.n_latches} ands={len(aig.ands)} | cycles={T} enc={encoder} -> "
+              f"L={aig.n_latches} ands={len(aig.ands)} | cycles={T} enc={encoder}{rare_s} -> "
               f"vars={b.nv} clauses={len(b.clauses)} support={len(support)}")
     return b

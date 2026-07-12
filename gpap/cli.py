@@ -39,19 +39,21 @@ def _cmd_sample(args):
         if path.endswith(".bench"):
             from gpap.circuits.bench import convert_one
             convert_one(path, tmp, args.cycles, args.seed, pin_outputs=args.pin_outputs,
-                        encoder=args.encoder, abc_path=args.abc, abc_opt=args.abc_opt)
+                        encoder=args.encoder, abc_path=args.abc, abc_opt=args.abc_opt,
+                        target_mode=args.target)
         else:
             from gpap.circuits.aig2cnf import convert_aig_one
             convert_aig_one(path, tmp, args.cycles, args.seed, pin_outputs=args.pin_outputs,
-                            encoder=args.encoder, abc_path=args.abc, abc_opt=args.abc_opt)
+                            encoder=args.encoder, abc_path=args.abc, abc_opt=args.abc_opt,
+                            target_mode=args.target)
         encode_s = _time.perf_counter() - _t0
         print(f"  encoded in {encode_s:.1f}s [{args.encoder}"
               f"{'/' + args.abc_opt if args.encoder != 'tseitin' else ''}]")
         path = tmp
     portfolio = CIRCUIT_PORTFOLIO if args.portfolio == "circuit" else DEFAULT_PORTFOLIO
-    # Only collect sample bits when an output file is requested: up to `-n` solutions, never more
-    # than the --max-samples safety ceiling (default 100k; raise it for a full dump).
-    out_cap = min(args.n, args.max_samples) if args.out else 0
+    # Collect sample bits when an output file is requested (up to `-n` solutions, never more
+    # than the --max-samples safety ceiling) — or when --sim-check needs rows to simulate.
+    out_cap = min(args.n, args.max_samples) if (args.out or args.sim_check) else 0
     mine = {"auto": "auto", "on": True, "off": False}[args.mine]
     use_kernel = False if args.use_kernel == "off" else args.use_kernel
     info = sample_file(path, device, n_time=args.n, n_cov=args.n_cov, out_cap=out_cap,
@@ -79,6 +81,48 @@ def _cmd_sample(args):
               f"in {m['seconds']:.1f}s")
     if info.get("uniformity") is not None:
         print(f"  uniformity: {format_uniformity(info['uniformity'], verbose=True)}")
+    if args.sim_baseline:
+        # The rejection-sampling rival: random inputs + bit-parallel circuit simulation, no CNF.
+        # Perfectly uniform by construction — its only weakness is p_accept. See simulate.py.
+        if tmp is None:
+            print("  sim-baseline: skipped (CNF input — no circuit to simulate)")
+        else:
+            from gpap.circuits.simulate import sim_baseline
+            r = sim_baseline(args.input, args.cycles, args.seed, pin_outputs=args.pin_outputs,
+                             target_mode=args.target)
+            info["sim_baseline"] = r
+            if r["hits"]:
+                amp = info["success_rate"] / r["p_accept"] if r["p_accept"] else float("inf")
+                print(f"  rejection baseline (CPU bit-parallel sim): p_accept={r['p_accept']:.2e} "
+                      f"({r['hits']:,}/{r['n_sim']:,}), {r['patterns_per_s']:.2e} patterns/s "
+                      f"=> {r['accepted_per_s']:,.0f} accepted/s "
+                      f"(GPAP amplification {amp:,.1f}x)")
+            else:
+                print(f"  rejection baseline (CPU bit-parallel sim): p_accept < "
+                      f"{r['p_accept_lt']:.1e} (0 hits in {r['n_sim']:,}; 95%), "
+                      f"{r['patterns_per_s']:.2e} patterns/s => rejection is unusable here")
+    if args.sim_check:
+        if tmp is None:
+            print("  sim-check: skipped (CNF input — no circuit to simulate)")
+        else:
+            from gpap.circuits.simulate import simulate_check
+            mat, cols = info.get("samples"), info.get("cols")
+            wm = info.get("wire_map") or {}
+            if mat is None or len(mat) == 0:
+                print("  sim-check: no samples collected")
+            elif any(v not in wm for v in cols):
+                print("  sim-check: skipped (no wire map for some sample columns)")
+            else:
+                nbad = simulate_check(args.input, args.cycles, args.seed, mat,
+                                      [wm[v] for v in cols], pin_outputs=args.pin_outputs,
+                                      target_mode=args.target)
+                info["sim_check_bad"] = nbad
+                if nbad == 0:
+                    print(f"  sim-check: {len(mat):,}/{len(mat):,} emitted samples reproduce "
+                          f"the pinned outputs through the circuit (encoder-independent)")
+                else:
+                    print(f"  SIM-CHECK FAILED: {nbad:,}/{len(mat):,} emitted samples do NOT "
+                          f"drive the circuit to the pinned outputs")
     if args.out:
         from gpap.sampling.output import write_samples
         mat, cols = info.get("samples"), info.get("cols")
@@ -109,10 +153,12 @@ def _cmd_bench(args):
             "--time-limit", str(args.time_limit), "--n-cov", str(args.n_cov),
             "--portfolio", args.portfolio, "--use-kernel", args.use_kernel,
             "--encoder", args.encoder, "--abc-opt", args.abc_opt, "--mine", args.mine,
-            "--uniformity", args.uniformity,
+            "--uniformity", args.uniformity, "--target", args.target,
             "--cycles", str(args.cycles), "--seed", str(args.seed)]
     if args.twise:
         argv += ["--twise"]
+    if args.sim_baseline:
+        argv += ["--sim-baseline"]
     if args.abc:
         argv += ["--abc", args.abc]
     if args.pin_outputs is not None:
@@ -128,16 +174,19 @@ def _cmd_bench(args):
 
 def _convert_circuit(path, outp, args, quiet=False):
     """Dispatch one circuit file (.bench or .aig/.aag) to its converter. `args` needs the shared
-    conversion attributes: cycles, seed, pin_outputs, encoder, abc, abc_opt (see
+    conversion attributes: cycles, seed, pin_outputs, encoder, abc, abc_opt, target (see
     _add_encoder_args) — scripts/sample_benchmark.py reuses this for circuit globs."""
+    tm = getattr(args, "target", "random")
     if path.endswith(".bench"):
         from gpap.circuits.bench import convert_one
         convert_one(path, outp, args.cycles, args.seed, pin_outputs=args.pin_outputs,
-                    encoder=args.encoder, abc_path=args.abc, abc_opt=args.abc_opt, quiet=quiet)
+                    encoder=args.encoder, abc_path=args.abc, abc_opt=args.abc_opt, quiet=quiet,
+                    target_mode=tm)
     else:
         from gpap.circuits.aig2cnf import convert_aig_one
         convert_aig_one(path, outp, args.cycles, args.seed, pin_outputs=args.pin_outputs,
-                        encoder=args.encoder, abc_path=args.abc, abc_opt=args.abc_opt, quiet=quiet)
+                        encoder=args.encoder, abc_path=args.abc, abc_opt=args.abc_opt,
+                        quiet=quiet, target_mode=tm)
 
 
 def _cmd_circuit2cnf(args):
@@ -224,6 +273,11 @@ def _add_encoder_args(sp):
                     help="abc optimization effort: 'full' (optimize the unrolled AIG — best "
                          "shrink, expensive on big unrolls) | 'fast' (optimize pre-unroll + one "
                          "cheap post sweep) | 'auto' (full when small, fast when big; default)")
+    sp.add_argument("--target", choices=["random", "rare"], default="random",
+                    help="pinned output pattern: 'random' (default — outputs of one seed-random "
+                         "simulated sequence; size-biased toward high-probability patterns) | "
+                         "'rare' (rarest pattern seen in a 262k-sequence bit-parallel simulation "
+                         "— still reachable/SAT, but adversarial for rejection sampling)")
 
 
 def main(argv=None):
@@ -257,6 +311,14 @@ def main(argv=None):
                         "solution spaces and run a chi-square test vs uniform — the sensitive "
                         "check). Real certificates on big spaces: eval/barbarik_gpap.py")
     _add_encoder_args(s)
+    s.add_argument("--sim-baseline", action="store_true",
+                   help="(circuit inputs) also measure the REJECTION-SAMPLING rival: random "
+                        "inputs + bit-parallel circuit simulation, no CNF — reports p_accept, "
+                        "sim patterns/s, accepted/s and GPAP's constraint amplification")
+    s.add_argument("--sim-check", action="store_true",
+                   help="(circuit inputs) simulate every emitted sample through the ORIGINAL "
+                        "circuit and verify the pinned outputs — an encoder-independent "
+                        "end-to-end soundness check (validates unroll+Tseitin/ABC, not just CNF)")
     s.add_argument("--out", default=None,
                    help="write the sampled solutions here (compact support projections, one per "
                         "sample). For a .bench input each column is a primary-input wire@cycle")
@@ -294,6 +356,9 @@ def main(argv=None):
     b.add_argument("--twise", action="store_true",
                    help="also compute 2-wise coverage (the CMSGen paper's spread metric; needs "
                         "the --n-cov quality pass — auto-enables n_cov=2000 if unset)")
+    b.add_argument("--sim-baseline", action="store_true",
+                   help="(circuit instances) also measure the rejection-sampling rival per "
+                        "instance: p_accept + bit-parallel sim rate -> p_acc / rej/s columns")
     _add_encoder_args(b)
     b.set_defaults(func=_cmd_bench)
 

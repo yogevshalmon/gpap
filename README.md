@@ -74,6 +74,18 @@ are unrolled `--cycles` times from the reset state (AIGER latch reset values 0/1
 pinned to a simulated reachable pattern, and the primary inputs across cycles become the sampling
 support (named `wire@cycle` in the output).
 
+**Rejection baseline & target hardness.** For circuit inputs, `--sim-baseline` measures the
+CNF-free rival every reviewer should ask about: draw random input sequences, bit-parallel
+simulate the circuit (no CNF, perfectly uniform), keep the ones hitting the pinned outputs. It
+reports `p_accept`, the accepted-samples/s that rejection achieves, and GPAP's *constraint
+amplification* (success rate ÷ p_accept) — when `p_accept` is high, simple rejection wins and
+the instance is not a constrained-sampling benchmark. `--target rare` pins the *rarest* output
+pattern observed in a large simulation batch instead of the default random one (which is drawn
+from the circuit's own output distribution and therefore biased toward easy patterns) — still
+reachable, so the CNF stays SAT, but adversarial for rejection. `--sim-check` simulates every
+emitted sample through the original circuit and verifies the pinned outputs: an
+encoder-independent, end-to-end soundness check.
+
 **Uniformity.** Opt-in (default `off` — the readout costs an extra sampling pass, so it is not
 run unless asked for). `--uniformity fast` prints a one-line **repeat-rate check**: draw ~2k
 samples and see whether some solutions repeat far more often than any uniform sampler would
