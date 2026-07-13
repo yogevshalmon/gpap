@@ -232,6 +232,72 @@ uniform by construction; rate = p_accept × sim-throughput).
   ORIGINAL circuit) is now the encoder-independent soundness gate — 2,000/2,000 on b03-c25
   through both encoders.
 
+**GPU gradient-descent rivals, run on OUR hardware: they collapse exactly where sampling gets
+hard (2026-07-12, .experiments/rivals_hts_full.json, eval/rivals_hts.py +
+eval/unroll_to_bench.py).** Same RTX 4080, same instance files, their own metric (unique
+solutions / their model_runtime — which EXCLUDES their CPU model-build; GPAP's number includes
+construction).
+- **HTS** (arXiv 2502.08673, the newest of the Berkeley family, PyTorch): on circuit unrolls
+  GPAP wins 26× (their own s15850a_3_2: 63k vs 2.5k u/s) to 380,000× (b13-c25 random); at RARE
+  targets HTS finds 0–17 solutions total (b12/b13-rare: 0) while GPAP delivers 17k–4.5M u/s.
+- **DEMOTIC** (ASP-DAC'25, works on .bench directly — no CNF): fed OUR exact task via an
+  unrolled single-output miter (eval/unroll_to_bench.py, self-checked p(MITER=1) == the
+  instance's p_accept): b03-c25-rare best 43.5 u/s vs GPAP 523k (≈12,000×) — and BELOW the CPU
+  rejection baseline (620k/s). b13-c25-rare (p=3e-5): 0 solutions in 111 s.
+- **Honest losses**: 75-10-1-q and prod-20 — the known jointly-constrained CNF lose-family —
+  GPAP 0% success while HTS produces (6.4k u/s on 75-10); gradient methods survive where
+  BCP-completion dies. And on tiny-|S| or-* instances the u/s metric is a SATURATION artifact
+  (both samplers enumerate the space; the number measures time-to-saturation, not throughput).
+- **Their published setups are rejection-easy by construction**: DEMOTIC's targets are a
+  hard-coded per-name table pinning only the FIRST 1–5 outputs; single-output pins have
+  p_accept ≥ 1/3 unless the bit is skewed (EPFL pin-1 measured: p ≥ 0.33 everywhere, dec.aig
+  the lone 3.9e-3). The rare-target protocol is where CNF/BCP sampling separates from both
+  gradient descent AND rejection.
+- Not run: DiffSampler (JAX; older sibling of HTS — same group, HTS is their successor),
+  QuickSampler (needs z3 build; CPU tool). Portability quirks that bit are documented in the
+  two eval/ harness docstrings.
+
+**New circuit families (2026-07-12): EPFL + HWMCC'17 + big ITC'99
+(benchmarks/circuits/README.md for provenance/licenses; scripts/fetch_benchmarks.sh for full
+sets).** HWMCC'17: of the 231 single-property AIGs ≤30k ANDs, only 7 have a property output
+that ever fires under random stimuli at T=25 (bit-parallel sweep) — those 7, pinned at
+`--target rare`, are genuine witness-sampling instances (p_accept 3e-4…6e-2); every other
+instance is a vacuous pin. EPFL (combinational, T=1): pin-1 — the DEMOTIC-style setup — is
+rejection-trivial; all-pins + rare is properly constrained (p 1e-3…<4e-7).
+MEASURED (.experiments/{hwmcc,epfl}_rare.json, 4080, n=20k/30s):
+- EPFL-rare splits three ways: (a) GPAP-wins-outright — rejection sees 0 hits in ~10M patterns
+  while GPAP keeps high success: arbiter 87k/s@91%, max 458k/s, mem_ctrl 148k/s@89%, square
+  63.8M/s@100%, priority (measured amp 17,151×), sin (amp 8,848×), int2float 681×, plus slow-
+  but-alone adder 217/s and sqrt 8.2k/s; (b) HARD-FOR-BOTH — the classic SAT-hard arithmetic
+  cones (multiplier, div, hyp, log2, bar): GPAP 0 sols AND rejection ~0 — the open-challenge
+  set; (c) rejection-easy leftovers (router p=0.07, voter p=0.5 — their output bits are skewed,
+  so even the rare side is common).
+- HWMCC-rare is humbler: a SINGLE property bit can only be as rare as its own skew, so 5/7 sit
+  at p≈3e-2…7e-2 where rejection wins (texasifetch 122k/s vs GPAP 51k/s); the two truly-rare
+  ones (6s215rb0 p=3e-4, amba p=2e-4) are ALSO the 0.7–1M-clause giants where GPAP's rate is
+  K-limited — 6s215rb0 ends dead even (64/s vs 58/s), amba both ~0. Witness-sampling on RTL
+  needs either multi-bit pins or the big-GPU (A100) rerun.
+
+**Standard public CNF-sampling suite vs CMSGen, equal 60s budgets (2026-07-12,
+.experiments/{cnf_suite,sk}_vs_cmsgen.json).** The FMCAD'21/DiffSampler-era corpus (blasted /
+or / tire / modexp / hash / 75-10 / 90-10 `.no_w` files, zenodo-4022395 lineage; + the sk_
+Sketch/service family), n=10k, SAME per-instance wall cap both sides (cmsgen_sample now takes
+`timeout=` = the bench --time-limit; partial samples streamed before the kill still count).
+- **Headline: geomean 65.4× steady / 32.1× e2e over 49 both-produced instances (standard
+  suite), 68.2× / 22.1× over 28 (sk_ suite)** — GPU 4080 vs single-core CPU.
+- Family texture: or-* 60–380× (GPAP up to 40M samples/s), blasted 66–236×, 90-10 15–55×,
+  Sketch-numeric 100–3,464×.
+- **Honest losses, all structured**: hash + modexp + tire are CMSGen-only families (8
+  instances; CMSGen itself only trickles ~1/s on modexp) — plus 7 "neither" (hash-4/6/8 and 4
+  of the 75/90-q instances defeat both in 60s); service-family e2e losses persist
+  (NotificationServiceImpl 0.27×, PhaseService 0.61×, ActivityService2 0.77×) — the known
+  jointly-constrained regime. GPAP-only: 0.
+- Within-family variance is real: modexp8-4-6 is the lone modexp GPAP cracks (mining + 60s
+  grind ⇒ 121×) while its 6 siblings give 0 — don't cherry-pick either direction.
+- Position for the paper: the CNF suite is a REFERENCE point (GPAP = GPU-parallel CMSGen, so
+  the ~65× geomean is the parallelism dividend at equal quality), not the headline — circuits
+  with rare targets remain the flagship domain.
+
 ## Measurement methodology (the traps that actually bit)
 
 **Same-seed repeats measure TIMING noise only, not DRAW noise.** Portfolio-membership changes

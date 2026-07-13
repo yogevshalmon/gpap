@@ -34,17 +34,24 @@ import time
 from gpap.cli import CIRCUIT_EXTS   # single source for "is this a circuit input?"
 
 
-def cmsgen_sample(path, cmsgen_bin, n, scratch, keep=None):
+def cmsgen_sample(path, cmsgen_bin, n, scratch, keep=None, timeout=60.0):
     """Run CMSGen to produce n samples; return (samp/s, parsed models).
 
     `keep` caps how many parsed models are retained in memory (the rest are only COUNTED, for the
     rate). This is essential on low-RAM hosts (e.g. a 12 GB Colab): retaining all `n` full models
-    is `n × N` Python ints (~8-9 GB at n=50k, N=5k) and OOM-kills the session. None = keep all."""
+    is `n × N` Python ints (~8-9 GB at n=50k, N=5k) and OOM-kills the session. None = keep all.
+
+    `timeout` caps CMSGen's wall per instance (the bench driver passes its --time-limit, so both
+    samplers get the SAME per-instance budget). On timeout, whatever samples CMSGen streamed to
+    the samplefile before the kill still count — the rate is then samples/timeout, honest for a
+    'produce what you can in the budget' comparison — instead of scoring a hard instance as 0."""
     out = os.path.join(scratch, "cms_" + os.path.basename(path) + ".txt")
     t0 = time.perf_counter()
     try:
         subprocess.run([cmsgen_bin, "--samples", str(n), "--samplefile", out, path],
-                       capture_output=True, timeout=1200)
+                       capture_output=True, timeout=timeout)
+    except subprocess.TimeoutExpired:
+        pass                                       # parse the partial samplefile below
     except Exception:  # noqa: BLE001
         return 0.0, []
     dt = time.perf_counter() - t0
@@ -260,13 +267,19 @@ def main(argv=None):
             row["gpap_plain_sps"] = plain["samples_per_s"]
         if args.cmsgen:
             # single CMSGen run at n_time (fair samp/s); use a subset of its samples for coverage
+            # same per-instance wall budget as GPAP's --time-limit (default 60s)
             crate_t, cmodels = cmsgen_sample(path, args.cmsgen, args.n_time, args.scratch,
-                                             keep=args.n_cov or 1)
-            ratio = (g["samples_per_s"] / crate_t) if crate_t else float("inf")
-            ratio_e2e = ((g.get("sps_e2e_total") or 0) / crate_t) if crate_t else float("inf")
+                                             keep=args.n_cov or 1, timeout=args.time_limit)
+            # ratio: inf = GPAP-only, 0 = CMSGen-only, None = neither produced in the budget
+            gsps = g["samples_per_s"]
+            ratio = (gsps / crate_t) if crate_t else (float("inf") if gsps else None)
+            ratio_e2e = (((g.get("sps_e2e_total") or 0) / crate_t) if crate_t
+                         else (float("inf") if gsps else None))
             row.update(cms_sps=crate_t, ratio=ratio, ratio_e2e=ratio_e2e)
             ratios.append(ratio)
-            line += f"{crate_t:>9,.0f}{ratio:>8.2f}x{ratio_e2e:>7.2f}x"
+            rtxt = "—" if ratio is None else f"{ratio:.2f}x"
+            rtxt_e = "—" if ratio_e2e is None else f"{ratio_e2e:.2f}x"
+            line += f"{crate_t:>9,.0f}{rtxt:>9}{rtxt_e:>8}"
             if quality:
                 # CMSGen distinct fraction on the same subset — the papers' metric is UNIQUE
                 # solutions/s, so report the dedup factor for BOTH samplers, not just GPAP
@@ -285,12 +298,20 @@ def main(argv=None):
           f"timed sampling {sum(r['wall_timed_s'] for r in results):,.1f}s)")
     if ratios:
         import statistics as st
-        gm = st.geometric_mean([r for r in ratios if r and r > 0 and r != float("inf")])
+        # finite ratios only: instances where one side produced 0 (ratio 0/inf) can't enter a
+        # geomean — they are reported per-row and counted here instead
+        fin = [r for r in ratios if r and 0 < r != float("inf")]
+        gm = st.geometric_mean(fin) if fin else 0.0
         e2e_rs = [r["ratio_e2e"] for r in results
                   if r.get("ratio_e2e") and 0 < r["ratio_e2e"] != float("inf")]
         gm_e2e = st.geometric_mean(e2e_rs) if e2e_rs else 0.0
+        n_gpap_only = sum(1 for r in ratios if r == float("inf"))
+        n_cms_only = sum(1 for r in ratios if r == 0)
+        n_neither = sum(1 for r in ratios if r is None)
         print(f"geomean GPAP/CMSGen throughput = {gm:.2f}x steady-state, {gm_e2e:.2f}x "
-              f"end-to-end incl. setup+mining  (GPAP=GPU, CMSGen=single-core CPU)")
+              f"end-to-end incl. setup+mining, over {len(fin)} both-produced instances "
+              f"(+{n_gpap_only} GPAP-only, {n_cms_only} CMSGen-only, {n_neither} neither)  "
+              f"(GPAP=GPU, CMSGen=single-core CPU)")
         # quality: mean 2-wise coverage delta (only when the quality pass ran)
         dq = [r["twise_gpap"] - r["twise_cms"] for r in results
               if r.get("twise_cms") is not None and r.get("twise_gpap") is not None]
