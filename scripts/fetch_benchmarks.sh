@@ -20,7 +20,7 @@ for f in arbiter cavlc ctrl dec i2c int2float mem_ctrl priority router voter; do
 done
 
 echo "== HWMCC'17 single-property AIGs (300 instances, ~27 MB) -> $CACHE/hwmcc17"
-if [ ! -d hwmcc17 ] || [ "$(ls hwmcc17/*.aig 2>/dev/null | wc -l)" -lt 300 ]; then
+if [ ! -d hwmcc17 ] || [ "$(find hwmcc17 -maxdepth 1 -type f -name '*.aig' | wc -l)" -lt 300 ]; then
     curl -sf -o hwmcc17-single.tar.xz https://fmv.jku.at/hwmcc17/hwmcc17-single-benchmarks.tar.xz
     mkdir -p hwmcc17 && tar -xf hwmcc17-single.tar.xz -C hwmcc17
     # the tarball extracts flat *.aig; normalize if it created a subdir
