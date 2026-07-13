@@ -94,6 +94,14 @@ def main(argv=None):
     ap.add_argument("--pin-outputs", type=int, default=None,
                     help="outputs to pin for circuit inputs (default: all)")
     ap.add_argument("--seed", type=int, default=5, help="conversion + sampling seed")
+    ap.add_argument("--seeds", type=int, nargs="+", default=None,
+                    help="run the timed sampling at EACH of these seeds and report the "
+                         "median-throughput run per instance (docs/BENCHMARKING.md: single-seed "
+                         "rates are draw-noisy up to ±40%% on low-success instances). The "
+                         "conversion/target seed stays --seed so every run samples the SAME CNF; "
+                         "CMSGen still runs once (CDCL rates are not draw-noisy the way "
+                         "trajectory sampling is). Adds a ±%% spread column; per-seed raw "
+                         "numbers land in the JSON")
     ap.add_argument("--mine", choices=["auto", "on", "off"], default="auto",
                     help="entailed-clause mining: 'auto' (on, except ABC-encoded CNFs — their "
                          "backbone is already gone) | 'on' (force) | 'off'")
@@ -162,6 +170,8 @@ def main(argv=None):
           f"| cmsgen={'yes' if args.cmsgen else 'no'}{enc_note}\n{len(files)} benchmarks\n")
     hdr = (f"{'instance':<24}{'N':>6}{'M':>7}{'|sup|':>6}{'GPAP/s':>10}{'e2e/s':>10}"
            f"{'dec/s':>9}{'impl/s':>9}{'succ%':>6}{'sols':>10}{'t_slv':>7}{'t_tot':>7}")
+    if args.seeds:
+        hdr += f"{'±%':>5}"
     if has_circuits:
         hdr += f"{'t_enc':>7}"
     if quality:
@@ -205,11 +215,23 @@ def main(argv=None):
                 sim = sim_baseline(path, args.cycles, args.seed, pin_outputs=args.pin_outputs,
                                    target_mode=args.target)
             path = cnf
-        g = sample_file(path, device, simplify=args.simplify, els=args.els, n_time=args.n_time,
-                        n_cov=args.n_cov, b=args.b, k_cap=args.k_cap, verify_cpu=args.verify_cpu,
-                        configs=portfolio, max_chunks=args.max_chunks, seed=args.seed, mine=mine,
-                        uniformity=args.uniformity, time_limit=args.time_limit,
-                        use_kernel=use_kernel)
+        # --seeds: one full timed run per seed; the ROW is the median-throughput run (a real,
+        # self-consistent run — not a per-metric mix), the others land in the JSON as per_seed.
+        runs = []
+        for s in (args.seeds or [args.seed]):
+            r = sample_file(path, device, simplify=args.simplify, els=args.els,
+                            n_time=args.n_time, n_cov=args.n_cov, b=args.b,
+                            k_cap=args.k_cap, verify_cpu=args.verify_cpu,
+                            configs=portfolio, max_chunks=args.max_chunks, seed=s,
+                            mine=mine, uniformity=args.uniformity,
+                            time_limit=args.time_limit, use_kernel=use_kernel)
+            r["seed"] = s
+            runs.append(r)
+        runs.sort(key=lambda r: r["samples_per_s"])
+        g = runs[len(runs) // 2]
+        spread = None
+        if len(runs) > 1 and g["samples_per_s"]:
+            spread = (runs[-1]["samples_per_s"] - runs[0]["samples_per_s"]) / (2 * g["samples_per_s"])
         sup1 = g["sup1"]                       # metadata from the pipeline's single parse
         twg = two_wise_coverage(g["models"], sup1) if args.twise else None
         snd = "OK" if g["gpu_sound"] and (g["cpu_sound"] in (None, True)) else "BAD"
@@ -226,6 +248,13 @@ def main(argv=None):
                "decisions_per_s": g.get("decisions_per_s"),
                "implications_per_s": g.get("implications_per_s"), "mined": g.get("mined"),
                "phases": g.get("phases"), "config_breakdown": g.get("config_breakdown")}
+        if args.seeds:
+            row["median_seed"] = g["seed"]
+            row["sps_spread_frac"] = spread
+            row["per_seed"] = [{"seed": r["seed"], "sps": r["samples_per_s"],
+                                "sps_e2e": r.get("sps_e2e_total"), "succ": r["success_rate"],
+                                "n_models": r["n_models"], "wall_timed_s": r["wall_timed_s"]}
+                               for r in runs]
         dps = f"{g['decisions_per_s']:.1e}" if g.get("decisions_per_s") else "—"
         ips = f"{g['implications_per_s']:.1e}" if g.get("implications_per_s") else "—"
         mi = g.get("mined")
@@ -238,6 +267,8 @@ def main(argv=None):
                 f"{g['samples_per_s']:>10,.0f}{g.get('sps_e2e_total') or 0:>10,.0f}{dps:>9}{ips:>9}"
                 f"{100*g['success_rate']:>5.0f}%{mn}{sols_s:>9}"
                 f"{g['wall_timed_s']:>6.1f}s{g['wall_total_s']:>6.1f}s")
+        if args.seeds:
+            line += f"{100 * spread:>4.0f}%" if spread is not None else f"{'—':>5}"
         if has_circuits:
             line += f"{encode_s:>6.1f}s" if encode_s is not None else f"{'—':>7}"
         if quality:

@@ -257,6 +257,34 @@ construction).
   QuickSampler (needs z3 build; CPU tool). Portability quirks that bit are documented in the
   two eval/ harness docstrings.
 
+**Recurrent-CircuitSAT-Sampler (MLCAD'25, arXiv 2502.21226 — the gradient family's SEQUENTIAL
+member, i.e. the closest rival to our headline domain), run on OUR hardware (2026-07-13,
+.experiments/rivals_recurrent_{table,rare}.json, eval/rivals_recurrent.py): the STRONGEST rival
+yet — competitive on its own easy targets, 100–320,000× behind at rare ones.**
+- Protocol replicated exactly from their run.py: per-FILENAME target table pinning 1–2 output
+  bits, reset-0 registers, unique solutions POOLED over all unroll depths start_point..T, and
+  model_runtime that excludes both model build and their solution re-check pass — all three
+  generous to them. GPAP samples the identical pins at fixed T=25, median of 3 seeds.
+- **On THEIR targets they are the first rival to win instances**: s386 806k vs 110k u/s (0.1×),
+  s832 (0.2×), b10 (0.4×), b03 a near-tie (0.9×); GPAP keeps 1.3–5.8× on
+  b04/b11/b12/b13/s1196. Two caveats measured, not asserted: (a) their table pins are
+  rejection-easy — p_accept 0.03…1.0, b13's pin literally always-true, b12 at 0.97 — so CPU
+  rejection dominates BOTH GPU samplers on those instances; (b) the depth-pooled unique count
+  SATURATES on easy pins (s386: the full 300k batch is unique-and-valid at every depth ⇒ the
+  6.4M "uniques" are ~21 pooled universes; the depth-T-only column is 300k = batch).
+- **At rare fixed-T targets** (the MITER-cone injection; same .bench files): GPAP 102×
+  (b04, p=1.5e-3) up to 320,629× (s1196, p=1.5e-6); b13 213×, s386 666×, b12 12,675×, b10 4×;
+  s832 GPAP-only (they find 0, we hold ~460 u/s at <1% success); b11 hard-for-BOTH (p=5.3e-6 —
+  they 1 pooled solution, we 0% success; the honest open instance); b03 an honest TIE (1.0×)
+  because a 4-output circuit HAS no rare pattern (rarest observed p=0.033).
+- Integration facts (harness docstring): Moore-pipeline circuits crash their backward() until
+  start_point ≥ the input→output register distance (the harness probes it); batch must respect
+  gates×T×batch×4B of autograd state (WSL2 throws 'device not ready' one rung above what fits —
+  the harness steps down a batch ladder).
+- Paper positioning: the gradient family's best sequential tool is genuinely fast on easy pins —
+  the ranking then INVERTS by 2–5 orders of magnitude the moment targets get rare. Same story as
+  HTS/DEMOTIC, now confirmed against the family's strongest member on its home turf.
+
 **New circuit families (2026-07-12): EPFL + HWMCC'17 + big ITC'99
 (benchmarks/circuits/README.md for provenance/licenses; scripts/fetch_benchmarks.sh for full
 sets).** HWMCC'17: of the 231 single-property AIGs ≤30k ANDs, only 7 have a property output
@@ -306,6 +334,12 @@ both directions with identical walls. On low-success instances, 8-chunk portfoli
 ±40% noise; a "consistent 0.81×" can be pure draw luck. Arbiter = multi-seed (5+) fixed-config
 shootout comparing MEDIANS, or deterministic same-seed single-config A/B where model COUNTS
 must match bit-identically; mine-first if the compared row mined (like-for-like formulas only).
+`gpap bench --seeds 5 6 7` (2026-07-13) bakes the protocol into the driver: the row is the
+median-throughput run, the ±% column is the half-spread, per-seed raws land in the JSON.
+Measured on the headline tables (.experiments/{circuits,epfl}_rare_3seed.json): steady
+instances sit at ±1–7%; the noisy ones are exactly the sub-second walls (EPFL cavlc ±69%,
+i2c ±56%, adder ±51%) — draw noise is a short-run artifact, so medians (or longer --n-time)
+are mandatory only there. All previous single-seed headline numbers reproduced within spread.
 
 **Benchmark GPU work against the solver's OWN in-C operation** (e.g. CaDiCaL's process()/probe),
 never a naive pysat re-implementation — the latter inflated a GPU "speedup" 50–100×. Validate
