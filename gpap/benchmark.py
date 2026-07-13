@@ -141,9 +141,8 @@ def main(argv=None):
                          "success barely drops; B>=16 over-constrains and collapses success)")
     ap.add_argument("--k-cap", type=int, default=49152)
     ap.add_argument("--use-kernel", choices=["auto", "off"], default="auto",
-                    help="fused Triton BCP kernels: 'auto' (default — per-formula dispatch picks "
-                         "packed 16|16, wide 8|24 or the unpacked fallback) | 'off' (PyTorch "
-                         "oracle path; the A/B baseline)")
+                    help="DEPRECATED no-op (the engine is packed-kernel-only; 'off' no longer "
+                         "exists) — kept so older drivers/notebooks don't break")
     ap.add_argument("--no-simplify", dest="simplify", action="store_false", default=True)
     ap.add_argument("--els", action="store_true",
                     help="also do equivalent-literal substitution (removes vars: faster propagate + "
@@ -161,7 +160,9 @@ def main(argv=None):
         args.n_cov = 2000                          # 2-wise needs the collected quality sample
     quality = args.n_cov > 0
     mine = {"auto": "auto", "on": True, "off": False}[args.mine]
-    use_kernel = False if args.use_kernel == "off" else args.use_kernel
+    if args.use_kernel == "off":
+        print("[warn] --use-kernel off is retired (packed-kernel-only engine); ignoring",
+              file=sys.stderr)
     show_unif = args.uniformity != "off"          # gates the unif column
     has_circuits = any(f.endswith(CIRCUIT_EXTS) for f in files)
     enc_note = f" | encoder={args.encoder}/{args.abc_opt} cycles={args.cycles}" if has_circuits else ""
@@ -224,7 +225,7 @@ def main(argv=None):
                             k_cap=args.k_cap, verify_cpu=args.verify_cpu,
                             configs=portfolio, max_chunks=args.max_chunks, seed=s,
                             mine=mine, uniformity=args.uniformity,
-                            time_limit=args.time_limit, use_kernel=use_kernel)
+                            time_limit=args.time_limit)
             r["seed"] = s
             runs.append(r)
         runs.sort(key=lambda r: r["samples_per_s"])

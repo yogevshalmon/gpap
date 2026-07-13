@@ -18,26 +18,27 @@ import torch
 
 from gpap.sampling.sampler import GPUSampler, parse_independent_support
 
+# Every config now runs the fused packed trajectory kernel at the boosted K_fused (the engine
+# is packed-kernel-only since 2026-07-13); a config is (random_var, B, lookahead) with
+# lookahead in {False, "soft"} — "soft" = the in-kernel ε-greedy risk-polarity.
+#
 # CIRCUIT portfolio (the default for circuit-unroll evaluation). Measured per-config on 22+
 # circuit instances (RTX 4080, 2026-07-02..04); each entry is the outright winner somewhere,
 # the adaptive bandit picks per instance:
-#   (True, 8, "fused")  — fused-trajectory kernel at boosted K_fused: broad deep-circuit winner.
-#   (True, 1, "fused")  — B=1's success edge is free in-kernel: wins the conflict-heavy deep set.
-#   (True, 8, "fsoft")  — in-kernel ε-greedy soft risk-polarity: wins the tight-cascade family.
-# (True, 64, "orac") — high-B on the PYTHON engine — was REMOVED 2026-07-06: measured 0/64 wins
-# on the full circuits dir while its cold-start chunks cost ~67s across the suite; its old niche
-# (ultra-shallow wide, b14 T=1) is now >3x behind the boosted-K fused configs. Re-audition on
-# hardware that shifts the balance (e.g. A100 large-K PyTorch batching) — the "orac" lookahead
-# mode itself remains fully supported.
-CIRCUIT_PORTFOLIO = [(True, 8, "fused"), (True, 1, "fused"), (True, 8, "fsoft")]
+#   (True, 8, False)  — broad deep-circuit winner.
+#   (True, 1, False)  — B=1's success edge is free in-kernel: wins the conflict-heavy deep set.
+#   (True, 8, "soft") — soft risk-polarity: wins the tight-cascade family.
+# ("orac" — high-B on the retired PYTHON engine — was removed 2026-07-06 after 0/64 wins, and
+# the engine path it needed was deleted 2026-07-13.)
+CIRCUIT_PORTFOLIO = [(True, 8, False), (True, 1, False), (True, 8, "soft")]
 
 # Default portfolio for projected sampling (the sk_ / CMSGen-comparison story):
-#   (True, 8, False)   — the classic niche config (BCP-determined support; fast tensor path).
-#   (True, 1, "fused") — v2 fused-trajectory kernel at boosted K_fused: the sk_ winner
-#                        (B=1's success edge is free in-kernel). Degrades to (True,1) if the
-#                        kernel is unavailable.
+#   (True, 8, False)   — the classic niche config (BCP-determined support).
+#   (True, 1, False)   — the sk_ winner (B=1's success edge is free in-kernel).
 #   (False, 1, False)  — structured/index order for the search-heavy "service" family.
-DEFAULT_PORTFOLIO = [(True, 8, False), (True, 1, "fused"), (False, 1, False)]
+# NOTE 2026-07-13: the (True,8) and (False,1) entries used to run the retired PyTorch v1 path;
+# they now run in-kernel — sk_-suite numbers published before this date predate that switch.
+DEFAULT_PORTFOLIO = [(True, 8, False), (True, 1, False), (False, 1, False)]
 
 
 def _uniformity_readout(smp, clauses, sup1, rate, config, max_rounds, mode="fast", target=2000):
@@ -121,7 +122,7 @@ def sample_clauses(nv, clauses, support, device, *, simplify=True, els=False, n_
                    n_cov=0, out_cap=0, uniformity="off", n_uni=2000, b=8, k_cap=49152,
                    max_chunks=None, time_limit=60.0, cov_chunks=4, max_rounds=300,
                    lookahead=False, verify_clauses=None, verify_cpu=False, cov_k_cap=2048,
-                   random_var="auto", configs="default", use_kernel="auto", mine="auto",
+                   random_var="auto", configs="default", mine="auto",
                    mine_gate=0.15, min_measure_chunks=3, seed=5,
                    _t_start=None, _phases=None, _wire_map=None):
     """Throughput run timed end-to-end (construction + simplify + sample, to match CMSGen's
@@ -151,17 +152,15 @@ def sample_clauses(nv, clauses, support, device, *, simplify=True, els=False, n_
         # skewed by one-time warmup — this is what inflated the first shallow circuit's number.
         # Returns the probe chunk's stats (a FREE gate signal for mining) and restores the RNG
         # so the timed run stays deterministic.
-        # FULL round budget + one chunk per FUSED-FAMILY config: with the old min(10, max_rounds)
-        # cap NO deep-circuit trajectory could complete in the warmup, so success_rate read 0% on
-        # every c25 unroll; and measuring only configs[0] (fused B=8) misreads instances whose
+        # FULL round budget + one chunk per config: with the old min(10, max_rounds) cap NO
+        # deep-circuit trajectory could complete in the warmup, so success_rate read 0% on
+        # every c25 unroll; and measuring only configs[0] (B=8) misreads instances whose
         # success lives in another config (b03 T=25: B=8 4.5%, B=1 99%). Either way the miner's
-        # "stuck" gate fired suite-wide and burned the full L2/L3 budget everywhere (77.6s of the
-        # c25 set's 99s overhead). Fused/fsoft chunks are in-kernel — cheap at any round budget —
-        # while an orac chunk can cost seconds even at K=1024 (measured 2.5s on b10 T=25), so the
-        # slow configs keep paying their own cold-start in the timed run exactly as before.
+        # "stuck" gate fired suite-wide and burned the full L2/L3 budget everywhere (77.6s of
+        # the c25 set's 99s overhead). Every config is now an in-kernel chunk — cheap at any
+        # round budget at the warmup's K<=1024.
         # Returns "best_success" = the best warmed config's completion rate — THE stuck signal.
-        cw = [c for c in (configs or []) if len(c) > 2 and c[2] in ("fused", "fsoft")]
-        cw = cw or (configs[:1] if configs else None)
+        cw = list(configs) if configs else None
         _k = s.K
         s.K = min(s.K, 1024)
         w = s.sample(1, configs=cw, decisions_per_round=b, random_var=random_var,
@@ -178,7 +177,7 @@ def sample_clauses(nv, clauses, support, device, *, simplify=True, els=False, n_
 
     _tc = time.perf_counter()
     smp = GPUSampler.from_clauses(nv, clauses, device, simplify=simplify, els=els,
-                                  support=support, k_cap=k_cap, seed=seed, use_kernel=use_kernel)
+                                  support=support, k_cap=k_cap, seed=seed)
     phases["construct"] = time.perf_counter() - _tc
     mine_info = None
     if device.type == "cuda":
@@ -218,7 +217,7 @@ def sample_clauses(nv, clauses, support, device, *, simplify=True, els=False, n_
                     _tm = time.perf_counter()
                     smp = GPUSampler.from_clauses(
                         nv, clauses + learned, device, simplify=simplify, els=els,
-                        support=support, k_cap=k_cap, seed=seed, use_kernel=use_kernel)
+                        support=support, k_cap=k_cap, seed=seed)
                     phases["rebuild"] = time.perf_counter() - _tm
                     _tm = time.perf_counter()
                     stuck = _warmup(smp)["best_success"] < mine_gate   # post-units stuck signal
@@ -234,8 +233,7 @@ def sample_clauses(nv, clauses, support, device, *, simplify=True, els=False, n_
                         _tm = time.perf_counter()
                         smp = GPUSampler.from_clauses(
                             nv, clauses + learned, device, simplify=simplify,
-                            els=els, support=support, k_cap=k_cap, seed=seed,
-                            use_kernel=use_kernel)
+                            els=els, support=support, k_cap=k_cap, seed=seed)
                         phases["rebuild"] = (phases.get("rebuild", 0.0)
                                              + time.perf_counter() - _tm)
                     for k2 in ("n_units", "n_binary", "n_ternary", "seconds"):

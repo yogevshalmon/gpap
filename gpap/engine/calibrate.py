@@ -13,34 +13,23 @@ def formula_mem_bytes(M: int, N: int) -> int:
 
 def per_batch_mem_bytes(M: int, N: int, max_clause_size: int = 127,
                         total_lits: int | None = None) -> int:
-    """GPU bytes per batch slot in BCPEngine, including peak intermediate allocations.
+    """GPU bytes per batch slot — the CONSERVATIVE analytic K bound.
 
-    Three phases contribute to peak memory — we take the max across sequential phases:
+    HISTORY: this model was derived and empirically calibrated (goldb/sat24) on the retired
+    PyTorch propagate path, whose scatter temporaries dominated the peak. The packed-kernel
+    engine's true footprint is far smaller (~4*M packed word + 2*N assignment + ~4*N trail,
+    no per-round temporaries), so this bound now over-reserves — DELIBERATELY kept unchanged:
+    every produced K was validated spill-safe under the nvidia-smi kill-switch with THESE
+    numbers, and any tightening must be re-validated the same way (this box spills to host
+    RAM instead of OOMing, so an optimistic model silently halves throughput). The fused-K
+    boost that recovers the headroom lives in GPUSampler.__init__ (K_fused), already
+    kill-switch-validated.
 
-    1. Static tensors (always alive):
-         sat_count (K,M): sat_b B/element  (auto-selected from max_clause_size)
-         lit_sum   (K,M): int32 → 4 B/element
-         assignment(K,2N): int8 → 1 B/element
-         Subtotal: (sat_b + 4)*M + 2*N
-
-    2. apply_assumptions_bulk peak: +8N per batch
-         4 simultaneous K×2N bool tensors (assum_mat, assum_neg, bool view, &-result).
-
-    3. _bulk_propagate_lits peak (DOMINANT for dense/small-N formulas): +1000*total_lits//N
-         7 int64 + 2 int32 temporary tensors, all of size `total` per propagation round.
-         total ≈ K × P × avg_occ_length, P ≈ 10 propagations/batch/round,
-         avg_occ_length = total_lits / N.
-         Empirical calibration (goldb, peak_prop measured): 570 bytes per avg_occ_length
-         unit; coefficient 1000 adds ~75% safety margin for dense/high-M/N formulas.
-
-    BCPEngine auto-selects sat_count dtype:
-      max_clause_size ≤ 127  → int8  (sat_b = 1)
-      max_clause_size ≤ 32767 → int16 (sat_b = 2)
-      else                   → int32 (sat_b = 4)
-
-    Dominant phase:
-      apply-peak (8N) dominates when N² > 90*total_lits (sparse/large-N formulas, e.g. goldb)
-      prop-peak  dominates when N² < 90*total_lits (dense/small-N formulas, e.g. sat24)
+    Model (historical derivation):
+      static           (sat_b + 4)*M + 2*N
+      apply peak       8*N   (four K×2N bool temporaries)
+      propagate peak   1000*total_lits//N   (scatter temporaries, empirical 570 B/unit + margin)
+      sat_b: 1 if max_clause_size ≤ 127, 2 if ≤ 32767, else 4.
 
     Formula: (sat_b + 4)*M + 2*N + max(8*N, 1000*total_lits//N) + 3
     """

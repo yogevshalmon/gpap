@@ -1,13 +1,15 @@
 """CNF formula representation for the GPAP engine: literal indexing, CSR occurrence lists,
-and the per-clause counters (clause_sizes / init_lit_sum) the sum-trick BCP engine consumes.
+and the per-clause counters (clause_sizes / init_lit_xor) the packed XOR-trick BCP consumes.
 
 Literal indexing (the 2N scheme):
   positive literal  v -> index 2*(v-1)
   negative literal -v -> index 2*(v-1) + 1
   negation: lit_index ^ 1
-"""
-import os
 
+The remaining-literal trick is XOR (not SUM): a clause tracks the XOR of its non-falsified
+literal indices; when exactly one literal survives, the XOR IS that literal. XOR never
+overflows, so the counters are exact at any formula size the packed word can index.
+"""
 import torch
 import numpy as np
 from itertools import chain
@@ -21,13 +23,14 @@ ext_assumptions = list[ext_assg]   # multiple assumption sets
 
 def flat_lit_arrays(clauses: list) -> tuple:
     """(lens, lit_idx, cls_idx) int64 numpy arrays for a clause list — the shared vectorised
-    path for CSR-occ / clause-size / lit-sum construction. The per-literal Python loops this
+    path for CSR-occ / clause-size / lit-xor construction. The per-literal Python loops this
     replaces cost seconds per call on 1M-clause circuit unrolls (and construction runs several
     times per instance: sampler, miner prober, post-mining rebuild)."""
     M = len(clauses)
     lens = np.fromiter(map(len, clauses), dtype=np.int64, count=M)
-    if M and lens.sum():
-        flat = np.array(list(chain.from_iterable(clauses)), dtype=np.int64)
+    total = int(lens.sum()) if M else 0
+    if total:
+        flat = np.fromiter(chain.from_iterable(clauses), dtype=np.int64, count=total)
     else:
         flat = np.empty(0, dtype=np.int64)
     lit_idx = 2 * (np.abs(flat) - 1) + (flat < 0)      # ext_lit_to_lit_index, vectorised
@@ -63,7 +66,8 @@ def lit_index_negation(lit_index: int) -> int:
 
 
 class OccurrenceList:
-    """GPU-resident occurrence lists for all 2*N literals in CSR format.
+    """GPU-resident occurrence lists for all 2*N literals in CSR format, int32 throughout
+    (what the Triton kernels consume directly — no per-engine int64->int32 copies).
 
     For each literal l, occ[l] stores the clause indices where ~l (the negation) appears.
     This way, when literal l is set TRUE, occ[l] gives us the clauses where ~l is falsified.
@@ -97,20 +101,21 @@ class OccurrenceList:
         occ._num_clauses = num_clauses
         num_lits = 2 * num_vars
         if len(neg_lit_idx) == 0:
-            occ._occ_offsets = torch.zeros(num_lits + 1, dtype=torch.int64, device=device)
-            occ._occ_clauses = torch.empty(0, dtype=torch.int64, device=device)
+            occ._occ_offsets = torch.zeros(num_lits + 1, dtype=torch.int32, device=device)
+            occ._occ_clauses = torch.empty(0, dtype=torch.int32, device=device)
             return occ
         order = np.argsort(neg_lit_idx, kind="stable")
         offsets = np.zeros(num_lits + 1, dtype=np.int64)
         np.cumsum(np.bincount(neg_lit_idx, minlength=num_lits), out=offsets[1:])
-        occ._occ_offsets = torch.from_numpy(offsets).to(device)
-        occ._occ_clauses = torch.from_numpy(cls_idx[order]).to(device)
+        occ._occ_offsets = torch.from_numpy(offsets.astype(np.int32)).to(device)
+        occ._occ_clauses = torch.from_numpy(cls_idx[order].astype(np.int32)).to(device)
         return occ
 
     def get_clause_indices(self, lit_index: int) -> torch.Tensor:
-        """Return clause indices for a single literal (clauses where ~lit appears)."""
-        start = self._occ_offsets[lit_index].item()
-        end = self._occ_offsets[lit_index + 1].item()
+        """Clause indices for one literal (clauses where ~lit appears). Debug/test helper —
+        syncs twice; never call on a hot path."""
+        start = int(self._occ_offsets[lit_index].item())
+        end = int(self._occ_offsets[lit_index + 1].item())
         return self._occ_clauses[start:end]
 
     @property
@@ -127,21 +132,30 @@ class OccurrenceList:
 
 
 class CnfFormula:
-    """CNF formula representation with occurrence lists and per-clause lit_sum.
+    """CNF formula representation with occurrence lists and per-clause XOR of literal indices.
 
     No clause->literal structure is stored. Instead we maintain:
-    - Occurrence lists (CSR): for each literal l, clauses where ~l appears
+    - Occurrence lists (CSR, int32): for each literal l, clauses where ~l appears
     - clause_sizes: number of literals per clause
-    - init_lit_sum: initial sum of literal indices per clause (for the sum trick)
+    - init_lit_xor: initial XOR of literal indices per clause (the remaining-literal trick)
+
+    An EMPTY clause makes the formula trivially UNSAT; it cannot be represented in the
+    counters, so it is dropped from the structures and recorded in `has_empty_clause`
+    (the engine turns that flag into an all-rows conflict).
     """
 
     def __init__(self, device: torch.device):
         self._device = device
         self._occ_list: OccurrenceList = None
         self._clause_sizes: torch.Tensor = None   # (M,) int32
-        self._init_lit_sum: torch.Tensor = None    # (M,) int32
+        self._init_lit_xor: torch.Tensor = None   # (M,) int32
         self._num_vars = 0
         self._num_clauses = 0
+        self._has_empty_clause = False
+
+    @property
+    def device(self) -> torch.device:
+        return self._device
 
     @property
     def num_vars(self) -> int:
@@ -160,63 +174,75 @@ class CnfFormula:
         return self._clause_sizes
 
     @property
-    def init_lit_sum(self) -> torch.Tensor:
-        return self._init_lit_sum
+    def init_lit_xor(self) -> torch.Tensor:
+        return self._init_lit_xor
+
+    @property
+    def has_empty_clause(self) -> bool:
+        """True iff the input contained an empty clause (formula trivially UNSAT)."""
+        return self._has_empty_clause
 
     def init_formula(self, num_vars: int, clauses: list[ext_cls]):
         """Initialize from a list of clauses (external literal format). Vectorised: one shared
-        flatten (flat_lit_arrays) feeds the occ CSR, clause_sizes and init_lit_sum — the old
+        flatten (flat_lit_arrays) feeds the occ CSR, clause_sizes and init_lit_xor — the old
         per-literal Python loops cost seconds per build on 1M-clause circuit unrolls, and
         construction runs several times per instance (sampler, miner prober, post-mining
         rebuild)."""
+        self._has_empty_clause = any(len(c) == 0 for c in clauses)
+        if self._has_empty_clause:
+            clauses = [c for c in clauses if c]
         self._num_vars = num_vars
         self._num_clauses = len(clauses)
 
         lens, lit_idx, cls_idx = flat_lit_arrays(clauses)
         self._occ_list = OccurrenceList.from_flat(num_vars, len(clauses), lit_idx ^ 1, cls_idx,
                                                   self._device)
-        # per-clause sum of literal indices (bincount weights are float64 — exact below 2^53)
-        if len(clauses):
-            lit_sums = np.bincount(cls_idx, weights=lit_idx,
-                                   minlength=len(clauses)).astype(np.int32)
+        # per-clause XOR of literal indices (exact at any size — XOR never overflows)
+        M = len(clauses)
+        if M:
+            bounds = np.zeros(M, dtype=np.int64)
+            np.cumsum(lens[:-1], out=bounds[1:])
+            xors = np.bitwise_xor.reduceat(lit_idx, bounds).astype(np.int32)
         else:
-            lit_sums = np.zeros(0, dtype=np.int32)
+            xors = np.zeros(0, dtype=np.int32)
         self._clause_sizes = torch.from_numpy(lens.astype(np.int32)).to(self._device)
-        self._init_lit_sum = torch.from_numpy(lit_sums).to(self._device)
+        self._init_lit_xor = torch.from_numpy(xors).to(self._device)
 
     def parse_cnf_file(self, cnf_file: str):
-        """Parse a DIMACS CNF file and build the formula."""
-        from tqdm import tqdm
+        """Parse a DIMACS CNF file and build the formula.
 
-        max_var_num = 0
-        clauses = []
-
-        with open(cnf_file) as file:
-            lines = [line.rstrip() for line in file]
-
-        # quiet the bar for piped/background runs (GPAP_QUIET=1 or non-tty stdout); show interactively
-        _quiet = bool(os.environ.get("GPAP_QUIET")) or not os.isatty(1)
-        for line in tqdm(lines, desc="Parsing CNF", disable=_quiet):
-            if len(line) == 0 or line.isspace():
-                continue
-            if line.startswith('c'):
-                continue
-            if line.startswith('p'):
-                continue
-            clause = []
-            try:
-                lits = line.split()
-                for lit_str in lits:
-                    lit_int = int(lit_str)
-                    max_var_num = max(abs(lit_int), max_var_num)
-                    if lit_int != 0:
-                        clause.append(lit_int)
-            except Exception:
-                raise Exception("Error parsing line", line)
-            if clause:
-                clauses.append(clause)
-
-        self.init_formula(max_var_num, clauses)
+        Token-stream parsing (clauses are 0-terminated, NOT line-based): multiple clauses on
+        one line and clauses spanning lines are handled per the DIMACS standard, as is the
+        SATLIB '%' end marker. N = max(header N, highest variable used) so trailing declared
+        variables (e.g. support vars appearing only in `c ind` lines) keep their slots."""
+        header_n = 0
+        body: list[str] = []
+        with open(cnf_file) as f:
+            for line in f:
+                s = line.strip()
+                if not s or s[0] == "c":
+                    continue
+                if s[0] == "%":                # SATLIB end marker: rest of file is padding
+                    break
+                if s[0] == "p":
+                    parts = s.split()
+                    if len(parts) >= 3 and parts[2].lstrip("-").isdigit():
+                        header_n = int(parts[2])
+                    continue
+                body.append(s)
+        try:
+            arr = np.array(" ".join(body).split(), dtype=np.int64) if body \
+                else np.empty(0, dtype=np.int64)
+        except ValueError as e:
+            raise ValueError(f"non-integer token in DIMACS clause body of {cnf_file}: {e}")
+        ends = np.nonzero(arr == 0)[0]
+        starts = np.concatenate([[0], ends[:-1] + 1]) if len(ends) else np.empty(0, np.int64)
+        clauses = [arr[a:b].tolist() for a, b in zip(starts, ends)]
+        if len(arr) and (len(ends) == 0 or ends[-1] != len(arr) - 1):
+            tail = arr[(ends[-1] + 1) if len(ends) else 0:]        # unterminated final clause
+            clauses.append(tail.tolist())
+        max_var = int(np.abs(arr).max()) if len(arr) else 0
+        self.init_formula(max(header_n, max_var), clauses)
 
     def print_stats(self):
         print(f"Variables: {self._num_vars}")

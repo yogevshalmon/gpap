@@ -1,155 +1,190 @@
+"""Unit tests for the packed kernel engine (BCPEngine): fixpoint semantics, the flush cache,
+counters and edge cases. Semantic ground truth = the pure-Python reference (reference_bcp.py);
+scenario-level expectations are spelled out per test. CUDA-only (the engine has no CPU path).
+"""
 import os
-import torch
-import pytest
 
-from gpap.engine.formula import CnfFormula
-from gpap.engine.formula import ext_lit_to_lit_index
+import pytest
+import torch
+
+from gpap.engine.formula import CnfFormula, ext_lit_to_lit_index
 from gpap.engine.bcp_engine import BCPEngine, make_assumption_tensor
+from gpap.engine.kernels import kernel_available
+
+from tests.reference_bcp import ref_bcp, assigned_set
 
 TEST_DATA_DIR = os.path.join(os.path.dirname(__file__), "test_data")
+AVAIL = torch.cuda.is_available() and kernel_available()
+pytestmark = pytest.mark.skipif(not AVAIL, reason="requires CUDA + a working triton")
+DEV = torch.device("cuda") if torch.cuda.is_available() else torch.device("cpu")
+
+
+def _engine(clauses, num_vars, K):
+    formula = CnfFormula(DEV)
+    formula.init_formula(num_vars, clauses)
+    engine = BCPEngine(formula)
+    engine.reset(K)
+    return engine
+
+
+def _assum(list_of_lists):
+    return make_assumption_tensor(list_of_lists, DEV)
 
 
 class TestBCPEngine:
-    def _make_engine(self, clauses, num_vars, num_batches):
-        device = torch.device("cpu")
-        formula = CnfFormula(device)
-        formula.init_formula(num_vars, clauses)
-        engine = BCPEngine(formula)
-        engine.init_state(num_batches=num_batches)
-        return engine
-
-    def _assum(self, list_of_lists):
-        return make_assumption_tensor(list_of_lists, torch.device("cpu"))
-
-    def test_init_state(self):
-        engine = self._make_engine([[1, 2], [-1, 3]], num_vars=3, num_batches=2)
-        assert engine.sat_count.shape == (2, 2)
-        assert engine.sat_count[0].tolist() == [2, 2]
+    def test_reset_state(self):
+        engine = _engine([[1, 2], [-1, 3]], num_vars=3, K=2)
+        sat = engine.sat_rows(torch.arange(2, device=DEV))
+        assert sat.shape == (2, 2)
+        assert sat[0].tolist() == [2, 2]
         assert engine.assignment.shape == (2, 6)
         assert (engine.assignment == 0).all()
+        assert engine.active.all() and not engine.conflict.any()
 
     def test_apply_assumption_no_conflict(self):
-        # (x1 OR x2), (~x1 OR x3)
-        engine = self._make_engine([[1, 2], [-1, 3]], num_vars=3, num_batches=1)
+        # (x1 OR x2), (~x1 OR x3): x1=T falsifies ~x1 in clause 1 -> unit -> x3 forced
+        engine = _engine([[1, 2], [-1, 3]], num_vars=3, K=1)
+        engine.apply_and_propagate(_assum([[ext_lit_to_lit_index(1)]]))
+        sat = engine.sat_rows(torch.tensor([0], device=DEV))[0]
+        assert sat[0].item() == 2      # clause 0 untouched (no ~x1/~x3 in it... no falsification)
+        assert sat[1].item() == 1      # clause 1 lost ~x1; survivor x3 was forced TRUE
+        assert not engine.conflict[0].item()
+        assert engine.assignment[0, ext_lit_to_lit_index(3)].item() == 1
 
-        # assume x1=TRUE (lit_idx=0)
-        engine.apply_assumptions_bulk(self._assum([[ext_lit_to_lit_index(1)]]))
+    def test_unit_clauses_flushed_at_reset(self):
+        # the formula's own unit (x3) is asserted by the construction-time flush cache
+        engine = _engine([[3], [-3, 2], [1, -2]], num_vars=3, K=2)
+        assert engine.assignment[0, ext_lit_to_lit_index(3)].item() == 1
+        assert engine.assignment[0, ext_lit_to_lit_index(2)].item() == 1   # implied by (-3, 2)
+        assert engine.assignment[1, ext_lit_to_lit_index(1)].item() == 1   # implied by (1, -2)
+        assert not engine.conflict.any()
 
-        # x1 TRUE -> ~x1 falsified -> clause 1 (~x1 OR x3) loses one lit
-        # sat_count[0,0] should still be 2 (x1 is in clause 0 but occ[0] = clauses with ~x1 = clause 1)
-        # Actually: occ[0] (lit idx 0, pos x1) = clauses containing ~x1 = clause 1
-        # so sat_count[0,1] -= 1 => was 2, now 1
-        assert engine.sat_count[0, 0].item() == 2  # clause 0 not affected
-        assert engine.sat_count[0, 1].item() == 1  # clause 1 lost ~x1
-        assert engine.conflict[0].item() == False
+    def test_contradicting_units_conflict_at_construction(self):
+        engine = _engine([[1], [-1]], num_vars=1, K=4)
+        assert engine.flush_conflict
+        assert engine.conflict.all() and not engine.active.any()
 
-    def test_apply_assumption_conflict(self):
-        # (x1), (~x1)
-        engine = self._make_engine([[1], [-1]], num_vars=1, num_batches=1)
-
-        # assume x1=TRUE: clause 1 (~x1) becomes conflict (sat_count -> 0)
-        engine.apply_assumptions_bulk(self._assum([[ext_lit_to_lit_index(1)]]))
-
-        # after assumption: sat_count[0,1] should be 0 (conflict)
-        assert engine.sat_count[0, 1].item() == 0
+    def test_empty_clause_is_unsat(self):
+        engine = _engine([[1, 2], []], num_vars=2, K=2)
+        assert engine.flush_conflict and engine.conflict.all()
 
     def test_bcp_unit_propagation(self):
         # (~x1 OR x2), (~x2 OR x3) — chain: x1=T -> x2=T -> x3=T
-        engine = self._make_engine([[-1, 2], [-2, 3]], num_vars=3, num_batches=1)
-
-        # assume x1=TRUE
-        engine.apply_assumptions_bulk(self._assum([[ext_lit_to_lit_index(1)]]))
-
-        # after assumption: clause 0 has ~x1 falsified -> sat_count=1, lit_sum=x2(idx=2)
-        assert engine.sat_count[0, 0].item() == 1
-
-        conflict = engine.propagate()
-        assert conflict[0].item() == False
-
-        # x2 should be propagated TRUE (lit idx 2)
-        assert engine.assignment[0, 2].item() == 1
-        # x3 should be propagated TRUE (lit idx 4)
-        assert engine.assignment[0, 4].item() == 1
-        assert engine.num_propagated[0].item() == 2
+        engine = _engine([[-1, 2], [-2, 3]], num_vars=3, K=1)
+        engine.apply_and_propagate(_assum([[ext_lit_to_lit_index(1)]]))
+        assert not engine.conflict[0].item()
+        assert engine.assignment[0, 2].item() == 1     # x2 TRUE
+        assert engine.assignment[0, 4].item() == 1     # x3 TRUE
+        assert engine.num_propagated[0].item() == 2    # implications only (not the decision)
 
     def test_bcp_conflict_detection(self):
-        # (x1 OR x2), (~x1), (~x2)
-        # assume x1=F -> clause 0 loses x1, clause 1 satisfied
-        # then x2 is forced TRUE by clause 0 -> but clause 2 (~x2) conflicts
-        engine = self._make_engine([[1, 2], [-1], [-2]], num_vars=2, num_batches=1)
-
-        # assume x1=FALSE (lit_idx=1, ~x1 TRUE)
-        engine.apply_assumptions_bulk(self._assum([[ext_lit_to_lit_index(-1)]]))
-
-        conflict = engine.propagate()
-        assert conflict[0].item() == True
+        # (x1 OR x2), (~x1), (~x2): units force x1=F,x2=F -> clause 0 empties at the FLUSH
+        engine = _engine([[1, 2], [-1], [-2]], num_vars=2, K=1)
+        assert engine.flush_conflict and engine.conflict[0].item()
 
     def test_multiple_batches(self):
-        # (x1 OR x2), (~x1 OR x2)
-        engine = self._make_engine([[1, 2], [-1, 2]], num_vars=2, num_batches=2)
-
-        # batch 0: x2=TRUE, batch 1: x2=FALSE
-        engine.apply_assumptions_bulk(self._assum([
-            [ext_lit_to_lit_index(2)],   # x2=TRUE
-            [ext_lit_to_lit_index(-2)],  # x2=FALSE
+        # (x1 OR x2), (~x1 OR x2): batch 0 assumes x2=T (fine), batch 1 x2=F (conflict)
+        engine = _engine([[1, 2], [-1, 2]], num_vars=2, K=2)
+        engine.apply_and_propagate(_assum([
+            [ext_lit_to_lit_index(2)],
+            [ext_lit_to_lit_index(-2)],
         ]))
-
-        conflict = engine.propagate()
-
-        # batch 0: x2=TRUE satisfies no clause directly (occ doesn't track satisfaction),
-        # but neither clause conflicts. Actually:
-        # occ[2] (pos x2) = clauses with ~x2 = none (no clause has ~x2)
-        # Hmm, let me reconsider. clauses: (x1 OR x2), (~x1 OR x2)
-        # ~x2 doesn't appear in any clause, so occ[lit_idx(x2)] = occ[2] = clauses with ~x2 = empty
-        # So setting x2=TRUE doesn't change any sat_count. Both clauses still have sat_count=2.
-        # No units, no conflicts. That's correct - clauses are still open.
-        assert conflict[0].item() == False
-
-        # batch 1: x2=FALSE (~x2 TRUE, lit_idx=3)
-        # occ[3] (neg x2) = clauses with x2 = clauses 0, 1
-        # sat_count[1, 0] -= 1 => 1 (unit: remaining = x1, idx 0)
-        # sat_count[1, 1] -= 1 => 1 (unit: remaining = ~x1, idx 1)
-        # BCP: force x1=T from clause 0, then ~x1 from clause 1 -> contradiction
-        assert conflict[1].item() == True
+        assert not engine.conflict[0].item()
+        assert engine.conflict[1].item()
 
     def test_parse_and_propagate(self):
-        """Test with CNF file."""
-        device = torch.device("cpu")
-        formula = CnfFormula(device)
+        formula = CnfFormula(DEV)
         formula.parse_cnf_file(os.path.join(TEST_DATA_DIR, "unit_prop_chain.cnf"))
-
         engine = BCPEngine(formula)
-        engine.init_state(num_batches=1)
-
-        # (x1 OR x2), (~x1 OR x2), (~x2 OR x3), (~x2 OR x4)
-        # assume x1=FALSE: clause 0 loses x1 -> unit: x2 forced
-        # then x2=TRUE: occ[2] = clauses with ~x2 = clauses 2,3 lose ~x2
-        # clause 2 becomes unit: x3 forced. clause 3 becomes unit: x4 forced.
-        engine.apply_assumptions_bulk(self._assum([[ext_lit_to_lit_index(-1)]]))
-        conflict = engine.propagate()
-
-        assert conflict[0].item() == False
-        # x2, x3, x4 should be propagated
+        engine.reset(1)
+        # (x1 OR x2), (~x1 OR x2), (~x2 OR x3), (~x2 OR x4): x1=F forces x2 -> x3, x4
+        engine.apply_and_propagate(_assum([[ext_lit_to_lit_index(-1)]]))
+        assert not engine.conflict[0].item()
         assert engine.num_propagated[0].item() == 3
-        # x2=TRUE (idx 2), x3=TRUE (idx 4), x4=TRUE (idx 6)
-        assert engine.assignment[0, 2].item() == 1
-        assert engine.assignment[0, 4].item() == 1
-        assert engine.assignment[0, 6].item() == 1
+        for v in (2, 3, 4):
+            assert engine.assignment[0, ext_lit_to_lit_index(v)].item() == 1
 
     def test_already_satisfied_unit(self):
-        """When sat_count==1 but remaining literal is already TRUE, skip it."""
-        # (x1 OR x2), (~x1 OR x2)
-        # If we assume both x1=TRUE and x2=TRUE:
-        # occ[0] = clauses with ~x1 = clause 1 -> sat_count[1] -= 1 = 1
-        # occ[2] = clauses with ~x2 = none
-        # After assumptions, clause 1 has sat_count=1, lit_sum = x2's idx
-        # But x2 is already TRUE -> should skip, not propagate
-        engine = self._make_engine([[1, 2], [-1, 2]], num_vars=2, num_batches=1)
-        engine.apply_assumptions_bulk(self._assum([[ext_lit_to_lit_index(1), ext_lit_to_lit_index(2)]]))
-        conflict = engine.propagate()
-
-        assert conflict[0].item() == False
+        # sat_count==1 with the survivor already TRUE must be skipped, not re-propagated
+        engine = _engine([[1, 2], [-1, 2]], num_vars=2, K=1)
+        engine.apply_and_propagate(
+            _assum([[ext_lit_to_lit_index(1), ext_lit_to_lit_index(2)]]))
+        assert not engine.conflict[0].item()
         assert engine.num_propagated[0].item() == 0
+
+    def test_reassume_implied_literal_is_noop(self):
+        """Regression (2026-07-03): assuming a literal the units flush ALREADY implied must not
+        double-count its falsifications (the old bulk path double-decremented sat counts ->
+        garbage forced literals -> FALSE conflicts)."""
+        clauses = [[1], [-1, 2], [-2, 3, 4], [-3, 4, 5]]
+        engine = _engine(clauses, num_vars=5, K=4)
+        assert engine.assignment[0, 0].item() == 1 and engine.assignment[0, 2].item() == 1
+        dec = torch.tensor([[0], [2], [0], [6]], dtype=torch.long, device=DEV)  # x1,x2,x1,x4
+        engine.apply_and_propagate(dec)
+        assert not engine.conflict.any(), "re-assuming an implied literal produced a false conflict"
+        # sat counts must equal ground truth (non-falsified literals under the assignment)
+        sat = engine.sat_rows(torch.arange(4, device=DEV))
+        for c_i, cl in enumerate(clauses):
+            for k in range(4):
+                truth = sum(1 for l in cl
+                            if engine.assignment[k, ext_lit_to_lit_index(l) ^ 1] != 1)
+                assert int(sat[k, c_i]) == truth, (k, c_i)
+
+    def test_matches_reference_random(self):
+        """Kernel fixpoints == the pure-Python reference on random CNFs (confluence)."""
+        import random
+        rng = random.Random(11)
+        for _ in range(25):
+            nv = rng.randint(3, 30)
+            clauses = []
+            for _ in range(rng.randint(nv, 4 * nv)):
+                vs = rng.sample(range(1, nv + 1), rng.randint(1, min(4, nv)))
+                clauses.append([v if rng.random() < 0.5 else -v for v in vs])
+            K = 16
+            decs = [[2 * (v - 1) + rng.randint(0, 1)
+                     for v in rng.sample(range(1, nv + 1), rng.randint(0, min(4, nv)))]
+                    for _ in range(K)]
+            f = CnfFormula(DEV)
+            f.init_formula(nv, clauses)
+            eng = BCPEngine(f)
+            eng.reset(K)
+            eng.apply_and_propagate(_assum(decs))
+            for k in range(K):
+                conf, asg = ref_bcp(clauses, decs[k])
+                assert bool(eng.conflict[k].item()) == conf, (clauses, decs[k])
+                if not conf:
+                    assert assigned_set(eng.assignment[k].cpu()) == asg, (clauses, decs[k])
+
+    def test_recache_flush_incremental_units(self):
+        """The miner flow: fold entailed units into the flush cache, reset(K) restores them."""
+        clauses = [[-1, 2], [-2, 3], [1, 4]]
+        engine = _engine(clauses, num_vars=4, K=1)
+        engine.apply_and_propagate(_assum([[ext_lit_to_lit_index(1)]]))   # x1 -> x2 -> x3
+        engine.recache_flush()
+        engine.reset(3)
+        for v in (1, 2, 3):
+            assert (engine.assignment[:, ext_lit_to_lit_index(v)] == 1).all()
+
+    def test_m0_formula(self):
+        engine = _engine([], num_vars=4, K=2)
+        assert not engine.conflict.any()
+        engine.apply_and_propagate(_assum([[0], [3]]))
+        assert not engine.conflict.any()
+        assert engine.assignment[0, 0].item() == 1 and engine.assignment[1, 3].item() == 1
+
+    def test_counters_accumulate(self):
+        engine = _engine([[-1, 2], [-2, 3]], num_vars=3, K=2)
+        assert engine.props_total() == 0 and engine.launches == 0    # flush not counted
+        engine.apply_and_propagate(_assum([[0], [0]]))               # x1=T per row
+        assert engine.launches == 1
+        assert engine.decs_total() == 2                              # one decision per row
+        assert engine.props_total() == 6                             # +2 implications per row
+
+    def test_envelope_rejection(self):
+        f = CnfFormula(DEV)
+        f.init_formula(40_000, [list(range(1, 300))])                # 2N>65535 AND len>255
+        with pytest.raises(ValueError):
+            BCPEngine(f)
 
 
 if __name__ == "__main__":

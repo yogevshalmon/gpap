@@ -1,40 +1,40 @@
 """The GPAP engine — K-parallel GPU BCP over independent assumption sets (the novelty).
 
-State per batch row k (of K independent rows): `sat_count (K,M)` = non-falsified literals per
-clause, `lit_sum (K,M)` = sum of their literal indices, `assignment (K,2N)`. Setting literal l
-TRUE decrements both counters over occ[l] (CSR occurrence lists of the NEGATED literal); a
-clause at sat_count==1 forces the literal whose index IS lit_sum (the sum trick), sat_count==0
-is a conflict. No clause scanning, ever.
+PACKED-KERNEL-ONLY: all propagation runs in the Triton kernels (kernels.py) on a packed
+int32 clause state — low SHIFT bits = sat_count (non-falsified literals), high bits = XOR of
+the surviving literal indices (xor of a one-element set IS the element; never overflows).
+Field split per formula: 16|16 for 2N <= 65535, 8|24 ("wide") for 2N <= 0xFFFFFF with clause
+len <= 255; anything larger is rejected. Setting literal l TRUE updates exactly the clauses in
+occ[l] (CSR occurrence lists of the NEGATED literal). No clause scanning, ever. Requires CUDA +
+triton — there is NO CPU execution path (`kernel_available()` probes; BCPEngine refuses
+construction without it).
 
 ## The contract: exactly two entry points
 
-Applications consume the engine ONLY through these (cube-and-conquer, UNSAT proving,
-inprocessing and sampling all did):
+Applications consume the engine ONLY through these:
 
 1. **Batched assumption checking** — K independent assumption sets, one BCP fixpoint each:
 
-       eng = BCPEngine(formula); eng.init_state(K)              # or reset_state(K) to reuse
-       eng.apply_and_propagate(dec)                             # (K,L) int64 lit-index tensor,
-                                                                #   -1 padding; fused kernel if
-                                                                #   attached, else bulk + propagate
-       eng.conflict / eng.real_conflict / eng.assignment        # (K,) bool / (K,) bool / (K,2N) int8
+       eng = BCPEngine(formula)                  # occ + packed init + post-units-flush cache
+       eng.reset(K)                              # broadcast-restore the flush cache
+       eng.apply_and_propagate(dec)              # (K,L) int64 lit-index tensor, -1 padding;
+                                                 #   ONE kernel launch to fixpoint
+       eng.conflict / eng.assignment             # (K,) bool / (K,2N) int8
 
-   `real_conflict` marks BCP-derived conflicts only (propagation happened) — the signal for
-   clause learning / entailed-clause mining. `AssumptionChecker` is the one-call convenience
-   face over this path.
+   `AssumptionChecker` is the one-call convenience face. The miner's incremental flow is
+   reset(1) + apply_and_propagate(units) + recache_flush().
 
-2. **Fused trajectory sampling** — the WHOLE randomized decide+propagate loop in one GPU launch
+2. **Fused trajectory sampling** — the WHOLE randomized decide+propagate loop in one launch
    per chunk (one Triton program per trajectory, sequential trail, no atomics):
 
-       eng.attach_kernel(TritonBCP())
-       packed = eng.reset_fused(K)                  # broadcast-restore cached post-flush state
-       eng.run_trajectory(order, n_support, B, seed, soft=..., packed=packed)
-       eng.active / eng.assignment                  # fully-assigned active rows are models
+       eng.reset(K)
+       eng.run_trajectory(order, n_support, B, seed, soft=...)
+       eng.active / eng.assignment               # fully-assigned active rows are models
 
-Anything else on BCPEngine is bookkeeping (work counters) or internals — do not reach into
-`_sat_count`/`_lit_sum` from application code; use the accessors (`sat_count`, `sat_rows`).
-Semantics guarantee: BCP fixpoints are confluent, so kernel and PyTorch paths produce
-bit-identical non-conflicted rows — the PyTorch path is the A/B oracle and the CPU fallback.
+Anything else on BCPEngine is accessors (`sat_rows`, work counters) — do not reach into
+`_packed`/`_assignment` from application code. Correctness: BCP fixpoints are confluent; the
+kernels are validated against a pure-Python reference BCP (tests/reference_bcp.py) and every
+emitted model is externally verifiable (clause satisfaction; tests do both).
 """
 from gpap.engine.formula import (
     CnfFormula,
@@ -47,10 +47,10 @@ from gpap.engine.formula import (
 from gpap.engine.bcp_engine import BCPEngine, make_assumption_tensor
 from gpap.engine.checker import AssumptionChecker
 from gpap.engine.calibrate import compute_k_safe, gpu_mem_available
-from gpap.engine.kernels import TritonBCP
+from gpap.engine.kernels import kernel_available
 
 __all__ = [
     "CnfFormula", "OccurrenceList", "BCPEngine", "make_assumption_tensor",
-    "AssumptionChecker", "compute_k_safe", "gpu_mem_available", "TritonBCP",
+    "AssumptionChecker", "compute_k_safe", "gpu_mem_available", "kernel_available",
     "ext_lit_to_lit_index", "lit_index_to_ext_lit", "lit_index_negation", "lit_index_to_var",
 ]

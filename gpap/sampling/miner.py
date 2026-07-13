@@ -6,8 +6,9 @@ don't pay (measured: retry tripled success AND wall), but CLAUSES do: every mine
 checked by BCP once and then prunes doomed trajectories EARLY in every one of the millions of
 subsequent kernel trajectories.
 
-Tiers (all exhaustive GPU BCP probes on the original formula, PyTorch engine path for
-`real_conflict` — trivial conflicts are subsumed by an existing clause and skipped):
+Tiers (all exhaustive GPU BCP probes on the original formula; candidates are pre-filtered to
+post-flush-FREE literals and to sets no existing <=3-clause subsumes, so every reported
+conflict is a genuine BCP cascade — see _Prober):
   L1  all 2N literals, iterated to fixpoint: assuming l real-conflicts => unit (~l). This finds
       the BCP-visible BACKBONE — measured hundreds of units on every service instance, the
       single biggest lever (units also shrink the formula through the sampler's simplify).
@@ -43,12 +44,12 @@ def _idx_lit(i: int) -> int:
 
 
 class _Prober:
-    """BCP-probe assumption sets against one formula, preferring the fused Triton kernel.
+    """BCP-probe assumption sets against one formula on the packed Triton engine.
 
-    The kernel path (one launch per chunk, fixed-size state, no scatter temporaries) is ~10x
-    faster than the PyTorch engine AND avoids the WSL2 driver watchdog that giant propagate
-    temporaries trip ("device not ready"). The post-units-flush state is cached as single rows
-    and broadcast-restored per chunk, so the Python-round-loop flush runs ONCE per formula.
+    One fixpoint launch per chunk, fixed-size state, no scatter temporaries — this also avoids
+    the WSL2 driver watchdog that giant propagate temporaries used to trip ("device not
+    ready"). The engine caches the post-units-flush state at construction and reset(K)
+    broadcast-restores it per chunk; learned units are folded in via recache_flush().
 
     Conflict semantics: candidates are pre-filtered to literals UNASSIGNED after the flush and
     to sets not already subsumed by an existing <=3-clause, so every reported conflict is a
@@ -58,37 +59,24 @@ class _Prober:
         f = CnfFormula(device)
         f.init_formula(num_vars, clauses)
         self.eng = BCPEngine(f)
-        if device.type == "cuda":
-            from gpap.engine.kernels import TritonBCP
-            if TritonBCP.available():
-                self.eng.attach_kernel(TritonBCP())
-        self.eng.reset_state(1)
-        self.eng.propagate()                               # units flush (once)
-        self._snapshot()
-
-    def _snapshot(self):
-        self.unsat = bool(self.eng.conflict[0].item())
-        self.asg_row = self.eng._assignment[0].clone()
-        self.sat_row = self.eng._sat_count[0].clone()
-        self.lsum_row = self.eng._lit_sum[0].clone()
-        self.asg_cpu = self.asg_row.cpu()
+        self.unsat = self.eng.flush_conflict
+        self.asg_cpu = self.eng.flushed_assignment.cpu()
 
     def assume_units(self, lit_indices: list[int]) -> None:
-        """Fold newly-learned units into the cached flush state INCREMENTALLY (propagate just
-        them on top of the current cache at K=1). Avoids rebuilding the formula/occ lists per
-        L1 iteration — the rebuild dominated mining wall on large unrolled circuits (measured
-        532s -> seconds). Sound: the units are entailed, so the narrowed state is exactly the
-        fixpoint the rebuilt formula's flush would reach."""
+        """Fold newly-learned units into the engine's cached flush state INCREMENTALLY
+        (propagate just them on top of the cache at K=1, then re-cache). Avoids rebuilding the
+        formula/occ lists per L1 iteration — the rebuild dominated mining wall on large
+        unrolled circuits (measured 532s -> seconds). Sound: the units are entailed, so the
+        narrowed state is exactly the fixpoint the rebuilt formula's flush would reach."""
         if not lit_indices or self.unsat:
             return
         eng = self.eng
-        eng.reset_state(1)
-        eng._sat_count.copy_(self.sat_row.unsqueeze(0))
-        eng._lit_sum.copy_(self.lsum_row.unsqueeze(0))
-        eng._assignment.copy_(self.asg_row.unsqueeze(0))
-        t = torch.tensor([lit_indices], dtype=torch.long, device=eng._device)
+        eng.reset(1)
+        t = torch.tensor([lit_indices], dtype=torch.long, device=eng.device)
         eng.apply_and_propagate(t)
-        self._snapshot()
+        eng.recache_flush()
+        self.unsat = eng.flush_conflict
+        self.asg_cpu = eng.flushed_assignment.cpu()
 
     def unassigned(self, lit: int) -> bool:
         """True iff the flush left this lit-index (and its negation) free."""
@@ -103,14 +91,13 @@ class _Prober:
         return np.stack([2 * fv, 2 * fv + 1], axis=1).reshape(-1).tolist()
 
     def safe_k(self, k_cap: int) -> int:
-        """VRAM-clamped probe batch: the probe holds (K,M) sat+lsum + (K,2N) assignment + trail
-        (~(sat_b+4)·M + 6·N bytes/row). A FIXED K=8192 on a big-M instance (b14 T=25: M=1.05M)
-        would allocate ~40 GB and spill-thrash WSL2 — clamp to a 30% share of free VRAM."""
+        """VRAM-clamped probe batch: the probe holds the (K,M) packed word + (K,2N) assignment
+        + trail (~4·M + 6·N bytes/row; the 5·M below keeps the validated margin). A FIXED
+        K=8192 on a big-M instance (b14 T=25: M=1.05M) would allocate ~40 GB and spill-thrash
+        WSL2 — clamp to a 30% share of free VRAM."""
         eng = self.eng
-        M, N = eng._num_clauses, eng._num_vars
-        if eng._device.type != "cuda":
-            return k_cap
-        free, _ = torch.cuda.mem_get_info(eng._device)
+        M, N = eng.num_clauses, eng.num_vars
+        free, _ = torch.cuda.mem_get_info(eng.device)
         per_row = 5 * M + 6 * N + 64
         return max(64, min(k_cap, int(0.3 * free / per_row)))
 
@@ -124,7 +111,7 @@ class _Prober:
         k_cap = self.safe_k(k_cap)
         for i in range(0, len(sets), k_cap):
             if deadline is not None and time.perf_counter() > deadline:
-                out.append(torch.zeros(len(sets) - i, dtype=torch.bool, device=eng._device))
+                out.append(torch.zeros(len(sets) - i, dtype=torch.bool, device=eng.device))
                 break
             chunk = sets[i:i + k_cap]
             K = len(chunk)
@@ -132,14 +119,10 @@ class _Prober:
             t = torch.full((K, L), -1, dtype=torch.long)
             for k, s in enumerate(chunk):
                 t[k, :len(s)] = torch.tensor(s, dtype=torch.long)
-            eng.reset_state(K)                             # right-sized buffers...
-            eng._sat_count.copy_(self.sat_row.unsqueeze(0).expand(K, -1))   # ...flushed state
-            eng._lit_sum.copy_(self.lsum_row.unsqueeze(0).expand(K, -1))
-            eng._assignment.copy_(self.asg_row.unsqueeze(0).expand(K, -1))
-            eng.apply_and_propagate(t.to(eng._device))     # ONE kernel launch (or torch fallback)
+            eng.reset(K)                                   # broadcast-restore the flushed state
+            eng.apply_and_propagate(t.to(eng.device))      # ONE kernel launch
             out.append(eng.conflict.clone())
-            if eng._device.type == "cuda":
-                torch.cuda.synchronize()                   # keep the async queue shallow
+            torch.cuda.synchronize()                       # keep the async queue shallow
         return torch.cat(out)
 
 

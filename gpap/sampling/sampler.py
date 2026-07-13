@@ -3,9 +3,12 @@
 `GPUSampler` draws satisfying assignments by running K independent randomized
 DPLL-completions in parallel on the GPU. Each "trajectory" repeatedly:
 
-  1. picks a free (unassigned) variable per sample,
-  2. assigns it a *random per-sample polarity* (a decision),
-  3. runs BCP to fixpoint (the engine's `apply_assumptions_bulk` + `propagate`).
+  1. picks the next B free (unassigned) variables per sample,
+  2. assigns each a *random per-sample polarity* (a decision),
+  3. runs BCP to fixpoint,
+
+all inside ONE fused Triton kernel launch per chunk (engine.run_trajectory — the engine is
+packed-kernel-only and requires CUDA + triton).
 
 A trajectory that reaches a conflict is a dead-end (discarded); a trajectory whose
 variables all become assigned with no conflict is a **guaranteed-valid model** — every
@@ -55,26 +58,14 @@ class GPUSampler:
         *,
         k_cap: int | None = 16384,
         seed: int | None = None,
-        use_kernel: "bool | str" = "auto",
     ):
         self.formula = formula
         self.device = device
         self.N = formula.num_vars
         self.M = formula.num_clauses
+        # The packed-Triton engine (the ONLY execution path — raises off-CUDA / without triton;
+        # field split 16|16 or 8|24 picked per formula, see gpap.engine).
         self.engine = BCPEngine(formula)
-        # Fused Triton apply+propagate kernel (one launch to fixpoint — kills the Python BCP round
-        # loop's launch/sync/unique overhead + its temporary churn; see gpap.engine.kernels).
-        # "auto" (default) = on when CUDA + triton compile are available; the PyTorch engine remains
-        # the fallback/oracle. TritonBCP now picks the packed field split PER FORMULA in
-        # _build_flush_cache (16|16 for 2N<=65535, 8|24 "wide" up to 2N<=0xFFFFFF, else unpacked), so
-        # a single class covers every instance — the old "wide"/"mono" opt-in flags are accepted as
-        # legacy aliases for "auto" (mono lost to wide, measured 0.93x — see docs/findings/INSIGHTS).
-        if use_kernel in ("auto", "wide", "mono", True):
-            from gpap.engine.kernels import TritonBCP
-            use_kernel = device.type == "cuda" and self.M > 0 and TritonBCP.available()
-            if use_kernel:
-                self.engine.attach_kernel(TritonBCP())
-        self.use_kernel = bool(use_kernel)
         self._max_cls = int(formula.clause_sizes.max().item()) if self.M else 1
         self._total_lits = int(formula.clause_sizes.sum().item()) if self.M else 0
         # RNG + state must exist before K calibration (the probe chunk in _calibrate_k uses _gen).
@@ -102,25 +93,21 @@ class GPUSampler:
         # chunks can run a much larger K (throughput ∝ K). Applied per-chunk in sample() ONLY for
         # fused configs and only while K is at its construction value (a lowered K — e.g. the
         # coverage run — is honoured). Hard cap 262,144; validated under the nvidia-smi kill-switch.
-        if self.use_kernel and self.M > 0:
+        if self.M > 0:
             sat_b = 1 if self._max_cls <= 127 else (2 if self._max_cls <= 32767 else 4)
             # Hard ceiling on the fused-K boost. 262,144 was kill-switch-validated on the 12 GB 4080;
             # on a big-VRAM GPU (A100 80 GB) the caller's VRAM-proportional k_cap is larger, so let it
             # raise the ceiling — the memory-safe `budget // fused_pb` below still bounds the actual K.
             # No-op on the 4080 (its k_cap < 262,144); unlocks A100 fused headroom for the K-scaling story.
             fused_cap = max(262_144, k_cap or 0)
-            n2 = 2 * self.N
-            packed = n2 <= 65535 or (n2 <= 0xFFFFFF and self._max_cls <= 255)
-            # Per-batch fused footprint: PACKED = ONE (K,M) int32 clause word; UNPACKED = the engine's
-            # (sat_b+4)·M sat/lsum. Either way the (K,N) per-round decision masks a v1 chunk builds are
-            # ABSENT in the fused path, so only ~10N of assignment + trail + readout temps remain.
-            fused_pb = (4 * self.M + 300 if packed else (sat_b + 4) * self.M + 64) + 10 * self.N
-            # eng_hold = the engine's (K,M) sat/lsum + (K,2N) assignment held at BASE K by a
-            # NON-fused config (PACKED only — the unpacked fused path reuses those very tensors, so
-            # its fused_pb already counts them). We deduct it UNCONDITIONALLY: even an all-fused
-            # portfolio needs comparable headroom for the fixed 4096×M soundness-check temporary
-            # (skipping it spilled b05-c50 under the nvidia-smi kill-switch).
-            eng_hold = (((sat_b + 4) * self.M + 2 * self.N) * self.K) if packed else 0
+            # Per-batch fused footprint: ONE (K,M) int32 packed clause word + ~10N of assignment,
+            # trail and readout temps (no per-round decision masks — everything is in-kernel).
+            fused_pb = 4 * self.M + 300 + 10 * self.N
+            # eng_hold: kept UNCONDITIONALLY as headroom although no base-K sat/lsum exists any
+            # more — it was ACCIDENTALLY covering the fixed 4096×M soundness-check temporary, and
+            # skipping it spilled b05-c50 under the nvidia-smi kill-switch. If the ~9% K is ever
+            # wanted back, it must go with an explicit 4096·M reservation + kill-switch re-run.
+            eng_hold = ((sat_b + 4) * self.M + 2 * self.N) * self.K
             budget = max(0, int(0.6 * (free_bytes - eng_hold)))
             self.K_fused = max(self.K, min(budget // fused_pb, fused_cap))
         else:
@@ -233,268 +220,50 @@ class GPUSampler:
         return (asg[:, 0::2] == 0) & (asg[:, 1::2] == 0)
 
     @torch.inference_mode()
-    def _immediate_conflict(self, rows: torch.Tensor, lits: torch.Tensor) -> torch.Tensor:
-        """1-step failed-literal test: (P,) bool, True iff setting `lits[i]` TRUE immediately
-        falsifies a clause — i.e. some clause in occ[lit] currently has sat_count==1 (its lone
-        non-falsified literal is ~lit, so the decrement empties it). Uses the user's insight that
-        a clause is conflicted exactly when sat_count hits 0. Catches direct clause-emptying, not
-        deeper propagation cascades (a cheap, sound under-approximation of failed literals)."""
-        occ = self.formula.occ_list
-        dev = self.device
-        P = rows.numel()
-        if P == 0:
-            return torch.zeros(0, dtype=torch.bool, device=dev)
-        starts = occ.occ_offsets[lits]
-        lengths = occ.occ_offsets[lits + 1] - starts
-        total = int(lengths.sum().item())
-        if total == 0:
-            return torch.zeros(P, dtype=torch.bool, device=dev)
-        cum = torch.zeros(P, dtype=torch.long, device=dev)
-        if P > 1:
-            cum[1:] = lengths[:-1].cumsum(0)
-        flat = torch.arange(total, dtype=torch.long, device=dev)
-        csi = starts.repeat_interleave(lengths) + (flat - cum.repeat_interleave(lengths))
-        clauses = occ.occ_clauses[csi]
-        exp_rows = rows.repeat_interleave(lengths)
-        sc = self.engine.sat_count.view(-1)[exp_rows * self.M + clauses].to(torch.long)
-        pair = torch.arange(P, dtype=torch.long, device=dev).repeat_interleave(lengths)
-        seg_min = torch.full((P,), 1 << 30, dtype=torch.long, device=dev)
-        seg_min.scatter_reduce_(0, pair, sc, reduce="amin", include_self=True)
-        return seg_min <= 1
-
-    @torch.inference_mode()
-    def _polarity_risk(self, lits: torch.Tensor) -> torch.Tensor:
-        """Cheap GPAP-native conflict-risk score for setting each lit TRUE (one occ-gather, no
-        snapshot/propagation). Setting `lit` decrements every clause where ¬lit appears (occ[lit]);
-        sat_count==1 → the clause empties → conflict; ==2 → it becomes a forced UNIT; ==3 → tightens.
-        risk = Σ w(sat_count) over occ[lit], w(1)=1e6, w(2)=4, w(3)=1, else 0.
-
-        ⚠️  RETAINED ONLY AS A NEGATIVE RESULT — do not use. The framing is WRONG for our regime:
-        sat_count is the NON-FALSIFIED-literal count, not a satisfaction/quality signal, and the only
-        truly bad transition is 1→0 (a real conflict). A clause going 2→1 (w=4 here) becomes a unit,
-        i.e. it PROPAGATES — and in our niche (freeAftSup≈0) propagation is exactly how a trajectory
-        completes into a model. So this score penalizes the engine's own success mechanism and
-        collapses diversity (measured: 27.sk 49%→0% success). Correcting it to weight ONLY 1→0
-        reduces to `_immediate_conflict` (a sound 1-step test) — which also doesn't help, because the
-        conflicts that kill the low-supOK family are DEEP cascades no instantaneous counter can see.
-        Net: there is no cheap 1-step proxy for "does this decision eventually conflict"; that lives
-        in the propagation closure (only `lookahead="full"` answers it, at net-negative cost).
-        `lits`: (P,) lit indices; the row for lits[i] is i (aligned with arange(P))."""
-        occ = self.formula.occ_list
-        dev = self.device
-        P = lits.numel()
-        if P == 0:
-            return torch.zeros(0, device=dev)
-        starts = occ.occ_offsets[lits]
-        lengths = occ.occ_offsets[lits + 1] - starts
-        total = int(lengths.sum().item())
-        if total == 0:
-            return torch.zeros(P, device=dev)
-        cum = torch.zeros(P, dtype=torch.long, device=dev)
-        if P > 1:
-            cum[1:] = lengths[:-1].cumsum(0)
-        flat = torch.arange(total, dtype=torch.long, device=dev)
-        csi = starts.repeat_interleave(lengths) + (flat - cum.repeat_interleave(lengths))
-        clauses = occ.occ_clauses[csi]
-        rows = torch.arange(P, dtype=torch.long, device=dev).repeat_interleave(lengths)
-        sc = self.engine.sat_count.view(-1)[rows * self.M + clauses].to(torch.long)
-        w = torch.zeros(total, device=dev)
-        w = torch.where(sc == 1, w.new_tensor(1e6), w)
-        w = torch.where(sc == 2, w.new_tensor(4.0), w)
-        w = torch.where(sc == 3, w.new_tensor(1.0), w)
-        risk = torch.zeros(P, device=dev)
-        risk.scatter_add_(0, rows, w)
-        return risk
-
-    @torch.inference_mode()
-    def _pick_decisions(
-        self, free: torch.Tensor, need: torch.Tensor, B: int, priority: torch.Tensor,
-        soft_la: bool = False,
-    ) -> torch.Tensor:
-        """Build a (K, B) int64 decision tensor (lit indices, -1 = no decision).
-
-        Per row needing a decision, choose up to B free variables — the ones with the
-        smallest `priority` rank (priority is a per-chunk (N,) vector: a random permutation
-        for diverse var order, or arange for deterministic). Polarity is random per pick, so
-        samples diverge even under a shared variable order. Rows not in `need`, and picks with
-        no remaining free var, are -1 (skipped by apply_assumptions_bulk).
-
-        `soft_la` (B=1): pick the *lower-conflict-risk* polarity via `_polarity_risk` (random
-        tie-break) instead of a uniform-random polarity. Costs two cheap occ-gathers per round —
-        no snapshot, no extra propagation, no K reduction — and biases away from cascade-prone
-        polarities to raise feasibility (success) while preserving sample diversity via the
-        tie-break and the random variable order.
-        """
-        BIG = priority.numel() + 1
-        masked = torch.where(free, priority.unsqueeze(0), priority.new_full((), BIG))  # (K,N)
-        if soft_la and B == 1:
-            var = masked.argmin(dim=1)                       # (K,) min-rank free var per row
-            out = torch.full((self.engine.sat_count.size(0), 1), -1, dtype=torch.long, device=self.device)
-            rows = need.nonzero(as_tuple=False).view(-1)
-            if rows.numel():
-                v = var[rows]
-                risk_t = self._polarity_risk(2 * v)          # risk of setting v TRUE
-                risk_f = self._polarity_risk(2 * v + 1)      # risk of setting v FALSE
-                randp = torch.randint(0, 2, (rows.numel(),), generator=self._gen, device=self.device)
-                pol = torch.where(risk_t < risk_f, torch.zeros_like(randp),
-                                  torch.where(risk_f < risk_t, torch.ones_like(randp), randp))
-                out[rows, 0] = 2 * v + pol
-            return out
-        if B == 1:
-            score, var = masked.min(dim=1, keepdim=True)    # (K,1) smallest rank among free
-        else:
-            # clamp to N: a tiny (post-simplify) formula can have fewer columns than B
-            score, var = masked.topk(min(B, masked.size(1)), dim=1, largest=False)  # (K,min(B,N))
-        pol = torch.randint(0, 2, var.shape, generator=self._gen, device=self.device)
-        lit = 2 * var + pol                                 # (K,B)
-        valid = (score < BIG) & need.unsqueeze(1)           # picked a real free var, row needs it
-        return torch.where(valid, lit, torch.full_like(lit, -1))
-
-    @torch.inference_mode()
-    def _decide_phase(self, B, priority, mask, max_rounds, rounds, lookahead=False):
-        """Keep deciding free vars in `mask` (None = all free) until none remain for any active
-        row (or max_rounds hit). Returns updated `rounds`.
-
-        `lookahead` (B=1): FULL-propagation feasibility lookahead — pick one var per row, snapshot
-        the engine state, try BOTH polarities (apply + propagate to fixpoint, record which conflict),
-        restore, then commit the non-conflicting polarity when exactly one conflicts (else random).
-        This emulates the conflict avoidance CMSGen gets from CDCL backtracking and dramatically
-        raises feasibility (supOK) on formulas whose support self-conflicts via deep cascades — the
-        1-step test misses those. Cost: ~3× propagations + a state snapshot per round (so sample()
-        halves K under lookahead to fit the snapshot)."""
-        eng = self.engine
-        K = eng.assignment.size(0)
-        BIG = priority.numel() + 1
-        neg1 = torch.tensor(-1, device=self.device)
-        while True:
-            free = self._free_mask()
-            dfree = free & mask if mask is not None else free
-            need = eng.active & dfree.any(dim=1)
-            if not bool(need.any()):
-                break
-            if max_rounds is not None and rounds >= max_rounds:
-                break
-            rounds += 1
-            if lookahead in (True, "full"):
-                pass  # fall through to the snapshot path below
-            else:
-                # off, cheap "soft" risk-polarity (handled inside _pick_decisions), or "orac"
-                # (force the PyTorch engine for this config — the oracle's batched tensor ops beat
-                # the per-warp kernel on ultra-shallow wide instances, e.g. b14 T=1; bandit-selected)
-                decisions = self._pick_decisions(dfree, need, B, priority,
-                                                 soft_la=(lookahead == "soft"))
-                if lookahead == "orac":
-                    eng.apply_assumptions_bulk(decisions)
-                    eng.propagate()
-                else:
-                    eng.apply_and_propagate(decisions)
-                continue
-            # --- full-propagation lookahead (B=1) ---
-            masked = torch.where(dfree, priority.unsqueeze(0), priority.new_full((), BIG))
-            var = masked.argmin(dim=1)                              # (K,) min-rank free var
-            dec_t = torch.where(need, 2 * var, neg1).unsqueeze(1)   # try var TRUE
-            dec_f = torch.where(need, 2 * var + 1, neg1).unsqueeze(1)  # try var FALSE
-            # snapshot (frontier is empty at fixpoint, so it needs no save/restore)
-            sc, ls = eng.sat_count.clone(), eng.lit_sum.clone()
-            asg, act, conf = eng.assignment.clone(), eng.active.clone(), eng.conflict.clone()
-
-            def _restore():
-                eng.sat_count.copy_(sc); eng.lit_sum.copy_(ls); eng.assignment.copy_(asg)
-                eng.active.copy_(act); eng.conflict.copy_(conf)
-
-            eng.apply_and_propagate(dec_t)
-            bad_t = eng.conflict & ~conf                           # TRUE newly conflicts
-            _restore()
-            eng.apply_and_propagate(dec_f)
-            bad_f = eng.conflict & ~conf                           # FALSE newly conflicts
-            _restore()
-            pol = torch.randint(0, 2, (K,), generator=self._gen, device=self.device)
-            pol = torch.where(bad_t & ~bad_f, torch.ones_like(pol), pol)   # TRUE bad → FALSE
-            pol = torch.where(bad_f & ~bad_t, torch.zeros_like(pol), pol)  # FALSE bad → TRUE
-            dec = torch.where(need, 2 * var + pol, neg1).unsqueeze(1)
-            eng.apply_and_propagate(dec)
-        return rounds
-
-    @torch.inference_mode()
-    def _run_chunk(self, K: int, B: int, random_var: bool, max_rounds: int | None,
-                   support_mask: torch.Tensor | None, complete: bool, lookahead: bool = False):
-        """One chunk of K trajectories. Phase 1 decides the support (when `support_mask` given);
-        if `complete`, phase 2 then decides the REMAINING free vars (the completion phase) so a
-        full sound model is reached. Without `complete`, only the support is fixed.
+    def _run_chunk(self, K: int, B: int, random_var: bool, max_rounds: "int | None",
+                   support_mask: torch.Tensor | None, complete: bool, lookahead=False):
+        """One chunk of K trajectories — the WHOLE decide+propagate loop in ONE fused kernel
+        launch (engine.run_trajectory). Decision order = support vars first (phase 1), then, if
+        `complete`, the remaining vars (phase 2); the kernel never straddles the phase boundary.
+        `lookahead` in ("soft", "fsoft") enables the in-kernel risk-polarity; `max_rounds` is
+        accepted for API compatibility but never applied (the kernel structurally terminates in
+        <= |order| decision groups; a cap cripples B=1 on large supports — measured 2x on s832).
 
         Returns (fully_assigned, support_complete, rounds, free_after_support):
-          fully_assigned     : active AND no free var → a guaranteed full model.
-          support_complete   : active AND no free *support* var → support projection fixed.
-          free_after_support : mean # free vars left once the support is fixed (how much work
-                               the completion phase faces; ~0 means support nearly determines all).
+          fully_assigned     : active AND no free var -> a guaranteed full model.
+          support_complete   : active AND no free *support* var -> support projection fixed.
+          free_after_support : always 0.0 (unmeasurable mid-trajectory in the fused path).
         """
         eng = self.engine
-        fused_c = lookahead in ("fused", "fsoft") and eng.has_kernel
-        # PACKED fused chunks (packed sat|xor state, see gpap.engine.kernels) skip reset_state+
-        # propagate entirely: the post-units-flush state is row-identical every chunk, so
-        # reset_fused broadcast-restores a cached row — no (K,M) sat/lsum writes, no per-chunk
-        # Python-round units flush. Falls back (returns False) when ineligible: ordinary path.
-        self._last_chunk_packed = bool(fused_c and eng.reset_fused(K))
-        if not self._last_chunk_packed:
-            eng.reset_state(K)
-            eng.propagate()                                 # process the formula's own units
+        # reset broadcast-restores the cached post-units-flush state: no (K,M) state writes
+        # beyond one copy, no per-chunk units flush.
+        eng.reset(K)
         if random_var:
             priority = torch.randperm(self.N, generator=self._gen, device=self.device)
         else:
             priority = torch.arange(self.N, device=self.device)
-
-        if fused_c:
-            # v2 fused-trajectory kernel: the WHOLE decide+propagate loop in ONE launch. Picking the
-            # next-B-free-vars in priority order inside the kernel is exactly _pick_decisions'
-            # semantics; polarity is a per-(chunk,k,v) hash bit. Decision order = support vars first
-            # (phase 1), then the completion vars (phase 2) — same two-phase behaviour.
-            rank = torch.argsort(priority)                  # vars in priority order
-            if support_mask is not None:
-                in_sup = support_mask[rank]
-                sup_part = rank[in_sup]
-                order = torch.cat([sup_part, rank[~in_sup]]) if complete else sup_part
-                n_support = int(sup_part.numel())
-            else:
-                order = rank
-                n_support = order.numel()                   # single phase: boundary = end
-            seed = int(torch.randint(0, 2 ** 62, (1,), generator=self._gen,
-                                     device=self.device).item())
-            # No round cap for fused: the kernel structurally terminates in ≤ |order| decision groups
-            # (each group either decides ≥1 var or exhausts the order). max_decision_rounds exists to
-            # bound the v1 PYTHON loop; applying it here cripples B=1 on large-support instances
-            # (measured: s832 T=25 support=450 → the 300 cap truncated every trajectory, 2× loss).
-            rounds = eng.run_trajectory(order, n_support, B, seed, None,
-                                        soft=(lookahead == "fsoft"),
-                                        packed=self._last_chunk_packed)
-            fr = self._free_mask()
-            if support_mask is not None:
-                support_complete = eng.active & ~(fr & support_mask).any(dim=1)
-            else:
-                support_complete = eng.active
-            fully = eng.active & ~fr.any(dim=1)
-            # free-after-support is unmeasurable mid-trajectory in the fused path (diagnostic only)
-            return fully, support_complete, rounds, 0.0
-
-        # Phase 1: fix the support (or, if no support, this decides everything).
-        rounds = self._decide_phase(B, priority, support_mask, max_rounds, 0, lookahead)
-
-        # diagnostic: free vars remaining once support is fixed (support-complete active rows)
+        # Picking the next-B-free-vars in priority order happens inside the kernel; polarity is
+        # a per-(chunk,k,v) hash bit seeded below (torch RNG stream consumed ONCE per chunk).
+        rank = torch.argsort(priority)                  # vars in priority order
+        if support_mask is not None:
+            in_sup = support_mask[rank]
+            sup_part = rank[in_sup]
+            order = torch.cat([sup_part, rank[~in_sup]]) if complete else sup_part
+            n_support = int(sup_part.numel())
+        else:
+            order = rank
+            n_support = order.numel()                   # single phase: boundary = end
+        seed = int(torch.randint(0, 2 ** 62, (1,), generator=self._gen,
+                                 device=self.device).item())
+        rounds = eng.run_trajectory(order, n_support, B, seed,
+                                    soft=(lookahead in ("soft", "fsoft")))
         fr = self._free_mask()
         if support_mask is not None:
             support_complete = eng.active & ~(fr & support_mask).any(dim=1)
         else:
             support_complete = eng.active
-        sc_rows = support_complete
-        free_after_support = (fr.sum(dim=1).float()[sc_rows].mean().item()
-                              if bool(sc_rows.any()) else 0.0)
-
-        # Phase 2: completion — decide all remaining free vars to reach full models.
-        if complete and support_mask is not None:
-            rounds = self._decide_phase(B, priority, None, max_rounds, rounds, lookahead)
-
-        free = self._free_mask()
-        fully = eng.active & ~free.any(dim=1)
-        return fully, support_complete, rounds, free_after_support
+        fully = eng.active & ~fr.any(dim=1)
+        return fully, support_complete, rounds, 0.0
 
     @torch.inference_mode()
     def _autotune(self, K, B_hint, max_rounds, support_mask, complete, lookahead, probe_k=2048):
@@ -735,7 +504,9 @@ class GPUSampler:
         if self.support:
             support_mask = torch.zeros(self.N, dtype=torch.bool, device=self.device)
             support_mask[torch.tensor(self.support, dtype=torch.long, device=self.device)] = True
-        K = self.K_fused if (la in ("fused", "fsoft") and self.K >= self._K_init) else self.K
+        # Every chunk is fused; run at the boosted K_fused while K is at its construction value
+        # (a caller-lowered K — e.g. the coverage run — is honoured).
+        K = self.K_fused if self.K >= self._K_init else self.K
         mats: list = []
         got = chunk = 0
         while got < n_target:
@@ -834,24 +605,24 @@ class GPUSampler:
         #    coverage but a slow config's K-independent round count drags every chunk (~1.5-2.7×).
         # Normalise the portfolio to (random_var, B, lookahead) triples. A config may be a 2-tuple
         # (rv, B) — lookahead defaults off — or a 3-tuple (rv, B, lookahead), lookahead ∈
-        # {False, "soft", "full"}. "soft" (cheap risk-polarity) is the big win on the tight/deep
-        # CIRCUIT regime (conflict-avoidance polarity → far higher success at no extra memory);
-        # "full" snapshots the (K,M) state so it needs K halved. off/"soft" cost no extra memory.
+        # {False, "soft"} ("fused"/"fsoft" accepted as aliases from the pre-packed-only era).
+        # "soft" = the in-kernel risk-polarity — the big win on the tight/deep CIRCUIT regime
+        # (conflict-avoidance polarity → far higher success at no extra memory). The retired
+        # modes raise: "full" python lookahead and "orac" needed the deleted PyTorch engine
+        # path (both measured out — see docs/findings/INSIGHTS.md).
         def _norm(c):
-            return (c[0], max(1, c[1]), (c[2] if len(c) > 2 else False))
-        plan = [_norm(c) for c in configs] if configs else [(random_var, B, lookahead)]
-        # NOTE: the packed K_fused keeps the conservative eng_hold deduction (__init__) even for an
-        # ALL-fused portfolio. In theory an all-fused run never allocates the engine's base-K
-        # sat/lsum, so skipping the deduction would recover ~9% K (measured on b12-c25). But that
-        # headroom was ACCIDENTALLY covering the fixed 4096×M soundness-check temporary (~3.3 GB on
-        # b05-c50's M=201k); skipping it SPILLED the big c50 wide instances under the kill-switch
-        # (11.7 GB on the 12 GB 4080, b05-c50). Keeping it costs ≤0.97× on the small c25 instances —
-        # within the 0.9× bar — and stays safe on the big ones. If the ~9% is ever wanted back, it
-        # must go with an explicit 4096·M reservation, then re-validated under the kill-switch.
-        # If ANY config in the plan uses "full" lookahead, halve K for the whole run (the fixed
-        # per-chunk allocation must fit the most memory-hungry config's snapshot).
-        need_full = any(c[2] in (True, "full") for c in plan)
-        K = max(1, self.K // 2) if need_full else self.K
+            la = c[2] if len(c) > 2 else False
+            if la in ("full", "orac", True):
+                raise ValueError(f"lookahead mode {la!r} was retired with the PyTorch engine "
+                                 "path; use False or 'soft'")
+            return (c[0], max(1, c[1]), "soft" if la in ("soft", "fsoft") else False)
+        plan = [_norm(c) for c in configs] if configs else [_norm((random_var, B, lookahead))]
+        # NOTE: the packed K_fused keeps the conservative eng_hold deduction (__init__) even
+        # though no base-K engine state exists any more — that headroom covers the fixed 4096×M
+        # soundness-check temporary (~3.3 GB on b05-c50's M=201k); skipping it SPILLED the big
+        # c50 wide instances under the kill-switch (11.7 GB on the 12 GB 4080). If the ~9% is
+        # ever wanted back, it must go with an explicit 4096·M reservation + kill-switch re-run.
+        K = self.K
         adaptive = configs is not None and config_policy == "adaptive" and len(plan) > 1
         # Per-config work counters (decs/props) alongside models/wall so the reported dec/s, impl/s,
         # assigns/s can be attributed to the SAME config as the headline samples/s (best_rate) —
@@ -873,10 +644,10 @@ class GPUSampler:
         keep_rows = collect or verify_clauses is not None
 
         self._sync()
-        bcp_r0 = self.engine.total_bcp_rounds
-        bcp_o0 = self.engine.total_bcp_ops + self.engine.kernel_ops()
-        bcp_p0 = self.engine.total_bcp_props + self.engine.kernel_props()
-        bcp_d0 = self.engine.total_bcp_decisions + self.engine.kernel_decs()
+        bcp_r0 = self.engine.launches
+        bcp_o0 = self.engine.ops_total()
+        bcp_p0 = self.engine.props_total()
+        bcp_d0 = self.engine.decs_total()
         t0 = time.perf_counter()
         while True:
             # Stop once n_target is met — BUT for the adaptive bandit, always measure every config at
@@ -909,12 +680,14 @@ class GPUSampler:
                 # Fused-trajectory chunks (fused AND fsoft — both are single-launch kernels with no
                 # (K,N) decide masks — see K_fused) run at the boosted K. Only while K is at its
                 # construction value: a caller-lowered K (coverage run) is honoured.
-                K_c = self.K_fused if (la_c in ("fused", "fsoft") and self.K >= self._K_init) else K_sub
+                # every chunk is fused: run at the boosted K_fused while K is at its
+                # construction value (a caller-lowered K — coverage run — is honoured)
+                K_c = self.K_fused if self.K >= self._K_init else K_sub
                 if adaptive:
                     self._sync()
                     # read BEFORE t_cfg so the (synced) counter reads aren't charged to wall
-                    p_before = self.engine.total_bcp_props + self.engine.kernel_props()
-                    d_before = self.engine.total_bcp_decisions + self.engine.kernel_decs()
+                    p_before = self.engine.props_total()
+                    d_before = self.engine.decs_total()
                     t_cfg = time.perf_counter()
                 fully, sup_complete, rounds, free_after = self._run_chunk(
                     K_c, B_c, rv_c, max_decision_rounds, support_mask, complete, la_c)
@@ -929,10 +702,8 @@ class GPUSampler:
                 cfg_stats[cfg]["chunks"] += 1
                 if adaptive:
                     self._sync(); cfg_stats[cfg]["wall"] += time.perf_counter() - t_cfg
-                    cfg_stats[cfg]["props"] += (self.engine.total_bcp_props
-                                                + self.engine.kernel_props()) - p_before
-                    cfg_stats[cfg]["decs"] += (self.engine.total_bcp_decisions
-                                               + self.engine.kernel_decs()) - d_before
+                    cfg_stats[cfg]["props"] += self.engine.props_total() - p_before
+                    cfg_stats[cfg]["decs"] += self.engine.decs_total() - d_before
                 if n_done:
                     # GPU soundness (cheap): for a FULLY-assigned row, non-falsified ⟺ TRUE, so
                     # "every clause has sat_count > 0" ⟺ "every clause has a TRUE literal" ⟺ satisfied.
@@ -968,10 +739,10 @@ class GPUSampler:
                         models.extend(out_rows)
         self._sync()
         elapsed = time.perf_counter() - t0
-        bcp_rounds = self.engine.total_bcp_rounds - bcp_r0     # BCP work over this timed run (delta)
-        bcp_ops = self.engine.total_bcp_ops + self.engine.kernel_ops() - bcp_o0
-        bcp_props = self.engine.total_bcp_props + self.engine.kernel_props() - bcp_p0
-        bcp_decs = self.engine.total_bcp_decisions + self.engine.kernel_decs() - bcp_d0
+        bcp_rounds = self.engine.launches - bcp_r0             # kernel launches over this run (delta)
+        bcp_ops = self.engine.ops_total() - bcp_o0
+        bcp_props = self.engine.props_total() - bcp_p0
+        bcp_decs = self.engine.decs_total() - bcp_d0
         bcp_impl = bcp_props - bcp_decs                        # every non-decision assignment
 
         out = {
@@ -1002,7 +773,7 @@ class GPUSampler:
             "max_decision_rounds": max(rounds_hist) if rounds_hist else 0,
             "n_distinct": len(distinct) if keep_rows else None,
             "gpu_sound": gpu_unsound == 0, "gpu_unsound": gpu_unsound,
-            "kernel": self.use_kernel,
+            "kernel": True,
         }
         if collect:
             out["models"] = models

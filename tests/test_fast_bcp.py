@@ -1,11 +1,9 @@
-"""A/B tests for the fused Triton BCP kernel (gpap/engine/kernels.py) vs the PyTorch oracle.
+"""Correctness tests for the packed Triton BCP kernels through the engine + sampler.
 
-Contract (BCP fixpoints are confluent, so this is exact):
-  * conflict/active flags identical everywhere;
-  * NON-conflicted rows: assignment / sat_count / lit_sum bit-identical;
-  * conflicted rows: partial counter state unspecified (the sampler never reads it).
-Inputs follow the sampler's guarantee: decisions are distinct variables per row (fresh or
-deliberately contradictory — the conflict paths are exercised explicitly).
+The semantic oracle is the pure-Python reference BCP (reference_bcp.py — BCP fixpoints are
+confluent, so agreement is exact), plus external CPU verification of every sampled model
+(_satisfies / PySAT in the miner test). Reproducibility: the fused trajectory consumes the
+torch RNG once per chunk (order + seed), so same-seed runs are bit-identical.
 """
 import random
 
@@ -13,12 +11,14 @@ import pytest
 import torch
 
 from gpap.engine.formula import CnfFormula
-from gpap.engine.bcp_engine import BCPEngine
-from gpap.engine.kernels import TritonBCP
+from gpap.engine.bcp_engine import BCPEngine, make_assumption_tensor
+from gpap.engine.kernels import kernel_available
 from gpap.sampling.sampler import GPUSampler, _satisfies
 
+from tests.reference_bcp import ref_bcp, assigned_set
+
 CUDA = torch.cuda.is_available()
-AVAIL = CUDA and TritonBCP.available()
+AVAIL = CUDA and kernel_available()
 pytestmark = pytest.mark.skipif(not AVAIL, reason="requires CUDA + a working triton")
 DEV = torch.device("cuda") if CUDA else torch.device("cpu")
 
@@ -32,24 +32,9 @@ def _random_cnf(rng, nv, nc, kmax=4):
     return clauses
 
 
-def _engines(nv, clauses, K, kernel_on_second=True):
-    """Two engines over the same formula; the second gets the fused kernel attached."""
-    out = []
-    for use in (False, kernel_on_second):
-        f = CnfFormula(DEV)
-        f.init_formula(nv, clauses)
-        e = BCPEngine(f)
-        if use:
-            e.attach_kernel(TritonBCP())
-        e.init_state(K)
-        e.propagate()                     # flush formula units (oracle path on both)
-        out.append(e)
-    return out
-
-
 def _free_decisions(rng, engine, K, B, contradict_rows=()):
-    """(K,B) int64 decisions: distinct FREE vars per row, random polarity (sampler's guarantee).
-    Rows in `contradict_rows` get an l/~l pair to exercise the conflict path."""
+    """(K,B) int64 decisions: distinct FREE vars per row, random polarity (the sampler's
+    guarantee). Rows in `contradict_rows` get an l/~l pair to exercise the conflict path."""
     asg = engine.assignment.cpu()
     dec = torch.full((K, B), -1, dtype=torch.int64)
     for k in range(K):
@@ -66,33 +51,35 @@ def _free_decisions(rng, engine, K, B, contradict_rows=()):
     return dec.to(DEV)
 
 
-def _assert_contract(oracle, kernel):
-    assert torch.equal(oracle.conflict, kernel.conflict), "conflict flags differ"
-    assert torch.equal(oracle._active, kernel._active), "active flags differ"
-    mask = ~oracle.conflict
-    assert torch.equal(oracle.assignment[mask], kernel.assignment[mask]), "assignment differs"
-    assert torch.equal(oracle.sat_count[mask], kernel.sat_count[mask]), "sat_count differs"
-    assert torch.equal(oracle.lit_sum[mask], kernel.lit_sum[mask]), "lit_sum differs"
-
-
-def test_ab_random_cnfs():
+def test_fixpoint_matches_reference_multistep():
+    """Multi-step decide+propagate vs the reference, incl. an injected l/~l conflict row.
+    The reference re-runs the CUMULATIVE decision list from scratch each step (same fixpoint
+    by confluence)."""
     rng = random.Random(11)
-    for trial in range(30):
+    for _ in range(15):
         nv = rng.randint(4, 40)
         clauses = _random_cnf(rng, nv, rng.randint(nv, 4 * nv))
-        K, B = 64, rng.choice([1, 2, 4])
-        oracle, kern = _engines(nv, clauses, K)
-        for step in range(3):                                # multi-step: rows diverge over steps
-            contradict = {rng.randrange(K)} if step == 1 else ()
-            dec = _free_decisions(rng, oracle, K, B, contradict_rows=contradict)
-            oracle.apply_assumptions_bulk(dec)
-            oracle.propagate()
-            kern.apply_and_propagate(dec)
-            _assert_contract(oracle, kern)
+        K, B = 32, rng.choice([1, 2, 4])
+        f = CnfFormula(DEV)
+        f.init_formula(nv, clauses)
+        eng = BCPEngine(f)
+        eng.reset(K)
+        cum = [[] for _ in range(K)]
+        for step in range(3):
+            contradict = {rng.randrange(K)} if (step == 1 and B >= 2) else ()
+            dec = _free_decisions(rng, eng, K, B, contradict_rows=contradict)
+            for k in range(K):
+                cum[k].extend(int(x) for x in dec[k].tolist() if x >= 0)
+            eng.apply_and_propagate(dec)
+            for k in range(K):
+                conf, asg = ref_bcp(clauses, cum[k])
+                assert bool(eng.conflict[k].item()) == conf
+                if not conf:
+                    assert assigned_set(eng.assignment[k].cpu()) == asg
 
 
-def test_ab_circuit_cnf(tmp_path):
-    """A/B on a real unrolled circuit (deep propagation cascades)."""
+def test_fixpoint_matches_reference_circuit(tmp_path):
+    """Reference A/B on a real unrolled circuit (deep propagation cascades)."""
     from gpap.circuits.bench import parse_bench, build_cnf, write_dimacs
     circ = parse_bench("benchmarks/circuits/bench/seq/s386.bench")
     b, support, _, _ = build_cnf(circ, T=3, seed=1)
@@ -100,37 +87,40 @@ def test_ab_circuit_cnf(tmp_path):
     write_dimacs(str(p), b, support)
     from pysat.formula import CNF
     cnf = CNF(from_file=str(p))
+    clauses = [list(c) for c in cnf.clauses]
     rng = random.Random(3)
-    K = 128
-    oracle, kern = _engines(cnf.nv, [list(c) for c in cnf.clauses], K)
-    for _ in range(4):
-        dec = _free_decisions(rng, oracle, K, 8)
-        oracle.apply_assumptions_bulk(dec)
-        oracle.propagate()
-        kern.apply_and_propagate(dec)
-        _assert_contract(oracle, kern)
+    K = 24
+    f = CnfFormula(DEV)
+    f.init_formula(cnf.nv, clauses)
+    eng = BCPEngine(f)
+    eng.reset(K)
+    dec = _free_decisions(rng, eng, K, 8)
+    eng.apply_and_propagate(dec)
+    for k in range(K):
+        conf, asg = ref_bcp(clauses, [int(x) for x in dec[k].tolist() if x >= 0])
+        assert bool(eng.conflict[k].item()) == conf
+        if not conf:
+            assert assigned_set(eng.assignment[k].cpu()) == asg
 
 
-def test_sampler_identical_models():
-    """Same seed, kernel on vs off => identical model sets (RNG consumption unchanged; fixpoints
-    confluent). Every model CPU-verified against the clauses."""
+def test_sampler_same_seed_identical_models():
+    """Same seed => identical model sets (the trajectory is a pure function of seed/order).
+    Every model CPU-verified against the clauses."""
     clauses = [[1, 2, 3], [-1, 4], [-2, -4], [3, -4, 5], [-5, 1]]
-    runs = {}
-    for use in (False, True):
-        smp = GPUSampler.from_clauses(5, clauses, DEV, k_cap=128, seed=17, use_kernel=use)
-        assert smp.use_kernel == use
+    runs = []
+    for _ in range(2):
+        smp = GPUSampler.from_clauses(5, clauses, DEV, k_cap=128, seed=17)
         out = smp.sample(500, decisions_per_round=2, max_chunks=8, collect=True,
                          verify_clauses=clauses)
         assert out["all_valid"]
-        assert out["kernel"] == use
-        runs[use] = sorted(tuple(m) for m in out["models"])
-    assert runs[False] == runs[True], "kernel changed the sampled model set"
+        runs.append(sorted(tuple(m) for m in out["models"]))
+    assert runs[0] == runs[1], "same seed produced different model sets"
 
 
-def test_sampler_kernel_portfolio_sound():
-    """Kernel path under the adaptive-bandit portfolio (incl. soft lookahead) stays sound."""
+def test_sampler_portfolio_sound():
+    """The adaptive-bandit portfolio (incl. soft risk-polarity) stays sound."""
     clauses = [[1, 2], [-1, 3], [-2, -3], [2, 4], [-4, -1, 5]]
-    smp = GPUSampler.from_clauses(5, clauses, DEV, k_cap=128, seed=5, use_kernel=True)
+    smp = GPUSampler.from_clauses(5, clauses, DEV, k_cap=128, seed=5)
     out = smp.sample(400, configs=[(True, 1, "soft"), (True, 4, False)], max_chunks=10,
                      collect=True, verify_clauses=clauses)
     assert out["all_valid"] and out["gpu_sound"] and out["n_models"] > 0
@@ -138,126 +128,54 @@ def test_sampler_kernel_portfolio_sound():
         assert _satisfies(m, clauses)
 
 
-def test_sampler_unsat_kernel():
-    smp = GPUSampler.from_clauses(1, [[1], [-1]], DEV, k_cap=16, seed=1, use_kernel=True)
+def test_sampler_unsat():
+    smp = GPUSampler.from_clauses(1, [[1], [-1]], DEV, k_cap=16, seed=1)
     out = smp.sample(10, max_chunks=5, collect=True, verify_clauses=[[1], [-1]])
     assert out["n_models"] == 0
 
 
-def test_fused_trajectory_sound():
-    """v2 fused-trajectory config (whole chunk in one launch): every model valid, UNSAT yields 0,
-    and success parity with the v1 path on a support-driven formula (phase boundary respected)."""
+def test_retired_lookahead_modes_raise():
+    smp = GPUSampler.from_clauses(3, [[1, 2], [-1, 3]], DEV, k_cap=16, seed=1)
+    for la in ("full", "orac", True):
+        with pytest.raises(ValueError):
+            smp.sample(10, configs=[(True, 1, la)], max_chunks=1)
+
+
+def test_fused_trajectory_sound_and_diverse():
     clauses = [[1, 2, 3], [-1, 4], [-2, -4], [3, -4, 5], [-5, 1]]
-    smp = GPUSampler.from_clauses(5, clauses, DEV, k_cap=128, seed=17, use_kernel=True)
-    out = smp.sample(400, configs=[(True, 2, "fused")], max_chunks=8, collect=True,
+    smp = GPUSampler.from_clauses(5, clauses, DEV, k_cap=128, seed=17)
+    out = smp.sample(400, configs=[(True, 2, False)], max_chunks=8, collect=True,
                      verify_clauses=clauses)
     assert out["all_valid"] and out["gpu_sound"] and out["n_models"] > 0
-    assert out["n_distinct"] >= 2                       # diversity sanity (formula has ≥2 models)
-    smp_u = GPUSampler.from_clauses(1, [[1], [-1]], DEV, k_cap=16, seed=1, use_kernel=True)
-    out_u = smp_u.sample(10, configs=[(True, 1, "fused")], max_chunks=4, collect=True,
-                         verify_clauses=[[1], [-1]])
-    assert out_u["n_models"] == 0
+    assert out["n_distinct"] >= 2                       # diversity sanity (formula has >=2 models)
 
 
 def test_fused_phase_boundary(tmp_path):
-    """A fused decision group must NOT straddle the support→completion boundary: on a circuit whose
-    support fully determines the rest, huge-B fused must match v1's success (~100%), not collapse
-    (the pre-fix straddle bug measured 100%→0% here)."""
+    """A decision group must NOT straddle the support->completion boundary: on a circuit whose
+    support fully determines the rest, a huge B must keep ~full success, not collapse (the
+    pre-fix straddle bug measured 100%->0% here)."""
     from gpap.circuits.bench import parse_bench, build_cnf, write_dimacs
     circ = parse_bench("benchmarks/circuits/bench/seq/s386.bench")
     b, support, _, _ = build_cnf(circ, T=2, seed=1)
     p = tmp_path / "s386c2.cnf"
     write_dimacs(str(p), b, support)
-    smp = GPUSampler.from_cnf_file(str(p), DEV, simplify=True, els=True, k_cap=512, seed=5,
-                                   use_kernel=True)
-    o_v1 = smp.sample(10 ** 9, configs=[(True, 4096, False)], max_chunks=2, collect=False)
-    o_fu = smp.sample(10 ** 9, configs=[(True, 4096, "fused")], max_chunks=2, collect=False)
-    assert o_fu["gpu_sound"]
-    # same ballpark success (both decide the whole support at once, then propagate)
-    assert abs(o_fu["success_rate"] - o_v1["success_rate"]) < 0.25
+    smp = GPUSampler.from_cnf_file(str(p), DEV, simplify=True, els=True, k_cap=512, seed=5)
+    out = smp.sample(10 ** 9, configs=[(True, 4096, False)], max_chunks=2, collect=False)
+    assert out["gpu_sound"]
+    assert out["success_rate"] > 0.5, "huge-B success collapsed: phase boundary straddled?"
 
 
-def test_fused_fallback_without_kernel():
-    """A 'fused' config with the kernel OFF degrades to the plain (rv, B) path and stays sound."""
-    clauses = [[1, 2], [-1, 3], [-2, -3]]
-    smp = GPUSampler.from_clauses(3, clauses, DEV, k_cap=64, seed=3, use_kernel=False)
-    out = smp.sample(200, configs=[(True, 1, "fused")], max_chunks=6, collect=True,
-                     verify_clauses=clauses)
-    assert out["all_valid"] and out["n_models"] > 0 and not out["kernel"]
-
-
-def test_kernel_ops_counter():
-    """The fused kernel feeds the engine work counters (ops > 0 after propagation)."""
-    clauses = [[1, 2], [-1, 3], [-2, -3]]
-    _, kern = _engines(3, clauses, 8)
-    dec = torch.zeros((8, 1), dtype=torch.int64, device=DEV)      # everyone decides x1=T
-    kern.apply_and_propagate(dec)
-    assert kern.kernel_ops() > 0
-    assert kern.total_bcp_rounds >= 1
-
-
-def _sample_fused(clauses, nv, cfg, *, force_unpacked, seed=17, chunks=8):
-    smp = GPUSampler.from_clauses(nv, clauses, DEV, k_cap=128, seed=seed, use_kernel=True)
-    if force_unpacked:
-        smp.engine._fused_kernel._packed_mode = False   # reset_fused declines -> unpacked kernel
-    out = smp.sample(10 ** 9, configs=[cfg], max_chunks=chunks, collect=True,
-                     verify_clauses=clauses)
-    packed_ran = bool(getattr(smp, "_last_chunk_packed", False))
-    assert packed_ran == (not force_unpacked), "wrong kernel variant dispatched"
-    assert out["all_valid"] and out["gpu_sound"]
-    return sorted(tuple(m) for m in out["models"]), out
-
-
-def test_packed_vs_unpacked_identical_models():
-    """The PACKED 16|16 (sat|xor) trajectory kernel must be semantically identical to the unpacked
-    one: same seed => bit-identical model sets (same order, same hash polarity, same propagation).
-    Includes formula UNIT clauses so the cached-flush restore path (reset_fused) is non-trivial."""
-    clauses = [[3], [1, 2, -3], [-1, 4], [-2, -4], [3, -4, 5], [-5, 1], [2, 5, 6], [-6, -2]]
-    for cfg in [(True, 1, "fused"), (True, 2, "fused"), (True, 2, "fsoft")]:
-        m_packed, o_p = _sample_fused(clauses, 6, cfg, force_unpacked=False)
-        m_plain, o_u = _sample_fused(clauses, 6, cfg, force_unpacked=True)
-        assert m_packed == m_plain, f"packed kernel changed the model set for {cfg}"
-        assert o_p["n_models"] == o_u["n_models"]
-
-
-def test_packed_circuit_identical_models(tmp_path):
-    """Packed vs unpacked on a real unrolled circuit (deep cascades + a pinned-output unit)."""
-    from gpap.circuits.bench import parse_bench, build_cnf, write_dimacs
-    circ = parse_bench("benchmarks/circuits/bench/seq/s386.bench")
-    b, support, _, _ = build_cnf(circ, T=2, seed=1)
-    p = tmp_path / "s386c2.cnf"
-    write_dimacs(str(p), b, support)
-    from pysat.formula import CNF
-    cnf = CNF(from_file=str(p))
-    clauses = [list(c) for c in cnf.clauses]
-    for cfg in [(True, 8, "fused"), (True, 1, "fsoft")]:
-        m_packed, _ = _sample_fused(clauses, cnf.nv, cfg, force_unpacked=False, chunks=4)
-        m_plain, _ = _sample_fused(clauses, cnf.nv, cfg, force_unpacked=True, chunks=4)
-        assert m_packed == m_plain, f"packed kernel changed the model set for {cfg}"
-
-
-def test_apply_already_implied_literal_no_false_conflict():
-    """Regression (found 2026-07-03 by conflict mining): assuming a literal that a prior units
-    flush ALREADY implied must be a no-op. apply_assumptions_bulk used to re-propagate it,
-    double-decrementing occ[lit]'s sat_counts -> garbage forced literals -> FALSE conflicts.
-    Formula: unit (1) forces x1; (-1 2) then forces x2; re-assuming x1 or x2 must not conflict."""
-    clauses = [[1], [-1, 2], [-2, 3, 4], [-3, 4, 5]]
+def test_kernel_counters():
+    """apply_and_propagate feeds the work counters (ops/props/decs > 0 after propagation)."""
     f = CnfFormula(DEV)
-    f.init_formula(5, clauses)
+    f.init_formula(3, [[1, 2], [-1, 3], [-2, -3]])
     eng = BCPEngine(f)
-    eng.init_state(4)
-    eng.propagate()                                        # flush: x1, x2 now TRUE
-    assert bool(eng.assignment[0, 0] == 1) and bool(eng.assignment[0, 2] == 1)
-    dec = torch.tensor([[0], [2], [0], [6]], dtype=torch.long, device=DEV)  # x1, x2, x1, x4
-    eng.apply_assumptions_bulk(dec)
-    eng.propagate()
-    assert not bool(eng.conflict.any()), "re-assuming an implied literal produced a false conflict"
-    # sat_count must equal ground truth (count non-falsified literals under the assignment)
-    for c_i, cl in enumerate(clauses):
-        for k in range(4):
-            truth = sum(1 for l in cl
-                        if eng.assignment[k, 2 * (abs(l) - 1) + (1 if l > 0 else 0)] != 1)
-            assert int(eng.sat_count[k, c_i]) == truth, (k, c_i)
+    eng.reset(8)
+    dec = torch.zeros((8, 1), dtype=torch.int64, device=DEV)      # everyone decides x1=T
+    eng.apply_and_propagate(dec)
+    assert eng.ops_total() > 0
+    assert eng.decs_total() == 8
+    assert eng.launches >= 1
 
 
 def test_miner_entailed_and_model_preserving():
@@ -304,15 +222,25 @@ def test_miner_entailed_and_model_preserving():
         check(nv, clauses, list(range(min(nv, 6))))
 
 
-def test_packed_bandit_mix_sound():
-    """Alternating packed-fused / oracle / v1 chunks in ONE run: the engine state groups
-    (assignment at the fused K vs sat/lsum at the base K) must never corrupt each other
-    (reset_state re-inits on any K mismatch)."""
-    clauses = [[3], [1, 2, -3], [-1, 4], [-2, -4], [3, -4, 5], [-5, 1]]
-    smp = GPUSampler.from_clauses(5, clauses, DEV, k_cap=64, seed=9, use_kernel=True)
+def test_bandit_mix_with_k_fused_boost_sound():
+    """Alternating configs at a BOOSTED K_fused vs the base K in ONE run: the state groups
+    must never corrupt each other (reset() re-allocates on any K change)."""
+    clauses = [[3], [1, 2, -3], [-1, 4], [-2, -4], [3, -4, 5]]
+    smp = GPUSampler.from_clauses(5, clauses, DEV, k_cap=64, seed=9)
     smp.K_fused = 128                                   # force fused chunks to a DIFFERENT K
-    out = smp.sample(10 ** 9, configs=[(True, 1, "fused"), (True, 2, False), (True, 2, "orac")],
+    out = smp.sample(10 ** 9, configs=[(True, 1, False), (True, 2, "soft")],
                      max_chunks=9, collect=True, verify_clauses=clauses)
     assert out["all_valid"] and out["gpu_sound"] and out["n_models"] > 0
     for m in out["models"]:
         assert _satisfies(m, clauses)
+
+
+def test_make_assumption_tensor_shapes():
+    t = make_assumption_tensor([[0, 2], [5]], DEV)
+    assert t.shape == (2, 2) and t.dtype == torch.int64
+    assert t[1].tolist() == [5, -1]
+    assert make_assumption_tensor([[], []], DEV).shape == (2, 0)
+
+
+if __name__ == "__main__":
+    pytest.main([__file__, "-v"])

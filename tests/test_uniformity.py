@@ -6,14 +6,23 @@ Statistical layers tested separately:
                    planted skew (deterministic RNG; thresholds far from the noise floor).
   collision mode — l2_ratio flags a heavy repeat pattern with |S| unknown; collision-free
                    samples report the birthday floor.
-  pipeline       — sample_clauses returns an exact-mode dict on a tiny CNF (CPU) whose
-                   soundness cross-check passes; the readout is OPT-IN (default off).
+  pipeline       — sample_clauses returns an exact-mode dict on a tiny CNF (needs CUDA — the
+                   engine is packed-kernel-only) whose soundness cross-check passes; the
+                   readout is OPT-IN (default off).
 """
 import numpy as np
 import pytest
 
 from gpap.sampling.metrics import (chi2_sf, enumerate_projections, format_uniformity,
                                    uniformity_stats)
+
+try:
+    import torch as _torch
+    from gpap.engine.kernels import kernel_available as _ka
+    _KERNEL = _torch.cuda.is_available() and _ka()
+except Exception:  # noqa: BLE001
+    _KERNEL = False
+needs_gpu = pytest.mark.skipif(not _KERNEL, reason="engine is CUDA+triton-only")
 
 
 # ------------------------------------------------------------------------------ chi2 survival
@@ -112,12 +121,13 @@ def test_enumerate_projections_cap():
 
 
 # ------------------------------------------------------------------------------ pipeline wiring
+@needs_gpu
 def test_pipeline_exact_uniformity_on_tiny_cnf():
     import torch
     from gpap.sampling.pipeline import sample_clauses
     clauses, sup0 = [[1, 2], [-1, 3], [-2, -3]], [0, 1, 2]
-    info = sample_clauses(3, clauses, sup0, torch.device("cpu"), n_time=400, n_cov=0,
-                          uniformity="exact", configs=None, use_kernel=False,
+    info = sample_clauses(3, clauses, sup0, torch.device("cuda"), n_time=400, n_cov=0,
+                          uniformity="exact", configs=None,
                           time_limit=20.0, mine=False)
     u = info["uniformity"]
     assert u is not None and u["mode"] == "exact" and u["S"] == 2
@@ -127,22 +137,24 @@ def test_pipeline_exact_uniformity_on_tiny_cnf():
     assert info["phases"]["uniformity"] < 10.0
 
 
+@needs_gpu
 def test_pipeline_default_is_off():
     import torch
     from gpap.sampling.pipeline import sample_clauses
-    info = sample_clauses(3, [[1, 2]], [0, 1], torch.device("cpu"), n_time=100, n_cov=0,
-                          configs=None, use_kernel=False, time_limit=10.0, mine=False)
+    info = sample_clauses(3, [[1, 2]], [0, 1], torch.device("cuda"), n_time=100, n_cov=0,
+                          configs=None, time_limit=10.0, mine=False)
     # the readout is OPT-IN (it costs an extra sampling pass): no uniformity kwarg -> no readout
     assert info["uniformity"] is None
     assert info["phases"]["uniformity"] == 0.0
 
 
+@needs_gpu
 def test_pipeline_fast_mode_is_solver_free():
     import torch
     from gpap.sampling.pipeline import sample_clauses
     clauses, sup0 = [[1, 2], [-1, 3], [-2, -3]], [0, 1, 2]
-    info = sample_clauses(3, clauses, sup0, torch.device("cpu"), n_time=400, n_cov=0,
-                          uniformity="fast", configs=None, use_kernel=False, time_limit=20.0,
+    info = sample_clauses(3, clauses, sup0, torch.device("cuda"), n_time=400, n_cov=0,
+                          uniformity="fast", configs=None, time_limit=20.0,
                           mine=False)
     u = info["uniformity"]
     # fast: no enumeration attempted, collision/repeat readout only
@@ -151,11 +163,12 @@ def test_pipeline_fast_mode_is_solver_free():
     assert u["l2_ratio"] < 1.5                     # uniform-ish sampler on a 2-solution space
 
 
+@needs_gpu
 def test_pipeline_uniformity_disabled():
     import torch
     from gpap.sampling.pipeline import sample_clauses
-    info = sample_clauses(3, [[1, 2]], [0, 1], torch.device("cpu"), n_time=100, n_cov=0,
-                          uniformity="off", configs=None, use_kernel=False, time_limit=10.0,
+    info = sample_clauses(3, [[1, 2]], [0, 1], torch.device("cuda"), n_time=100, n_cov=0,
+                          uniformity="off", configs=None, time_limit=10.0,
                           mine=False)
     assert info["uniformity"] is None
 

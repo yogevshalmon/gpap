@@ -3,16 +3,27 @@
 The load-bearing correctness claim: unit-propagation simplification (simplify_cnf) preserves the
 set of valid SUPPORT PROJECTIONS, so sampling the simplified formula and reconstructing yields the
 same distribution support as sampling the original. These tests enumerate the exact projection set
-(via CaDiCaL) and check GPAP against it, with and without simplification."""
+(via CaDiCaL) and check GPAP against it, with and without simplification.
+
+Sampling tests need CUDA (the engine is packed-kernel-only); the pure-host simplify/ELS
+classification tests run anywhere."""
 import random
 
+import pytest
 import torch
 from pysat.formula import CNF
 from pysat.solvers import Solver
 
 from gpap.sampling.sampler import GPUSampler, simplify_cnf, simplify_cnf_els
 
-DEV = torch.device("cpu")  # tests run on CPU for determinism/portability
+CUDA = torch.cuda.is_available()
+try:
+    from gpap.engine.kernels import kernel_available
+    KERNEL = CUDA and kernel_available()
+except Exception:  # noqa: BLE001
+    KERNEL = False
+needs_gpu = pytest.mark.skipif(not KERNEL, reason="engine is CUDA+triton-only")
+DEV = torch.device("cuda") if CUDA else torch.device("cpu")
 
 
 def _enumerate_projections(clauses, support):
@@ -28,6 +39,7 @@ def _enumerate_projections(clauses, support):
     return out
 
 
+@needs_gpu
 def test_sound_basic():
     # (x1∨x2)∧(¬x1∨x3)∧(¬x2∨¬x3) → exactly 2 models {-1,2,-3},{1,-2,3}
     clauses = [[1, 2], [-1, 3], [-2, -3]]
@@ -40,6 +52,7 @@ def test_sound_basic():
     assert out["n_models"] > 0
 
 
+@needs_gpu
 def test_config_portfolio_soft_lookahead():
     # The circuit portfolio uses 3-tuple configs (random_var, B, lookahead) including "soft"
     # risk-polarity. Every produced model must satisfy the formula, and the reported dominant/
@@ -57,12 +70,14 @@ def test_config_portfolio_soft_lookahead():
     assert out2["all_valid"] and len(out2["dominant_config"]) == 3
 
 
+@needs_gpu
 def test_unsat():
     smp = GPUSampler.from_clauses(1, [[1], [-1]], DEV, k_cap=16, seed=1)
     out = smp.sample(10, max_chunks=5, collect=True, verify_clauses=[[1], [-1]])
     assert out["n_models"] == 0
 
 
+@needs_gpu
 def test_unsat_via_simplify():
     smp = GPUSampler.from_clauses(1, [[1], [-1]], DEV, k_cap=16, seed=1, simplify=True)
     out = smp.sample(10, max_chunks=5, collect=True)
@@ -102,6 +117,7 @@ def test_simplify_cnf_classifies_forced_and_dontcare():
     assert all(1 <= abs(l) <= nv2 for c in cl2 for l in c)
 
 
+@needs_gpu
 def test_simplify_preserves_projection_set():
     """The decisive legitimacy check: valid support projections are identical with/without
     simplification, and GPAP-simplified covers exactly that set (sound + complete)."""
@@ -159,6 +175,7 @@ def test_els_removes_variables():
     assert all(1 <= abs(l) <= nv_r for c in cl_r for l in c)
 
 
+@needs_gpu
 def test_els_preserves_projection_set():
     """ELS-reduced sampling reconstructs models that (a) satisfy the ORIGINAL formula and (b) cover
     EXACTLY the valid support-projection set — the strongest soundness gate (an inconsistent
@@ -175,6 +192,7 @@ def test_els_preserves_projection_set():
     assert projs == exact, f"ELS missed projections: {exact - projs}"
 
 
+@needs_gpu
 def test_els_equivalent_vars_stay_equal():
     """The consistency requirement: s2≡s3 and s4≡s5 must be EQUAL in every reconstructed model."""
     nv, clauses, sup = _equiv_formula(seed=3)
@@ -186,6 +204,7 @@ def test_els_equivalent_vars_stay_equal():
         assert (4 in s) == (5 in s), "equivalent vars s4,s5 reconstructed unequal"
 
 
+@needs_gpu
 def test_fully_determined_formula_m0():
     """A formula that simplification reduces to ZERO clauses (everything unit-forced or equivalence-
     collapsed) must still sample without crashing — the BCP engine handles M=0 (empty clause set)."""
@@ -203,15 +222,17 @@ def test_fully_determined_formula_m0():
         assert 1 in s and -2 in s and 3 in s and 4 in s
 
 
+@needs_gpu
 def test_b_larger_than_num_vars():
     """decisions_per_round B can exceed the (post-simplify) variable count on tiny formulas —
-    _pick_decisions must clamp the topk instead of erroring."""
+    the in-kernel decision pick must exhaust the order instead of erroring."""
     clauses = [[1, 2], [-1, -2]]                       # 2 vars, 2 models
     smp = GPUSampler.from_clauses(2, clauses, DEV, k_cap=64, seed=1)
     out = smp.sample(200, decisions_per_round=8, max_chunks=10, collect=True, verify_clauses=clauses)
     assert out["n_models"] > 0 and out["all_valid"]
 
 
+@needs_gpu
 def test_simplify_dontcare_both_polarities():
     """A don't-care support var must take BOTH polarities across samples (uniform), not be pinned."""
     nv, clauses, sup = _controlled_formula(seed=11)

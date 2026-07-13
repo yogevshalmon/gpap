@@ -41,7 +41,7 @@ def _gpap_solutions(input_file, num_solutions, ind_var_list, seed, device, confi
     cnf = CNF(from_file=input_file)
     sup0 = [v - 1 for v in ind_var_list]
     smp = GPUSampler.from_clauses(cnf.nv, cnf.clauses, torch.device(device), support=sup0,
-                                  seed=seed, k_cap=4096, use_kernel=(device == "cuda" and "auto"))
+                                  seed=seed, k_cap=4096)
     bits, cols = smp.sample_bits(num_solutions, config=config, max_chunks=200)
     if bits is None or len(bits) < num_solutions:
         raise RuntimeError(f"GPAP produced {0 if bits is None else len(bits)}/{num_solutions} "

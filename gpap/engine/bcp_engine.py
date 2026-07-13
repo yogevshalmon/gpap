@@ -1,5 +1,20 @@
-import time
+"""BCPEngine — the K-parallel packed BCP engine (state management + kernel launches).
 
+All propagation executes in the Triton kernels (gpap.engine.kernels); this class owns the
+state and the launch plumbing:
+
+  * packed clause state (K, M) int32 — sat_count | XOR-of-remaining-literals, field split
+    chosen per formula (SHIFT = 16 or 8; formulas outside both envelopes are rejected);
+  * assignment (K, 2N) int8 (1 = TRUE), active / conflict (K,) bool;
+  * the post-units-flush cache: the state after asserting the formula's own unit clauses is
+    row-identical for every row of every chunk, so it is computed ONCE at construction (one
+    fixpoint launch at K=1) and `reset(K)` broadcast-restores it — no per-chunk flush;
+  * lifetime work counters accumulated ON GPU (no per-launch sync; the *_total() reads sync).
+
+Requires CUDA + a working triton; construction raises otherwise. There is no CPU fallback —
+correctness is validated against a pure-Python reference BCP (tests/reference_bcp.py) and by
+external-solver model verification, not by a second production path.
+"""
 import torch
 
 from gpap.engine.formula import CnfFormula
@@ -9,7 +24,7 @@ def make_assumption_tensor(
     assumptions_lit_indices: list[list[int]],
     device: torch.device,
 ) -> torch.Tensor:
-    """Convert list[list[int]] to a (K, L) int64 padded tensor for BCPEngine.apply_assumptions_bulk.
+    """Convert list[list[int]] to a (K, L) int64 padded tensor for BCPEngine.apply_and_propagate.
 
     L = max assumption count across all batches; empty slots filled with -1.
     Build this once before any timed / hot path.
@@ -24,626 +39,213 @@ def make_assumption_tensor(
 
 
 class BCPEngine:
-    """Boolean Constraint Propagation engine using occurrence lists and the sum trick.
+    """Packed-state BCP over K independent rows. Two entry points (see gpap.engine.__init__):
 
-    For K parallel assumption sets and M clauses, maintains:
-    - sat_count (K, M): remaining non-falsified literals per clause (init = clause_sizes)
-                        dtype auto-selected: int8 if max_clause_size ≤ 127, int16 ≤ 32767, else int32
-    - lit_sum (K, M):   running sum of non-falsified literal indices (init = init_lit_sum, int32)
-    - assignment (K, 2*N): 0 = unassigned, 1 = TRUE
+        eng = BCPEngine(formula)                 # builds occ + packed init + the flush cache
+        eng.reset(K)                             # broadcast-restore the post-flush state
+        eng.apply_and_propagate(dec)             # (K,L) int64 lit indices, -1 pad; ONE launch
+        eng.run_trajectory(order, n_support, B, seed, soft=...)   # whole sampling loop, ONE launch
+        eng.active / eng.conflict / eng.assignment / eng.sat_rows(idx)
 
-    When literal l is set TRUE:
-    - ~l is falsified in all clauses in occ[l]
-    - sat_count[:, occ[l]] -= 1
-    - lit_sum[:, occ[l]] -= negated_lit_index (i.e. l ^ 1)
-
-    Conflict: sat_count == 0
-    Unit: sat_count == 1, remaining literal = lit_sum value
-
-    Propagation uses a frontier of (batch, clause) pairs whose sat_count was just
-    decremented, avoiding a full (K, M) scan each round.
+    Setting literal l TRUE decrements the packed word of every clause in occ[l] (CSR lists of
+    the NEGATED literal) and XORs ~l out of its remaining-literal field; sat==1 forces the
+    literal the XOR field holds, sat==0 conflicts the row. No clause scanning, ever.
     """
 
-    def __init__(self, formula: CnfFormula):
+    _WIDE_MAX_2N = 0xFFFFFF          # 8|24 split: 24-bit literal index ceiling
+    _WIDE_MAX_LEN = 255              # 8|24 split: 8-bit sat_count ceiling
+
+    def __init__(self, formula: CnfFormula, *, force_wide: bool = False):
+        from gpap.engine.kernels import kernel_available
         self._formula = formula
-        self._device = formula._device
+        self._device = formula.device
         self._num_vars = formula.num_vars
         self._num_clauses = formula.num_clauses
-        self._bcp_rounds = 0
-        # Lifetime work counters (NOT reset by reset_state, so they accumulate across chunks; the
-        # sampler reads deltas). Cheap: incremented from tensor .numel() in the propagate loop, no sync.
-        self.total_bcp_rounds = 0   # BCP rounds executed (propagation depth)
-        self.total_bcp_ops = 0      # frontier (batch,clause) cells processed (≈ literal-falsification work)
-        self.total_bcp_props = 0    # literals assigned TRUE (decisions + implications) — the CDCL-
-                                    # comparable "propagations" count (CDCL solvers report props/sec)
-        self.total_bcp_decisions = 0  # DECISION assignments only (branch picks). Implications =
-                                    # total_bcp_props - total_bcp_decisions (every non-decision
-                                    # assignment is a unit-propagation implication).
-        # Optional fused-kernel fast path (see gpap.engine.kernels.TritonBCP). None = pure-PyTorch.
-        self._fused_kernel = None
-        self._packed_active = False   # last reset was a packed fused reset (see reset_fused)
+        if self._device.type != "cuda" or not kernel_available():
+            raise RuntimeError(
+                "BCPEngine requires CUDA + a working triton kernel (the engine is packed-"
+                "kernel-only; there is no CPU path). Check `gpap info`.")
 
-    def attach_kernel(self, kernel) -> None:
-        """Attach a fused apply+propagate kernel (e.g. TritonBCP). apply_and_propagate() dispatches
-        to it; all other engine methods keep using the PyTorch path (the A/B oracle)."""
-        self._fused_kernel = kernel
-
-    @property
-    def has_kernel(self) -> bool:
-        return self._fused_kernel is not None
-
-    def apply_and_propagate(self, assumptions: "torch.Tensor") -> None:
-        """Apply an assumption/decision tensor and run BCP to fixpoint. With a kernel attached this
-        is ONE fused GPU launch (no Python round loop, no per-round syncs/temporaries); otherwise it
-        falls back to apply_assumptions_bulk() + propagate(). Sampler hot-loop entry point."""
-        if self._fused_kernel is not None:
-            self._fused_kernel.run(self, assumptions)
-            return
-        self.apply_assumptions_bulk(assumptions)
-        self.propagate()
-
-    def reset_fused(self, K: int) -> bool:
-        """Fast per-chunk reset for PACKED fused chunks (the kernel broadcast-restores its cached
-        post-units-flush state). Returns False when unavailable (no kernel / formula not
-        packed-eligible) — the caller must then run the ordinary reset_state() + propagate()."""
-        self._packed_active = bool(self._fused_kernel is not None
-                                   and self._fused_kernel.reset_fused(self, K))
-        return self._packed_active
-
-    def run_trajectory(self, order: "torch.Tensor", n_support: int, B: int, seed: int,
-                       max_rounds: "int | None" = None, *, soft: bool = False,
-                       packed: bool = False) -> int:
-        """Fused trajectory sampling — contract entry point 2: the WHOLE randomized
-        decide+propagate loop for every batch row in ONE kernel launch. Requires an attached
-        kernel. See kernels._bcp_trajectory_kernel for semantics."""
-        return self._fused_kernel.run_trajectory(self, order, n_support, B, seed, max_rounds,
-                                                 soft=soft, packed=packed)
-
-    def sat_rows(self, row_idx: "torch.Tensor") -> "torch.Tensor":
-        """sat_count values for the given batch rows, transparent to the packed fused state
-        (after a packed reset_fused the counters live in the kernel's packed tensor, not
-        `sat_count`). The supported accessor for app-level soundness checks."""
-        if self._packed_active:
-            return self._fused_kernel.packed_sat_rows(row_idx)
-        return self._sat_count[row_idx]
-
-    def kernel_ops(self) -> int:
-        """Occ entries processed by the fused kernel (0 when no kernel). Syncs — read off hot path."""
-        return self._fused_kernel.ops_total() if self._fused_kernel is not None else 0
-
-    def kernel_props(self) -> int:
-        """Literals assigned by the fused kernel (0 when no kernel). Syncs — read off hot path."""
-        return self._fused_kernel.props_total() if self._fused_kernel is not None else 0
-
-    def kernel_decs(self) -> int:
-        """Decision literals assigned by the fused kernel (0 when no kernel). Syncs — off hot path."""
-        return self._fused_kernel.decs_total() if self._fused_kernel is not None else 0
-
-    def init_state(self, num_batches: int):
-        """Initialize BCP state for K parallel assumption sets."""
-        self._packed_active = False
-        K = num_batches
-        M = self._num_clauses
-        N = self._num_vars
-
-        # auto-select sat_count dtype based on max clause size (M==0 — e.g. a formula fully
-        # determined by simplification/ELS — has an empty clause_sizes; .max() would error)
-        max_cls = int(self._formula.clause_sizes.max().item()) if M > 0 else 1
-        if max_cls <= 127:
-            self._sat_count_dtype = torch.int8
-        elif max_cls <= 32767:
-            self._sat_count_dtype = torch.int16
+        M, n2 = self._num_clauses, 2 * self._num_vars
+        max_len = int(formula.clause_sizes.max().item()) if M else 0
+        wide_ok = n2 <= self._WIDE_MAX_2N and max_len <= self._WIDE_MAX_LEN
+        if n2 <= 65535 and not force_wide:
+            self._shift = 16
+        elif wide_ok:
+            self._shift = 8              # the "wide" split (or the force_wide test hook)
         else:
-            self._sat_count_dtype = torch.int32
+            raise ValueError(
+                f"formula outside the packed envelopes: 2N={n2}, max clause len={max_len} "
+                f"(16|16 needs 2N<=65535; 8|24 needs 2N<={self._WIDE_MAX_2N} and "
+                f"len<={self._WIDE_MAX_LEN}). Split long clauses or reduce variables.")
 
-        # clause counters: (K, M)
-        # Convert to target dtype on the M-element vector FIRST, then expand+clone — avoids
-        # materialising a K×M int32 intermediate before the int8/int16 conversion.
-        self._sat_count = self._formula.clause_sizes.to(self._sat_count_dtype).unsqueeze(0).expand(K, -1).clone()
-        self._lit_sum   = self._formula.init_lit_sum.unsqueeze(0).expand(K, -1).clone()  # int32
+        # int32 CSR (formula already stores int32 — just pin contiguity for the kernels)
+        occ = formula.occ_list
+        self._occ_off = occ.occ_offsets.contiguous()
+        self._occ_cls = occ.occ_clauses.contiguous()
 
-        # assignment: (K, 2*N), 0=unassigned, 1=TRUE
-        self._assignment = torch.zeros((K, 2 * N), dtype=torch.int8, device=self._device)
+        # packed init row: sat_count | (xor << SHIFT). Packed in uint32 (the shifted XOR may
+        # legitimately reach bit 31) then reinterpreted as the kernel's int32 — a numpy view is
+        # exact where an integer cast could saturate.
+        import numpy as np
+        xor_mask = (1 << (32 - self._shift)) - 1
+        sizes = formula.clause_sizes.cpu().numpy().astype(np.uint32)
+        xors = formula.init_lit_xor.cpu().numpy().astype(np.uint32)
+        packed = (sizes | ((xors & xor_mask) << self._shift)).view(np.int32)
+        self._packed_init = torch.from_numpy(packed).to(self._device)
 
-        # track which batches are still active (no conflict)
-        self._active = torch.ones(K, dtype=torch.bool, device=self._device)
+        # row-state tensors, sized on first reset()
+        self._packed = None              # (K, M) int32
+        self._assignment = None          # (K, 2N) int8
+        self._active = None              # (K,) bool
+        self._conflict = None            # (K,) bool
+        # kernel workspace / per-launch outputs (sized with K / B in _ensure)
+        self._trail = None               # (K, cap) int32
+        self._nprops = None              # (K,) int32: literals set TRUE last launch
+        self._nops = None                # (K,) int32: occ entries processed last launch
+        self._ndecs = None               # (K,) int32: decision literals last launch
+        self._nrounds = None             # (K,) int32: trajectory decision rounds last launch
+        # lifetime counters (GPU 0-d accumulators; *_total() syncs lazily)
+        self._ops_acc = torch.zeros((), dtype=torch.int64, device=self._device)
+        self._props_acc = torch.zeros((), dtype=torch.int64, device=self._device)
+        self._decs_acc = torch.zeros((), dtype=torch.int64, device=self._device)
+        self.launches = 0
 
-        # track conflict result per batch
-        self._conflict = torch.zeros(K, dtype=torch.bool, device=self._device)
-        
-        # track actual conflict (no-insta conflict that will cause subsumption) after round 1
-        self._real_conflict = torch.zeros(K, dtype=torch.bool, device=self._device)
+        self._build_flush_cache()
 
-        # track number of propagated literals per batch
-        self._num_propagated = torch.zeros(K, dtype=torch.int32, device=self._device)
-
-        # track which batches hit the round limit before reaching fixpoint/conflict
-        self._timed_out = torch.zeros(K, dtype=torch.bool, device=self._device)
-
-        # Frontier: (batch, clause) pairs whose sat_count was just decremented.
-        # propagate() reads frontier_batches/clauses and replaces them each round.
-        # Seeded here with clauses already at unit/conflict in the original formula.
-        init_unit_cls = (self._formula.clause_sizes <= 1).nonzero(as_tuple=False).view(-1)
-        if init_unit_cls.numel() > 0:
-            self._frontier_batches = (
-                torch.arange(K, device=self._device)
-                .unsqueeze(1).expand(-1, init_unit_cls.numel()).reshape(-1)
-            )
-            self._frontier_clauses = init_unit_cls.unsqueeze(0).expand(K, -1).reshape(-1)
-        else:
-            self._frontier_batches = torch.empty(0, dtype=torch.long, device=self._device)
-            self._frontier_clauses = torch.empty(0, dtype=torch.long, device=self._device)
-
-    def reset_state(self, num_batches: int):
-        """Reset BCP state in-place, reusing existing tensor allocations.
-
-        After the first chunk, this is faster than init_state(): uses .copy_()/.zero_()
-        instead of allocating new (K, M) tensors. Falls back to init_state() when K changes
-        (e.g. last partial chunk) or when called before any init.
-        """
-        # Re-init when ANY state tensor is missing or K-mismatched: a packed fused chunk
-        # (TritonBCP.reset_fused) resizes assignment/active/conflict to the boosted K while
-        # leaving sat_count/lit_sum untouched, so the two groups can disagree here.
-        if (not hasattr(self, '_sat_count') or self._sat_count.size(0) != num_batches
-                or self._assignment.size(0) != num_batches):
-            self.init_state(num_batches)
-            return
-
-        self._packed_active = False
-        K = num_batches
-        # In-place overwrite — no new allocations for sat_count/lit_sum/assignment.
-        # Dtype conversion on the M-element vector before expand avoids materialising K×M temps.
-        self._sat_count.copy_(self._formula.clause_sizes.to(self._sat_count_dtype).unsqueeze(0).expand(K, -1))
-        self._lit_sum.copy_(self._formula.init_lit_sum.unsqueeze(0).expand(K, -1))
-        self._assignment.zero_()
-        self._active.fill_(True)
-        self._conflict.zero_()
-        self._real_conflict.zero_()
-        self._num_propagated.zero_()
-        self._timed_out.zero_()
-        self._bcp_rounds = 0
-
-        # Rebuild frontier for any unit/conflict clauses in the original formula
-        init_unit_cls = (self._formula.clause_sizes <= 1).nonzero(as_tuple=False).view(-1)
-        if init_unit_cls.numel() > 0:
-            self._frontier_batches = (
-                torch.arange(K, device=self._device)
-                .unsqueeze(1).expand(-1, init_unit_cls.numel()).reshape(-1)
-            )
-            self._frontier_clauses = init_unit_cls.unsqueeze(0).expand(K, -1).reshape(-1)
-        else:
-            self._frontier_batches = torch.empty(0, dtype=torch.long, device=self._device)
-            self._frontier_clauses = torch.empty(0, dtype=torch.long, device=self._device)
-
-    def _bulk_propagate_lits(
-        self, batch_ids: torch.Tensor, lit_ids: torch.Tensor
-    ) -> tuple[torch.Tensor, torch.Tensor]:
-        """Bulk-propagate literals: update sat_count, lit_sum, and assignment.
-
-        Returns (frontier_batches, frontier_clauses): the (batch, clause) pairs whose
-        sat_count was just decremented. Pass these as the next round's frontier so
-        propagate() only checks cells that actually changed.
-
-        batch_ids: (P,) int64 — unique (batch, lit) pairs, all active, none already assigned
-        lit_ids:   (P,) int64
-        """
-        occ = self._formula.occ_list
-        M = self._num_clauses
-        P = batch_ids.size(0)
-        _empty = torch.empty(0, dtype=torch.long, device=self._device)
-        if P == 0:
-            return _empty, _empty
-
-        # CSR lookup for all P literals at once
-        starts  = occ.occ_offsets[lit_ids]          # (P,)
-        ends    = occ.occ_offsets[lit_ids + 1]       # (P,)
-        lengths = ends - starts                       # (P,) — may include zeros
-        total   = lengths.sum().item()               # CPU sync: necessary scalar transfer
-
-        if total > 0:
-            # Expand batch_ids to one entry per occ hit
-            exp_batches = batch_ids.repeat_interleave(lengths)  # (total,)
-
-            # Segment-offset trick: local_off[j] = position of j within its segment
-            cum = torch.zeros(P, dtype=torch.long, device=self._device)
-            if P > 1:
-                cum[1:] = lengths[:-1].cumsum(0)
-            flat_range  = torch.arange(total, dtype=torch.long, device=self._device)
-            local_off   = flat_range - cum.repeat_interleave(lengths)
-            csi         = starts.repeat_interleave(lengths) + local_off
-            exp_clauses = occ.occ_clauses[csi]           # (total,) clause indices
-
-            # Flat 1D index into (K, M) for scatter operations
-            flat_idx = exp_batches * M + exp_clauses     # (total,)
-
-            # Decrement sat_count for all affected (batch, clause) pairs.
-            neg_ones = torch.full((total,), -1, dtype=self._sat_count_dtype, device=self._device)
-            self._sat_count.view(-1).scatter_add_(0, flat_idx, neg_ones)
-
-            # Subtract neg_lit from lit_sum for all affected pairs
-            neg_lits     = (lit_ids ^ 1).to(torch.int32)           # (P,) XOR flips bit 0
-            exp_neg_lits = (-neg_lits).repeat_interleave(lengths)   # (total,)
-            self._lit_sum.view(-1).scatter_add_(0, flat_idx, exp_neg_lits)
-
-            self._assignment[batch_ids, lit_ids] = 1
-            return exp_batches, exp_clauses
-
-        self._assignment[batch_ids, lit_ids] = 1
-        return _empty, _empty
+    # ------------------------------------------------------------------ construction
 
     @torch.inference_mode()
-    def apply_assumptions_bulk(self, assumptions: torch.Tensor):
-        """Apply assumptions in bulk using scatter operations for better GPU performance.
-
-        Populates the frontier with affected (batch, clause) pairs so propagate()
-        only checks cells that were modified.
-
-        Args:
-            assumptions: (K, L) int64 tensor. Each row is one batch's literals;
-                         -1 = padding. Build with make_assumption_tensor() outside
-                         any timed / hot loop.
-        """
-        K = self._sat_count.size(0)
-        N = self._num_vars
-
-        assumptions = assumptions.to(self._device)
-        if assumptions.numel() == 0:
-            return
-
-        # Vectorised build — no Python loops, one scatter
-        valid     = assumptions >= 0                                               # (K, L)
-        if not valid.any():
-            return
-        batch_ids = torch.arange(K, device=self._device).unsqueeze(1) \
-                        .expand_as(assumptions)[valid]                             # (P,)
-        lit_ids   = assumptions[valid]                                             # (P,)
-
-        # Build (K, 2N) assumption matrix — scatter is idempotent for duplicate (batch, lit) pairs
-        assum_mat = torch.zeros(K, 2 * N, dtype=torch.bool, device=self._device)
-        assum_mat[batch_ids, lit_ids] = True
-
-        # Intra-batch contradiction: same batch assumes both l and ~l for some variable
-        intra_conflict = (assum_mat[:, 0::2] & assum_mat[:, 1::2]).any(dim=1) & self._active
-
-        # Contradiction against existing assignment: assume l but ~l already TRUE
-        assum_neg = torch.zeros_like(assum_mat)
-        assum_neg[:, 0::2] = assum_mat[:, 1::2]
-        assum_neg[:, 1::2] = assum_mat[:, 0::2]
-        existing_conflict = (assum_neg & self._assignment.bool()).any(dim=1) & self._active
-
-        new_conflicts = intra_conflict | existing_conflict
-        self._conflict |= new_conflicts
-        self._active   &= ~new_conflicts
-
-        # Get unique (batch, lit) pairs for still-active batches. Also drop literals ALREADY
-        # assigned TRUE (e.g. implied by a prior propagate() units flush): _bulk_propagate_lits
-        # decrements occ[lit] unconditionally, so re-applying an assigned literal would
-        # double-decrement sat_count -> garbage forced literals -> FALSE conflicts. (The Triton
-        # kernel has always had this skip-duplicates guard; this mirrors it on the bulk path.)
-        pairs = assum_mat.nonzero()           # (total_unique, 2) int64
-        valid = self._active[pairs[:, 0]] & \
-            (self._assignment[pairs[:, 0], pairs[:, 1]] == 0)
-        pairs = pairs[valid]
-
-        if pairs.size(0) > 0:
-            self.total_bcp_props += pairs.size(0)          # decision assignments (free metadata)
-            self.total_bcp_decisions += pairs.size(0)      # ...and they are DECISIONS (branch picks)
-            new_b, new_c = self._bulk_propagate_lits(pairs[:, 0], pairs[:, 1])
-            if new_b.numel() > 0:
-                self._frontier_batches = torch.cat([self._frontier_batches, new_b])
-                self._frontier_clauses = torch.cat([self._frontier_clauses, new_c])
-
-    @torch.inference_mode()
-    def propagate(
-        self,
-        max_rounds: int | None = None,
-        soft_stop_frac: float | None = None,
-        min_rounds: int = 0,
-    ) -> torch.Tensor:
-        """Run BCP to fixpoint (or stop early) for all active batches.
-
-        Uses a frontier of (batch, clause) pairs updated each round — only checks
-        cells whose sat_count changed, avoiding a full (K, M) scan.
-
-        Args:
-            max_rounds: hard cap; stop after this many rounds even if not at fixpoint.
-                        Batches still in the frontier are marked in self._timed_out.
-                        None (default) means no hard cap.
-            soft_stop_frac: after round_count >= min_rounds, stop when a round's
-                            useful work (unique propagations) drops below
-                            soft_stop_frac × peak observed work. None (default)
-                            disables the heuristic. Batches still in the frontier
-                            when triggered are marked in self._timed_out.
-            min_rounds: don't allow soft_stop_frac to trigger before this round.
-
-        Returns:
-            conflict: (K,) boolean tensor, True if batch has a conflict
-        """
-        N = self._num_vars
-
-        frontier_b = self._frontier_batches
-        frontier_c = self._frontier_clauses
-        round_count = 0
-        peak_work   = 0
-
-        while frontier_b.numel() > 0:
-            self._bcp_rounds += 1
-            self.total_bcp_rounds += 1
-            self.total_bcp_ops += frontier_b.numel()   # cells processed this round (free .numel())
-            round_count += 1
-
-            if max_rounds is not None and round_count > max_rounds:
-                # Mark batches still active in this frontier as timed out
-                in_flight = torch.unique(frontier_b)
-                still_active = in_flight[self._active[in_flight]]
-                if still_active.numel() > 0:
-                    self._timed_out[still_active] = True
-                break
-
-            # --- Filter frontier to active batches ---
-            # No .any() guard (which forces a CPU sync): empty masks make every op
-            # below a no-op, and the loop terminates at the prop_batches.numel() == 0
-            # break (.numel() is tensor metadata, free) or when the frontier empties.
-            active_mask = self._active[frontier_b]
-            fb = frontier_b[active_mask]
-            fc = frontier_c[active_mask]
-
-            # --- Gather sat_count at frontier positions ---
-            sc_vals = self._sat_count[fb, fc]
-
-            # --- Conflicts: sat_count == 0 (unconditional; no-op when none) ---
-            is_conflict = sc_vals == 0
-            conf_b = fb[is_conflict]
-            self._conflict[conf_b] = True
-            self._active[conf_b]   = False
-            # actual conflict (not just insta-conflict from assumptions) after round 1
-            if round_count > 1:
-                self._real_conflict[conf_b] = True
-
-            # --- Units: sat_count == 1 for still-active batches ---
-            is_unit = (sc_vals == 1) & self._active[fb]
-            unit_b      = fb[is_unit]
-            unit_c      = fc[is_unit]
-            forced_lits = self._lit_sum[unit_b, unit_c].long()
-
-            # --- Vectorized filter (B/C/D) ---
-            neg_forced       = forced_lits ^ 1
-            is_active        = self._active[unit_b]
-            is_new           = self._assignment[unit_b, forced_lits] == 0
-            is_contradiction = self._assignment[unit_b, neg_forced]  == 1
-
-            contra_mask = is_active & is_contradiction
-            contra_b = unit_b[contra_mask]
-            self._conflict[contra_b] = True
-            self._active[contra_b]   = False
-            if round_count > 1:
-                self._real_conflict[contra_b] = True
-
-            to_prop = is_active & is_new & ~is_contradiction
-            prop_batches = unit_b[to_prop]
-            prop_lits    = forced_lits[to_prop]
-
-            # --- Sparse dedup + intra-round contradiction check (E) ---
-            # Encode (batch, lit) as a flat scalar; torch.unique deduplicates cheaply
-            two_N = 2 * N
-            flat_unique = torch.unique(prop_batches * two_N + prop_lits)  # sorted, deduped
-            prop_batches = flat_unique.div(two_N, rounding_mode='floor')
-            prop_lits    = flat_unique % two_N
-
-            # Intra-round conflict: same batch has both l and ~l queued.
-            # Computed unconditionally; the bad.numel() guard (free) skips the work
-            # when there is no contradiction.
-            flat_neg = prop_batches * two_N + (prop_lits ^ 1)
-            intra_mask = torch.isin(flat_neg, flat_unique)
-            bad = torch.unique(prop_batches[intra_mask])
-            bad = bad[self._active[bad]]
-            if bad.numel() > 0:
-                self._conflict[bad] = True
-                self._active[bad]   = False
-                self._real_conflict[bad] = True
-                keep = ~torch.isin(prop_batches, bad)
-                prop_batches = prop_batches[keep]
-                prop_lits    = prop_lits[keep]
-
-            if prop_batches.numel() == 0:
-                break
-
-            # --- Propagate; next frontier = clauses whose sat_count just changed (F) ---
-            this_round_work = prop_batches.numel()  # free: tensor metadata, no CUDA sync
-            self.total_bcp_props += this_round_work
-            frontier_b, frontier_c = self._bulk_propagate_lits(prop_batches, prop_lits)
-
-            # --- Per-batch propagation count (G) ---
-            ones = torch.ones(prop_batches.size(0), dtype=torch.int32, device=self._device)
-            self._num_propagated.scatter_add_(0, prop_batches, ones)
-
-            # --- Soft cutoff: stop when per-round work decays below soft_stop_frac × peak (H) ---
-            if this_round_work > peak_work:
-                peak_work = this_round_work
-            if (soft_stop_frac is not None
-                    and round_count >= min_rounds
-                    and peak_work > 0
-                    and this_round_work < soft_stop_frac * peak_work):
-                if frontier_b.numel() > 0:
-                    in_flight = torch.unique(frontier_b)
-                    still_active = in_flight[self._active[in_flight]]
-                    if still_active.numel() > 0:
-                        self._timed_out[still_active] = True
-                break
-
-        return self._conflict
-
-    @torch.inference_mode()
-    def propagate_profiled(self) -> tuple[torch.Tensor, dict]:
-        """Like propagate() but with per-step, per-round timing.
-
-        Inlines _bulk_propagate_lits to expose sub-step costs.
-        Use only for profiling — sync overhead inflates wall time.
-
-        Returns:
-            conflict: (K,) boolean tensor
-            summary:  dict[step_name -> {total_ms, mean_ms, n}]
-        """
-        N = self._num_vars
-        device = self._device
-        is_cuda = device.type == "cuda"
-        occ = self._formula.occ_list
+    def _build_flush_cache(self) -> None:
+        """One fixpoint launch at K=1 seeded with the formula's unit-clause literals; the
+        resulting state is cached and broadcast-restored by every reset(K). An empty clause
+        (or contradictory/conflicting units) makes the flush itself conflict — reset() then
+        marks every row conflicted (the formula is UNSAT; 0 models either way)."""
+        f = self._formula
         M = self._num_clauses
+        self.reset(1, _from_init=True)
+        if f.has_empty_clause:
+            self._conflict.fill_(True)
+            self._active.fill_(False)
+        elif M:
+            unit_mask = f.clause_sizes == 1
+            if bool(unit_mask.any()):
+                units = f.init_lit_xor[unit_mask].to(torch.int64).view(1, -1)
+                self.apply_and_propagate(units)
+        self._packed_flushed = self._packed[0].clone()
+        self._asg_flushed = self._assignment[0].clone()
+        self._flush_conflict = bool(self._conflict[0].item())
+        # the flush is construction, not sampled work — reset the lifetime counters
+        self._ops_acc.zero_(); self._props_acc.zero_(); self._decs_acc.zero_()
+        self.launches = 0
 
-        def ts() -> float:
-            if is_cuda:
-                torch.cuda.synchronize()
-            return time.perf_counter()
+    @torch.inference_mode()
+    def recache_flush(self) -> None:
+        """Re-cache the flush state from row 0 of the CURRENT state — the incremental-units
+        hook (miner): reset(1) + apply_and_propagate(new_units) + recache_flush() folds
+        entailed units into the cached flush without rebuilding the formula."""
+        self._packed_flushed = self._packed[0].clone()
+        self._asg_flushed = self._assignment[0].clone()
+        self._flush_conflict = bool(self._conflict[0].item())
 
-        steps: dict[str, list[float]] = {
-            "frontier_filter": [],  # active-mask filter on frontier
-            "sc_gather":       [],  # sat_count[fb, fc] gather
-            "conflict":        [],  # sat==0 detection + mark
-            "unit_filter":     [],  # B/C/D: forced-lit gather + active/new/contra filter
-            "sparse_dedup":    [],  # E: unique encode + intra-conflict (sparse, no bitmap)
-            "csr_lookup":      [],  # CSR occ_offsets slice + lengths
-            "expand":          [],  # repeat_interleave + segment-offset + flat_idx
-            "scatter_sat":     [],  # scatter_add_ on sat_count
-            "scatter_lit":     [],  # scatter_add_ on lit_sum
-            "assign":          [],  # assignment write + num_propagated scatter_add
-        }
+    def _ensure(self, K: int, B: int) -> None:
+        cap = self._num_vars + max(B, 64) + 8
+        if self._trail is None or self._trail.size(0) != K or self._trail.size(1) < cap:
+            dev = self._device
+            self._trail = torch.empty((K, cap), dtype=torch.int32, device=dev)
+            self._nprops = torch.zeros(K, dtype=torch.int32, device=dev)
+            self._nops = torch.zeros(K, dtype=torch.int32, device=dev)
+            self._ndecs = torch.zeros(K, dtype=torch.int32, device=dev)
+            self._nrounds = torch.zeros(K, dtype=torch.int32, device=dev)
 
-        frontier_b = self._frontier_batches
-        frontier_c = self._frontier_clauses
+    # ------------------------------------------------------------------ entry points
 
-        while frontier_b.numel() > 0:
-            self._bcp_rounds += 1
+    @torch.inference_mode()
+    def reset(self, K: int, _from_init: bool = False) -> None:
+        """Reset K rows to the cached post-flush state (allocations reused when K matches)."""
+        dev = self._device
+        M, n2 = self._num_clauses, 2 * self._num_vars
+        if self._assignment is None or self._assignment.size(0) != K:
+            self._packed = torch.empty((K, M), dtype=torch.int32, device=dev)
+            self._assignment = torch.empty((K, n2), dtype=torch.int8, device=dev)
+            self._active = torch.empty(K, dtype=torch.bool, device=dev)
+            self._conflict = torch.empty(K, dtype=torch.bool, device=dev)
+        if _from_init:                       # construction path: pre-flush init state
+            self._packed.copy_(self._packed_init.unsqueeze(0).expand(K, -1))
+            self._assignment.zero_()
+            self._active.fill_(True)
+            self._conflict.fill_(False)
+            return
+        self._packed.copy_(self._packed_flushed.unsqueeze(0).expand(K, -1))
+        self._assignment.copy_(self._asg_flushed.unsqueeze(0).expand(K, -1))
+        self._active.fill_(not self._flush_conflict)
+        self._conflict.fill_(self._flush_conflict)
 
-            t0 = ts()
-            active_mask = self._active[frontier_b]
-            any_active = active_mask.any().item()
-            steps["frontier_filter"].append(ts() - t0)
-            if not any_active:
-                break
-            fb = frontier_b[active_mask]
-            fc = frontier_c[active_mask]
+    @torch.inference_mode()
+    def apply_and_propagate(self, decisions: torch.Tensor) -> None:
+        """Apply a (K, L) int64 decision tensor (-1 = padding) and BCP to fixpoint — ONE launch.
+        Duplicate literals are skipped; l/~l pairs and decisions contradicting the existing
+        assignment conflict the row. Entry point 1 (batched assumption checking)."""
+        from gpap.engine.kernels import _bcp_fixpoint_kernel
+        K = self._assignment.size(0)
+        decisions = decisions.to(self._device)
+        if decisions.dim() == 1:
+            decisions = decisions.unsqueeze(1)
+        B = decisions.size(1)
+        if decisions.numel() == 0:
+            return
+        self._ensure(K, B)
+        # Zero the per-row outputs: INACTIVE rows are left unwritten by the kernel, and
+        # summing stale values would corrupt the accumulators.
+        self._nprops.zero_(); self._nops.zero_(); self._ndecs.zero_()
+        dec = decisions.to(torch.int64).contiguous()
+        _bcp_fixpoint_kernel[(K,)](
+            self._packed, self._assignment,
+            self._active.view(torch.int8), self._conflict.view(torch.int8),
+            dec, self._occ_off, self._occ_cls, self._trail,
+            self._nprops, self._nops, self._ndecs,
+            self._num_clauses, 2 * self._num_vars, B, self._trail.size(1),
+            SHIFT=self._shift, num_warps=1,
+        )
+        self.launches += 1
+        self._ops_acc += self._nops.sum()               # GPU-side, no sync
+        self._props_acc += self._nprops.sum()
+        self._decs_acc += self._ndecs.sum()
 
-            t0 = ts()
-            sc_vals = self._sat_count[fb, fc]
-            steps["sc_gather"].append(ts() - t0)
+    @torch.inference_mode()
+    def run_trajectory(self, order: torch.Tensor, n_support: int, B: int, seed: int,
+                       *, soft: bool = False) -> int:
+        """Whole randomized decide+propagate trajectories for every row — ONE launch. `order` =
+        (P,) var indices, support vars first; picking the next B still-free vars in `order` with
+        a stateless per-(chunk,k,v) hash polarity (the torch RNG stream is NOT consumed, so runs
+        are reproducible via `seed` alone). `soft` enables the in-kernel risk-polarity. Entry
+        point 2 (trajectory sampling). Returns the max decision rounds any row used (one sync)."""
+        from gpap.engine.kernels import _bcp_trajectory_kernel
+        K = self._assignment.size(0)
+        self._ensure(K, 64)
+        self._nprops.zero_(); self._nops.zero_(); self._ndecs.zero_(); self._nrounds.zero_()
+        order = order.to(torch.int32).contiguous()
+        _bcp_trajectory_kernel[(K,)](
+            self._packed, self._assignment,
+            self._active.view(torch.int8), self._conflict.view(torch.int8),
+            order, self._occ_off, self._occ_cls,
+            self._trail, self._nrounds, self._nops, self._nprops, self._ndecs,
+            self._num_clauses, 2 * self._num_vars, order.numel(), n_support, B,
+            self._trail.size(1), 1 << 30, seed,
+            SOFT=(1 if soft else 0), SHIFT=self._shift, num_warps=1,
+        )
+        self.launches += 1
+        self._ops_acc += self._nops.sum()
+        self._props_acc += self._nprops.sum()
+        self._decs_acc += self._ndecs.sum()
+        return int(self._nrounds.max().item())
 
-            t0 = ts()
-            is_conflict = sc_vals == 0
-            if is_conflict.any():
-                self._conflict[fb[is_conflict]] = True
-                self._active[fb[is_conflict]]   = False
-            steps["conflict"].append(ts() - t0)
+    # ------------------------------------------------------------------ accessors
 
-            t0 = ts()
-            is_unit = (sc_vals == 1) & self._active[fb]
-            if not is_unit.any():
-                steps["unit_filter"].append(ts() - t0)
-                break
-            unit_b      = fb[is_unit]
-            unit_c      = fc[is_unit]
-            forced_lits = self._lit_sum[unit_b, unit_c].long()
-            neg_forced       = forced_lits ^ 1
-            is_active        = self._active[unit_b]
-            is_new           = self._assignment[unit_b, forced_lits] == 0
-            is_contradiction = self._assignment[unit_b, neg_forced]  == 1
-            contra_mask = is_active & is_contradiction
-            if contra_mask.any():
-                self._conflict[unit_b[contra_mask]] = True
-                self._active[unit_b[contra_mask]]   = False
-            to_prop = is_active & is_new & ~is_contradiction
-            steps["unit_filter"].append(ts() - t0)
-            if not to_prop.any():
-                break
-
-            prop_batches = unit_b[to_prop]
-            prop_lits    = forced_lits[to_prop]
-
-            t0 = ts()
-            two_N = 2 * N
-            flat_unique = torch.unique(prop_batches * two_N + prop_lits)
-            prop_batches = flat_unique.div(two_N, rounding_mode='floor')
-            prop_lits    = flat_unique % two_N
-            flat_neg = prop_batches * two_N + (prop_lits ^ 1)
-            intra_mask = torch.isin(flat_neg, flat_unique)
-            if intra_mask.any():
-                bad = torch.unique(prop_batches[intra_mask])
-                bad = bad[self._active[bad]]
-                if bad.numel() > 0:
-                    self._conflict[bad] = True
-                    self._active[bad]   = False
-                    keep = ~torch.isin(prop_batches, bad)
-                    prop_batches = prop_batches[keep]
-                    prop_lits    = prop_lits[keep]
-            steps["sparse_dedup"].append(ts() - t0)
-            if prop_batches.numel() == 0:
-                break
-
-            P = prop_batches.size(0)
-
-            # Inlined _bulk_propagate_lits with sub-step timing
-            t0 = ts()
-            starts  = occ.occ_offsets[prop_lits]
-            ends    = occ.occ_offsets[prop_lits + 1]
-            lengths = ends - starts
-            total   = lengths.sum().item()          # CPU sync: necessary scalar transfer
-            steps["csr_lookup"].append(ts() - t0)
-
-            if total > 0:
-                t0 = ts()
-                exp_batches = prop_batches.repeat_interleave(lengths)
-                cum = torch.zeros(P, dtype=torch.long, device=device)
-                if P > 1:
-                    cum[1:] = lengths[:-1].cumsum(0)
-                flat_range  = torch.arange(total, dtype=torch.long, device=device)
-                local_off   = flat_range - cum.repeat_interleave(lengths)
-                csi         = starts.repeat_interleave(lengths) + local_off
-                exp_clauses = occ.occ_clauses[csi]
-                flat_idx    = exp_batches * M + exp_clauses
-                steps["expand"].append(ts() - t0)
-
-                t0 = ts()
-                neg_ones = torch.full((total,), -1, dtype=self._sat_count_dtype, device=device)
-                self._sat_count.view(-1).scatter_add_(0, flat_idx, neg_ones)
-                steps["scatter_sat"].append(ts() - t0)
-
-                t0 = ts()
-                neg_lits     = (prop_lits ^ 1).to(torch.int32)
-                exp_neg_lits = (-neg_lits).repeat_interleave(lengths)
-                self._lit_sum.view(-1).scatter_add_(0, flat_idx, exp_neg_lits)
-                steps["scatter_lit"].append(ts() - t0)
-
-                frontier_b, frontier_c = exp_batches, exp_clauses
-            else:
-                steps["expand"].append(0.0)
-                steps["scatter_sat"].append(0.0)
-                steps["scatter_lit"].append(0.0)
-                _empty = torch.empty(0, dtype=torch.long, device=device)
-                frontier_b, frontier_c = _empty, _empty
-
-            t0 = ts()
-            self._assignment[prop_batches, prop_lits] = 1
-            ones = torch.ones(P, dtype=torch.int32, device=device)
-            self._num_propagated.scatter_add_(0, prop_batches, ones)
-            steps["assign"].append(ts() - t0)
-
-        def summarize(times: list[float]) -> dict:
-            if not times:
-                return {"total_ms": 0.0, "mean_ms": 0.0, "n": 0}
-            ms = [t * 1e3 for t in times]
-            return {"total_ms": sum(ms), "mean_ms": sum(ms) / len(ms), "n": len(ms)}
-
-        return self._conflict, {k: summarize(v) for k, v in steps.items()}
-
-    @property
-    def conflict(self) -> torch.Tensor:
-        return self._conflict
-
-    @property
-    def real_conflict(self) -> torch.Tensor:
-        """(K,) bool — True only for BCP-derived conflicts (round_count > 1).
-        Excludes trivial conflicts where the assumption set directly violates an
-        existing clause without any propagation. Use this for clause learning."""
-        return self._real_conflict
+    def sat_rows(self, row_idx: torch.Tensor) -> torch.Tensor:
+        """sat_count values for the given rows (extracted from the packed state). The supported
+        accessor for app-level soundness checks ('every clause > 0' on a fully-assigned row)."""
+        return self._packed[row_idx] & ((1 << self._shift) - 1)
 
     @property
     def assignment(self) -> torch.Tensor:
@@ -654,44 +256,74 @@ class BCPEngine:
         return self._active
 
     @property
+    def conflict(self) -> torch.Tensor:
+        return self._conflict
+
+    @property
     def num_propagated(self) -> torch.Tensor:
-        return self._num_propagated
+        """(K,) int32 — unit-propagation IMPLICATIONS of the last launch (assigned minus
+        decisions)."""
+        return self._nprops - self._ndecs
 
     @property
-    def timed_out(self) -> torch.Tensor:
-        """(K,) bool — True if batch hit the round limit before reaching fixpoint/conflict."""
-        return self._timed_out
+    def flush_conflict(self) -> bool:
+        """True iff the formula's own units already conflict (formula UNSAT)."""
+        return self._flush_conflict
 
     @property
-    def sat_count(self) -> torch.Tensor:
-        return self._sat_count
+    def flushed_assignment(self) -> torch.Tensor:
+        """(2N,) int8 — the cached post-flush assignment row (formula units + implications)."""
+        return self._asg_flushed
 
     @property
-    def lit_sum(self) -> torch.Tensor:
-        return self._lit_sum
+    def shift(self) -> int:
+        """Packed field split: 16 (16|16) or 8 (8|24 'wide')."""
+        return self._shift
+
+    @property
+    def num_vars(self) -> int:
+        return self._num_vars
+
+    @property
+    def num_clauses(self) -> int:
+        return self._num_clauses
+
+    @property
+    def device(self) -> torch.device:
+        return self._device
+
+    def ops_total(self) -> int:
+        """Occ entries processed so far (syncs; read off the hot path)."""
+        return int(self._ops_acc.item())
+
+    def props_total(self) -> int:
+        """Literals assigned so far — decisions + implications (syncs; off the hot path)."""
+        return int(self._props_acc.item())
+
+    def decs_total(self) -> int:
+        """Decision literals assigned so far (syncs; off the hot path).
+        Implications = props_total() - decs_total()."""
+        return int(self._decs_acc.item())
 
 
 if __name__ == "__main__":
     from gpap.engine.formula import ext_lit_to_lit_index
 
-    device = torch.device("cpu")
+    if not torch.cuda.is_available():
+        raise SystemExit("demo requires CUDA (the engine is kernel-only)")
+    device = torch.device("cuda")
     formula = CnfFormula(device)
     # (x1 OR x2), (~x1 OR x3), (~x2 OR ~x3), (x1 OR ~x2)
-    clauses = [[1, 2], [-1, 3], [-2, -3], [1, -2]]
-    formula.init_formula(3, clauses)
+    formula.init_formula(3, [[1, 2], [-1, 3], [-2, -3], [1, -2]])
 
     engine = BCPEngine(formula)
-    engine.init_state(num_batches=2)
+    engine.reset(2)
+    # batch 0: assume x1=TRUE, batch 1: assume x1=FALSE
+    dec = make_assumption_tensor([[ext_lit_to_lit_index(1)],
+                                  [ext_lit_to_lit_index(-1)]], device)
+    engine.apply_and_propagate(dec)
 
-    # batch 0: assume x1=TRUE (lit_idx=0), batch 1: assume x1=FALSE (lit_idx=1)
-    assumptions = [
-        [ext_lit_to_lit_index(1)],   # x1 TRUE
-        [ext_lit_to_lit_index(-1)],  # x1 FALSE (~x1 TRUE)
-    ]
-    engine.apply_assumptions_bulk(assumptions)
-    conflict = engine.propagate()
-
-    print("Conflicts:", conflict)
-    print("Assignment batch 0:", engine.assignment[0])
-    print("Assignment batch 1:", engine.assignment[1])
-    print("Propagated:", engine.num_propagated)
+    print("Conflicts:", engine.conflict.tolist())
+    print("Assignment batch 0:", engine.assignment[0].tolist())
+    print("Assignment batch 1:", engine.assignment[1].tolist())
+    print("Implications:", engine.num_propagated.tolist())

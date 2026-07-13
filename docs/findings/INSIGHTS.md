@@ -29,6 +29,26 @@ max 105 W) under battery/whisper profiles, uniformly halving all rates. Check
 `nvidia-smi -q -d POWER` and SM clocks under load (>2.5 GHz boost) before trusting absolute
 numbers; A/B ratios within one state remain valid.
 
+**The engine is packed-XOR-Triton-only; the PyTorch execution path was DELETED (2026-07-13).**
+Architecture-review decision: every path except the packed (sat|xor in one int32, SHIFT=16|8)
+trajectory/fixpoint kernels was dead weight — the PyTorch propagate loop (kept as "oracle + CPU
+fallback"), the unpacked kernels, and the SUM-trick counters (`init_lit_sum` → `init_lit_xor`;
+XOR never overflows, killing a latent int32-saturation edge in the float64→int32 construction).
+Consequences, all deliberate: (1) CUDA+triton is REQUIRED — `BCPEngine` refuses construction
+without it, `gpap sample`/`bench` exit early on CPU; the "portable CPU smoke" now covers only
+host-side logic. (2) The A/B oracle moved to `tests/reference_bcp.py` (pure-Python worklist BCP;
+confluence makes agreement exact) + external model verification — the engine no longer carries
+its own second implementation. (3) Formulas outside the packed envelopes (2N > 0xFFFFFF, or
+2N > 65535 with clause len > 255) are REJECTED instead of falling back to unpacked. (4) The
+`orac` and `full`-lookahead config modes are gone for real (both measured out earlier); soft is
+spelled `"soft"` ("fused"/"fsoft" accepted as aliases). (5) DEFAULT_PORTFOLIO's
+(True,8,False)/(False,1,False) entries — which ran the PyTorch v1 loop — now run in-kernel at
+K_fused: sk_-suite numbers published before 2026-07-13 predate that switch (expected faster).
+Validated by the no-change gate: 11 baseline model-set hashes (fused packed configs, pinned K,
+seed 5; circuits + ELS + wide-ladder + units-flush cases) reproduced bit-identically after the
+delete. `external_solver.py` (PySAT wrapper) moved to `scripts/`; `profile_engine.py` (profiled
+the deleted path) moved to `archive/`.
+
 **Pure-PyTorch BCP is structurally latency-bound; the fused Triton kernel is the fix
 (2026-07-02).** The Python round loop pays launch+sync+`torch.unique` per BCP round (measured
 ~3.3 ms/round at K=1024, nearly pure overhead; 12.9× more trajectories cost only 3.9× wall).

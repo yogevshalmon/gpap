@@ -23,8 +23,10 @@ def _cmd_sample(args):
     from gpap.sampling.metrics import format_uniformity
     from gpap.sampling.pipeline import sample_file, CIRCUIT_PORTFOLIO, DEFAULT_PORTFOLIO
 
-    device = torch.device(args.device) if args.device else torch.device(
-        "cuda" if torch.cuda.is_available() else "cpu")
+    if not torch.cuda.is_available():
+        raise SystemExit("gpap sample requires CUDA + triton (the engine is packed-kernel-"
+                         "only; there is no CPU path). See `gpap info`.")
+    device = torch.device(args.device) if args.device else torch.device("cuda")
     path = args.input
     tmp = None
     encode_s = None
@@ -55,11 +57,10 @@ def _cmd_sample(args):
     # than the --max-samples safety ceiling) — or when --sim-check needs rows to simulate.
     out_cap = min(args.n, args.max_samples) if (args.out or args.sim_check) else 0
     mine = {"auto": "auto", "on": True, "off": False}[args.mine]
-    use_kernel = False if args.use_kernel == "off" else args.use_kernel
     info = sample_file(path, device, n_time=args.n, n_cov=args.n_cov, out_cap=out_cap,
                        seed=args.seed, simplify=not args.no_simplify, els=args.els, mine=mine,
                        uniformity=args.uniformity, configs=portfolio,
-                       time_limit=args.time_limit, use_kernel=use_kernel)
+                       time_limit=args.time_limit)
     if encode_s is not None:
         info["encode_s"] = encode_s          # circuit->CNF encode wall (stats sidecar honesty)
         info["encoder"] = args.encoder
@@ -151,7 +152,7 @@ def _cmd_bench(args):
     from gpap import benchmark
     argv = ["--glob", args.glob, "--n-time", str(args.n),
             "--time-limit", str(args.time_limit), "--n-cov", str(args.n_cov),
-            "--portfolio", args.portfolio, "--use-kernel", args.use_kernel,
+            "--portfolio", args.portfolio,
             "--encoder", args.encoder, "--abc-opt", args.abc_opt, "--mine", args.mine,
             "--uniformity", args.uniformity, "--target", args.target,
             "--cycles", str(args.cycles), "--seed", str(args.seed)]
@@ -224,7 +225,8 @@ def _cmd_info(args):
     import torch
     print(f"torch {torch.__version__}  (CUDA {torch.version.cuda})")
     if not torch.cuda.is_available():
-        print("device: CPU (no CUDA) — the PyTorch BCP oracle runs; fused kernels are off")
+        print("device: CPU (no CUDA) — the engine CANNOT run (packed-kernel-only, no CPU path);"
+              " only circuit2cnf / preprocessing work here")
         _print_abc_status()
         return
     dev = torch.device("cuda")
@@ -233,10 +235,10 @@ def _cmd_info(args):
     print(f"device: {props.name}  {total/1e9:.1f} GB ({free/1e9:.1f} GB free)  "
           f"SM {props.major}.{props.minor} x{props.multi_processor_count}")
     try:
-        from gpap.engine.kernels import TritonBCP
-        print(f"triton fused kernels: {'available' if TritonBCP.available() else 'UNAVAILABLE'}")
+        from gpap.engine.kernels import kernel_available
+        print(f"triton kernels: {'available' if kernel_available() else 'UNAVAILABLE (the engine cannot run)'}")
     except Exception as e:  # noqa: BLE001
-        print(f"triton fused kernels: import failed ({e})")
+        print(f"triton kernels: import failed ({e}) — the engine cannot run")
     _print_abc_status()
     # Power-limit / clock warning (the measured 40 W-vs-80 W + battery-clock gotchas). Before any
     # headline benchmark, confirm the card isn't power-capped or downclocked — ratios in one state
@@ -296,9 +298,6 @@ def main(argv=None):
     s.add_argument("--portfolio", choices=["circuit", "default"], default="circuit")
     s.add_argument("--no-simplify", action="store_true")
     s.add_argument("--els", action="store_true", help="equivalent-literal substitution (removes vars)")
-    s.add_argument("--use-kernel", choices=["auto", "off"], default="auto",
-                   help="fused Triton BCP kernels: 'auto' (per-formula dispatch) | 'off' (PyTorch "
-                        "oracle path)")
     s.add_argument("--cycles", type=int, default=25,
                    help="unroll depth (circuit inputs; combinational AIGs clamp to 1)")
     s.add_argument("--pin-outputs", type=int, default=None, help="outputs to pin (circuit input)")
@@ -340,9 +339,6 @@ def main(argv=None):
     b.add_argument("--n-cov", type=int, default=0)
     b.add_argument("--cmsgen", default=None, help="path to a cmsgen binary (enables comparison)")
     b.add_argument("--portfolio", choices=["circuit", "default"], default="circuit")
-    b.add_argument("--use-kernel", choices=["auto", "off"], default="auto",
-                   help="fused Triton BCP kernels: 'auto' (per-formula dispatch) | 'off' (PyTorch "
-                        "oracle path)")
     b.add_argument("--device", default=None)
     b.add_argument("--output", default=None)
     b.add_argument("--cycles", type=int, default=25,

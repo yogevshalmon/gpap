@@ -1,31 +1,33 @@
 # GPAP — GPU-Parallel Assumption Propagation & CircuitSAT Sampling
 
-GPU-accelerated BCP over K independent assumption sets (PyTorch + fused Triton), and a
-CircuitSAT/projected **solution sampler** built on it. The engine is the novelty; sampling is the
-flagship app. Deep material lives in [`docs/`](docs/) — keep this file short and current.
+GPU-accelerated BCP over K independent assumption sets (packed Triton kernels — the ONLY
+execution path; CUDA+triton required, no CPU fallback), and a CircuitSAT/projected **solution
+sampler** built on it. The engine is the novelty; sampling is the flagship app. Deep material
+lives in [`docs/`](docs/) — keep this file short and current.
 
 ## Core design — no clause scanning
 
-- **Negated occurrence lists** (CSR): `occ[l]` = clauses where `~l` appears. Setting `l` TRUE
-  falsifies `~l` in exactly those clauses.
-- **Two per-clause counters, batched over K sets**: `sat_count (K,M)` (non-falsified literals;
-  `==0` conflict, `==1` unit) and `lit_sum (K,M)` (sum of surviving literal indices).
-- **The sum trick**: at `sat_count == 1` the surviving literal's index **is** `lit_sum`. The fused
-  kernel packs both into one int32, replacing the sum with an XOR (never overflows).
+- **Negated occurrence lists** (CSR, int32): `occ[l]` = clauses where `~l` appears. Setting `l`
+  TRUE falsifies `~l` in exactly those clauses.
+- **ONE packed int32 clause word, batched over K rows**: low `SHIFT` bits = `sat_count`
+  (non-falsified literals; `==0` conflict, `==1` unit), high bits = **XOR of surviving literal
+  indices** — at `sat_count == 1` the XOR **is** the forced literal (xor of a one-element set;
+  never overflows). Update per falsified literal: `st = (st - 1) ^ (neg << SHIFT)`.
 - **Literal indexing (2N)**: `+v → 2(v-1)`, `-v → 2(v-1)+1`, negation `l ^ 1`. Assignment `(K,2N)`
   int8, 0=unassigned / 1=TRUE.
+- Correctness story: BCP fixpoints are confluent ⇒ kernels are A/B'd against a pure-Python
+  reference BCP (`tests/reference_bcp.py`) + every emitted model is externally verifiable.
 
 ## Layout
 
 ```
 gpap/
-  engine/                  # THE PRIMITIVE (app-agnostic, reusable)
-    formula.py             # CnfFormula + OccurrenceList + literal-index helpers (2N scheme, SAT types)
-    bcp_engine.py          # PyTorch reference engine: the A/B oracle + CPU fallback (SLIMMED)
-    kernels.py             # all Triton kernels: fixpoint + trajectory (unpacked) + packed (SHIFT=16|8)
+  engine/                  # THE PRIMITIVE (app-agnostic, reusable; CUDA+triton-only)
+    formula.py             # CnfFormula + int32 CSR occ + init_lit_xor + DIMACS tokenizer (2N scheme)
+    bcp_engine.py          # BCPEngine: packed state + flush cache + kernel launches + counters
+    kernels.py             # the 2 Triton kernels (fixpoint + trajectory, SHIFT=16|8) + _propagate helper
     calibrate.py           # K sizing, VRAM model, gpu_mem_available
     checker.py             # AssumptionChecker: the batched-assumptions API face
-    external_solver.py     # PySAT wrapper (verification)
   sampling/                # THE FLAGSHIP
     sampler.py             # GPUSampler (trajectories, bandit, soft-stop) — engine consumer only
     pipeline.py            # sample_file / sample_clauses: the full e2e flow + the two portfolios
@@ -42,7 +44,8 @@ gpap/
   cli.py                   # `gpap` subcommands (sample / bench / circuit2cnf / info)
   benchmark.py             # the `gpap bench` suite driver (in-package so it works installed)
 eval/                      # cross-GPU sampling benchmark driver + plots (Colab / A100)
-scripts/                   # shims (sample_benchmark -> gpap.benchmark), bench_to_cnf, build_abc.sh
+scripts/                   # shims (sample_benchmark -> gpap.benchmark), bench_to_cnf, build_abc.sh,
+                           #   external_solver.py (PySAT utility, kept for future use)
 docs/findings/             # INSIGHTS.md (settled results index) + *_FINDINGS.md deep dives
 tests/                     # pytest; circuit CNFs GENERATED from benchmarks/circuits/bench/ at test time
 archive/                   # concluded experiments (not maintained; see archive/README.md)
@@ -50,14 +53,17 @@ archive/                   # concluded experiments (not maintained; see archive/
 
 ## Engine contract — two entry points (see `gpap/engine/__init__.py`)
 
-1. **Batched assumption checking**: `apply_and_propagate(K×L decisions) → conflict / real_conflict /
-   assignment` (sum-trick BCP). `AssumptionChecker` is the one-call face.
-2. **Fused trajectory sampling**: `reset_fused(K)` + `run_trajectory(order, n_support, B, seed, …)`
-   — the whole randomized decide+propagate loop in one launch.
+1. **Batched assumption checking**: `reset(K)` + `apply_and_propagate(K×L decisions) → conflict /
+   assignment` (one fixpoint launch). `AssumptionChecker` is the one-call face; the miner's
+   incremental flow is `reset(1) + apply_and_propagate(units) + recache_flush()`.
+2. **Fused trajectory sampling**: `reset(K)` + `run_trajectory(order, n_support, B, seed,
+   soft=…)` — the whole randomized decide+propagate loop in one launch.
 
-App code must go through these + the accessors (`sat_rows()`, `has_kernel`) — do NOT reach into
-`_sat_count`/`_fused_kernel`. BCP fixpoints are confluent, so kernel and PyTorch paths are
-bit-identical on non-conflicted rows (the PyTorch path is the oracle + CPU fallback).
+`reset(K)` broadcast-restores the construction-time post-units-flush cache (no per-chunk flush).
+App code must go through these + the accessors (`sat_rows()`, work counters) — do NOT reach into
+`_packed`/`_assignment`. The engine picks the packed split per formula (16|16 / 8|24) and
+REJECTS formulas outside both envelopes; the PyTorch path was deleted 2026-07-13 (packed-XOR
+kernels are the only path — the oracle is `tests/reference_bcp.py`).
 
 ## Fused kernel & K sizing (the memory model that keeps biting)
 
@@ -66,20 +72,23 @@ bit-identical on non-conflicted rows (the PyTorch path is the oracle + CPU fallb
   a small K. Do not remove it.
 - `GPUSampler._calibrate_k`: **K = min(4 × safe_floor, analytic, cap)**, `safe_floor =
   0.7·free/(70M+40N)`. A runtime memory PROBE is unreliable here — do not resurrect it.
-- **`K_fused`** (fused-only chunks skip the (K,N) decision masks): a boosted per-chunk K. The packed
-  branch deducts `eng_hold` UNCONDITIONALLY — skipping it for all-fused portfolios spilled b05-c50
-  under the kill-switch (the headroom covers the fixed 4096×M soundness temp). Don't re-try without
-  an explicit 4096·M reservation + kill-switch re-validation.
-- **Packed field split** (per formula, in `TritonBCP._build_flush_cache`): 16|16 for 2N ≤ 65535;
-  **8|24 ("wide") for 65535 < 2N ≤ 0xFFFFFF, max clause len ≤ 255** (the big instances — the
-  default now covers them, geomean 1.31× on c50 unrolls); else the unpacked fallback. One merged
-  `_bcp_trajectory_packed_kernel` with a `SHIFT` constexpr — `mono` (1-byte) lost to wide and was
-  deleted (see docs/findings/INSIGHTS.md).
+- **`K_fused`** (every chunk is fused now): a boosted per-chunk K. The `eng_hold` deduction stays
+  UNCONDITIONAL — skipping it spilled b05-c50 under the kill-switch (the headroom covers the fixed
+  4096×M soundness temp). Don't re-try without an explicit 4096·M reservation + kill-switch
+  re-validation. `compute_k_safe`'s analytic model is knowingly conservative (calibrated on the
+  retired PyTorch path) — retuning it = K change = kill-switch re-validation.
+- **Packed field split** (per formula, in `BCPEngine.__init__`): 16|16 for 2N ≤ 65535;
+  **8|24 ("wide") for 65535 < 2N ≤ 0xFFFFFF, max clause len ≤ 255** (the big instances — covers
+  them, geomean 1.31× on c50 unrolls); anything larger is REJECTED with a ValueError (no unpacked
+  fallback any more). One kernel source with a `SHIFT` constexpr — `mono` (1-byte) lost to wide
+  and was deleted (see docs/findings/INSIGHTS.md).
 
 ## Running
 
 ```bash
-pytest -m "not gpu and not slow"      # portable CPU smoke (any platform)
+pytest -m "not gpu and not slow"      # host-side logic smoke (parsers/preprocess/circuits/metrics
+                                      #   run anywhere; ALL engine/sampler tests need CUDA+triton
+                                      #   and self-skip without them)
 pytest                                # full suite (gpu tests skip off-CUDA; slow = deep unrolls)
 
 gpap info                             # device / triton / power-limit warning
