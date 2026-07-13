@@ -155,6 +155,8 @@ def _cmd_bench(args):
             "--encoder", args.encoder, "--abc-opt", args.abc_opt, "--mine", args.mine,
             "--uniformity", args.uniformity, "--target", args.target,
             "--cycles", str(args.cycles), "--seed", str(args.seed)]
+    if args.seeds:
+        argv += ["--seeds"] + [str(s) for s in args.seeds]
     if args.twise:
         argv += ["--twise"]
     if args.sim_baseline:
@@ -346,6 +348,10 @@ def main(argv=None):
     b.add_argument("--cycles", type=int, default=25,
                    help="unroll depth (circuit inputs; combinational AIGs clamp to 1)")
     b.add_argument("--seed", type=int, default=5, help="conversion + sampling seed")
+    b.add_argument("--seeds", type=int, nargs="+", default=None,
+                   help="run the timed sampling at each seed, report the median-throughput run "
+                        "per instance (+ ±%% spread column; per-seed raws in the JSON). "
+                        "Conversion/target stays --seed")
     b.add_argument("--pin-outputs", type=int, default=None, help="outputs to pin (circuit input)")
     b.add_argument("--mine", choices=["auto", "on", "off"], default="auto",
                    help="entailed-clause mining: 'auto' (on, except ABC-encoded CNFs) | 'on' | 'off'")
