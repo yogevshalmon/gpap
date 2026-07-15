@@ -49,6 +49,141 @@ seed 5; circuits + ELS + wide-ladder + units-flush cases) reproduced bit-identic
 delete. `external_solver.py` (PySAT wrapper) moved to `scripts/`; `profile_engine.py` (profiled
 the deleted path) moved to `archive/`.
 
+**Final-engine suite re-runs (2026-07-14, .experiments/circuits_rare_3seed_v3.json +
+_abc_v3.json): engine session = 1.29x geomean e2e on Tseitin; ABC at RARE targets is a
+per-instance lever, not a global win.** (1) Tseitin, pre-bitmap vs final engine (v2 vs v3,
+identical protocol): geomean 1.29x models/s over 11 non-vacuous (b04 1.64x, s832 1.75x,
+b09/b10 1.49x, s386 1.37x, s1196 1.29x, b08 1.30x, b12 1.20x; b03 0.98x — its att/s win sits
+behind a succ redraw), i.e. the bitmap arc added ~1.2x e2e on top of v2's 1.07x. (2) SAME
+final engine, ABC vs Tseitin at --target rare: geomean 0.86x but BIMODAL — wins 1.8-5.7x on
+7/11 non-vacuous (b03 5.7x, b08 4.9x, b09 4.2x, b11 3.9x, s832 3.2x, b06 3.0x, b04 2.4x,
+b12 2.3x, b10 1.8x) and UNLOCKS b14 (0 -> 24 models/s, 1,455 sols/60s; Tseitin delivers 0),
+vs three real losses where the rare-pin success collapses under the dc2/fraig rewrite:
+b13 1.000->0.000 succ (4.7M -> 679/s, catastrophic), s386 0.64->0.04 (0.22x), s1196
+0.80->0.22 (0.62x). The earlier "ABC geomean 5.9x, zero regressions" was measured pre-rare
+defaults — at RARE targets the encoder can invert on exactly the backbone-rich cones.
+Practical: keep tseitin the default; -encoder abc per instance (b14-class + most mid-size
+win big); a cheap two-encode probe race in the pipeline is the obvious future auto-pick.
+b15 stays 0 under both (p_acc < 3e-6; honest unsolved).
+
+**Assignment BITMAP: the second NobleCount word — one atomic_or IS dedup + contradiction;
++40-50% across the board and the dispatch crossover moved (2026-07-14).** Assignment is now
+bit l of (K, ceil(2N/32)) int32 words instead of a byte per literal. l and l^1 always share a
+word (2v/2v+1), so (a) the scalar forced-check is ONE load (was two); (b) in WAVE the push is
+ONE tl.atomic_or whose RETURN gives race-free duplicate (old bit l) + contradiction (old bit
+l^1) detection under any lane interleaving — the WxW in-warp dedup + contra2 matrices and
+both byte gathers are DELETED; (c) 8x smaller: b14's assignment 670MB→84MB (~L2), small-2N
+rows go L1-resident. Validated vs a fresh HEAD-worktree golden gate (12 hashes: model sets +
+checker assignments — also cross-validates the whole wave/SUM/vscan/bitmap stack against the
+committed XOR-era engine), all modes bit-identical. THREE knock-on effects, all measured
+(interleaved A/Bs): (1) readout must NOT bit-unpack with strided slice-writes — 16x sector-RMW
+amplification dragged big-K instances 15-25%; the sampler's completion check is now
+`any_free` = one bitwise pass over the words (pair free = even bit of ~(w|w>>1), pair-mask
+REQUIRED — padding pairs read free), and projection gathers var bits directly
+(`var_true_bits`), no (K,N) mask ever. (2) The vector decision scan became WAVE-ONLY: the
+serial scan now hits L1 (b06 row = 760B) and the warp screen + take-atomics LOSE in scalar
+(b06 0.82x, b03 0.91x) while still +12-19% at wave K. (3) Wave's large-K penalty was the
+dedup tax: b03@K=49k flipped to wave 1.41x ⇒ dispatch threshold retuned 6x→30x resident
+warps (scalar only holds b06@129k=46x, 1.13x). num_warps>1 (W=64/128 spread over real warps)
+is NEGATIVE 2-5x — cross-warp reduction sync per wave step dominates; W=32/1-warp stays.
+FINAL straight-protocol (auto dispatch): b03 631k(wave) / b04 81k / b06 945k(scalar) /
+b12 50k / b14 4.0k att/s = 1.4-1.5x over pre-bitmap same-session, and vs the pre-wave
+baseline: b14 5.7x, b12 2.8x, b04 1.8x, b03 1.5x.
+
+**Post-engine-work suite re-run (2026-07-14, .experiments/circuits_rare_3seed_v2.json —
+identical protocol to the 2026-07-13 pre-wave table): e2e models/s geomean 1.07× non-vacuous;
+the wins are CONCENTRATED, not uniform.** Where the engine work aimed (K-capped big-M): b12
+1.36× (succ unchanged 0.53 — clean), b05-c25 1.74× (vacuous ⇒ pure throughput = the K/wave win
+undiluted), b11 0 → 8 models/s (a former lose-set zero now emits). Where it can't show: the
+saturated scalar class (b02/b03/b06/b13/s386) reads ±7% = the cross-session drift band; b04's
+kernel win IS in the file (B=8 attempts/s 37.8k→60.2k = 1.59×) but 3 unlucky succ draws
+(0.68-0.76 → 0.48-0.58; §3 draw noise, amplified by bigger-K chunks sharing fewer order
+permutations) ate it in models/s (0.90×); b14/b15 stay ~0 models/s at 60 s — 4.8× attempts
+still loses to succ ≈ 5e-4 (throughput is no longer b14's bottleneck; success rate is).
+LESSON for headline tables: on low-succ instances report attempts/s (engine) and models/s
+(e2e) separately — engine gains convert to e2e only where succ holds. Full suite (not slow)
+138/138 after all engine changes.
+
+**Warp-wide decision SCAN in the trajectory kernel: +30% b12 / +16% b06 / +7% b04, on by
+default in BOTH kernel modes (2026-07-14).** The last serial warp-uniform loop was the decision
+scan: each trajectory walks `order` one entry at a time with two dependent assignment-byte
+loads — every entry is visited once per trajectory (ptr is monotone), so completed trajectories
+crawl the whole mostly-assigned array serially. Vectorized under a `VSCAN` constexpr (W-wide
+order load + two byte gathers per step, cumsum-rank the free lanes, take the first `need`,
+same splitmix polarity hash, rank-ordered trail pushes; entries past the B-th free pick are
+re-scanned next round) — BIT-IDENTICAL picks by construction, and the 11-hash gate passes in
+scalar, wave, and VSCAN=0 modes. Interleaved same-process A/B (the cross-session numbers lied:
+b14 read −15% until interleaved, then exact tie — clock/power drift): wave b12 1.30×, b04
+1.07×, b14 1.00×; scalar b06 1.16×, b03 0.97× (8-rep; shortest order = the one loser, within
+3%). Regime: wins scale with order length × completion rate (assigned-crawl dominated); losses
+capped at the early-phase 32-wide gather waste. Default ON for both modes (`GPAP_VSCAN=0`
+disables); the scalar pick loop remains as the SOFT path (soft polarity needs per-var occ
+walks — vectorizing it is future work).
+
+**SUM-packed word (modular sum, back from the XOR): ONE atomic_add IS the whole clause update
+(2026-07-13).** The packed high field now holds the SUM of surviving literal indices mod
+2^(32-SHIFT) instead of their XOR — same word size, same 16|16 / 8|24 envelopes (one literal
+< 2^F, every removal exact mod 2^F). Why: the update becomes a single subtraction
+`st -= 1 + (neg << SHIFT)` (the count field never borrows since count >= 1; the sum field
+wraps off the top), which in the WAVE kernel is ONE `tl.atomic_add` whose RETURN VALUE gives
+race-free detection — old count==1 ⇒ this lane emptied the clause, old count==2 ⇒ unit and
+`(old_sum - neg) & SUM_MASK` IS the forced literal (the serialized old sum holds exactly the
+not-yet-removed literals). Replaced the atomic_cas retry loop (2+ L2 ops, scratch-pointer
+masking) and beat it everywhere: b14 2,726→3,311 (1.21×), b03-wave 393k→435k (1.11×), b04/b12
+1.07×. NARRATIVE: NobleCount's original count+sum was the atomic-native form all along; XOR
+was the serial-path optimization. Scalar kernel unchanged in cost (one sub vs sub+xor).
+Interleaved A/B at K=49k after this: b03 scalar≈wave (tie), b06 scalar 1.2× ahead ⇒ the
+6×-resident-warps dispatch threshold stands. Gate bit-identical in scalar, wave and auto.
+
+**Clause renumbering for occ locality: NEGATIVE — topological emission is already ~optimal
+(2026-07-13).** The measured 2.0-2.1 sectors per ~2.8-clause occ walk (vs "ideal" 1.03) is
+STRUCTURAL, not an ordering artifact: a literal's occ = its defining gate's clauses (already
+adjacent — bench.py emits gate-by-gate, frame-major) + its FANOUT gates' clauses, and no
+permutation can make every var's fanout adjacent simultaneously (clauses are shared; the 1.03
+bound ignores that). Var-major first-touch reorder: 0% change (it reproduces the existing
+order); barycentric (mean-var sort): 18-24% WORSE; RCM untested (no scipy in the venv — if
+ever revisited, it is the right next heuristic, but expect little: fanout distance in a
+frame-major unroll is already short). Do not re-litigate without a layout that beats 2.0
+sectors/walk on the OFFLINE metric first.
+
+**K-calibrator retune: the PyTorch-era floor bound K at ~1/3 of the packed engine's real fit
+(2026-07-13, kill-switch validated).** Measured real engine bytes/row = 4M+2N — exactly the
+packed model — while the binding K term everywhere was the retired 4×0.7·free/(70M+40N) floor
+(70 B/clause modeled the deleted path's scatter temporaries). Fix: K = min(analytic, cap) — the
+analytic ((sat_b+4)M + 2N + 8N-class temps) matches the packed footprint incl. the (K,N)
+readout masks. Enabler: the 4096×M soundness-check transient (~3.3 GB on b05-c50, which the old
+headroom accidentally covered) is now read in ≤256 MB slices (_SOUND_SLICE_BYTES). New K:
+b04 4.4k→14.9k, b12 3.0k→10.4k, b14 280→958, b03 30k→49k(cap), b05-c50 5.0k; peak memory
+≤7.4 GB on all five under the nvidia-smi kill-switch (no spill). Shared-memory staging of the
+row state was analyzed and REJECTED: one row's clause word is 34 KB (b03)–4.2 MB (b14) vs
+100 KB/SM at 48-warp occupancy (~2 KB/warp), clause words have ~no reuse within a trajectory,
+and the only high-reuse structure (the occ CSR, shared read-only by all K rows) already fits
+the 50 MB L2 on every instance — "faster memory" for this workload means MORE ROWS in DRAM +
+fewer sectors per op, not staging. Sector-locality headroom measured for a future clause
+renumbering: a literal's ~2.8-clause walk touches 2.0-2.1 32B sectors vs 1.03 ideal → ≤50%
+traffic cut upper bound (realistically 1.2-1.4× on ceiling-bound instances).
+
+**Warp-wide WAVE propagate: 3.9× on K-starved big-M instances; scalar stays best at large K
+(2026-07-13).** The scalar kernels are warp-uniform (1 useful lane of 32, ONE scattered request
+in flight per row) — harmless when K ≫ resident warps (~2.8k on the 4080: the scalar kernel
+already sits at the scattered-DRAM ceiling, measured ~175 GB/s lower-bound on b03 at K=25k),
+but big-M instances are VRAM-capped to K ≈ 0.3–4k rows ⇒ Little's law caps them at
+K·32B/latency ≈ 140–190 GB/s — MLP-starved, not bandwidth-bound. Fix = `_wave_propagate`
+(WAVE constexpr in the same two kernels): pop ≤W trail literals at once, flatten their occ
+segments (cumsum + one-hot schedule), process W clause updates per step; cross-literal
+same-clause races handled by a `tl.atomic_cas` retry loop on the SAME 4-byte packed word
+(CAS serializes exactly: the committing lane's new word yields the true sat count + forced
+literal; W×W in-warp dedup + cumsum-compaction appends units — no state change, no envelope
+change). Confluence ⇒ bit-identical models (11-hash gate passes in wave mode). Measured
+(warmed, equal K, W=32; W=16/64 both worse): b14 K=280 **3.06×**, b12 K=3k **1.31×**, b04 K=4k
+**1.14×**, b03 K=30k **0.91×** (CAS = 2 L2 ops + stride overhead with no headroom to buy back)
+⇒ GPUSampler auto-dispatches: wave iff calibrated K_fused < 6× resident warps (device-derived;
+crossover measured between K=15k and 49k on the 4080); `GPAP_KERNEL=scalar|wave` forces.
+STACKED with the same-day K-calibrator retune (see the entry above), the combined engine gains
+vs the pre-wave scalar baseline at production settings: b14 695→2,726 att/s (**3.9×**), b12
+17.8k→25.9k (**1.45×**), b04 44.4k→53.8k (**1.21×**), b03 unchanged (~0.95-1.05×, saturated).
+Remaining traffic lever: clause renumbering for sector locality (≤50% headroom, measured).
+
 **Pure-PyTorch BCP is structurally latency-bound; the fused Triton kernel is the fix
 (2026-07-02).** The Python round loop pays launch+sync+`torch.unique` per BCP round (measured
 ~3.3 ms/round at K=1024, nearly pure overhead; 12.9× more trajectories cost only 3.9× wall).

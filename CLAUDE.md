@@ -10,11 +10,15 @@ lives in [`docs/`](docs/) — keep this file short and current.
 - **Negated occurrence lists** (CSR, int32): `occ[l]` = clauses where `~l` appears. Setting `l`
   TRUE falsifies `~l` in exactly those clauses.
 - **ONE packed int32 clause word, batched over K rows**: low `SHIFT` bits = `sat_count`
-  (non-falsified literals; `==0` conflict, `==1` unit), high bits = **XOR of surviving literal
-  indices** — at `sat_count == 1` the XOR **is** the forced literal (xor of a one-element set;
-  never overflows). Update per falsified literal: `st = (st - 1) ^ (neg << SHIFT)`.
-- **Literal indexing (2N)**: `+v → 2(v-1)`, `-v → 2(v-1)+1`, negation `l ^ 1`. Assignment `(K,2N)`
-  int8, 0=unassigned / 1=TRUE.
+  (non-falsified literals; `==0` conflict, `==1` unit), high bits = **SUM of surviving literal
+  indices mod 2^(32-SHIFT)** — at `sat_count == 1` the field **is** the forced literal (every
+  removal exact mod 2^F, one literal < 2^F). Update per falsified literal is ONE subtraction
+  `st -= 1 + (neg << SHIFT)` (count never borrows, sum wraps off the top) — which is also a
+  single `atomic_add` whose RETURN value gives race-free unit/conflict detection (the WAVE
+  kernel's whole trick; XOR packing was the serial-only variant, replaced 2026-07-13).
+- **Literal indexing (2N)**: `+v → 2(v-1)`, `-v → 2(v-1)+1`, negation `l ^ 1`. Assignment =
+  BITMAP (bit l of int32 words; l and ~l share a word ⇒ ONE atomic_or answers duplicate +
+  contradiction; 8× smaller than the former (K,2N) int8 — accessors materialize copies).
 - Correctness story: BCP fixpoints are confluent ⇒ kernels are A/B'd against a pure-Python
   reference BCP (`tests/reference_bcp.py`) + every emitted model is externally verifiable.
 
@@ -23,9 +27,9 @@ lives in [`docs/`](docs/) — keep this file short and current.
 ```
 gpap/
   engine/                  # THE PRIMITIVE (app-agnostic, reusable; CUDA+triton-only)
-    formula.py             # CnfFormula + int32 CSR occ + init_lit_xor + DIMACS tokenizer (2N scheme)
+    formula.py             # CnfFormula + int32 CSR occ + init_lit_sum + DIMACS tokenizer (2N scheme)
     bcp_engine.py          # BCPEngine: packed state + flush cache + kernel launches + counters
-    kernels.py             # the 2 Triton kernels (fixpoint + trajectory, SHIFT=16|8) + _propagate helper
+    kernels.py             # the 2 Triton kernels (fixpoint + trajectory, SHIFT=16|8) + scalar/WAVE propagate
     calibrate.py           # K sizing, VRAM model, gpu_mem_available
     checker.py             # AssumptionChecker: the batched-assumptions API face
   sampling/                # THE FLAGSHIP
@@ -62,7 +66,7 @@ archive/                   # concluded experiments (not maintained; see archive/
 `reset(K)` broadcast-restores the construction-time post-units-flush cache (no per-chunk flush).
 App code must go through these + the accessors (`sat_rows()`, work counters) — do NOT reach into
 `_packed`/`_assignment`. The engine picks the packed split per formula (16|16 / 8|24) and
-REJECTS formulas outside both envelopes; the PyTorch path was deleted 2026-07-13 (packed-XOR
+REJECTS formulas outside both envelopes; the PyTorch path was deleted 2026-07-13 (packed
 kernels are the only path — the oracle is `tests/reference_bcp.py`).
 
 ## Fused kernel & K sizing (the memory model that keeps biting)
@@ -70,13 +74,33 @@ kernels are the only path — the oracle is `tests/reference_bcp.py`).
 - `PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True` is set in `gpap/__init__.py` **before** torch
   inits CUDA. It removes the allocator fragmentation that inflated reserved memory ~2.3× and forced
   a small K. Do not remove it.
-- `GPUSampler._calibrate_k`: **K = min(4 × safe_floor, analytic, cap)**, `safe_floor =
-  0.7·free/(70M+40N)`. A runtime memory PROBE is unreliable here — do not resurrect it.
+- `GPUSampler._calibrate_k`: **K = min(analytic, cap)** (retuned 2026-07-13, kill-switch
+  validated: the old 4×0.7·free/(70M+40N) floor modeled the deleted PyTorch path and bound K at
+  ~1/3 of the packed fit; the 4096×M soundness transient is now read in ≤256 MB slices). A
+  runtime memory PROBE is unreliable here — do not resurrect it.
 - **`K_fused`** (every chunk is fused now): a boosted per-chunk K. The `eng_hold` deduction stays
   UNCONDITIONAL — skipping it spilled b05-c50 under the kill-switch (the headroom covers the fixed
   4096×M soundness temp). Don't re-try without an explicit 4096·M reservation + kill-switch
   re-validation. `compute_k_safe`'s analytic model is knowingly conservative (calibrated on the
   retired PyTorch path) — retuning it = K change = kill-switch re-validation.
+- **Assignment BITMAP** (2026-07-14): assignment = bit l of (K, ⌈2N/32⌉) int32 words (l/~l
+  share a word) — 8× smaller than byte-per-literal (small-2N rows go L1-resident), and in
+  WAVE a forced-literal push is ONE `tl.atomic_or` whose RETURN deduplicates (old bit l) and
+  detects contradiction (old bit l^1) race-free — the old W×W in-warp dedup is deleted.
+  Readout goes through materializing accessors (`assignment`, `assignment_rows`,
+  `var_true_bits`, `any_free` — the sampler's completion check is one bitwise pass, never a
+  (K,N) mask; strided bit-unpack slice-writes cost 16× sector RMW amplification, measured).
+- **Kernel variant auto-dispatch** (same state, pure launch flag; gate-validated bit-identical):
+  warp-wide **WAVE** propagate (≤W trail lits at once, occ segments flattened, the packed-word
+  `atomic_add` return value resolving cross-literal clause races) when calibrated K_fused <
+  30× resident warps (retuned post-bitmap: wave b03@49k 1.41×, scalar only holds the huge-K/
+  tiny-M extreme b06@129k); scalar serial-trail propagate beyond. Session total vs the
+  pre-wave baseline: b14 5.7×, b12 2.8×, b04 1.8×, b03 1.5×. `GPAP_KERNEL=scalar|wave`
+  forces; W via `GPAP_WAVE_W` (32 best; W>32 spreads over W/32 real warps via num_warps —
+  measured 2-5× WORSE, cross-warp reduction sync dominates). The trajectory kernel's
+  **decision scan** is warp-wide in WAVE only (bit-identical picks; +12-19% there; in scalar
+  the bitmap made the serial scan L1-cheap and the screen LOSES; `GPAP_VSCAN=0` disables;
+  SOFT path stays scalar).
 - **Packed field split** (per formula, in `BCPEngine.__init__`): 16|16 for 2N ≤ 65535;
   **8|24 ("wide") for 65535 < 2N ≤ 0xFFFFFF, max clause len ≤ 255** (the big instances — covers
   them, geomean 1.31× on c50 unrolls); anything larger is REJECTED with a ValueError (no unpacked
@@ -129,7 +153,10 @@ runs `full` below ~50k estimated unrolled ANDs, `fast` (pre-unroll opt + cheap p
 Encode wall is printed + in stats (`encode_s`) — it is NOT inside the pipeline's e2e rate.
 **Miner overlap**: dc2/fraig removes the backbone L1 mines (0-45 units on ABC CNFs vs 59-1007 on
 Tseitin, for the same 5s budget) ⇒ `sample_file` auto-disables mining on `c encoder abc` CNFs
-(`--mine on` forces).
+(`--mine on` forces). **At `--target rare` the encoder is PER-INSTANCE** (2026-07-14, same
+engine, 3-seed): ABC wins 1.8-5.7× on most and unlocks b14 (0→24 models/s), but the rare-pin
+success can COLLAPSE under dc2/fraig (b13 1.00→0.00 succ = 0.0001×, s386 0.22×, s1196 0.62×)
+— don't report suite geomeans across encoders without the split (see INSIGHTS).
 
 **Uniformity readout** (`--uniformity off|fast|exact`, default **off** — the readout costs an
 extra sampling pass, so it is opt-in; always off the timing path).

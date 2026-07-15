@@ -1,8 +1,10 @@
 """The GPAP engine — K-parallel GPU BCP over independent assumption sets (the novelty).
 
 PACKED-KERNEL-ONLY: all propagation runs in the Triton kernels (kernels.py) on a packed
-int32 clause state — low SHIFT bits = sat_count (non-falsified literals), high bits = XOR of
-the surviving literal indices (xor of a one-element set IS the element; never overflows).
+int32 clause state — low SHIFT bits = sat_count (non-falsified literals), high bits = SUM of
+the surviving literal indices mod the field width (every removal exact mod 2^F, so at
+sat_count==1 the field IS the forced literal; the sum form makes the update a single
+atomic_add in the warp-parallel WAVE kernel).
 Field split per formula: 16|16 for 2N <= 65535, 8|24 ("wide") for 2N <= 0xFFFFFF with clause
 len <= 255; anything larger is rejected. Setting literal l TRUE updates exactly the clauses in
 occ[l] (CSR occurrence lists of the NEGATED literal). No clause scanning, ever. Requires CUDA +
@@ -32,7 +34,7 @@ Applications consume the engine ONLY through these:
        eng.active / eng.assignment               # fully-assigned active rows are models
 
 Anything else on BCPEngine is accessors (`sat_rows`, work counters) — do not reach into
-`_packed`/`_assignment` from application code. Correctness: BCP fixpoints are confluent; the
+`_packed`/`_abits` from application code. Correctness: BCP fixpoints are confluent; the
 kernels are validated against a pure-Python reference BCP (tests/reference_bcp.py) and every
 emitted model is externally verifiable (clause satisfaction; tests do both).
 """

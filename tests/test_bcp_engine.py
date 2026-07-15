@@ -130,8 +130,10 @@ class TestBCPEngine:
                             if engine.assignment[k, ext_lit_to_lit_index(l) ^ 1] != 1)
                 assert int(sat[k, c_i]) == truth, (k, c_i)
 
-    def test_matches_reference_random(self):
-        """Kernel fixpoints == the pure-Python reference on random CNFs (confluence)."""
+    @pytest.mark.parametrize("mode", ["scalar", "wave"])
+    def test_matches_reference_random(self, mode):
+        """Kernel fixpoints == the pure-Python reference on random CNFs (confluence), for BOTH
+        propagate variants (serial trail and the warp-wide wavefront)."""
         import random
         rng = random.Random(11)
         for _ in range(25):
@@ -146,7 +148,7 @@ class TestBCPEngine:
                     for _ in range(K)]
             f = CnfFormula(DEV)
             f.init_formula(nv, clauses)
-            eng = BCPEngine(f)
+            eng = BCPEngine(f, mode=mode)
             eng.reset(K)
             eng.apply_and_propagate(_assum(decs))
             for k in range(K):

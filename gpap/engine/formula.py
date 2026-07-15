@@ -1,14 +1,18 @@
 """CNF formula representation for the GPAP engine: literal indexing, CSR occurrence lists,
-and the per-clause counters (clause_sizes / init_lit_xor) the packed XOR-trick BCP consumes.
+and the per-clause counters (clause_sizes / init_lit_sum) the packed sum-trick BCP consumes.
 
 Literal indexing (the 2N scheme):
   positive literal  v -> index 2*(v-1)
   negative literal -v -> index 2*(v-1) + 1
   negation: lit_index ^ 1
 
-The remaining-literal trick is XOR (not SUM): a clause tracks the XOR of its non-falsified
-literal indices; when exactly one literal survives, the XOR IS that literal. XOR never
-overflows, so the counters are exact at any formula size the packed word can index.
+The remaining-literal trick is a MODULAR SUM: a clause tracks the sum of its non-falsified
+literal indices mod 2^F (F = the packed word's high-field width); when exactly one literal
+survives, the field holds that literal exactly (every removal is exact mod 2^F, and a single
+literal index < 2^F). The sum form is what makes the warp-parallel kernel possible: ONE
+atomic_add applies count-=1 and sum-=neg together (the count field never borrows — count >= 1
+at every decrement — and the sum field wraps off the top of the word), and the atomic's
+RETURN VALUE alone yields exact conflict/unit detection plus the forced literal.
 """
 import torch
 import numpy as np
@@ -132,12 +136,13 @@ class OccurrenceList:
 
 
 class CnfFormula:
-    """CNF formula representation with occurrence lists and per-clause XOR of literal indices.
+    """CNF formula representation with occurrence lists and per-clause literal-index sums.
 
     No clause->literal structure is stored. Instead we maintain:
     - Occurrence lists (CSR, int32): for each literal l, clauses where ~l appears
     - clause_sizes: number of literals per clause
-    - init_lit_xor: initial XOR of literal indices per clause (the remaining-literal trick)
+    - init_lit_sum: initial sum of literal indices per clause, mod 2^32 (the engine masks it
+      to its packed field width; see the module docstring for why SUM, not XOR)
 
     An EMPTY clause makes the formula trivially UNSAT; it cannot be represented in the
     counters, so it is dropped from the structures and recorded in `has_empty_clause`
@@ -148,7 +153,7 @@ class CnfFormula:
         self._device = device
         self._occ_list: OccurrenceList = None
         self._clause_sizes: torch.Tensor = None   # (M,) int32
-        self._init_lit_xor: torch.Tensor = None   # (M,) int32
+        self._init_lit_sum: torch.Tensor = None   # (M,) int32 (sum mod 2^32, exact bit pattern)
         self._num_vars = 0
         self._num_clauses = 0
         self._has_empty_clause = False
@@ -174,8 +179,8 @@ class CnfFormula:
         return self._clause_sizes
 
     @property
-    def init_lit_xor(self) -> torch.Tensor:
-        return self._init_lit_xor
+    def init_lit_sum(self) -> torch.Tensor:
+        return self._init_lit_sum
 
     @property
     def has_empty_clause(self) -> bool:
@@ -184,7 +189,7 @@ class CnfFormula:
 
     def init_formula(self, num_vars: int, clauses: list[ext_cls]):
         """Initialize from a list of clauses (external literal format). Vectorised: one shared
-        flatten (flat_lit_arrays) feeds the occ CSR, clause_sizes and init_lit_xor — the old
+        flatten (flat_lit_arrays) feeds the occ CSR, clause_sizes and init_lit_sum — the old
         per-literal Python loops cost seconds per build on 1M-clause circuit unrolls, and
         construction runs several times per instance (sampler, miner prober, post-mining
         rebuild)."""
@@ -197,16 +202,19 @@ class CnfFormula:
         lens, lit_idx, cls_idx = flat_lit_arrays(clauses)
         self._occ_list = OccurrenceList.from_flat(num_vars, len(clauses), lit_idx ^ 1, cls_idx,
                                                   self._device)
-        # per-clause XOR of literal indices (exact at any size — XOR never overflows)
+        # per-clause SUM of literal indices, exact mod 2^32 (int64 add then reinterpret the low
+        # 32 bits — an integer CAST could saturate, a view is exact; the engine masks further
+        # down to its packed field width, and mod-2^32-then-mod-2^F == mod-2^F)
         M = len(clauses)
         if M:
             bounds = np.zeros(M, dtype=np.int64)
             np.cumsum(lens[:-1], out=bounds[1:])
-            xors = np.bitwise_xor.reduceat(lit_idx, bounds).astype(np.int32)
+            sums = (np.add.reduceat(lit_idx, bounds).astype(np.uint64)
+                    & 0xFFFFFFFF).astype(np.uint32).view(np.int32)
         else:
-            xors = np.zeros(0, dtype=np.int32)
+            sums = np.zeros(0, dtype=np.int32)
         self._clause_sizes = torch.from_numpy(lens.astype(np.int32)).to(self._device)
-        self._init_lit_xor = torch.from_numpy(xors).to(self._device)
+        self._init_lit_sum = torch.from_numpy(sums).to(self._device)
 
     def parse_cnf_file(self, cnf_file: str):
         """Parse a DIMACS CNF file and build the formula.

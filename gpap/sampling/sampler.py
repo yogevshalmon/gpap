@@ -76,9 +76,9 @@ class GPUSampler:
         self._pyrng = _random.Random(seed)
         self.support: list[int] | None = None   # 0-based independent-support vars (from `c ind`)
         self._recon: dict | None = None          # set when built with simplify=True (see _from_simplified)
-        # K auto-sized to the GPU (see _calibrate_k): the old analytic floor 0.7·free/(70M+40N) was
-        # ~4-6x too conservative because allocator FRAGMENTATION (not tensor size) inflated reserved
-        # memory; enabling expandable_segments (at import) removes that, so K = 4× the floor is safe.
+        # K auto-sized to the GPU (see _calibrate_k): K = min(analytic, cap) — the analytic
+        # model matches the packed engine's real footprint (retuned 2026-07-13, kill-switch
+        # validated; the PyTorch-era 70M+40N floor that used to bind is gone with that path).
         free_bytes = gpu_mem_available(device)
         analytic = compute_k_safe(
             self.M, self.N, free_bytes, cap=k_cap,
@@ -102,6 +102,8 @@ class GPUSampler:
             fused_cap = max(262_144, k_cap or 0)
             # Per-batch fused footprint: ONE (K,M) int32 packed clause word + ~10N of assignment,
             # trail and readout temps (no per-round decision masks — everything is in-kernel).
+            # The assignment itself is a BITMAP now (N/4 bytes, was 2N) — the 10N budget is kept
+            # UNCHANGED as conservative headroom; shrinking it = a K change = kill-switch re-run.
             fused_pb = 4 * self.M + 300 + 10 * self.N
             # eng_hold: kept UNCONDITIONALLY as headroom although no base-K sat/lsum exists any
             # more — it was ACCIDENTALLY covering the fixed 4096×M soundness-check temporary, and
@@ -112,31 +114,41 @@ class GPUSampler:
             self.K_fused = max(self.K, min(budget // fused_pb, fused_cap))
         else:
             self.K_fused = self.K
+        # Kernel-variant auto-dispatch on the CALIBRATED K (a pure launch flag, gate-validated
+        # bit-identical): below memory saturation each row's serial trail leaves requests-in-
+        # flight on the table, and the warp-wide WAVE propagate multiplies them. Crossover
+        # RETUNED 2026-07-14 after the assignment-BITMAP change removed wave's WxW dedup tax:
+        # wave now wins well past saturation (b03 K=49k = 17.7x resident: wave 1.41x, was
+        # 0.9x pre-bitmap) and scalar only holds the huge-K/tiny-M extreme (b06 K=129k = 46x
+        # resident: scalar 1.13x, interleaved A/Bs) — boundary set mid-gap at ~30x resident
+        # warps (83k here, device-derived so it transfers to bigger GPUs). GPAP_KERNEL forces.
+        if os.environ.get("GPAP_KERNEL") is None and device.type == "cuda":
+            props = torch.cuda.get_device_properties(device)
+            resident = props.multi_processor_count * (props.max_threads_per_multi_processor // 32)
+            self.engine.set_mode("wave" if self.K_fused < 30 * resident else "scalar")
 
-    # K-calibration: with CUDA expandable_segments (set at module import) the sampler's per-round
-    # variable-sized churn no longer fragments the allocator — reserved memory drops ~2.3× AND the
-    # old super-linear (≈K^2.3) growth that spilled dense instances becomes LINEAR in K (per-batch
-    # stable across K). That headroom lets K safely exceed the old proven-safe floor by this factor;
-    # 4× is validated to stay well under budget for the densest measured instance (s1196: 4×floor →
-    # 5.9 GB of the 8 GB safe budget, stable across chunks, no spill), with margin for denser unknowns.
-    _CAL_MULT = 4
+    # Byte cap for one (rows, M) int32 soundness-check slice (see sample()); bounds the
+    # transient regardless of M so the K budget needs no silent headroom for it.
+    _SOUND_SLICE_BYTES = 256e6
 
     def _calibrate_k(self, free_bytes: int, k_cap: int | None, analytic_k: int) -> int:
-        """Size K to the spill-safe VRAM budget. The old analytic floor (0.7·free/(70M+40N)) was
-        calibrated to never spill under the DEFAULT allocator; enabling `expandable_segments` (at
-        import) both cuts reserved memory ~2.3× and linearises it in K, so K can safely be a fixed
-        multiple (_CAL_MULT) of that floor — no fragile per-instance probe.
+        """Size K to the spill-safe VRAM budget: K = min(analytic, cap).
 
-        A runtime probe was tried and abandoned: with expandable_segments the peak-reserved read at
-        construction is systematically ~1.6× below production (allocation-history dependent) and the
-        frontier peak varies with the RNG draw, so every probe/differencing variant under-measured
-        per-batch and over-sized K → spill. The fixed 4×-floor multiple is measured-safe and robust.
+        RETUNED 2026-07-13 (kill-switch validated): the old extra floor 4×0.7·free/(70M+40N)
+        modeled the DELETED PyTorch path's scatter temporaries and bound K everywhere at ~1/3
+        of what the packed engine actually fits (measured real engine bytes/row = 4M+2N; the
+        roofline showed exactly those instances MLP-starved). The analytic model
+        (compute_k_safe ≈ (sat_b+4)M + 2N + 8N-class temps) matches the packed engine's true
+        footprint incl. the (K,N) readout masks, so it IS the floor now. The 4096×M soundness
+        transient that the old headroom accidentally covered is gone (sat_rows is read in
+        bounded slices — see _SOUND_SLICE_BYTES).
+
+        A runtime memory probe was tried and abandoned (2026-07-01): with expandable_segments
+        the peak-reserved read at construction is systematically ~1.6× below production and the
+        peak varies with the RNG draw → probes under-measure → spill. Do not resurrect it.
         CPU / M==0: analytic only (no CUDA budget to exploit)."""
         cap = k_cap if k_cap else analytic_k
-        safe_floor = max(1, int(0.7 * free_bytes / (70 * self.M + 40 * self.N + 64)))
-        if self.device.type != "cuda" or self.M == 0:
-            return max(1, min(analytic_k, cap))
-        return max(1, min(self._CAL_MULT * safe_floor, analytic_k, cap))
+        return max(1, min(analytic_k, cap))
 
     @classmethod
     def from_cnf_file(cls, path: str, device: torch.device, *, simplify: bool = False,
@@ -213,11 +225,16 @@ class GPUSampler:
 
     # ----------------------------------------------------------------- one chunk
 
-    @torch.inference_mode()
-    def _free_mask(self) -> torch.Tensor:
-        """(K, N) bool — variable v free iff neither polarity is assigned TRUE."""
-        asg = self.engine.assignment            # (K, 2N) int8, 1 = TRUE
-        return (asg[:, 0::2] == 0) & (asg[:, 1::2] == 0)
+    def _pair_masks(self, support_mask: "torch.Tensor | None"):
+        """(all_vars_words, support_words|None) engine pair masks for the completion checks.
+        Cached; keyed by support-mask IDENTITY with a strong ref held — sample() builds ONE
+        support_mask per call, so this rebuilds once per sample() not per chunk."""
+        if getattr(self, "_pm_ref", "unset") is not support_mask:
+            self._pm_ref = support_mask
+            self._pm_all = self.engine.make_pair_mask(None)
+            self._pm_sup = (self.engine.make_pair_mask(support_mask)
+                            if support_mask is not None else None)
+        return self._pm_all, self._pm_sup
 
     @torch.inference_mode()
     def _run_chunk(self, K: int, B: int, random_var: bool, max_rounds: "int | None",
@@ -257,12 +274,13 @@ class GPUSampler:
                                  device=self.device).item())
         rounds = eng.run_trajectory(order, n_support, B, seed,
                                     soft=(lookahead in ("soft", "fsoft")))
-        fr = self._free_mask()
-        if support_mask is not None:
-            support_complete = eng.active & ~(fr & support_mask).any(dim=1)
-        else:
-            support_complete = eng.active
-        fully = eng.active & ~fr.any(dim=1)
+        # Completion checks straight off the assignment BITMAP (one bitwise pass over the
+        # words; the former (K, N) free-mask materialization cost ~16x its bytes in strided
+        # sector RMWs and dragged the big-K instances ~15-25%).
+        pm_all, pm_sup = self._pair_masks(support_mask)
+        fully = eng.active & ~eng.any_free(pm_all)
+        support_complete = (eng.active & ~eng.any_free(pm_sup)
+                            if support_mask is not None else eng.active)
         return fully, support_complete, rounds, 0.0
 
     @torch.inference_mode()
@@ -475,12 +493,14 @@ class GPUSampler:
         """(n_done, S) uint8 support projection for the fully-assigned rows, via the cached plan.
         Pure GPU tensor ops — the whole point is to avoid the per-row Python reconstruct."""
         plan = self._build_projection_plan()
-        pos = self.engine.assignment[fully][:, 0::2] == 1        # (n, N) bool: var TRUE
-        n, dev = pos.size(0), self.device
+        n = int(fully.sum().item()) if fully.dtype == torch.bool else fully.numel()
+        dev = self.device
         proj = plan["const"].unsqueeze(0).expand(n, -1).clone()  # (n, S) uint8
         g = plan["gcol"] >= 0
         if bool(g.any()):
-            proj[:, g] = pos[:, plan["gcol"][g]].to(torch.uint8) ^ plan["flip"][g]
+            # gather ONLY the needed var columns' TRUE bits straight from the bitmap
+            pos = self.engine.var_true_bits(fully, plan["gcol"][g])   # (n, |g|) uint8
+            proj[:, g] = pos ^ plan["flip"][g]
         rm = plan["rgroup"] >= 0
         if plan["n_groups"] and bool(rm.any()):
             bits = torch.randint(0, 2, (n, plan["n_groups"]), generator=self._gen,
@@ -710,15 +730,17 @@ class GPUSampler:
                     # (Holds ONLY at a complete assignment — sat_count>0 on a PARTIAL assignment just
                     # means "not yet violated". We gate on `fully`, so it's valid.) Redundant with
                     # `active` (cleared the instant a clause hits 0); CPU `_satisfies()` is the real check.
-                    # Capped to 4096 rows: it's a diagnostic, and an uncapped slice materialises an
-                    # (n_done, M) temp that can reach GBs at the fused K. engine.sat_rows() is
-                    # transparent to the packed fused state (counters live in the kernel there).
+                    # Capped to 4096 rows AND read in bounded slices: the (rows, M) int32 temp is
+                    # kept under _SOUND_SLICE_BYTES — the old single 4096×M slice reached ~3.3 GB
+                    # on b05-c50 and forced the K budget to keep silent headroom for it.
                     idx = fully.nonzero().view(-1)[:4096]
-                    sat_rows = self.engine.sat_rows(idx)
-                    if not bool((sat_rows > 0).all()):
-                        gpu_unsound += int((sat_rows <= 0).any(dim=1).sum().item())
+                    step = max(64, int(self._SOUND_SLICE_BYTES // max(4 * self.M, 1)))
+                    for s0 in range(0, idx.numel(), step):
+                        sat_rows = self.engine.sat_rows(idx[s0:s0 + step])
+                        if not bool((sat_rows > 0).all()):
+                            gpu_unsound += int((sat_rows <= 0).any(dim=1).sum().item())
                 if n_done and keep_rows:
-                    asg = self.engine.assignment[fully]         # (n_done, 2N) int8
+                    asg = self.engine.assignment_rows(fully)    # (n_done, 2N) int8 copy
                     pos = asg[:, 0::2] == 1                      # (n_done, N) bool, var v TRUE
                     vidx = torch.arange(1, self.N + 1, device=self.device)
                     comp_rows = torch.where(pos, vidx, -vidx).to(torch.int32).cpu().tolist()

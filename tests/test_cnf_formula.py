@@ -66,12 +66,12 @@ class TestCnfFormula:
         assert formula.num_clauses == 4
         assert formula.clause_sizes.tolist() == [2, 3, 2, 1]
 
-        # init_lit_xor (XOR of lit-indices) for each clause:
-        # clause 0: ~x1(1) ^ x2(2) = 3
-        # clause 1: x1(0) ^ ~x2(3) ^ x3(4) = 7
-        # clause 2: ~x1(1) ^ ~x2(3) = 2
+        # init_lit_sum (sum of lit-indices) for each clause:
+        # clause 0: ~x1(1) + x2(2) = 3
+        # clause 1: x1(0) + ~x2(3) + x3(4) = 7
+        # clause 2: ~x1(1) + ~x2(3) = 4
         # clause 3: ~x3(5) = 5
-        assert formula.init_lit_xor.tolist() == [3, 7, 2, 5]
+        assert formula.init_lit_sum.tolist() == [3, 7, 4, 5]
 
     def test_parse_cnf_file(self):
         device = torch.device("cpu")
@@ -81,7 +81,7 @@ class TestCnfFormula:
         assert formula.num_vars == 3
         assert formula.num_clauses == 4
         assert formula.clause_sizes.tolist() == [2, 3, 2, 1]
-        assert formula.init_lit_xor.tolist() == [3, 7, 2, 5]
+        assert formula.init_lit_sum.tolist() == [3, 7, 4, 5]
 
     def test_single_literal_clauses(self):
         device = torch.device("cpu")
@@ -95,7 +95,7 @@ class TestCnfFormula:
         assert formula.clause_sizes.tolist() == [1, 1]
         # clause 0: x1(0) = 0
         # clause 1: ~x1(1) = 1
-        assert formula.init_lit_xor.tolist() == [0, 1]
+        assert formula.init_lit_sum.tolist() == [0, 1]
 
 
 if __name__ == "__main__":
