@@ -65,7 +65,14 @@ class GPUSampler:
         self.M = formula.num_clauses
         # The packed-Triton engine (the ONLY execution path — raises off-CUDA / without triton;
         # field split 16|16 or 8|24 picked per formula, see gpap.engine).
-        self.engine = BCPEngine(formula)
+        # EXPERIMENT SEAM: GPAP_BCP=wl swaps in the classic 2-watched-literal engine (scalar-only,
+        # ~5x the per-row state — K is scaled below) so the BCP SCHEME can be A/B'd end-to-end
+        # through this same pipeline. Default is the packed NobleCount engine.
+        if os.environ.get("GPAP_BCP") == "wl":
+            from gpap.engine.wl_engine import WLBCPEngine
+            self.engine = WLBCPEngine(formula)
+        else:
+            self.engine = BCPEngine(formula)
         self._max_cls = int(formula.clause_sizes.max().item()) if self.M else 1
         self._total_lits = int(formula.clause_sizes.sum().item()) if self.M else 0
         # RNG + state must exist before K calibration (the probe chunk in _calibrate_k uses _gen).
@@ -114,6 +121,19 @@ class GPUSampler:
             self.K_fused = max(self.K, min(budget // fused_pb, fused_cap))
         else:
             self.K_fused = self.K
+        # 2-WL SEAM: the whole K model above is calibrated to NobleCount's per-row footprint (ONE
+        # packed word per clause + the bitmap). 2-WL additionally carries a clause->lit CSR and
+        # MUTABLE per-row watch arrays (~5x), so reuse the same budget by scaling K down by the
+        # real per-row ratio — this box spills to host RAM SILENTLY rather than OOMing, and an
+        # over-sized K would read as "2-WL is slow" when it is really thrashing. Only the WL
+        # engine exposes per_row_int32(), so this is a no-op for the default engine.
+        if getattr(self.engine, "per_row_int32", None) is not None and self.M > 0:
+            noble_per_row = self.M + (2 * self.N + 31) // 32          # packed word + bitmap words
+            ratio = self.engine.per_row_int32() / max(noble_per_row, 1)
+            if ratio > 1.0:
+                self.K = max(1, int(self.K / ratio))
+                self.K_fused = max(1, int(self.K_fused / ratio))
+                self._K_init = self.K
         # Kernel-variant auto-dispatch on the CALIBRATED K (a pure launch flag, gate-validated
         # bit-identical): below memory saturation each row's serial trail leaves requests-in-
         # flight on the table, and the warp-wide WAVE propagate multiplies them. Crossover

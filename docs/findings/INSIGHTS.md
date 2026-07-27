@@ -135,6 +135,25 @@ was the serial-path optimization. Scalar kernel unchanged in cost (one sub vs su
 Interleaved A/B at K=49k after this: b03 scalar≈wave (tie), b06 scalar 1.2× ahead ⇒ the
 6×-resident-warps dispatch threshold stands. Gate bit-identical in scalar, wave and auto.
 
+**Classic 2-watched-literals is 1.8–2.6× SLOWER than NobleCount, per-warp scalar-vs-scalar
+(2026-07-15).** Built a full 2-WL engine (`gpap/engine/wl_engine.py`, `WLBCPEngine`) at the SAME
+one-program-per-row scalar parallelisation as the NobleCount scalar kernel, same bitmap + splitmix
+hash ⇒ **bit-identical models** (192/192 identical+valid, 8 instances × B∈{1,4,8} × 8 seeds; the
+confluence gate). Interleaved fixed-K A/B: 2-WL loses 1.84× (b06) … 2.55× (s386) on every
+instance, doing **~1.9× more memory work** (matches a CPU work proxy) and needing **4.9× more
+per-row state**. WHY, and why it does NOT transfer from the CDCL wisdom: (1) narrow Tseitin
+clauses (width 2–3) — 2-WL's satisfied-clause skip saves only 1.08–1.19× visits, but each visit
+pays a replacement-watch SCAN ⇒ ~2× total traffic; NobleCount's sum-word touch is ONE op, no scan,
+and at sat==1 the sum field IS the forced literal. (2) Forward-only trajectories (no backtracking)
+delete counter-BCP's only CDCL penalty. (3) 2-WL needs clause→lit CSR (NobleCount stores none) +
+mutable per-row watch arrays ⇒ less occupancy. (4) 2-WL does NOT decompose into independent
+per-occurrence atomics ⇒ it CANNOT have the WAVE gear, so the real gap is wider than the scalar 2×.
+(5) The mutable-watch machinery is even compiler-fragile: it crashed until `num_warps=1` (default
+4 warps ran 128 redundant threads RACING on the row-private watch arrays → torn reads → OOB; a CPU
+mirror of the exact kernel trajectories proved the algorithm never overflows). This is the
+empirical justification for building GPAP on the sum-trick counter, not watched literals. Full
+write-up: [2WL_VS_NOBLECOUNT_FINDINGS.md](2WL_VS_NOBLECOUNT_FINDINGS.md).
+
 **Clause renumbering for occ locality: NEGATIVE — topological emission is already ~optimal
 (2026-07-13).** The measured 2.0-2.1 sectors per ~2.8-clause occ walk (vs "ideal" 1.03) is
 STRUCTURAL, not an ordering artifact: a literal's occ = its defining gate's clauses (already
