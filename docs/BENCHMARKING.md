@@ -46,6 +46,20 @@ not sampling, is the bottleneck). So:
 - `distinct_frac ≈ 1.0` on all non-tiny spaces; the count matters on tiny circuit spaces (e.g.
   b06-c5 has only 64 distinct solutions total — a raw rate overstates distinct delivery ~2500×).
 
+## 4b. Charge both samplers for the SAME deliverable — CMSGen's emission is not free
+
+GPAP's timed run emits nothing (§4). Stock CMSGen formats and writes every sample as a full
+N-variable DIMACS assignment, and on wide formulas that costs more than the sampling:
+**`27.sk_3_32`, 50k samples — 0.42 s generating vs 3.6 s with `--samplefile`** (373 MB written;
+`--samplefile /dev/null` still costs 3.3 s, so it is ostream formatting, not disk). A
+GPAP-without-emission vs CMSGen-with-emission ratio measures file I/O.
+
+So: build CMSGen with `scripts/build_cmsgen.sh` (upstream + `scripts/cmsgen_gpap_eval.patch`) and
+let `gpap bench` use its `--nowrite` for the timed run — it detects the flag automatically, and
+marks any row it had to measure the old way as `cms_mode="write"`. The patch's `--statsevery`
+also exports CryptoMiniSat's own propagation/decision counters, which is where the `Cdec/s` /
+`Cimpl/s` columns come from. **Ratios published before 2026-07-27 include the emission handicap.**
+
 ## 5. Benchmark against the competitor's OWN optimized operation
 
 Compare GPU work against CMSGen's actual C++ sampler (or a solver's in-C `process()`), never a naive

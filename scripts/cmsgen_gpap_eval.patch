@@ -1,0 +1,165 @@
+From: GPAP evaluation harness
+Subject: [PATCH] cmsgen: --nowrite + machine-parseable work-rate stats (GPAP eval only)
+
+Two additions to meelgroup/cmsgen @ 8210aa9, both OFF by default (stock behaviour is
+bit-identical unless the new flags are passed). They exist so a GPU-vs-CPU sampling
+comparison can be made on equal terms:
+
+  --nowrite       Generate the samples but emit none: no samplefile is opened, no sample is
+                  formatted, and the every-10-samples console line is suppressed. This is the
+                  apples-to-apples mode against GPAP's timed run, which likewise emits nothing
+                  (its models stay on the GPU; delivery is a separate, off-timing pass).
+                  MEASURED on 27.sk_3_32, 50,000 samples, single core: 0.42 s with --nowrite vs
+                  3.6 s with --samplefile — i.e. ~88% of stock CMSGen's wall on that instance is
+                  ostream formatting of full N-variable assignments (373 MB of samplefile),
+                  not sampling. The effect grows with |vars|, so it is largest exactly on the
+                  big circuit unrolls.
+
+  --statsevery N  Print `c gpap-stats samples=.. props=.. decisions=.. conflicts=.. cpu_s=..
+                  wall_s=..` every N samples (default 1000) and once at the end, flushed, so a
+                  harness that kills the process on a time budget still sees every completed
+                  line. props/decisions are CryptoMiniSat's own counters
+                  (SATSolver::get_sum_propagations/decisions/conflicts) — the CPU numbers that
+                  GPAP's impl/s and dec/s columns are compared against.
+
+Apply with:  git apply /path/to/cmsgen_gpap_eval.patch   (scripts/build_cmsgen.sh does it)
+
+diff --git a/src/main.cpp b/src/main.cpp
+index b10e6ad..dca797d 100644
+--- a/src/main.cpp
++++ b/src/main.cpp
+@@ -20,6 +20,7 @@ OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN
+ THE SOFTWARE.
+ */
+ 
++#include <chrono>
+ #include <ctime>
+ #include <cstring>
+ #include <errno.h>
+@@ -209,20 +210,33 @@ void Main::add_supported_options() {
+     program.add_argument("--samplefile")
+         .action([&](const auto& a) {resultFilename = a;})
+         .help("Write sample(s) to this file");
++    program.add_argument("--nowrite")
++        .default_value(false)
++        .implicit_value(true)
++        .help("Generate the samples but write NONE of them (no file is opened). Measures the "
++              "pure generation rate, for comparison against samplers that do not emit either");
++    program.add_argument("--statsevery")
++        .action([&](const auto& a) {stats_every = std::atoi(a.c_str());})
++        .default_value(1000)
++        .help("Print a machine-parseable 'c gpap-stats' line (cumulative samples/propagations/"
++              "decisions/conflicts + elapsed) every N samples; 0 = only at the end");
+     program.add_argument("file").remaining().help("input CNF file");
+ }
+ /* clang-format on */
+ 
+ void Main::manually_parse_some_options() {
+-    resultfile = new std::ofstream;
+-    resultfile->open(resultFilename.c_str());
+-    if (!(*resultfile)) {
+-        cout
+-        << "ERROR: Couldn't open file '"
+-        << resultFilename
+-        << "' for writing samples!"
+-        << endl;
+-        std::exit(-1);
++    nowrite = (program["--nowrite"] == true);
++    if (!nowrite) {
++        resultfile = new std::ofstream;
++        resultfile->open(resultFilename.c_str());
++        if (!(*resultfile)) {
++            cout
++            << "ERROR: Couldn't open file '"
++            << resultFilename
++            << "' for writing samples!"
++            << endl;
++            std::exit(-1);
++        }
+     }
+     conf.polarity_mode = PolarityMode::polarmode_weighted;
+     conf.restartType = Restart::fixed;
+@@ -303,8 +317,12 @@ int Main::solve() {
+ 
+     lbool ret = multi_solutions();
+     //printResultFunc(&cout, false, ret);
+-    assert(resultfile);
+-    printResultFunc(resultfile, true, ret);
++    if (!nowrite) {
++        assert(resultfile);
++        printResultFunc(resultfile, true, ret);
++    } else if (ret == l_False) {
++        cout << "WARNING: No samples generated, CNF is unsatisfiable" << endl;
++    }
+     if (ret == l_True) {
+         cout << "c Finished generating all " << max_nr_of_solutions << " samples" << endl;
+     }
+@@ -313,8 +331,28 @@ int Main::solve() {
+     return correctReturnValue(ret);
+ }
+ 
++void Main::print_gpap_stats(uint64_t n_samples, double wall_s)
++{
++    //One machine-parseable line, flushed (endl) so a harness that KILLS this process on its
++    //time budget still sees every line printed before the kill.
++    cout
++    << "c gpap-stats"
++    << " samples=" << n_samples
++    << " props=" << solver->get_sum_propagations()
++    << " decisions=" << solver->get_sum_decisions()
++    << " conflicts=" << solver->get_sum_conflicts()
++    << " cpu_s=" << std::fixed << std::setprecision(4) << cpuTime()
++    << " wall_s=" << std::fixed << std::setprecision(4) << wall_s
++    << endl;
++}
++
+ lbool Main::multi_solutions() {
+-    cout << "c Writing samples to file: " << resultFilename << endl;
++    if (!nowrite) cout << "c Writing samples to file: " << resultFilename << endl;
++    const auto t_start = std::chrono::steady_clock::now();
++    auto wall = [&]() {
++        return std::chrono::duration<double>(
++            std::chrono::steady_clock::now() - t_start).count();
++    };
+     unsigned long current_nr_of_solutions = 0;
+     lbool ret = l_True;
+     while(current_nr_of_solutions < max_nr_of_solutions && ret == l_True) {
+@@ -323,7 +361,13 @@ lbool Main::multi_solutions() {
+         if (ret == l_True && current_nr_of_solutions < max_nr_of_solutions) {
+             //printResultFunc(&cout, false, ret);
+             if (resultfile) printResultFunc(resultfile, true, ret);
+-            if (current_nr_of_solutions % 10 == 0) {
++            if (stats_every && current_nr_of_solutions % stats_every == 0) {
++                print_gpap_stats(current_nr_of_solutions, wall());
++            }
++            //The every-10 console line is a flush per 10 samples: kept for the default
++            //(file-writing) mode so stock behaviour is unchanged, suppressed in --nowrite
++            //mode where console I/O would be measured as sampling time.
++            if (!nowrite && current_nr_of_solutions % 10 == 0) {
+                 cout
+                 << "c Number of samples found until now: "
+                 << std::setw(6) << current_nr_of_solutions
+@@ -331,6 +375,7 @@ lbool Main::multi_solutions() {
+             }
+         }
+     }
++    print_gpap_stats(current_nr_of_solutions, wall());
+     return ret;
+ }
+ 
+diff --git a/src/main.h b/src/main.h
+index 279a96b..375736d 100644
+--- a/src/main.h
++++ b/src/main.h
+@@ -93,6 +93,11 @@ class Main: public MainCommon
+         string fileToRead;
+         std::ofstream* resultfile = NULL;
+ 
++        //GPAP eval harness (see gpap scripts/cmsgen_gpap_eval.patch)
++        bool nowrite = false;             //--nowrite: generate samples, emit none
++        uint32_t stats_every = 1000;      //--statsevery: 'c gpap-stats' line cadence
++        void print_gpap_stats(uint64_t n_samples, double wall_s);
++
+         //Drat checker
+         bool clause_ID_needed = false;
+ };

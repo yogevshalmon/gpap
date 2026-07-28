@@ -48,7 +48,20 @@ import time
 REPO_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
 sys.path.insert(0, REPO_ROOT)
 
+from eval.rival_common import VARIANTS, prepare_variant, variant_note   # noqa: E402
+
 RIVAL_DEFAULT = os.path.expanduser("~/.cache/gpap/src/Recurrent-CircuitSAT-Sampler")
+# Per-SUBPROCESS wall cap for the rival, default 300 s = 5x the 60 s sampling budget GPAP gets
+# per instance. Deliberately GENEROUS and not symmetric: the rival's wall includes building its
+# PyTorch model, which its OWN metric (unique / model_runtime) excludes, so a tight cap would
+# truncate runs it would have completed. MEASURED on this suite: DEMOTIC median 3.7-15.3 s
+# (1/38 runs over 60 s), Recurrent-CircuitSAT median ~165 s with a 665 s tail (18/18 over 60 s,
+# 5/18 over 300 s) — a 60 s cap would have produced ZERO valid Recurrent measurements.
+# A timed-out run is reported as an error row with the reason, never as a zero that would enter
+# a geomean as if the rival had genuinely produced nothing.
+DEFAULT_TIMEOUT = 300.0
+PROBE_TIMEOUT = 60.0          # per start_point probe (a 1-step run; same budget)
+PROBE_BUDGET = 120.0          # total probing per instance before we give up on it
 BENCH_DIR = os.path.join(REPO_ROOT, "benchmarks", "circuits", "bench", "seq")
 
 # their run.py target table (the branches for instances we share; idx into the OUTPUT list)
@@ -134,8 +147,8 @@ def miter_bench(src, dst, T, seed):
 
 # ---------------------------------------------------------------- the two samplers
 
-def run_recurrent(rival, bench_file, key, T, steps, batch, start_point, timeout=900,
-                  retry=True):
+def run_recurrent(rival, bench_file, key, T, steps, batch, start_point,
+                  timeout=DEFAULT_TIMEOUT, retry=True):
     """One run of their sampler; returns dict or {'error': ...}. `key` = the filename stem the
     copy is given (their target table and results csv are keyed on it)."""
     data_dir = os.path.join(rival, "data", "rival_tmp")
@@ -186,12 +199,17 @@ def run_recurrent(rival, bench_file, key, T, steps, batch, start_point, timeout=
             "batch": batch, "steps": steps, "start_point": start_point}
 
 
-def probe_start_point(rival, bench_file, key, T, max_sp=10):
+def probe_start_point(rival, bench_file, key, T, max_sp=10, budget=PROBE_BUDGET):
     """Their backward() crashes while the pinned output has no gradient path to any input
-    (Moore register latency); walk start_point up until a tiny run survives."""
+    (Moore register latency); walk start_point up until a tiny run survives. Bounded twice: each
+    probe gets PROBE_TIMEOUT, and the whole search gets `budget` — an instance whose probe never
+    settles must cost minutes, not the afternoon."""
+    t0 = time.perf_counter()
     for sp in range(max_sp + 1):
+        if time.perf_counter() - t0 > budget:
+            return None
         r = run_recurrent(rival, bench_file, key, T, steps=1, batch=256, start_point=sp,
-                          timeout=180)
+                          timeout=PROBE_TIMEOUT)
         if "error" not in r:
             return sp
         if "does not require grad" not in r["error"]:
@@ -202,13 +220,14 @@ def probe_start_point(rival, bench_file, key, T, max_sp=10):
 BATCH_LADDER = (1_000_000, 300_000, 100_000, 30_000, 10_000, 3_000)
 
 
-def run_recurrent_ladder(rival, bench_file, key, T, steps, batch, start_point):
+def run_recurrent_ladder(rival, bench_file, key, T, steps, batch, start_point,
+                         timeout=DEFAULT_TIMEOUT):
     """run_recurrent, stepping down the batch ladder when the WSL2 driver refuses the size
     ('device not ready' reproduces at a fixed batch on some models yet passes one rung lower)."""
     ladder = [b for b in BATCH_LADDER if b <= batch]
     r = {"error": "empty ladder"}
     for b in ladder[:3]:
-        r = run_recurrent(rival, bench_file, key, T, steps, b, start_point)
+        r = run_recurrent(rival, bench_file, key, T, steps, b, start_point, timeout=timeout)
         if "error" not in r or "device not ready" not in r["error"]:
             return r
     return r
@@ -225,7 +244,8 @@ def pick_batch(bench_file, T, budget_bytes=5 << 30):
     return 3_000
 
 
-def run_gpap(bench_file, T, pin_outputs, target, seeds, n_time, device):
+def run_gpap(bench_file, T, pin_outputs, target, seeds, n_time, device, time_limit=60.0,
+             n_cov=1000):
     """Convert once (explicit pins), then sample at each seed; report per-seed + medians."""
     from gpap.circuits.bench import parse_bench, build_cnf, write_dimacs
     from gpap.sampling.pipeline import CIRCUIT_PORTFOLIO, sample_file
@@ -237,8 +257,10 @@ def run_gpap(bench_file, T, pin_outputs, target, seeds, n_time, device):
     runs = []
     try:
         for s in seeds:
-            g = sample_file(cnf_path, device, n_time=n_time, n_cov=5000,
-                            configs=CIRCUIT_PORTFOLIO, time_limit=60.0, seed=s)
+            # n_cov feeds distinct_frac only, but it COLLECTS models and rebuilds them in
+            # Python — real wall on a deep unroll. Keep it small; it is not the measurement.
+            g = sample_file(cnf_path, device, n_time=n_time, n_cov=n_cov,
+                            configs=CIRCUIT_PORTFOLIO, time_limit=time_limit, seed=s)
             runs.append({"seed": s, "sps": g["samples_per_s"], "sps_e2e": g.get("sps_e2e_total"),
                          "unique_per_s_est": g.get("unique_sps_est") or 0.0,
                          "success": g["success_rate"], "n_models": g["n_models"]})
@@ -258,11 +280,22 @@ def main():
     ap.add_argument("--bench-dir", default=BENCH_DIR)
     ap.add_argument("--rare", action="store_true",
                     help="our adversarial fixed-T rare pattern (MITER cone) instead of their table pins")
+    ap.add_argument("--circuit-variants", nargs="+", default=["raw"], choices=list(VARIANTS),
+                    metavar="V",
+                    help="which circuit BOTH sides are given: 'raw' (as committed) and/or 'abc' "
+                         "(ABC-optimized sequential AIG written back as .bench, equivalence-"
+                         "checked) — so an ABC-encoded GPAP arm is never compared against a "
+                         "rival that only ever saw the unoptimized circuit")
     ap.add_argument("-T", "--cycles", type=int, default=25)
     ap.add_argument("--steps", type=int, default=1, help="their num_steps (script default 1)")
     ap.add_argument("--seeds", type=int, nargs="+", default=[5, 6, 7])
     ap.add_argument("--gpap-n", type=int, default=50_000)
     ap.add_argument("--target-seed", type=int, default=5, help="rare-pattern selection seed")
+    ap.add_argument("--timeout", type=float, default=DEFAULT_TIMEOUT,
+                    help="per-run wall cap for the RIVAL subprocess (s); a run that exceeds it "
+                         "is an error row, not a zero")
+    ap.add_argument("--gpap-time-limit", type=float, default=60.0,
+                    help="per-seed sampling wall cap for the GPAP side (s)")
     ap.add_argument("--output", default=None)
     args = ap.parse_args()
     if not os.path.isdir(os.path.join(args.rival, "src")):
@@ -274,18 +307,27 @@ def main():
     mode = "rare(fixed-T pattern, MITER)" if args.rare else "their target table"
     print(f"{len(args.names)} instances | T={args.cycles} steps={args.steps} | mode: {mode} | "
           f"GPAP median of seeds {args.seeds}")
-    hdr = (f"{'instance':<10}{'pin':>12}{'p_acc':>10}{'RCS uniq':>11}{'@T':>9}{'t':>7}"
-           f"{'RCS u/s':>10}{'GPAP u/s~':>11}{'succ%':>7}{'ratio':>10}")
+    hdr = (f"{'instance':<10}{'circ':>6}{'pin':>12}{'p_acc':>10}{'RCS uniq':>11}{'@T':>9}"
+           f"{'t':>7}{'RCS u/s':>10}{'GPAP u/s~':>11}{'succ%':>7}{'ratio':>10}")
     print(hdr)
     print("-" * len(hdr))
     out = []
-    for name in args.names:
-        src = os.path.join(args.bench_dir, f"{name}.bench")
-        if not os.path.isfile(src):
+    for name, variant in ((n, v) for n in args.names for v in args.circuit_variants):
+        src0 = os.path.join(args.bench_dir, f"{name}.bench")
+        if not os.path.isfile(src0):
             print(f"{name:<10}  no such bench file, skipped")
             continue
+        # BOTH sides get the same circuit (eval/rival_common.py): with 'abc' the rival is handed
+        # the ABC-optimized .bench too, gated by a bit-exact simulation equivalence check.
+        src, vinfo = prepare_variant(src0, variant, tmp, cycles=args.cycles,
+                                     seed=args.target_seed,
+                                     target_mode="rare" if args.rare else "random")
+        if vinfo.get("error"):
+            print(f"{name:<10}{variant:>6}  circuit variant unusable: {vinfo['error'][:60]}",
+                  flush=True)
+            continue
         if args.rare:
-            rival_file = os.path.join(tmp, f"{name}_rare.bench")
+            rival_file = os.path.join(tmp, f"{name}_{variant}_rare.bench")
             pattern, est = miter_bench(src, rival_file, args.cycles, args.target_seed)
             key = RARE_ALIAS                       # their table: [-1]=1 == MITER=1
             gpap_file, pin_n = rival_file, None    # single MITER output, pin all(=1)
@@ -298,39 +340,46 @@ def main():
             idx, vals = TARGETS[name]
             key = name                             # untouched copy hits their table branch
             rival_file = src
-            gpap_file = os.path.join(tmp, f"{name}_reord.bench")
+            gpap_file = os.path.join(tmp, f"{name}_{variant}_reord.bench")
             picked = reorder_bench(src, gpap_file, idx)
             gpap_target = {w: bool(v) for w, v in zip(picked, vals)}
             pin_n = len(idx)
             pin_desc = ",".join(f"[{i}]={v}" for i, v in zip(idx, vals))
         sim = sim_baseline(gpap_file, args.cycles, args.target_seed, pin_outputs=pin_n,
                            target=gpap_target)
-        sp = probe_start_point(args.rival, rival_file, key, args.cycles)
+        sp = probe_start_point(args.rival, rival_file, key, args.cycles)   # bounded, see above
         if sp is None:
             rcs = {"error": "no gradient path at any start_point<=10"}
         else:
             batch = pick_batch(rival_file, args.cycles)
             rcs = run_recurrent_ladder(args.rival, rival_file, key, args.cycles, args.steps,
-                                       batch, sp)
-        g = run_gpap(gpap_file, args.cycles, pin_n, gpap_target, args.seeds, args.gpap_n, device)
+                                       batch, sp, timeout=args.timeout)
+        g = run_gpap(gpap_file, args.cycles, pin_n, gpap_target, args.seeds, args.gpap_n, device,
+                     time_limit=args.gpap_time_limit)
         row = {"name": name, "mode": "rare" if args.rare else "table", "pin": pin_desc,
+               "variant": variant, "circuit": vinfo,
                "p_accept": sim["p_accept"], "p_accept_lt": sim.get("p_accept_lt"),
                "rcs": rcs, "gpap": g}
         out.append(row)
         pa = sim["p_accept"] if sim["p_accept"] else sim.get("p_accept_lt", 0.0)
         pa_s = f"{pa:.2e}" if sim["p_accept"] else f"<{pa:.0e}"
         if "error" in rcs:
-            print(f"{name:<10}{pin_desc:>12}{pa_s:>10}  RCS FAILED: {rcs['error'][:50]} | "
-                  f"GPAP u/s~={g['unique_per_s_est']:,.0f} succ={100 * g['success']:.0f}%",
-                  flush=True)
+            print(f"{name:<10}{variant:>6}{pin_desc:>12}{pa_s:>10}  RCS FAILED: "
+                  f"{rcs['error'][:44]} | GPAP u/s~={g['unique_per_s_est']:,.0f} "
+                  f"succ={100 * g['success']:.0f}%", flush=True)
             continue
         ratio = (g["unique_per_s_est"] / rcs["unique_per_s"] if rcs["unique_per_s"]
                  else float("inf"))
         at_t = f"{rcs['unique_at_T']:,}" if rcs.get("unique_at_T") is not None else "—"
-        print(f"{name:<10}{pin_desc:>12}{pa_s:>10}{rcs['unique']:>11,}{at_t:>9}"
+        print(f"{name:<10}{variant:>6}{pin_desc:>12}{pa_s:>10}{rcs['unique']:>11,}{at_t:>9}"
               f"{rcs['runtime_s']:>6.1f}s{rcs['unique_per_s']:>10,.0f}"
               f"{g['unique_per_s_est']:>11,.0f}{100 * g['success']:>6.0f}%{ratio:>9.1f}x",
               flush=True)
+    if len(args.circuit_variants) > 1:
+        print("\ncircuit variants (BOTH sides get the same circuit; abc = sequential-AIG "
+              "optimization, equivalence-checked):")
+        for r in out:
+            print(f"  {r['name']:<8} {variant_note(r['circuit'])}")
     if args.output:
         os.makedirs(os.path.dirname(args.output) or ".", exist_ok=True)
         json.dump(out, open(args.output, "w"), indent=1)

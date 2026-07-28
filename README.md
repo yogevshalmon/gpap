@@ -63,8 +63,25 @@ gpap sample b10.bench --cycles 25 -n 50000 --out stim.out   # unroll, sample, wr
 gpap sample design.aig --cycles 25 -n 50000                 # AIGER input (.aig/.aag), same flow
 gpap sample b10.bench --cycles 25 --encoder abc             # smaller CNF via berkeley-abc (below)
 gpap circuit2cnf benches/ cnf_out/ --cycles 25 --pin-outputs 1   # circuit dir -> CNF dir
-gpap bench 'benchmarks/circuits/*.cnf' --cmsgen /path/to/cmsgen --n-cov 5000
-gpap bench 'benches/*.bench' --encoder abc --cycles 25      # circuits benchmark, ABC-encoded
+gpap bench 'benchmarks/circuits/*.cnf' --cmsgen ~/.cache/gpap/bin/cmsgen --n-cov 5000
+gpap bench 'benches/*.bench' --encoders tseitin abc:fast --cycles 25 --target rare --resume
+```
+
+**Comparing against CMSGen fairly.** Build it with `scripts/build_cmsgen.sh` (upstream at a
+pinned commit + the small in-repo patch `scripts/cmsgen_gpap_eval.patch`). GPAP's timed run emits
+nothing — models stay on the GPU — while stock CMSGen writes every sample as a full N-variable
+DIMACS assignment, which on wide formulas costs several times the sampling itself (measured
+`27.sk_3_32`, 50k samples: 0.42 s vs 3.6 s). The patch adds `--nowrite` (generate, emit nothing)
+and `--statsevery` (its own propagation/decision counters); `gpap bench` detects both, times the
+like-for-like run, and reports the emission cost separately. A stock binary still works — the row
+is just marked `cms_mode="write"`. See [`docs/BENCHMARKING.md`](docs/BENCHMARKING.md) §4b.
+
+**The full experimental sweep** (all families, both encoders, both target regimes, the GPU rivals,
+and the figures) is one script per family — [`docs/EVAL_RUNBOOK.md`](docs/EVAL_RUNBOOK.md):
+
+```bash
+eval/rivals_setup.sh            # abc + patched cmsgen + DEMOTIC / Recurrent-CircuitSAT / HTS
+eval/run_full_eval.sh seq       # resumable; also comb | sk | epfl | hwmcc | rivals | plots | all
 ```
 
 **Circuit inputs.** `.bench` (ISCAS-85/89, ITC'99) and AIGER `.aig`/`.aag` (binary and ASCII,

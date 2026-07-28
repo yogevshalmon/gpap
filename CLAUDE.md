@@ -47,8 +47,11 @@ gpap/
     simulate.py            # bit-parallel sim: REJECTION baseline (p_accept), rare targets, sim-check
   cli.py                   # `gpap` subcommands (sample / bench / circuit2cnf / info)
   benchmark.py             # the `gpap bench` suite driver (in-package so it works installed)
-eval/                      # cross-GPU sampling benchmark driver + plots (Colab / A100)
-scripts/                   # shims (sample_benchmark -> gpap.benchmark), bench_to_cnf, build_abc.sh,
+eval/                      # the experiment layer: run_full_eval.sh (staged/resumable terminal
+                           #   sweep) + eval_plots.py + rivals_{demotic,recurrent,hts}.py +
+                           #   rivals_setup.sh + barbarik_gpap.py + the cross-GPU Colab driver
+scripts/                   # shims (sample_benchmark -> gpap.benchmark), bench_to_cnf,
+                           #   build_abc.sh, build_cmsgen.sh + cmsgen_gpap_eval.patch,
                            #   external_solver.py (PySAT utility, kept for future use)
 docs/findings/             # INSIGHTS.md (settled results index) + *_FINDINGS.md deep dives
 tests/                     # pytest; circuit CNFs GENERATED from benchmarks/circuits/bench/ at test time
@@ -178,16 +181,51 @@ matrix leaves the device). `--out-format bits|npy|dimacs`, `--max-samples` cap (
 `--stats` for the info JSON. Sound: every row extends to a full model (test_output.py). Circuit
 CNFs embed a `c wire <var> <input@cycle>` map (bench.py) so output columns are named by wire.
 
-Benchmark suite driver (thin table over `gpap.sampling.pipeline`; the glob may mix CNFs with
-circuits — .bench/.aig/.aag are converted first with the same --encoder/--abc-opt flags, encode
-wall reported per instance as t_enc, never folded into either sampler's rate):
+Benchmark suite driver (`gpap/benchmark.py`, schema-3 JSON; thin table over
+`gpap.sampling.pipeline`; the glob may mix CNFs with circuits — .bench/.aig/.aag are converted
+first, encode wall reported per instance as t_enc, never folded into either sampler's rate):
 ```bash
-PYTHONPATH=. .venv/bin/python scripts/sample_benchmark.py \
-    --glob '/path/to/circuits/*.cnf' --use-kernel auto --output .experiments/out.json
-PYTHONPATH=. .venv/bin/python scripts/sample_benchmark.py \
-    --glob 'benchmarks/circuits/bench/seq/*.bench' --encoder abc --cycles 25
+gpap bench 'benchmarks/circuits/bench/seq/*.bench' --encoders tseitin abc:fast --target rare \
+    --cmsgen ~/.cache/gpap/bin/cmsgen --output .experiments/seq.json --resume
 ```
-Cross-GPU (Colab/A100): `eval/colab_sampling_benchmark.py` + `notebooks/gpap_colab_sampling.ipynb`.
+- **`--encoders tseitin abc:fast`** runs EVERY circuit through each encoder back-to-back in ONE
+  process (same GPU state) → one row per (instance, encoder) + a paired A/B summary. Single
+  `--encoder` still works.
+- **Never dies mid-sweep**: a failing cell becomes an `error`/`skipped` row and the run continues;
+  rows are written to `--output` after each one and `--resume` skips what is already there
+  (the Colab-disconnect story). Out-of-envelope formulas (`gpap.engine.packed_envelope`) and
+  `--max-clauses/--max-vars` oversizes are skipped WITH the reason, never a raise.
+- **Engine provenance in every row** (`engine`: packed split 16|16 vs 8|24, wave/scalar propagate,
+  K/K_fused) + a `krn` column — the evidence a number came from the sum-trick kernel in-envelope.
+- **CMSGen fairness**: build it with `scripts/build_cmsgen.sh` (upstream + the in-repo patch
+  `scripts/cmsgen_gpap_eval.patch`). GPAP's timed run emits nothing, stock CMSGen writes every
+  sample as a full N-var assignment — measured 8.2× of its wall on 27.sk_3_32 (0.42s vs 3.6s /
+  373 MB). The driver auto-detects the patch's `--nowrite` and times THAT; a stock binary is
+  used as-is but the row is marked `cms_mode="write"` and a warning printed. The patch's
+  `--statsevery` also gives CMSGen's own props/decisions ⇒ the `Cdec/s`/`Cimpl/s` columns.
+  **Pre-2026-07-27 GPAP/CMSGen ratios include the emission handicap** (docs/BENCHMARKING.md §4b).
+
+**Full experimental sweep** — [`docs/EVAL_RUNBOOK.md`](docs/EVAL_RUNBOOK.md). Terminal-driven
+(Colab reaps idle notebook cells), staged and resumable:
+```bash
+eval/rivals_setup.sh                  # abc + patched cmsgen + DEMOTIC/Recurrent/HTS checkouts
+eval/run_full_eval.sh seq             # or comb | sk | epfl | hwmcc | rivals | plots | all
+```
+Each circuit stage sweeps encoders × targets(rare,random) × depths(25,50) into
+`.experiments/full_eval/<gpu>/`; `eval/eval_plots.py` turns those into the encoder-A/B,
+vs-CMSGen, work-rate, amplification and rival figures + `summary.md` (which lists every
+skipped/errored instance — read it before quoting a geomean).
+Rival harnesses: `eval/rivals_demotic.py` (`--mode native` = their ISCAS-85 pins, `--mode miter`
+= our rare-target instance as a single-output miter; sanitizes wire names + BUFF→BUF because
+DEMOTIC exec's generated Python), `eval/rivals_recurrent.py`, `eval/rivals_hts.py`.
+**Same circuit on both sides** (`--circuit-variants raw abc`, eval/rival_common.py): the
+circuit-level rivals unroll `.bench` themselves, so an ABC-encoded GPAP arm must not face a rival
+holding the raw circuit — `abc_backend.simplify_bench_abc` ABC-optimizes the SEQUENTIAL AIG and
+writes it back as a primitive-gate .bench (via AIGER; abc's `write_bench` emits LUT/DFFRSE that
+nothing here parses), gated by `bench_equiv_check` (identical stimuli ⇒ bit-identical accept
+words). The post-unroll ABC pass has no sequential equivalent — stated, not hidden. Measured:
+DEMOTIC gains 15-25% from it on ISCAS-85 and c1355 flips 0.5×→1.5× in our favour.
+Cross-GPU K-scaling: `eval/colab_sampling_benchmark.py` + `notebooks/gpap_colab_sampling.ipynb`.
 
 ## Ground rules (do not re-litigate — see docs/findings/INSIGHTS.md)
 

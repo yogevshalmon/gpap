@@ -8,87 +8,228 @@ massively in parallel on the GPU. This harness compares them with the SAT-sampli
 own metrics (Golia et al., FMCAD'21):
 
   THROUGHPUT  — samples/sec (wall time to produce --n-time samples, including setup).
+  WORK RATES  — decisions/s + unit-prop implications/s for BOTH samplers (CMSGen's come from its
+                own CryptoMiniSat counters; needs the patched binary, see --cmsgen below).
   QUALITY     — 2-wise coverage %: for each pair of sampling-set vars, the fraction of pairs whose
                 all four (±,±) combinations appear across the samples (the combinatorial-testing
                 quality metric CMSGen reports). Higher = better solution-space spread.
   SOUNDNESS   — GPAP: GPU check (every model's clauses all have sat_count>0) + optional CPU verify.
 
+### Emission fairness (the CMSGen protocol; read before quoting a ratio)
+
+GPAP's timed run EMITS NOTHING — models stay on the GPU and delivery is a separate, off-timing
+pass (docs/BENCHMARKING.md §4). Stock CMSGen instead formats and writes every sample as a full
+N-variable DIMACS assignment, which on wide formulas costs MORE than the sampling itself
+(measured on 27.sk_3_32, 50k samples: 0.42 s generating vs 3.6 s with --samplefile — 373 MB of
+output). Comparing GPAP-without-emission to CMSGen-with-emission measures file I/O, not sampling.
+
+So the driver prefers a CMSGen built with scripts/build_cmsgen.sh (upstream + the small in-repo
+patch scripts/cmsgen_gpap_eval.patch) which adds `--nowrite` (generate, emit nothing) and
+`--statsevery` (parseable propagation/decision counters). It auto-detects those flags:
+  * patched  -> the timed CMSGen run uses --nowrite (like-for-like), and the write-mode rate is
+                reported too whenever a samplefile run happens anyway (--n-cov) or --cmsgen-both;
+  * stock    -> falls back to the samplefile run, and the row is marked cms_mode="write" so the
+                handicap is visible in the JSON rather than silently folded into the ratio.
+
 The glob may mix DIMACS CNFs with circuits (.bench / .aig / .aag): circuits are converted first
-(same --encoder / --abc-opt / --cycles / --pin-outputs flags as `gpap sample`; the encode wall is
-reported per instance and in the JSON, NOT folded into the sampler's e2e rate — both samplers
-consume the identical CNF, so the encode cost is common to the comparison).
+(same --encoder / --abc-opt / --cycles / --pin-outputs / --target flags as `gpap sample`; the
+encode wall is reported per instance and in the JSON, NOT folded into the sampler's e2e rate —
+both samplers consume the identical CNF, so the encode cost is common to the comparison).
+`--encoders tseitin abc:fast` runs EVERY circuit through each encoder back-to-back in one pass,
+emitting one row per (instance, encoder) — the paired A/B the encoder plots consume.
 
 Usage:
-  gpap bench 'benchmarks/sampling/*.cnf' --cmsgen /path/to/cmsgen --n-cov 5000
-  gpap bench 'benchmarks/circuits/bench/seq/*.bench' --encoder abc --cycles 25
+  gpap bench 'benchmarks/sampling/*.cnf' --cmsgen ~/.cache/gpap/bin/cmsgen --n-cov 5000
+  gpap bench 'benchmarks/circuits/bench/seq/*.bench' --encoders tseitin abc:fast --target rare
   PYTHONPATH=. .venv/bin/python scripts/sample_benchmark.py --glob '...'   # equivalent
 """
 import argparse
 import glob
 import json
 import os
+import re
 import subprocess
 import sys
 import time
 
 from gpap.cli import CIRCUIT_EXTS   # single source for "is this a circuit input?"
 
+SCHEMA = 3          # results-JSON schema version (docs/BENCHMARKING.md §7)
+#   1: original flat rows
+#   2: + encode_s / encoder / sim_baseline / per_seed
+#   3: + one row per (instance, ENCODER) with `enc_key`; engine provenance (`engine`); CMSGen
+#      work-rate stats + emission mode (`cms_*`); error rows; resumable incremental output
 
-def cmsgen_sample(path, cmsgen_bin, n, scratch, keep=None, timeout=60.0):
-    """Run CMSGen to produce n samples; return (samp/s, parsed models).
 
-    `keep` caps how many parsed models are retained in memory (the rest are only COUNTED, for the
-    rate). This is essential on low-RAM hosts (e.g. a 12 GB Colab): retaining all `n` full models
-    is `n × N` Python ints (~8-9 GB at n=50k, N=5k) and OOM-kills the session. None = keep all.
+# --------------------------------------------------------------------------- CMSGen runner
 
-    `timeout` caps CMSGen's wall per instance (the bench driver passes its --time-limit, so both
-    samplers get the SAME per-instance budget). On timeout, whatever samples CMSGen streamed to
-    the samplefile before the kill still count — the rate is then samples/timeout, honest for a
-    'produce what you can in the budget' comparison — instead of scoring a hard instance as 0."""
+_GPAP_STATS_RE = re.compile(
+    r"c gpap-stats samples=(\d+) props=(\d+) decisions=(\d+) conflicts=(\d+) "
+    r"cpu_s=([0-9.]+) wall_s=([0-9.]+)")
+_nowrite_cache: dict = {}
+
+
+def cmsgen_supports_nowrite(cmsgen_bin: str) -> bool:
+    """True iff this binary carries the GPAP eval patch (--nowrite / --statsevery). Cached."""
+    if cmsgen_bin not in _nowrite_cache:
+        try:
+            h = subprocess.run([cmsgen_bin, "--help"], capture_output=True, text=True, timeout=20)
+            txt = (h.stdout or "") + (h.stderr or "")
+        except Exception:  # noqa: BLE001 — a missing/unrunnable binary is handled by the caller
+            txt = ""
+        _nowrite_cache[cmsgen_bin] = "--nowrite" in txt and "--statsevery" in txt
+    return _nowrite_cache[cmsgen_bin]
+
+
+def _parse_cms_stats(text: str) -> dict | None:
+    """Last `c gpap-stats` line of a (possibly killed) CMSGen run -> counters dict.
+
+    The patched binary flushes one line every --statsevery samples, so a run killed on the time
+    budget still reports the counters it had reached — the same 'produce what you can in the
+    budget' accounting the sample count uses."""
+    last = None
+    for m in _GPAP_STATS_RE.finditer(text or ""):
+        last = m
+    if last is None:
+        return None
+    n, props, decs, confl, cpu_s, wall_s = last.groups()
+    return {"samples": int(n), "props": int(props), "decisions": int(decs),
+            "conflicts": int(confl), "cpu_s": float(cpu_s), "wall_s": float(wall_s)}
+
+
+def cmsgen_run(path, cmsgen_bin, n, scratch, *, keep=None, timeout=60.0, write=True,
+               stats_every=1000, seed=None) -> dict:
+    """Run CMSGen once and return a dict describing the run.
+
+    write=True  -> stock protocol: samples are written to a samplefile (which is then parsed for
+                   the model list the quality pass needs). This INCLUDES the emission cost.
+    write=False -> `--nowrite` (patched binaries only): generate and count, emit nothing. The
+                   apples-to-apples mode against GPAP's non-emitting timed run; the sample count
+                   then comes from the `c gpap-stats` counters instead of the file.
+
+    `keep` caps how many parsed models are retained in memory (the rest are only COUNTED). This is
+    essential on low-RAM hosts (a 12 GB Colab): retaining all `n` full models is `n × N` Python
+    ints (~8-9 GB at n=50k, N=5k) and OOM-kills the session. None = keep all.
+
+    `timeout` caps CMSGen's wall per instance (the driver passes its --time-limit, so both
+    samplers get the SAME per-instance budget). On timeout, whatever CMSGen produced before the
+    kill still counts — rate = samples/wall, honest for a 'produce what you can in the budget'
+    comparison — instead of scoring a hard instance as 0."""
     out = os.path.join(scratch, "cms_" + os.path.basename(path) + ".txt")
+    cmd = [cmsgen_bin, "--samples", str(n)]
+    patched = cmsgen_supports_nowrite(cmsgen_bin)
+    if patched:
+        cmd += ["--statsevery", str(stats_every)]
+    if seed is not None:
+        cmd += ["-s", str(seed)]
+    if write or not patched:
+        cmd += ["--samplefile", out]
+    else:
+        cmd += ["--nowrite"]
+    cmd.append(path)
     t0 = time.perf_counter()
+    timed_out = False
+    stdout = ""
     try:
-        subprocess.run([cmsgen_bin, "--samples", str(n), "--samplefile", out, path],
-                       capture_output=True, timeout=timeout)
-    except subprocess.TimeoutExpired:
-        pass                                       # parse the partial samplefile below
-    except Exception:  # noqa: BLE001
-        return 0.0, []
+        p = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout)
+        stdout = (p.stdout or "") + (p.stderr or "")
+    except subprocess.TimeoutExpired as e:
+        timed_out = True                        # partial output still carries the counters
+        stdout = ((e.stdout or "") if isinstance(e.stdout, str)
+                  else (e.stdout or b"").decode("utf-8", "replace"))
+    except Exception as ex:  # noqa: BLE001
+        return {"error": f"{type(ex).__name__}: {ex}", "samples_per_s": 0.0, "models": [],
+                "n_samples": 0, "mode": "write" if (write or not patched) else "nowrite"}
     dt = time.perf_counter() - t0
-    models = []
-    count = 0
-    if os.path.exists(out):
+    stats = _parse_cms_stats(stdout)
+    models, count = [], 0
+    if (write or not patched) and os.path.exists(out):
         for line in open(out):
             lits = [int(x) for x in line.split() if x.lstrip("-").isdigit()]
             if lits and lits[-1] == 0:
                 lits = lits[:-1]
             if not lits:
                 continue
-            count += 1                                   # rate uses the full count, not just kept
+            count += 1                           # the rate uses the full count, not just kept
             if keep is None or len(models) < keep:
                 models.append(lits)
         try:
-            os.remove(out)                               # the samplefile can be >1 GB; don't accumulate
+            os.remove(out)                       # the samplefile can be >1 GB; don't accumulate
         except OSError:
             pass
-    return (count / dt if dt else 0.0), models
+    elif stats:
+        count = stats["samples"]
+    r = {"samples_per_s": (count / dt if dt else 0.0), "models": models, "n_samples": count,
+         "wall_s": dt, "timed_out": timed_out,
+         "mode": "write" if (write or not patched) else "nowrite", "patched": patched}
+    if stats:
+        # CMSGen's own counters over the same wall -> the CPU numbers our dec/s and impl/s face.
+        # implications = propagations - decisions (same definition as the GPAP columns).
+        r["stats"] = stats
+        r["decisions_per_s"] = stats["decisions"] / dt if dt else 0.0
+        r["props_per_s"] = stats["props"] / dt if dt else 0.0
+        r["implications_per_s"] = max(0, stats["props"] - stats["decisions"]) / dt if dt else 0.0
+        r["conflicts"] = stats["conflicts"]
+    return r
 
 
-def main(argv=None):
-    import numpy as np
-    import torch
-    from gpap.cli import _add_encoder_args, _convert_circuit
-    from gpap.sampling.metrics import distinct_projections, format_uniformity, two_wise_coverage
-    from gpap.sampling.pipeline import CIRCUIT_PORTFOLIO, DEFAULT_PORTFOLIO, sample_file
+def cmsgen_sample(path, cmsgen_bin, n, scratch, keep=None, timeout=60.0):
+    """Back-compat wrapper (eval/colab_sampling_benchmark.py imports this): stock write-mode run,
+    returning (samples_per_s, models)."""
+    r = cmsgen_run(path, cmsgen_bin, n, scratch, keep=keep, timeout=timeout, write=True)
+    return r["samples_per_s"], r["models"]
 
+
+# --------------------------------------------------------------------------- encoder specs
+
+def parse_encoder_specs(tokens, default_encoder, default_abc_opt):
+    """['tseitin', 'abc:fast'] -> [('tseitin', None), ('abc', 'fast')].
+
+    A bare 'abc' inherits --abc-opt. The returned order is the run order; every circuit is
+    converted+sampled once per spec (back-to-back, same process, same GPU state — the paired A/B
+    the encoder plots want)."""
+    if not tokens:
+        return [(default_encoder, default_abc_opt if default_encoder != "tseitin" else None)]
+    specs = []
+    for tok in tokens:
+        enc, _, opt = tok.partition(":")
+        if enc not in ("tseitin", "abc", "auto"):
+            raise SystemExit(f"unknown encoder {enc!r} in --encoders (tseitin|abc|auto[:opt])")
+        if enc == "tseitin":
+            specs.append(("tseitin", None))
+        else:
+            specs.append((enc, opt or default_abc_opt))
+    return specs
+
+
+def enc_key(encoder, abc_opt):
+    return encoder if encoder == "tseitin" else f"{encoder}:{abc_opt}"
+
+
+# --------------------------------------------------------------------------- driver
+
+def _build_argparser():
     ap = argparse.ArgumentParser(prog="gpap bench")
     ap.add_argument("--glob", default="benchmarks/sampling/*.cnf",
                     help="instances: DIMACS .cnf and/or circuits (.bench/.aig/.aag, converted "
                          "first with the encoder flags below)")
     ap.add_argument("--device", default=None)
-    ap.add_argument("--cmsgen", default=None, help="path to the cmsgen binary (enables comparison)")
+    ap.add_argument("--cmsgen", default=None,
+                    help="path to a cmsgen binary (enables the comparison). Prefer one built by "
+                         "scripts/build_cmsgen.sh: its --nowrite makes the emission-free "
+                         "comparison possible and --statsevery yields CMSGen's own work rates")
+    ap.add_argument("--cmsgen-both", action="store_true",
+                    help="with a patched cmsgen, ALSO time the write-mode (samplefile) run even "
+                         "when no quality pass needs the models — the emission-cost appendix")
+    ap.add_argument("--cmsgen-seed", type=int, default=None, help="cmsgen -s seed")
     # circuit-conversion flags (identical to `gpap sample` / `gpap circuit2cnf`)
+    from gpap.cli import _add_encoder_args
     _add_encoder_args(ap)
+    ap.add_argument("--encoders", nargs="+", default=None, metavar="ENC",
+                    help="run every circuit through EACH of these encoders, back to back, one "
+                         "row per (instance, encoder): e.g. --encoders tseitin abc:fast "
+                         "(tokens: tseitin | abc[:full|fast|auto] | auto). Default: the single "
+                         "--encoder/--abc-opt pair")
     ap.add_argument("--cycles", type=int, default=25,
                     help="unroll depth for circuit inputs (combinational AIGs clamp to 1)")
     ap.add_argument("--pin-outputs", type=int, default=None,
@@ -149,8 +290,57 @@ def main(argv=None):
                          "bigger K). Sound + model-preserving; ~1.5x throughput on the niche")
     ap.add_argument("--also-plain", action="store_true", help="also run GPAP without simplification")
     ap.add_argument("--verify-cpu", action="store_true", help="also CPU-verify a few models vs clauses")
+    ap.add_argument("--max-clauses", type=int, default=None,
+                    help="skip any instance whose CNF exceeds this many clauses (recorded as a "
+                         "skipped row with the size). The engine itself only rejects formulas "
+                         "outside the packed envelope — this is the WALL-TIME guard for a "
+                         "sweep: a 50-cycle b15 unroll parses for minutes before it samples")
+    ap.add_argument("--max-vars", type=int, default=None,
+                    help="same, on variables (the packed-word envelope caps 2N at 16.7M anyway)")
     ap.add_argument("--scratch", default="/tmp")
-    ap.add_argument("--output", default=None)
+    ap.add_argument("--keep-cnf", action="store_true",
+                    help="keep each converted circuit CNF in --scratch after its row finishes. "
+                         "Default: delete it — a full matrix (encoders x targets x depths) of "
+                         "deep unrolls is tens of GB, which fills a Colab disk mid-sweep")
+    ap.add_argument("--output", default=None,
+                    help="results JSON. Written INCREMENTALLY (after every row) so a dropped "
+                         "Colab session keeps everything finished so far")
+    ap.add_argument("--resume", action="store_true",
+                    help="skip (instance, encoder) rows already present in --output and append "
+                         "to it — re-run the same command after an interruption")
+    ap.add_argument("--tag", default=None, help="free-form label stored in the results JSON")
+    return ap
+
+
+def _row_key(row):
+    return (row.get("name"), row.get("enc_key"), row.get("cycles"), row.get("target"))
+
+
+def _dimacs_header(path):
+    """(num_vars, num_clauses) from the `p cnf N M` line — a few bytes, no clause parse."""
+    try:
+        with open(path) as f:
+            for line in f:
+                s = line.strip()
+                if s.startswith("p "):
+                    parts = s.split()
+                    if len(parts) >= 4:
+                        return int(parts[2]), int(parts[3])
+                    return None, None
+                if s and s[0] not in "c%":
+                    break                          # no header (rare) — let the parse decide
+    except OSError:
+        pass
+    return None, None
+
+
+def main(argv=None):
+    import numpy as np
+    import torch
+    from gpap.sampling.metrics import distinct_projections, format_uniformity, two_wise_coverage
+    from gpap.sampling.pipeline import CIRCUIT_PORTFOLIO, DEFAULT_PORTFOLIO, sample_file
+
+    ap = _build_argparser()
     args = ap.parse_args(argv)
     device = (torch.device(args.device) if args.device
               else torch.device("cuda" if torch.cuda.is_available() else "cpu"))
@@ -163,14 +353,56 @@ def main(argv=None):
     if args.use_kernel == "off":
         print("[warn] --use-kernel off is retired (packed-kernel-only engine); ignoring",
               file=sys.stderr)
-    show_unif = args.uniformity != "off"          # gates the unif column
+    specs = parse_encoder_specs(args.encoders, args.encoder, args.abc_opt)
+    os.makedirs(args.scratch, exist_ok=True)       # converted CNFs + CMSGen samplefiles land here
+    show_unif = args.uniformity != "off"           # gates the unif column
     has_circuits = any(f.endswith(CIRCUIT_EXTS) for f in files)
-    enc_note = f" | encoder={args.encoder}/{args.abc_opt} cycles={args.cycles}" if has_circuits else ""
+    multi_enc = len(specs) > 1
+    cms_patched = bool(args.cmsgen) and cmsgen_supports_nowrite(args.cmsgen)
+    if args.cmsgen and not cms_patched:
+        print("[warn] this cmsgen has no --nowrite (stock build): its rate INCLUDES writing every "
+              "sample to a file, which GPAP's timed run does not do. Build the patched binary "
+              "with scripts/build_cmsgen.sh for the like-for-like number.", file=sys.stderr)
+
+    # ---- resume / incremental output -------------------------------------------------------
+    results, done = [], set()
+    if args.output and args.resume and os.path.exists(args.output):
+        try:
+            prev = json.load(open(args.output))
+            results = prev.get("results", [])
+            done = {_row_key(r) for r in results}
+            print(f"[resume] {len(results)} row(s) already in {args.output}")
+        except Exception as e:  # noqa: BLE001
+            print(f"[resume] could not read {args.output} ({e}); starting fresh", file=sys.stderr)
+
+    def _save():
+        if not args.output:
+            return
+        os.makedirs(os.path.dirname(args.output) or ".", exist_ok=True)
+        payload = {"schema": SCHEMA, "device": str(device), "tag": args.tag,
+                   "gpu": _gpu_info(device), "args": vars(args),
+                   "encoders": [enc_key(e, o) for e, o in specs],
+                   "cmsgen_patched": cms_patched, "results": results}
+        tmp = args.output + ".tmp"
+        with open(tmp, "w") as f:
+            json.dump(payload, f, indent=1)
+        os.replace(tmp, args.output)               # atomic: a kill never truncates the results
+
+    enc_note = (f" | encoders={','.join(enc_key(e, o) for e, o in specs)} cycles={args.cycles} "
+                f"target={args.target}" if has_circuits else "")
+    cms_note = ("no" if not args.cmsgen else
+                ("yes [patched: nowrite]" if cms_patched else "yes [STOCK: writes samples]"))
     print(f"device={device} | simplify={args.simplify} | portfolio={args.portfolio} "
           f"| n_time={args.n_time:,} (limit {args.time_limit:g}s/inst) n_cov={args.n_cov:,} "
-          f"| cmsgen={'yes' if args.cmsgen else 'no'}{enc_note}\n{len(files)} benchmarks\n")
-    hdr = (f"{'instance':<24}{'N':>6}{'M':>7}{'|sup|':>6}{'GPAP/s':>10}{'e2e/s':>10}"
-           f"{'dec/s':>9}{'impl/s':>9}{'succ%':>6}{'sols':>10}{'t_slv':>7}{'t_tot':>7}")
+          f"| cmsgen={cms_note}{enc_note}\n{len(files)} benchmarks x {len(specs)} encoder(s)\n")
+
+    hdr = f"{'instance':<24}"
+    if multi_enc:
+        hdr += f"{'enc':>10}"
+    # Widths sized for the real range: rates reach 6e7 samples/s and sols 1e7 on shallow
+    # circuits, and a column that overflows silently glues itself to its neighbour.
+    hdr += (f"{'N':>7}{'M':>8}{'|sup|':>6}{'GPAP/s':>13}{'e2e/s':>13}"
+            f"{'dec/s':>9}{'impl/s':>9}{'succ%':>6}{'sols':>12}{'t_slv':>7}{'t_tot':>7}")
     if args.seeds:
         hdr += f"{'±%':>5}"
     if has_circuits:
@@ -183,180 +415,369 @@ def main(argv=None):
         hdr += f"{'unif':>9}"
     if args.sim_baseline:
         hdr += f"{'p_acc':>9}{'rej/s':>11}{'amp':>9}"
-    hdr += f"{'snd':>4}"
+    hdr += f"{'krn':>5}{'snd':>4}"
     if args.cmsgen:
-        hdr += f"{'CMS/s':>9}{'GPAP/CMS':>9}{'e2e/CMS':>8}"
+        hdr += f"{'CMS/s':>10}{'Cdec/s':>9}{'Cimpl/s':>9}{'GPAP/CMS':>10}{'e2e/CMS':>9}"
         if args.twise:
             hdr += f"{'2wiseC':>7}"
-    print(hdr); print("-" * len(hdr))
-    results, ratios = [], []
+    print(hdr)
+    print("-" * len(hdr))
+
     t_suite = time.perf_counter()
     total_sols = 0
-    for path in files:
-        name = os.path.basename(path)
-        encode_s = None
-        sim = None
-        if path.endswith(CIRCUIT_EXTS):
-            # Convert with the shared CLI dispatcher (same flags as `gpap sample`). The encode
-            # wall is reported separately — both samplers consume the identical CNF, so it is
-            # common to the comparison, not part of either sampler's rate.
-            cnf = os.path.join(args.scratch,
-                               os.path.splitext(name)[0] + f"-c{args.cycles}.cnf")
-            _t0 = time.perf_counter()
-            try:
-                _convert_circuit(path, cnf, args, quiet=True)
-            except Exception as e:  # noqa: BLE001
-                print(f"{name}: SKIPPED (convert failed: {type(e).__name__}: {e})",
-                      file=sys.stderr)
+    for path0 in files:
+        name = os.path.basename(path0)
+        is_circuit = path0.endswith(CIRCUIT_EXTS)
+        for encoder, abc_opt in (specs if is_circuit else [(None, None)]):
+            ek = enc_key(encoder, abc_opt) if is_circuit else None
+            key = (name, ek, args.cycles if is_circuit else None,
+                   args.target if is_circuit else None)
+            if key in done:
                 continue
-            encode_s = time.perf_counter() - _t0
-            if args.sim_baseline:
-                # The rejection-sampling rival at the SAME cycles/seed/pin/target (simulate.py).
-                from gpap.circuits.simulate import sim_baseline
-                sim = sim_baseline(path, args.cycles, args.seed, pin_outputs=args.pin_outputs,
-                                   target_mode=args.target)
-            path = cnf
-        # --seeds: one full timed run per seed; the ROW is the median-throughput run (a real,
-        # self-consistent run — not a per-metric mix), the others land in the JSON as per_seed.
-        runs = []
-        for s in (args.seeds or [args.seed]):
-            r = sample_file(path, device, simplify=args.simplify, els=args.els,
+            row = {"name": name, "enc_key": ek, "encoder": encoder, "abc_opt": abc_opt,
+                   "cycles": args.cycles if is_circuit else None,
+                   "target": args.target if is_circuit else None,
+                   "seed": args.seed, "n_time": args.n_time, "time_limit": args.time_limit}
+            try:
+                r = _run_one(path0, row, args, device, portfolio, mine, quality,
+                             sample_file, two_wise_coverage, distinct_projections)
+            except KeyboardInterrupt:
+                raise
+            except Exception as e:  # noqa: BLE001 — one bad instance must never kill the suite
+                row["error"] = f"{type(e).__name__}: {e}"
+                _drop_cnf(row, args)
+                results.append(row)
+                _save()
+                lbl = f"{name[:22]}" + (f" [{ek}]" if multi_enc else "")
+                print(f"{lbl:<24} ERROR: {row['error'][:90]}", file=sys.stderr, flush=True)
+                continue
+            _drop_cnf(r, args)
+            results.append(r)
+            _save()
+            if r.get("skipped"):
+                lbl = f"{name[:22]}" + (f" [{ek}]" if multi_enc else "")
+                print(f"{lbl:<24} SKIPPED: {r['skipped']}", flush=True)
+                continue
+            total_sols += r["n_models"]
+            print(_format_row(r, args, multi_enc, has_circuits, quality, show_unif,
+                              format_uniformity), flush=True)
+
+    suite_wall = time.perf_counter() - t_suite
+    good = [r for r in results if not r.get("error") and not r.get("skipped")]
+    n_err = sum(1 for r in results if r.get("error"))
+    n_skip = sum(1 for r in results if r.get("skipped"))
+    print(f"\nTOTAL: {total_sols:,} solutions over {len(good)} rows in {suite_wall:,.1f}s "
+          f"suite wall (solver e2e {sum(r['wall_total_s'] for r in good):,.1f}s, of which "
+          f"timed sampling {sum(r['wall_timed_s'] for r in good):,.1f}s)"
+          + (f"  [{n_err} error, {n_skip} skipped]" if (n_err or n_skip) else ""))
+    _print_summaries(good, args, [enc_key(e, o) for e, o in specs] if multi_enc else None, np)
+    _save()
+    if args.output:
+        print(f"wrote {args.output}")
+    return results
+
+
+def _drop_cnf(row, args):
+    """Delete the CNF this cell generated (unless --keep-cnf). A full circuit matrix is tens of
+    GB of intermediate DIMACS; on a Colab disk that is the difference between finishing and
+    dying at 80%. The path stays in the row for provenance."""
+    p = row.get("cnf_path")
+    if args.keep_cnf or not p or p == row.get("name") or not row.get("encode_s"):
+        return                                     # not ours to delete (plain-CNF input)
+    try:
+        os.remove(p)
+    except OSError:
+        pass
+
+
+def _gpu_info(device):
+    import torch
+    if device.type != "cuda":
+        return {"name": "cpu"}
+    p = torch.cuda.get_device_properties(device)
+    free, total = torch.cuda.mem_get_info(device)
+    return {"name": p.name, "total_gb": round(p.total_memory / 1e9, 2),
+            "free_gb": round(free / 1e9, 2), "sms": p.multi_processor_count,
+            "capability": f"{p.major}.{p.minor}", "torch": torch.__version__,
+            "cuda": torch.version.cuda}
+
+
+def _run_one(path0, row, args, device, portfolio, mine, quality,
+             sample_file, two_wise_coverage, distinct_projections):
+    """One (instance, encoder) cell: convert -> optional rejection baseline -> GPAP (x seeds)
+    -> optional CMSGen. Returns the result row. Raises only on unexpected failures (the caller
+    turns those into an error row); expected 'cannot run this instance' conditions (packed
+    envelope, conversion failure) come back as a `skipped` row."""
+    from gpap.cli import _convert_circuit
+    name = row["name"]
+    path = path0
+    sim = None
+    if path0.endswith(CIRCUIT_EXTS):
+        cnf = os.path.join(args.scratch, f"{os.path.splitext(name)[0]}-c{args.cycles}"
+                           f"-{row['enc_key'].replace(':', '_')}-{args.target}.cnf")
+        conv = argparse.Namespace(**vars(args))    # per-encoder view of the conversion flags
+        conv.encoder, conv.abc_opt = row["encoder"], row["abc_opt"]
+        _t0 = time.perf_counter()
+        try:
+            _convert_circuit(path0, cnf, conv, quiet=True)
+        except Exception as e:  # noqa: BLE001 — a conversion failure skips the CELL, not the run
+            row["skipped"] = f"convert failed: {type(e).__name__}: {e}"
+            return row
+        row["encode_s"] = time.perf_counter() - _t0
+        if args.sim_baseline:
+            # The rejection-sampling rival at the SAME cycles/seed/pin/target (simulate.py).
+            from gpap.circuits.simulate import sim_baseline
+            sim = sim_baseline(path0, args.cycles, args.seed, pin_outputs=args.pin_outputs,
+                               target_mode=args.target)
+        path = cnf
+    row["cnf_path"] = path
+
+    # Packed-envelope pre-check (cheap, header only): the sum-trick word cannot represent every
+    # formula — 2N bounds its literal-SUM field and the max clause length bounds its COUNT field
+    # (gpap.engine.packed_envelope). The var count is readable from the DIMACS header without a
+    # parse, and it is the condition a real instance actually hits; the clause-length half is
+    # caught below by the engine's own raise. Either way the CELL is skipped with a reason
+    # recorded — a suite sweep must not die on one oversized unroll.
+    from gpap.engine import packed_envelope
+    nv_hdr, m_hdr = _dimacs_header(path)
+    if nv_hdr:
+        row["nv"], row["M"] = nv_hdr, m_hdr
+        if packed_envelope(nv_hdr, 1)[0] is None:
+            row["skipped"] = (f"formula outside the packed envelopes: 2N={2 * nv_hdr} "
+                              f"(max {0xFFFFFF}) — needs a wider packed word")
+            return row
+        if args.max_clauses and m_hdr and m_hdr > args.max_clauses:
+            row["skipped"] = f"{m_hdr:,} clauses > --max-clauses {args.max_clauses:,}"
+            return row
+        if args.max_vars and nv_hdr > args.max_vars:
+            row["skipped"] = f"{nv_hdr:,} vars > --max-vars {args.max_vars:,}"
+            return row
+
+    # --seeds: one full timed run per seed; the ROW is the median-throughput run (a real,
+    # self-consistent run — not a per-metric mix), the others land in the JSON as per_seed.
+    runs = []
+    for s in (args.seeds or [args.seed]):
+        try:
+            g = sample_file(path, device, simplify=args.simplify, els=args.els,
                             n_time=args.n_time, n_cov=args.n_cov, b=args.b,
                             k_cap=args.k_cap, verify_cpu=args.verify_cpu,
                             configs=portfolio, max_chunks=args.max_chunks, seed=s,
-                            mine=mine, uniformity=args.uniformity,
-                            time_limit=args.time_limit)
-            r["seed"] = s
-            runs.append(r)
-        runs.sort(key=lambda r: r["samples_per_s"])
-        g = runs[len(runs) // 2]
-        spread = None
-        if len(runs) > 1 and g["samples_per_s"]:
-            spread = (runs[-1]["samples_per_s"] - runs[0]["samples_per_s"]) / (2 * g["samples_per_s"])
-        sup1 = g["sup1"]                       # metadata from the pipeline's single parse
-        twg = two_wise_coverage(g["models"], sup1) if args.twise else None
-        snd = "OK" if g["gpu_sound"] and (g["cpu_sound"] in (None, True)) else "BAD"
-        total_sols += g["n_models"]
-        row = {"name": name, "nv": g["nv"], "M": g["n_clauses"], "support": len(sup1),
-               "gpap_sps": g["samples_per_s"], "gpap_sps_e2e": g.get("sps_e2e_total"),
-               "n_models": g["n_models"], "wall_timed_s": g["wall_timed_s"],
-               "wall_total_s": g["wall_total_s"],
-               "encode_s": encode_s, "encoder": args.encoder if encode_s is not None else None,
-               "uniformity": g.get("uniformity"), "sim_baseline": sim,
-               "succ": g["success_rate"], "twise_gpap": twg,
-               "gpu_sound": g["gpu_sound"], "n_distinct": g["n_distinct"],
-               "unique_sps_est": g.get("unique_sps_est"), "assigns_per_s": g.get("assigns_per_s"),
-               "decisions_per_s": g.get("decisions_per_s"),
-               "implications_per_s": g.get("implications_per_s"), "mined": g.get("mined"),
-               "phases": g.get("phases"), "config_breakdown": g.get("config_breakdown")}
-        if args.seeds:
-            row["median_seed"] = g["seed"]
-            row["sps_spread_frac"] = spread
-            row["per_seed"] = [{"seed": r["seed"], "sps": r["samples_per_s"],
-                                "sps_e2e": r.get("sps_e2e_total"), "succ": r["success_rate"],
-                                "n_models": r["n_models"], "wall_timed_s": r["wall_timed_s"]}
-                               for r in runs]
-        dps = f"{g['decisions_per_s']:.1e}" if g.get("decisions_per_s") else "—"
-        ips = f"{g['implications_per_s']:.1e}" if g.get("implications_per_s") else "—"
-        mi = g.get("mined")
-        # '+' after succ% = entailed-clause mining ran (low-success gate); details land in the JSON.
-        # '<' after sols = a safety valve (--time-limit, or zero-progress on a hopeless instance)
-        # stopped the run before it delivered --n-time samples; rates are still valid.
-        mn = "+" if mi else " "
-        sols_s = f"{g['n_models']:,}" + ("<" if g.get("chunk_capped") else "")
-        line = (f"{name[:22]:<24}{g['nv']:>6}{g['n_clauses']:>7}{len(sup1):>6}"
-                f"{g['samples_per_s']:>10,.0f}{g.get('sps_e2e_total') or 0:>10,.0f}{dps:>9}{ips:>9}"
-                f"{100*g['success_rate']:>5.0f}%{mn}{sols_s:>9}"
-                f"{g['wall_timed_s']:>6.1f}s{g['wall_total_s']:>6.1f}s")
-        if args.seeds:
-            line += f"{100 * spread:>4.0f}%" if spread is not None else f"{'—':>5}"
-        if has_circuits:
-            line += f"{encode_s:>6.1f}s" if encode_s is not None else f"{'—':>7}"
-        if quality:
-            uq = f"{g['unique_sps_est']:,.0f}" if g.get("unique_sps_est") else "—"
-            line += f"{uq:>10}"
-        if args.twise:
-            line += f"{twg:>7.1f}%"
-        if show_unif:
-            line += f"{format_uniformity(g.get('uniformity')):>9}"
-        if args.sim_baseline:
-            if sim is None:
-                line += f"{'—':>9}{'—':>11}{'—':>9}"
-            elif sim["hits"]:
-                amp = (g["success_rate"] / sim["p_accept"]) if sim["p_accept"] else 0.0
-                row["amplification"] = amp
-                amps = f"{amp:,.0f}x" if amp < 1e6 else f"{amp:.0e}x"
-                line += f"{sim['p_accept']:>9.1e}{sim['accepted_per_s']:>11,.0f}{amps:>9}"
-            else:                                  # no hit seen: rejection is unusable here
-                row["amplification"] = None
-                line += f"{'<' + format(sim['p_accept_lt'], '.0e'):>9}{'~0':>11}{'inf':>9}"
-        line += f"{snd:>4}"
-        plain = None
-        if args.also_plain:
-            plain = sample_file(path, device, simplify=False, n_time=args.n_time, n_cov=0,
-                                b=args.b, k_cap=args.k_cap, configs=portfolio,
-                                max_chunks=args.max_chunks, time_limit=args.time_limit)
-            row["gpap_plain_sps"] = plain["samples_per_s"]
-        if args.cmsgen:
-            # single CMSGen run at n_time (fair samp/s); use a subset of its samples for coverage
-            # same per-instance wall budget as GPAP's --time-limit (default 60s)
-            crate_t, cmodels = cmsgen_sample(path, args.cmsgen, args.n_time, args.scratch,
-                                             keep=args.n_cov or 1, timeout=args.time_limit)
-            # ratio: inf = GPAP-only, 0 = CMSGen-only, None = neither produced in the budget
-            gsps = g["samples_per_s"]
-            ratio = (gsps / crate_t) if crate_t else (float("inf") if gsps else None)
-            ratio_e2e = (((g.get("sps_e2e_total") or 0) / crate_t) if crate_t
-                         else (float("inf") if gsps else None))
-            row.update(cms_sps=crate_t, ratio=ratio, ratio_e2e=ratio_e2e)
-            ratios.append(ratio)
-            rtxt = "—" if ratio is None else f"{ratio:.2f}x"
-            rtxt_e = "—" if ratio_e2e is None else f"{ratio_e2e:.2f}x"
-            line += f"{crate_t:>9,.0f}{rtxt:>9}{rtxt_e:>8}"
-            if quality:
-                # CMSGen distinct fraction on the same subset — the papers' metric is UNIQUE
-                # solutions/s, so report the dedup factor for BOTH samplers, not just GPAP
-                cd, cn = distinct_projections(cmodels[:args.n_cov], sup1)
-                row.update(cms_distinct=cd, cms_distinct_of=cn)
-            if args.twise:
-                twc = two_wise_coverage(cmodels[:args.n_cov], sup1)
-                row.update(twise_cms=twc)
-                line += f"{twc:>6.1f}%"
-        print(line, flush=True)
-        results.append(row)
+                            mine=mine, uniformity=args.uniformity, time_limit=args.time_limit)
+        except ValueError as e:                    # the engine's packed-envelope rejection
+            if "packed envelope" not in str(e):
+                raise
+            row["nv"], row["M"] = nv_hdr, m_hdr
+            row["skipped"] = str(e)
+            return row
+        g["seed"] = s
+        runs.append(g)
+    runs.sort(key=lambda r: r["samples_per_s"])
+    g = runs[len(runs) // 2]
+    spread = None
+    if len(runs) > 1 and g["samples_per_s"]:
+        spread = (runs[-1]["samples_per_s"] - runs[0]["samples_per_s"]) / (2 * g["samples_per_s"])
+    sup1 = g["sup1"]                       # metadata from the pipeline's single parse
+    row.update({
+        "nv": g["nv"], "M": g["n_clauses"], "support": len(sup1),
+        "gpap_sps": g["samples_per_s"], "gpap_sps_e2e": g.get("sps_e2e_total"),
+        "n_models": g["n_models"], "wall_timed_s": g["wall_timed_s"],
+        "wall_total_s": g["wall_total_s"], "chunk_capped": g.get("chunk_capped"),
+        "uniformity": g.get("uniformity"), "sim_baseline": sim,
+        "succ": g["success_rate"], "gpu_sound": g["gpu_sound"], "cpu_sound": g.get("cpu_sound"),
+        "n_distinct": g["n_distinct"], "n_collected": g.get("n_collected"),
+        "unique_sps_est": g.get("unique_sps_est"), "assigns_per_s": g.get("assigns_per_s"),
+        "decisions_per_s": g.get("decisions_per_s"),
+        "implications_per_s": g.get("implications_per_s"), "mined": g.get("mined"),
+        "phases": g.get("phases"), "config_breakdown": g.get("config_breakdown"),
+        # WHICH kernel/packed split actually ran (sum-trick provenance) + the calibrated K.
+        "engine": g.get("engine"),
+        "tuned": [g.get("tuned_rv"), g.get("tuned_b"), g.get("tuned_la")],
+    })
+    row["twise_gpap"] = two_wise_coverage(g["models"], sup1) if args.twise else None
+    if args.seeds:
+        row["median_seed"] = g["seed"]
+        row["sps_spread_frac"] = spread
+        row["per_seed"] = [{"seed": r["seed"], "sps": r["samples_per_s"],
+                            "sps_e2e": r.get("sps_e2e_total"), "succ": r["success_rate"],
+                            "n_models": r["n_models"], "wall_timed_s": r["wall_timed_s"]}
+                           for r in runs]
+    if sim is not None and sim.get("hits"):
+        row["amplification"] = ((g["success_rate"] / sim["p_accept"]) if sim["p_accept"] else 0.0)
+    elif sim is not None:
+        row["amplification"] = None
+    if args.also_plain:
+        plain = sample_file(path, device, simplify=False, n_time=args.n_time, n_cov=0,
+                            b=args.b, k_cap=args.k_cap, configs=portfolio,
+                            max_chunks=args.max_chunks, time_limit=args.time_limit)
+        row["gpap_plain_sps"] = plain["samples_per_s"]
 
-    suite_wall = time.perf_counter() - t_suite
-    print(f"\nTOTAL: {total_sols:,} solutions over {len(results)} instances in {suite_wall:,.1f}s "
-          f"suite wall (solver e2e {sum(r['wall_total_s'] for r in results):,.1f}s, of which "
-          f"timed sampling {sum(r['wall_timed_s'] for r in results):,.1f}s)")
-    if ratios:
-        import statistics as st
-        # finite ratios only: instances where one side produced 0 (ratio 0/inf) can't enter a
-        # geomean — they are reported per-row and counted here instead
-        fin = [r for r in ratios if r and 0 < r != float("inf")]
-        gm = st.geometric_mean(fin) if fin else 0.0
-        e2e_rs = [r["ratio_e2e"] for r in results
-                  if r.get("ratio_e2e") and 0 < r["ratio_e2e"] != float("inf")]
-        gm_e2e = st.geometric_mean(e2e_rs) if e2e_rs else 0.0
-        n_gpap_only = sum(1 for r in ratios if r == float("inf"))
-        n_cms_only = sum(1 for r in ratios if r == 0)
-        n_neither = sum(1 for r in ratios if r is None)
+    # ---- CMSGen (same per-instance wall budget as GPAP's --time-limit) ---------------------
+    if args.cmsgen:
+        patched = cmsgen_supports_nowrite(args.cmsgen)
+        # The TIMED run: emission-free when the binary supports it (like GPAP's timed run). On a
+        # stock binary it is the samplefile run, so keep the models the quality pass needs from
+        # it (a patched build gets them from the separate write run below instead).
+        timed = cmsgen_run(path, args.cmsgen, args.n_time, args.scratch,
+                           keep=(0 if patched else (args.n_cov or 1)),
+                           timeout=args.time_limit, write=not patched,
+                           seed=args.cmsgen_seed)
+        cmodels = timed.get("models") or []
+        row["cms_mode"] = timed["mode"]
+        row["cms_sps"] = timed["samples_per_s"]
+        row["cms_n_samples"] = timed["n_samples"]
+        row["cms_timed_out"] = timed.get("timed_out")
+        row["cms_decisions_per_s"] = timed.get("decisions_per_s")
+        row["cms_implications_per_s"] = timed.get("implications_per_s")
+        row["cms_props_per_s"] = timed.get("props_per_s")
+        row["cms_conflicts"] = timed.get("conflicts")
+        if timed.get("error"):
+            row["cms_error"] = timed["error"]
+        # A samplefile run when the quality pass needs models (or --cmsgen-both): its rate is the
+        # WITH-EMISSION number — reported separately, never used for the headline ratio.
+        if patched and (quality or args.cmsgen_both):
+            wr = cmsgen_run(path, args.cmsgen, args.n_time, args.scratch,
+                            keep=(args.n_cov or 1), timeout=args.time_limit, write=True,
+                            seed=args.cmsgen_seed)
+            cmodels = wr.get("models") or []
+            row["cms_sps_write"] = wr["samples_per_s"]
+            # >1 = how much throughput CMSGen loses by emitting its samples (the handicap every
+            # published GPAP-vs-stock-CMSGen ratio silently contained).
+            row["cms_write_penalty"] = (timed["samples_per_s"] / wr["samples_per_s"]
+                                        if wr["samples_per_s"] else None)
+        elif not patched:
+            row["cms_sps_write"] = timed["samples_per_s"]   # stock: the timed run IS write-mode
+        gsps, crate = g["samples_per_s"], row["cms_sps"]
+        # ratio: inf = GPAP-only, 0 = CMSGen-only, None = neither produced in the budget
+        row["ratio"] = (gsps / crate) if crate else (float("inf") if gsps else None)
+        row["ratio_e2e"] = ((((g.get("sps_e2e_total") or 0) / crate) if crate
+                             else (float("inf") if gsps else None)))
+        if quality and cmodels:
+            cd, cn = distinct_projections(cmodels[:args.n_cov], sup1)
+            row["cms_distinct"], row["cms_distinct_of"] = cd, cn
+        if args.twise:
+            row["twise_cms"] = two_wise_coverage(cmodels[:args.n_cov], sup1) if cmodels else None
+    return row
+
+
+def _format_row(r, args, multi_enc, has_circuits, quality, show_unif, format_uniformity):
+    eng = r.get("engine") or {}
+    line = f"{r['name'][:22]:<24}"
+    if multi_enc:
+        line += f"{(r.get('enc_key') or '—'):>10}"
+    dps = f"{r['decisions_per_s']:.1e}" if r.get("decisions_per_s") else "—"
+    ips = f"{r['implications_per_s']:.1e}" if r.get("implications_per_s") else "—"
+    # '+' after succ% = entailed-clause mining ran; '<' after sols = a safety valve
+    # (--time-limit / zero-progress) stopped the run before it delivered --n-time samples.
+    mn = "+" if r.get("mined") else " "
+    sols_s = f"{r['n_models']:,}" + ("<" if r.get("chunk_capped") else "")
+    line += (f"{r['nv']:>7}{r['M']:>8}{r['support']:>6}"
+             f"{r['gpap_sps']:>13,.0f}{r.get('gpap_sps_e2e') or 0:>13,.0f}{dps:>9}{ips:>9}"
+             f"{100*r['succ']:>5.0f}%{mn}{sols_s:>11}"
+             f"{r['wall_timed_s']:>6.1f}s{r['wall_total_s']:>6.1f}s")
+    if args.seeds:
+        sp = r.get("sps_spread_frac")
+        line += f"{100 * sp:>4.0f}%" if sp is not None else f"{'—':>5}"
+    if has_circuits:
+        line += f"{r['encode_s']:>6.1f}s" if r.get("encode_s") is not None else f"{'—':>7}"
+    if quality:
+        uq = f"{r['unique_sps_est']:,.0f}" if r.get("unique_sps_est") else "—"
+        line += f"{uq:>10}"
+    if args.twise:
+        line += f"{(r.get('twise_gpap') or 0):>7.1f}%"
+    if show_unif:
+        line += f"{format_uniformity(r.get('uniformity')):>9}"
+    if args.sim_baseline:
+        sim = r.get("sim_baseline")
+        if sim is None:
+            line += f"{'—':>9}{'—':>11}{'—':>9}"
+        elif sim["hits"]:
+            amp = r.get("amplification") or 0.0
+            amps = f"{amp:,.0f}x" if amp < 1e6 else f"{amp:.0e}x"
+            line += f"{sim['p_accept']:>9.1e}{sim['accepted_per_s']:>11,.0f}{amps:>9}"
+        else:                                      # no hit seen: rejection is unusable here
+            line += f"{'<' + format(sim['p_accept_lt'], '.0e'):>9}{'~0':>11}{'inf':>9}"
+    # kernel provenance: w/s = wave/scalar propagate, 16 or 8 = the packed split's SHIFT
+    krn = f"{eng.get('mode', '?')[0]}{eng.get('shift', '')}" if eng else "—"
+    snd = "OK" if r.get("gpu_sound") and (r.get("cpu_sound") in (None, True)) else "BAD"
+    line += f"{krn:>5}{snd:>4}"
+    if args.cmsgen:
+        cd = f"{r['cms_decisions_per_s']:.1e}" if r.get("cms_decisions_per_s") else "—"
+        ci = f"{r['cms_implications_per_s']:.1e}" if r.get("cms_implications_per_s") else "—"
+        ratio, ratio_e = r.get("ratio"), r.get("ratio_e2e")
+        rtxt = "—" if ratio is None else (f"{ratio:.2f}x" if ratio != float("inf") else "GPAP")
+        rtxt_e = "—" if ratio_e is None else (f"{ratio_e:.2f}x" if ratio_e != float("inf") else "GPAP")
+        line += f"{r.get('cms_sps') or 0:>10,.0f}{cd:>9}{ci:>9}{rtxt:>10}{rtxt_e:>9}"
+        if args.twise:
+            line += f"{(r.get('twise_cms') or 0):>6.1f}%"
+    return line
+
+
+def _print_summaries(rows, args, enc_order, np):
+    import statistics as st
+
+    def _gm(xs):
+        xs = [x for x in xs if x and 0 < x != float("inf")]
+        return st.geometric_mean(xs) if xs else None
+
+    if args.cmsgen:
+        ratios = [r.get("ratio") for r in rows]
+        fin = [x for x in ratios if x and 0 < x != float("inf")]
+        gm = _gm(ratios) or 0.0
+        gm_e2e = _gm([r.get("ratio_e2e") for r in rows]) or 0.0
+        n_gpap_only = sum(1 for x in ratios if x == float("inf"))
+        n_cms_only = sum(1 for x in ratios if x == 0)
+        n_neither = sum(1 for x in ratios if x is None)
+        mode = {r.get("cms_mode") for r in rows if r.get("cms_mode")}
+        mtxt = ("emission-free (--nowrite)" if mode == {"nowrite"}
+                else "STOCK, includes writing every sample" if mode == {"write"} else str(mode))
         print(f"geomean GPAP/CMSGen throughput = {gm:.2f}x steady-state, {gm_e2e:.2f}x "
-              f"end-to-end incl. setup+mining, over {len(fin)} both-produced instances "
+              f"end-to-end incl. setup+mining, over {len(fin)} both-produced rows "
               f"(+{n_gpap_only} GPAP-only, {n_cms_only} CMSGen-only, {n_neither} neither)  "
-              f"(GPAP=GPU, CMSGen=single-core CPU)")
-        # quality: mean 2-wise coverage delta (only when the quality pass ran)
-        dq = [r["twise_gpap"] - r["twise_cms"] for r in results
+              f"(GPAP=GPU, CMSGen=single-core CPU, {mtxt})")
+        pen = [r["cms_write_penalty"] for r in rows if r.get("cms_write_penalty")]
+        if pen:
+            print(f"  CMSGen emission cost: writing the samples costs it {_gm(pen):.2f}x "
+                  f"throughput (geomean over {len(pen)} rows) — the like-for-like ratio above "
+                  f"uses the emission-free rate")
+        dq = [r["twise_gpap"] - r["twise_cms"] for r in rows
               if r.get("twise_cms") is not None and r.get("twise_gpap") is not None]
         if dq:
             print(f"mean 2-wise coverage: GPAP "
-                  f"{np.mean([r['twise_gpap'] for r in results if r['twise_gpap'] is not None]):.1f}% "
-                  f"vs CMSGen {np.mean([r['twise_cms'] for r in results if r.get('twise_cms') is not None]):.1f}% "
+                  f"{np.mean([r['twise_gpap'] for r in rows if r.get('twise_gpap') is not None]):.1f}% "
+                  f"vs CMSGen {np.mean([r['twise_cms'] for r in rows if r.get('twise_cms') is not None]):.1f}% "
                   f"(Δ {np.mean(dq):+.1f}pp)")
-    if args.output:
-        os.makedirs(os.path.dirname(args.output) or ".", exist_ok=True)
-        json.dump({"device": str(device), "args": vars(args), "results": results},
-                  open(args.output, "w"), indent=1)
-        print(f"wrote {args.output}")
+    if enc_order:
+        # Paired encoder A/B: only instances that produced a row under EVERY encoder count, and
+        # the BASE is the first --encoders token (the run order), not an alphabetical accident.
+        by_inst = {}
+        for r in rows:
+            by_inst.setdefault(r["name"], {})[r.get("enc_key")] = r
+        present = {r.get("enc_key") for r in rows if r.get("enc_key")}
+        encs = [e for e in enc_order if e in present]
+        if len(encs) < 2:
+            return
+        base = encs[0]
+        print(f"\nencoder A/B (paired, base = {base}):")
+        for e in encs[1:]:
+            pairs = [(v[base], v[e]) for v in by_inst.values() if base in v and e in v]
+            if not pairs:
+                continue
+            sps = _gm([b["gpap_sps"] / a["gpap_sps"] for a, b in pairs if a["gpap_sps"]])
+            e2e = _gm([(b.get("gpap_sps_e2e") or 0) / (a.get("gpap_sps_e2e") or 1)
+                       for a, b in pairs if a.get("gpap_sps_e2e")])
+            shrink = _gm([a["M"] / b["M"] for a, b in pairs if b["M"]])
+            enc_a = sum(a.get("encode_s") or 0 for a, _ in pairs)
+            enc_b = sum(b.get("encode_s") or 0 for _, b in pairs)
+            wins = sum(1 for a, b in pairs if b["gpap_sps"] > a["gpap_sps"])
+            print(f"  {e:<12} vs {base}: {sps or 0:.2f}x steady, {e2e or 0:.2f}x e2e, "
+                  f"{shrink or 0:.2f}x fewer clauses, wins {wins}/{len(pairs)}, "
+                  f"encode {enc_a:.1f}s -> {enc_b:.1f}s (total over {len(pairs)} instances)")
+            if args.cmsgen:
+                cms = _gm([(b.get("cms_sps") or 0) / (a.get("cms_sps") or 1)
+                           for a, b in pairs if a.get("cms_sps")])
+                if cms:
+                    print(f"  {'':<12} (CMSGen gains {cms:.2f}x on the same CNFs — the encoder "
+                          f"helps both sides; ratio shift = {(sps or 0) / cms:.2f}x)")
 
 
 if __name__ == "__main__":

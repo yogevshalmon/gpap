@@ -46,7 +46,12 @@ from gpap.engine.formula import (
     lit_index_negation,
     lit_index_to_var,
 )
-from gpap.engine.bcp_engine import BCPEngine, make_assumption_tensor
+from gpap.engine.bcp_engine import (
+    BCPEngine,
+    clauses_envelope,
+    make_assumption_tensor,
+    packed_envelope,
+)
 from gpap.engine.checker import AssumptionChecker
 from gpap.engine.calibrate import compute_k_safe, gpu_mem_available
 from gpap.engine.kernels import kernel_available
@@ -54,5 +59,6 @@ from gpap.engine.kernels import kernel_available
 __all__ = [
     "CnfFormula", "OccurrenceList", "BCPEngine", "make_assumption_tensor",
     "AssumptionChecker", "compute_k_safe", "gpu_mem_available", "kernel_available",
+    "packed_envelope", "clauses_envelope",
     "ext_lit_to_lit_index", "lit_index_to_ext_lit", "lit_index_negation", "lit_index_to_var",
 ]

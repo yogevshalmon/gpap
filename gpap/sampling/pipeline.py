@@ -259,6 +259,16 @@ def sample_clauses(nv, clauses, support, device, *, simplify=True, els=False, n_
     if device.type == "cuda":
         torch.cuda.synchronize()
     wall = time.perf_counter() - t0
+    # Engine provenance for the results JSON: WHICH packed split and WHICH kernel variant actually
+    # ran, and at what K. Captured here — after the (possible) post-mining rebuild, before the
+    # coverage pass lowers K. This is the evidence that a headline number came from the sum-trick
+    # packed kernel inside its non-overflowing envelope (see engine.packed_envelope).
+    engine_info = {"kernel": "triton-packed-sum", "mode": smp.engine.mode,
+                   "shift": smp.engine.shift,
+                   "split": f"{smp.engine.shift}|{32 - smp.engine.shift}",
+                   "K": smp.K, "K_fused": smp.K_fused, "N_eff": smp.N, "M_eff": smp.M,
+                   "max_clause_len": (int(smp.formula.clause_sizes.max().item())
+                                      if smp.M else 0)}
     # Headline throughput = the best-THROUGHPUT config's steady-state rate (best_rate_sps), NOT the
     # end-to-end blend. With the adaptive bandit the run measures every config once (see sampler.py);
     # on a big-K GPU a single chunk exceeds n_time, so the blend would report whatever config ran
@@ -350,6 +360,7 @@ def sample_clauses(nv, clauses, support, device, *, simplify=True, els=False, n_
             "decisions_per_s": dps,                           # branch decisions/s (best-rate config)
             "implications_per_s": ips,                        # unit-prop implications/s (=assigns-decisions)
             "kernel": t.get("kernel", False),                 # fused Triton BCP kernel active?
+            "engine": engine_info,                            # packed split / kernel variant / K
             "attempts_per_s": t.get("attempts_per_s"),        # raw trajectory throughput (K/chunk rate)
             "bcp_rounds_per_chunk": t.get("bcp_rounds_per_chunk"),
             "bcp_ops_per_attempt": t.get("bcp_ops_per_attempt"),
