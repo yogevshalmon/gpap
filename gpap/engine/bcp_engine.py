@@ -25,6 +25,40 @@ import torch
 from gpap.engine.formula import CnfFormula
 
 
+# ---------------------------------------------------------------------- packed envelopes
+# The sum-trick word is ONE int32: low SHIFT bits = sat_count, high (32-SHIFT) bits = the sum of
+# the surviving literal indices mod 2^(32-SHIFT). Two conditions make it exact, and they are the
+# WHOLE overflow story:
+#   (a) the sum field must hold any single literal index  -> 2N <= 2^(32-SHIFT)
+#   (b) the count field must hold any clause's length     -> max clause len <= 2^SHIFT - 1
+# (a) is what makes "sat_count==1 => the field IS the forced literal" exact; (b) is what keeps the
+# count from carrying into the sum field at construction. Both are checked at construction and a
+# formula outside BOTH splits is REJECTED (no unpacked fallback exists) — callers that sweep a
+# benchmark suite should pre-check with packed_envelope() and skip, rather than take the raise.
+PACKED_SPLITS = ((16, 65535, 65535), (8, 0xFFFFFF, 255))   # (SHIFT, max 2N, max clause len)
+
+
+def packed_envelope(num_vars: int, max_clause_len: int) -> "tuple[int | None, str]":
+    """Pick the packed field split for a formula shape: returns (SHIFT, "") when it fits, or
+    (None, reason) when it is outside every envelope (the caller can then skip the instance
+    instead of catching the BCPEngine ValueError mid-suite).
+
+    Preference order is the measured one: 16|16 whenever 2N fits (the sat half then holds any
+    realistic clause), else the 8|24 "wide" split for the big unrolls."""
+    n2 = 2 * num_vars
+    for shift, max_2n, max_len in PACKED_SPLITS:
+        if n2 <= max_2n and max_clause_len <= max_len:
+            return shift, ""
+    return None, (f"outside the packed envelopes: 2N={n2}, max clause len={max_clause_len} "
+                  f"(16|16 needs 2N<=65535 and len<=65535; 8|24 needs 2N<={0xFFFFFF} and "
+                  f"len<=255)")
+
+
+def clauses_envelope(num_vars: int, clauses: list) -> "tuple[int | None, str]":
+    """packed_envelope() straight off a clause list (computes the max clause length)."""
+    return packed_envelope(num_vars, max((len(c) for c in clauses), default=0))
+
+
 def make_assumption_tensor(
     assumptions_lit_indices: list[list[int]],
     device: torch.device,
@@ -85,16 +119,16 @@ class BCPEngine:
 
         M, n2 = self._num_clauses, 2 * self._num_vars
         max_len = int(formula.clause_sizes.max().item()) if M else 0
-        wide_ok = n2 <= self._WIDE_MAX_2N and max_len <= self._WIDE_MAX_LEN
-        if n2 <= 65535 and not force_wide:
-            self._shift = 16
-        elif wide_ok:
-            self._shift = 8              # the "wide" split (or the force_wide test hook)
-        else:
-            raise ValueError(
-                f"formula outside the packed envelopes: 2N={n2}, max clause len={max_len} "
-                f"(16|16 needs 2N<=65535; 8|24 needs 2N<={self._WIDE_MAX_2N} and "
-                f"len<={self._WIDE_MAX_LEN}). Split long clauses or reduce variables.")
+        # Field split (see packed_envelope): both fields must be non-overflowing — 2N bounds the
+        # SUM field, max clause length bounds the COUNT field. A clause longer than 2^SHIFT-1
+        # (only reachable with repeated literals) would carry its count into the sum at
+        # construction, so it is checked for BOTH splits, not just the wide one.
+        shift, why = packed_envelope(self._num_vars, max_len)
+        if force_wide and n2 <= self._WIDE_MAX_2N and max_len <= self._WIDE_MAX_LEN:
+            shift = 8                    # test hook: force the wide split on a narrow formula
+        if shift is None:
+            raise ValueError(f"formula {why}. Split long clauses or reduce variables.")
+        self._shift = shift
 
         # int32 CSR (formula already stores int32 — just pin contiguity for the kernels)
         occ = formula.occ_list

@@ -85,3 +85,44 @@ def test_abc_unroll_matches_our_simulator():
     bits = {v: (v in m) for v in sup}
     in_seq = [{inp: bits[sup[i * T + t]] for i, inp in enumerate(inputs)} for t in range(T)]
     assert simulate(circ, in_seq, T) == target
+
+
+# --------------------------------------------------------------------------------------------
+# Circuit-level simplification (.bench -> ABC -> .bench) — the RIVAL-fairness path.
+# The GPU rivals unroll .bench themselves, so they must be offered the same ABC-optimized circuit
+# GPAP's abc arm gets. That swap is only legitimate if the circuit is unchanged as a function.
+
+@pytest.mark.parametrize("name", ["b03", "b06", "b10", "s386"])
+@pytest.mark.parametrize("target_mode", ["random", "rare"])
+def test_simplify_bench_abc_is_equivalent(tmp_path, name, target_mode):
+    """The simplified copy must accept EXACTLY the same input sequences: identical stimuli in,
+    bit-identical acceptance words out (not merely the same acceptance rate)."""
+    from gpap.circuits.abc_backend import bench_equiv_check, simplify_bench_abc
+    src = os.path.join(BENCH, f"{name}.bench")
+    dst = str(tmp_path / f"{name}_abc.bench")
+    st = simplify_bench_abc(src, dst)
+    assert st["ands_after"] <= st["ands_before"]
+    chk = bench_equiv_check(src, dst, 25, 5, target_mode=target_mode)
+    assert chk["ok"], f"{name}: ABC copy accepts a different set ({chk})"
+    assert chk["hits_src"] == chk["hits_dst"]
+
+
+def test_simplify_bench_abc_output_is_parseable_and_primitive(tmp_path):
+    """The emitted .bench must use only primitives every consumer here understands (ours and both
+    circuit-level rivals' parsers): AND / NOT / BUF / DFF — never abc's LUT/DFFRSE."""
+    import re
+    from gpap.circuits.abc_backend import simplify_bench_abc
+    src = os.path.join(BENCH, "b03.bench")
+    dst = str(tmp_path / "b03_abc.bench")
+    simplify_bench_abc(src, dst)
+    circ = parse_bench(dst)
+    ops = {op for op, _ins in circ[3].values()}
+    assert ops <= {"AND", "NOT", "BUF"}, ops
+    assert circ[2], "latches vanished — the sequential structure must survive"
+    text = open(dst).read()
+    assert "LUT" not in text and "DFFRSE" not in text
+    # every signal name must be a valid Python identifier: DEMOTIC exec's generated source
+    for tok in re.findall(r"^\s*([^=\s#]+)\s*=", text, re.M):
+        assert re.fullmatch(r"[A-Za-z_]\w*", tok), tok
+    # ...and the header must not contain the substrings their line classifier keys on
+    assert not any(k in text.splitlines()[0] for k in ("INPUT", "OUTPUT", "DFF", "="))

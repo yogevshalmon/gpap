@@ -168,6 +168,14 @@ def _cmd_bench(args):
         argv += ["--pin-outputs", str(args.pin_outputs)]
     if args.cmsgen:
         argv += ["--cmsgen", args.cmsgen]
+    if args.cmsgen_both:
+        argv += ["--cmsgen-both"]
+    if args.encoders:
+        argv += ["--encoders"] + list(args.encoders)
+    if args.resume:
+        argv += ["--resume"]
+    if args.tag:
+        argv += ["--tag", args.tag]
     if args.device:
         argv += ["--device", args.device]
     if args.output:
@@ -337,7 +345,19 @@ def main(argv=None):
     b.add_argument("-n", "--n-time", dest="n", type=int, default=50_000)
     b.add_argument("--time-limit", type=float, default=60.0)
     b.add_argument("--n-cov", type=int, default=0)
-    b.add_argument("--cmsgen", default=None, help="path to a cmsgen binary (enables comparison)")
+    b.add_argument("--cmsgen", default=None,
+                   help="path to a cmsgen binary (enables the comparison). Prefer the one built "
+                        "by scripts/build_cmsgen.sh — its --nowrite gives the emission-free, "
+                        "like-for-like rate (stock CMSGen's wall is dominated by writing every "
+                        "sample) and --statsevery its own decisions/implications per second")
+    b.add_argument("--cmsgen-both", action="store_true",
+                   help="also time CMSGen's write-mode run (the emission-cost appendix)")
+    b.add_argument("--encoders", nargs="+", default=None, metavar="ENC",
+                   help="run every circuit through EACH encoder, one row per (instance, "
+                        "encoder): e.g. --encoders tseitin abc:fast")
+    b.add_argument("--resume", action="store_true",
+                   help="skip rows already in --output and append (re-run after an interruption)")
+    b.add_argument("--tag", default=None, help="free-form label stored in the results JSON")
     b.add_argument("--portfolio", choices=["circuit", "default"], default="circuit")
     b.add_argument("--device", default=None)
     b.add_argument("--output", default=None)

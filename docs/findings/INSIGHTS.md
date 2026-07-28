@@ -500,6 +500,38 @@ are mandatory only there. All previous single-seed headline numbers reproduced w
 never a naive pysat re-implementation — the latter inflated a GPU "speedup" 50–100×. Validate
 solve speedups on kissat (SOTA), not just cadical.
 
+**EMISSION IS NOT FREE: every GPAP-vs-CMSGen ratio published before 2026-07-27 charged CMSGen
+for writing its samples and GPAP for nothing (2026-07-27).** GPAP's timed run is
+`collect=False` — models never leave the GPU (above). Stock CMSGen formats and writes every
+sample as a full N-variable DIMACS assignment. Measured on 27.sk_3_32, 50k samples, one core:
+**0.42 s generating vs 3.6 s with `--samplefile`** — 373 MB of output, ~88% of its wall;
+`--samplefile /dev/null` still costs 3.3 s, so it is ostream formatting, not disk, and it
+therefore scales with |vars| (worst exactly on the big circuit unrolls). The comparison as run
+was measuring file I/O. Fix: `scripts/cmsgen_gpap_eval.patch` (applied by
+`scripts/build_cmsgen.sh`) adds `--nowrite` — generate, emit nothing — plus `--statsevery`,
+which exports CryptoMiniSat's own propagation/decision/conflict counters (flushed, so a
+time-budget kill still reports them; this is where the `Cdec/s`/`Cimpl/s` columns come from).
+`gpap bench` auto-detects both, times the `--nowrite` run, and marks any row measured with a
+stock binary `cms_mode="write"` instead of hiding the handicap. Measured suite-wide on the sk_
+family (28 instances, same run): **emission costs CMSGen 5.3× geomean** (min 1.5×, median 5.6×,
+max 15.9× — it tracks |vars|, so it is largest exactly on the wide formulas where we claim the
+biggest wins). Every ratio published before 2026-07-27 contains that factor.
+
+**Full re-measured suite, emission-free (2026-07-28, RTX 4080 laptop, `eval/run_full_eval.sh`,
+357 rows / 13 stages / 0 errors / 0 skips; `.experiments/full_eval/<gpu>/plots/summary.md`).**
+GPAP/CMSGen geomean, per instance at its best encoder (per-row figure in brackets):
+sk 48.5×; seq-c25 rare **47.7×** (22.2×) / random 107.9× (90.1×); seq-c50 rare 47.6× (35.2×) /
+random 137.7× (113.1×); comb rare 538× / random 555×; hwmcc-c25 rare 156× / random 496×;
+hwmcc-c50 rare 30.9× / random 230×; epfl rare **12.7×** (3.4×) / random 11.0×.
+Three things the sweep settled: (1) rare targets cost ~4× of the ratio versus rejection-easy
+random pins, on identical instances — quote the rare column; (2) per-ROW and per-INSTANCE
+geomeans diverge (epfl 3.4× vs 12.7×) whenever one encoder collapses on an instance the other
+handles, so aggregate over instances-at-best-encoder and report the encoder split separately;
+(3) the encoder recommendation is per FAMILY, measured: hwmcc abc 4-8.5× (7/7 wins),
+comb abc 1.8-2.0×, seq abc 1.1-2.4× steady but 1.9-4.0× e2e, epfl abc 0.9-1.4× (8/20 wins —
+use tseitin). Engine provenance across the sweep: 289 rows on the 16|16 split, 68 on 8|24
+"wide", both wave and scalar propagate — all in-envelope, all GPU-sound.
+
 **Unique-solutions metric: distinct COUNT off the timing path.** Competitors (DEMOTIC/HTS/
 recurrent) report unique-solutions/s. Folding reconstruction+dedup into the timed run
 understates throughput up to 10× (Python delivery, not sampling, is the bottleneck), so the
