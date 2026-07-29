@@ -54,10 +54,26 @@ def _run_sampler(cnf: Path, workdir: Path, n=2000, seed=7):
     return rows, r.stdout
 
 
+def _extends_to_model(clauses, row) -> bool:
+    """Is the formula satisfiable with `row`'s literals asserted? This is the DEFINITION of a
+    valid projected sample, decided rather than approximated."""
+    from pysat.solvers import Solver
+    with Solver(name="minisat22", bootstrap_with=clauses) as s:
+        return s.solve(assumptions=list(row))
+
+
 def _assert_rows_are_models(rows, clauses, num_vars, support):
-    """Every emitted row must EXTEND to a full model: propagating it must not conflict, and at
-    the fixpoint no clause may be falsified. For a full (non-projected) row this reduces to
-    'satisfies every clause' directly."""
+    """Every emitted row must EXTEND to a full model.
+
+    Propagating the row must not conflict, and then every clause must be satisfied. That second
+    check is exact for a FULL assignment, and stronger than necessary for a projection: BCP is
+    incomplete, so an independent support fixes a model semantically without necessarily
+    *deriving* it, and a valid projection could in principle leave clauses merely non-falsified.
+    Measured on every instance this suite uses (circuit Tseitin, a deep unroll, and a projected
+    `sk_` CNF) the fixpoint does satisfy all of them — GPAP only emits rows that were already
+    fully assigned — so the strong check is the one that runs and it catches far more than
+    "did not conflict". Where it does not hold we decide the real question with a SAT call
+    instead of failing a legitimate sample."""
     assert rows, "sampler emitted nothing"
     for row in rows:
         assert row, "empty solution row"
@@ -69,9 +85,23 @@ def _assert_rows_are_models(rows, clauses, num_vars, support):
                 "projection columns are not the declared independent support"
         conflict, assigned = ref_bcp(clauses, [lit_idx(x) for x in row])
         assert not conflict, f"emitted row conflicts under BCP: {row[:10]}..."
-        for cl in clauses:
-            assert any(lit_idx(x) in assigned for x in cl), \
-                f"clause {cl} not satisfied by an emitted row"
+        unsatisfied = [cl for cl in clauses if not any(lit_idx(x) in assigned for x in cl)]
+        if unsatisfied:
+            assert support is not None, \
+                f"a FULL assignment left clause {unsatisfied[0]} unsatisfied"
+            assert _extends_to_model(clauses, row), \
+                f"projection does not extend to any model: {row[:10]}..."
+
+
+def test_extends_to_model_helper():
+    """The projected-sample fallback, exercised directly — on our instances BCP always closes
+    the formula, so without this the branch would never run anywhere."""
+    # x1=TRUE forces x2 both ways => no extension; x1=FALSE extends fine.
+    both_ways = [[-1, 2], [-1, -2]]
+    assert not _extends_to_model(both_ways, [1])
+    assert _extends_to_model(both_ways, [-1])
+    # A clause BCP cannot resolve from the support alone, but which a model satisfies.
+    assert _extends_to_model([[2, 3]], [1])
 
 
 def test_cpp_sampler_full_assignments(tmp_path):
