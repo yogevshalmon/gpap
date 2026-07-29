@@ -36,6 +36,15 @@ if [ "$MODE" != "check" ]; then
                 || echo "[warn] clone failed: $name (it will be reported as missing)"
         fi
     done
+    # THE ENGINE. Since the engine became a C++ library there is no Python fallback: without
+    # libgpap every GPAP row of every stage errors out. Build it FIRST and fail loudly, because
+    # a missing core turns a multi-hour sweep into a few hundred error rows.
+    if ! bash "$REPO_ROOT/scripts/build_core.sh"; then
+        echo "[FATAL] libgpap did not build — the sweep would produce nothing but error rows." >&2
+        echo "        Needs cmake + a C++17 compiler + the NVIDIA driver + python/triton." >&2
+        echo "        On Colab: apt-get install -y build-essential cmake" >&2
+        exit 1
+    fi
     bash "$REPO_ROOT/scripts/build_abc.sh"    || echo "[warn] abc build failed (tseitin-only)"
     bash "$REPO_ROOT/scripts/build_cmsgen.sh" || echo "[warn] cmsgen build failed (GPAP-only runs)"
 fi
@@ -52,13 +61,22 @@ import importlib, shutil, torch
 ok = torch.cuda.is_available()
 name = torch.cuda.get_device_properties(0).name if ok else "-"
 print(f'{"torch / CUDA":<34} {torch.__version__} cuda={torch.version.cuda} avail={ok} {name}')
+# THE engine is libgpap now, not the triton JIT — probe the library, or a green table would
+# promise a run that cannot happen (kernel_available() stays True with no core built).
+try:
+    from gpap.engine import core_available
+    from gpap.engine import _core
+    if core_available():
+        print(f'{"libgpap (THE engine)":<34} {_core.version()}  {_core.load()._name}')
+    else:
+        print(f'{"libgpap (THE engine)":<34} MISSING -- run scripts/build_core.sh')
+except Exception as e:
+    print(f'{"libgpap (THE engine)":<34} UNAVAILABLE: {e}')
 try:
     import triton
-    from gpap.engine.kernels import kernel_available
-    print(f'{"triton kernels (THE engine)":<34} triton {triton.__version__}, '
-          f'kernel_available={kernel_available()}')
+    print(f'{"triton (kernel compiler)":<34} {triton.__version__}  [build time only]')
 except Exception as e:
-    print(f'{"triton kernels (THE engine)":<34} UNAVAILABLE: {e}')
+    print(f'{"triton (kernel compiler)":<34} MISSING ({e}) -- cannot build the core')
 for mod in ("pysat", "numpy", "matplotlib"):
     try:
         m = importlib.import_module(mod)

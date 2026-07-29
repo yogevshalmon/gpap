@@ -372,6 +372,19 @@ def main(argv=None):
             results = prev.get("results", [])
             done = {_row_key(r) for r in results}
             print(f"[resume] {len(results)} row(s) already in {args.output}")
+            # Resuming a file written by a DIFFERENT engine silently mixes provenance in one
+            # result set. Rows carry engine.core since the libgpap port (absent = the retired
+            # torch/Triton-JIT engine), so say so rather than let it into a summary unnoticed.
+            from gpap.sampling.pipeline import _core_provenance
+            here = _core_provenance()
+            stale = sorted({(r.get("engine") or {}).get("core") or "pre-libgpap (torch engine)"
+                            for r in results
+                            if (r.get("engine") or {}).get("core") not in (None, here)
+                            or ((r.get("engine") or {}).get("core") is None and r.get("engine"))})
+            if stale:
+                print(f"[resume] WARNING: {args.output} contains rows from another engine "
+                      f"({', '.join(stale)}); this run appends {here}. Delete the file to "
+                      f"re-measure everything on one engine.", file=sys.stderr)
         except Exception as e:  # noqa: BLE001
             print(f"[resume] could not read {args.output} ({e}); starting fresh", file=sys.stderr)
 

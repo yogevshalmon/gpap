@@ -54,6 +54,10 @@ def _candidates() -> list[Path]:
     a stale `gpap/lib/libgpap.so` left by an earlier `build_core.sh --install` would otherwise
     silently shadow a rebuild. An installed wheel has no build tree, so it falls through."""
     env = os.environ.get("GPAP_LIB")
+    if env and not Path(env).exists():
+        # Explicit beats implicit: silently falling through to some OTHER library because the
+        # requested path has a typo is how you benchmark a build you did not mean to.
+        raise GpapError(0, "GPAP_LIB is set but does not exist", env)
     out = [Path(env)] if env else []
     here = Path(__file__).resolve()
     repo = here.parents[2]
