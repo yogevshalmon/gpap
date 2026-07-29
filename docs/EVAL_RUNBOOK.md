@@ -13,12 +13,20 @@ survives, and every stage here checkpoints after each row anyway.
 
 ```bash
 git clone <repo> gpap && cd gpap
+apt-get install -y build-essential cmake zlib1g-dev   # compilers for libgpap/cmsgen/abc
 pip install -e ".[dev]"                # torch+triton come with the Colab image
-eval/rivals_setup.sh                   # abc, patched CMSGen, DEMOTIC, Recurrent-CircuitSAT, HTS
+eval/rivals_setup.sh                   # libgpap FIRST, then abc, patched CMSGen, the 3 rivals
 eval/run_full_eval.sh check            # readiness table — read it before starting
 eval/run_full_eval.sh smoke            # ~5 min: every stage, 1-2 instances. Do this FIRST.
 gpap info                              # device + POWER STATE (docs/BENCHMARKING.md §1)
 ```
+
+**The engine is a compiled library now** (`libgpap`, see [cpp/README.md](../cpp/README.md)) and
+has NO Python fallback, so `rivals_setup.sh` builds it first via `scripts/build_core.sh` and
+aborts if that fails — without it every GPAP row of every stage errors out. `run_full_eval.sh`
+re-checks before each stage and refuses to start rather than burn hours producing error rows;
+`check` reports it as `libgpap (THE engine)`. If you ever build it by hand, `scripts/build_core.sh`
+is the one command (cmake + a C++17 compiler + the driver + triton; no CUDA toolkit).
 
 `rivals_setup.sh` builds CMSGen from upstream **with `scripts/cmsgen_gpap_eval.patch`** applied.
 That patch is what makes the CPU comparison honest — see §4. Everything lands in
@@ -100,9 +108,9 @@ outlive the browser tab.
 ```bash
 # --- terminal, once -------------------------------------------------------------
 cd /content && git clone <repo> gpap && cd gpap
+apt-get -qq install -y build-essential cmake zlib1g-dev >/dev/null   # libgpap/cmsgen/abc deps
 pip install -q -e ".[dev]"
-apt-get -qq install -y build-essential cmake zlib1g-dev >/dev/null   # cmsgen/abc build deps
-eval/rivals_setup.sh && eval/run_full_eval.sh check
+eval/rivals_setup.sh && eval/run_full_eval.sh check   # builds libgpap first; check must show it
 eval/run_full_eval.sh smoke                       # ~5 min sanity pass, separate output dir
 
 # --- the sweep, one family per command, detached --------------------------------
@@ -222,7 +230,9 @@ then stepped down a ladder on "device not ready".
 
 | symptom | cause / fix |
 |---|---|
-| every rate ~halved | GPU power cap or battery clocks — `gpap info` (BENCHMARKING §1) |
+| `libgpap ... is not available` / every GPAP row errors | the engine was not built — `scripts/build_core.sh` (needs cmake + a C++17 compiler + triton). Verify with `eval/rivals_setup.sh check`. |
+| `GPAP_LIB is set but does not exist` | the env var points at a typo; unset it or fix the path (it is refused rather than silently falling back to another build) |
+| every rate ~halved | GPU power cap or battery clocks — `gpap info` (BENCHMARKING §1); and note SM clocks move 2.8x WITHIN a run, so do not compare rates across runs (BENCHMARKING §1b) |
 | throughput collapses, no OOM | K too large → host-RAM spill. Never OOM-probe; use the nvidia-smi kill-switch (§2) |
 | `cmsgen=yes [STOCK: ...]` warning | binary lacks the patch — `scripts/build_cmsgen.sh` |
 | a stage exits instantly | it resumed and everything was already done; delete the JSON to force a re-run |

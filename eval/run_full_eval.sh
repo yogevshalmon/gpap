@@ -94,6 +94,18 @@ SEED_ARGS=(); [ -n "$SEEDS" ] && SEED_ARGS=(--seeds $SEEDS)
 
 banner() { echo; echo "=============== $* ==============="; date -Is; }
 
+# PREFLIGHT. The engine is a compiled library now and has no Python fallback, so a missing
+# libgpap does not fail the sweep — it fails every ROW of it, quietly, for hours. Check once.
+# (`check` is exempt: reporting what is missing is exactly its job.)
+if [ "$STAGE" != "check" ]; then
+    if ! "$PY" -c "import sys; from gpap.engine import core_available; sys.exit(0 if core_available() else 1)" 2>/dev/null; then
+        echo "[FATAL] libgpap (the engine) is not available — every GPAP row would error." >&2
+        echo "        Build it:  scripts/build_core.sh" >&2
+        echo "        Details:   eval/rivals_setup.sh check" >&2
+        exit 1
+    fi
+fi
+
 # bench <name> <glob> [extra gpap-bench args...]
 bench() {
     local name="$1" pattern="$2"; shift 2
