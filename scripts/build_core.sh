@@ -43,7 +43,11 @@ echo "==> compiling kernels ahead of time ($($PYTHON -c 'import triton;print("tr
 "$PYTHON" "$REPO/cpp/tools/build_kernels.py" ${ARCH:+--arch "$ARCH"}
 
 echo "==> configuring"
-cmake -S "$REPO/cpp" -B "$BUILD" -DCMAKE_BUILD_TYPE=Release >/dev/null
+# Hand cmake the SAME interpreter we just used. Without a toolkit, CMakeLists gets `cuda.h` from
+# the triton wheel by asking a python for it — and its own find_package(Python3) may well pick a
+# different one that has no triton, failing with a confusing "cuda.h not found".
+cmake -S "$REPO/cpp" -B "$BUILD" -DCMAKE_BUILD_TYPE=Release \
+      -DPython3_EXECUTABLE="$("$PYTHON" -c 'import sys;print(sys.executable)')" >/dev/null
 
 echo "==> building"
 cmake --build "$BUILD" -j "$(nproc 2>/dev/null || echo 4)"

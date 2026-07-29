@@ -103,8 +103,13 @@ def compile_one(fn, signature: list, num_warps: int, target, num_stages: int = 3
     for h in hints.values():
         assert h == 16, f"only 16-byte divisibility hints are used here, got {h}"
     attrs = {k: [["tt.divisibility", 16]] for k in hints}
-    fn.create_binder()
-    src = fn.ASTSource(fn=fn, constexprs=constants, signature=sig, attrs=attrs)
+    # Import ASTSource directly rather than via fn.create_binder(): the binder calls
+    # `driver.active.get_current_target()`, and triton's NVIDIA driver reports itself INACTIVE
+    # unless torch is installed AND torch.cuda.is_available() — i.e. unless a real GPU is
+    # present. Going through the binder would make cross-compilation (`--arch`) impossible on
+    # exactly the machines it exists for: CI runners and build containers with no GPU.
+    from triton.compiler import ASTSource
+    src = ASTSource(fn=fn, constexprs=constants, signature=sig, attrs=attrs)
     backend = triton.compiler.make_backend(target)
     options = backend.parse_options({"num_warps": num_warps, "num_stages": num_stages})
     cc = triton.compile(src, target=target, options=options.__dict__)

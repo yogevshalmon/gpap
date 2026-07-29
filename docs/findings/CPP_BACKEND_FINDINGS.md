@@ -139,6 +139,32 @@ tier 1 got the bounded version: **one** retry with the polarity flipped before g
 regime-dependence finding for `soft` — a lever that is net-negative in one regime must stay
 reachable, not be discarded.
 
+## 5c. "I verified the clean-machine build" — in an environment that was not clean
+
+The CI `build-core` job failed on the first PR, twice, for reasons the local verification could
+not have caught, and both are worth keeping:
+
+1. `gpap/engine/kernels.py` imported **torch** at module scope. `build_kernels.py` loads that
+   file to AOT-compile the kernels, so a build box with triton but no torch could not build the
+   library at all — for a runtime GPU probe (`kernel_available`) that the AOT path never calls.
+   Fixed by importing torch lazily inside that function.
+2. Under that, a second failure: `compile_one` reached the kernels through
+   `fn.create_binder()`, which calls `driver.active.get_current_target()`. Triton's NVIDIA
+   driver reports itself ACTIVE only when `import torch and torch.cuda.is_available()` — i.e.
+   only on a machine with a real GPU. So `--arch NN` cross-compilation, whose entire purpose is
+   building without a GPU, could not work. Fixed by constructing `triton.compiler.ASTSource`
+   directly; verified a **pure no-op** for codegen (byte-identical generated file when the
+   kernel source is held constant).
+
+The methodology lesson: the local "clean machine" reproduction used the repo virtualenv, which
+has torch, and ran on a box with a GPU — so it validated neither claim it was written to test.
+Reproducing an environment means removing what it does not have (`sys.meta_path` blocker for
+torch, stub driver for libcuda), not merely not using it.
+
+Related gotcha, worth knowing before comparing generated artifacts: **editing kernels.py at all —
+even a comment — changes the cubin bytes**, because Triton embeds source line tables. The
+AOT-vs-JIT bit-identity gate compares the same source through two paths, which is unaffected.
+
 ## 6. Method notes
 
 - Every A/B is interleaved within one process or alternated back-to-back across processes, and

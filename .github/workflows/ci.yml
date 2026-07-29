@@ -34,6 +34,9 @@ jobs:
         with:
           python-version: "3.12"
       - name: Install triton (the kernel compiler; build-time only)
+        # triton ONLY — deliberately no torch. The AOT path must not need it: triton's NVIDIA
+        # backend reports itself inactive unless torch is installed AND a GPU is present, so a
+        # runner could never satisfy it anyway. This job is what keeps that true.
         run: |
           python -m pip install --upgrade pip
           pip install triton numpy
@@ -46,9 +49,13 @@ jobs:
       - name: AOT-compile the kernels for sm_80 (no GPU needed)
         run: python cpp/tools/build_kernels.py --arch 80
       - name: Build libgpap
+        # -DPython3_EXECUTABLE: with no CUDA toolkit, CMakeLists gets cuda.h out of the triton
+        # wheel by asking a python for it. Pin the one we installed triton into rather than
+        # letting find_package(Python3) choose.
         run: |
           cmake -S cpp -B build -DCMAKE_BUILD_TYPE=Release \
-                -DGPAP_CUDA_DRIVER=/tmp/libcuda.so
+                -DGPAP_CUDA_DRIVER=/tmp/libcuda.so \
+                -DPython3_EXECUTABLE="$(which python)"
           cmake --build build -j
       - name: Check the artifacts exist
         run: |

@@ -49,9 +49,12 @@ Semantics contract:
 
 Requires CUDA + triton (ships with torch on Linux/Colab — no nvcc). `kernel_available()`
 probes once (compile+run a trivial kernel); the engine refuses to construct without it.
-"""
-import torch
 
+NOTE: torch is imported LAZILY, inside `kernel_available()`. Nothing in the kernel definitions
+needs it, and `cpp/tools/build_kernels.py` imports this module to AOT-compile them — on a build
+machine (CI, a container) that has triton but no torch, a module-level import would make the
+whole library unbuildable for a runtime-only probe.
+"""
 try:
     import triton
     import triton.language as tl
@@ -395,6 +398,11 @@ def kernel_available() -> bool:
     if _avail_cache is not None:
         return _avail_cache
     ok = False
+    try:
+        import torch                      # lazy: see the module docstring (build-time has none)
+    except Exception:  # noqa: BLE001
+        _avail_cache = False
+        return False
     if _HAVE_TRITON and torch.cuda.is_available():
         try:
             dev = torch.device("cuda")
