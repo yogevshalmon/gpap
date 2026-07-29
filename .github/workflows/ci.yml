@@ -19,6 +19,41 @@ jobs:
           pip install torch --index-url https://download.pytorch.org/whl/cpu
           pip install -e ".[dev]"
       - name: Ruff (lint)
-        run: ruff check gpap tests scripts eval
+        run: ruff check gpap tests scripts eval cpp
       - name: CPU smoke suite (GPU tests auto-skip off-CUDA)
         run: pytest -m "not gpu and not slow" -q
+
+  build-core:
+    # The engine core builds WITHOUT a GPU and WITHOUT the CUDA toolkit: triton cross-compiles
+    # the kernels for a named arch, and cuda.h comes from the triton wheel. This job is the
+    # proof that a new user can run scripts/build_core.sh on a clean machine.
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Install triton (the kernel compiler; build-time only)
+        run: |
+          python -m pip install --upgrade pip
+          pip install triton numpy
+      - name: Stub libcuda (a CI runner has no driver; we only need to LINK against it)
+        # An empty stub is NOT enough: libgpap.so tolerates undefined symbols, but the example
+        # EXECUTABLES do not, so they fail to link. The generator derives the symbol list from
+        # the sources (plus the _v2 aliases cuda.h macro-remaps to), which also keeps it correct
+        # when a driver call is added.
+        run: python cpp/tools/make_libcuda_stub.py /tmp/libcuda.so
+      - name: AOT-compile the kernels for sm_80 (no GPU needed)
+        run: python cpp/tools/build_kernels.py --arch 80
+      - name: Build libgpap
+        run: |
+          cmake -S cpp -B build -DCMAKE_BUILD_TYPE=Release \
+                -DGPAP_CUDA_DRIVER=/tmp/libcuda.so
+          cmake --build build -j
+      - name: Check the artifacts exist
+        run: |
+          test -f build/libgpap.so
+          test -x build/gpap_demo
+          test -x build/gpap_sample
+          test -x build/gpap_assumptions
+          echo "libgpap and every example build from a clean checkout"

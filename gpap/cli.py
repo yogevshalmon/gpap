@@ -242,11 +242,23 @@ def _cmd_info(args):
     free, total = torch.cuda.mem_get_info(dev)
     print(f"device: {props.name}  {total/1e9:.1f} GB ({free/1e9:.1f} GB free)  "
           f"SM {props.major}.{props.minor} x{props.multi_processor_count}")
+    # The engine core (libgpap): the C++ library Python and C++ consumers share.
+    try:
+        from gpap.engine import _core
+        if _core.available():
+            path = next(p for p in _core._candidates() if p.exists())
+            print(f"engine core: libgpap {_core.version()}  ({path})")
+        else:
+            print("engine core: NOT BUILT — the engine cannot run.\n"
+                  "             build it with:  scripts/build_core.sh")
+    except Exception as e:  # noqa: BLE001
+        print(f"engine core: unavailable ({e})")
     try:
         from gpap.engine.kernels import kernel_available
-        print(f"triton kernels: {'available' if kernel_available() else 'UNAVAILABLE (the engine cannot run)'}")
+        print(f"triton (kernel source / JIT reference): "
+              f"{'available' if kernel_available() else 'unavailable'}")
     except Exception as e:  # noqa: BLE001
-        print(f"triton kernels: import failed ({e}) — the engine cannot run")
+        print(f"triton (kernel source / JIT reference): import failed ({e})")
     _print_abc_status()
     # Power-limit / clock warning (the measured 40 W-vs-80 W + battery-clock gotchas). Before any
     # headline benchmark, confirm the card isn't power-capped or downclocked — ratios in one state

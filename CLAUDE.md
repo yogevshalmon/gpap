@@ -1,9 +1,16 @@
 # GPAP — GPU-Parallel Assumption Propagation & CircuitSAT Sampling
 
-GPU-accelerated BCP over K independent assumption sets (packed Triton kernels — the ONLY
-execution path; CUDA+triton required, no CPU fallback), and a CircuitSAT/projected **solution
+GPU-accelerated BCP over K independent assumption sets, and a CircuitSAT/projected **solution
 sampler** built on it. The engine is the novelty; sampling is the flagship app. Deep material
 lives in [`docs/`](docs/) — keep this file short and current.
+
+**The engine is a C++ library, [`libgpap`](cpp/)** (since 2026-07-28) — ONE implementation that
+Python (`gpap.engine`, via ctypes) and C++ consumers (`#include <gpap/gpap.hpp>`) share. The GPU
+kernels are still written in Triton: [`gpap/engine/kernels.py`](gpap/engine/kernels.py) is the
+single source of truth, AOT-compiled into the library by `cpp/tools/build_kernels.py` (cubins
+verified BIT-IDENTICAL at SASS level to the JIT ones). Build: `scripts/build_core.sh` — needs
+cmake + a C++17 compiler + the NVIDIA driver + triton at build time; **no CUDA toolkit, no nvcc**.
+Runtime deps of the library: `libcuda` alone. CUDA is required; there is no CPU path.
 
 ## Core design — no clause scanning
 
@@ -25,11 +32,24 @@ lives in [`docs/`](docs/) — keep this file short and current.
 ## Layout
 
 ```
+cpp/                       # THE ENGINE CORE — libgpap (C ABI + header-only C++ wrapper)
+  include/gpap/gpap.h      # the C ABI: formula, engine, selections, readout, counters, sizing
+  include/gpap/gpap.hpp    # C++, TWO TIERS: Sampler/AssumptionChecker (DIMACS, auto-everything)
+                           #   over Formula/Engine (RAII + exceptions over the ABI's 0-based ids)
+  src/formula.cpp          # DIMACS tokenizer + CSR occ + packed init (THE builder; python defers)
+  src/engine.cpp           # state ownership (cuMemAlloc), reset/flush cache, both entry points
+  src/readout.cpp          # selections, on-device soundness, bit gathers, assignment rows
+  src/calibrate.cpp        # K sizing, VRAM model  |  src/runtime.cpp: cubin registry + launches
+  kernels/helpers.py       # support kernels (Triton, so the toolchain stays nvcc-free)
+  tools/build_kernels.py   # AOT: kernels.py + helpers.py -> embedded cubins (29 specializations)
+  examples/                # sample.cpp + assumptions.cpp (tier 1) + demo.c (raw C ABI)
 gpap/
-  engine/                  # THE PRIMITIVE (app-agnostic, reusable; CUDA+triton-only)
-    formula.py             # CnfFormula + int32 CSR occ + init_lit_sum + DIMACS tokenizer (2N scheme)
-    bcp_engine.py          # BCPEngine: packed state + flush cache + kernel launches + counters
-    kernels.py             # the 2 Triton kernels (fixpoint + trajectory, SHIFT=16|8) + scalar/WAVE propagate
+  engine/                  # THE PYTHON FACE of the core (app-agnostic, reusable)
+    _core.py               # ctypes binding to libgpap (private)
+    formula.py             # CnfFormula: facade over the core's builder (numpy fallback off-GPU)
+    bcp_engine.py          # BCPEngine: marshalling + torch-friendly accessors over the core
+    _torch_engine.py       # the retired PyTorch/Triton-JIT engine — equivalence-gate reference only
+    kernels.py             # the 2 Triton kernels (fixpoint + trajectory, SHIFT=16|8) + scalar/WAVE
     calibrate.py           # K sizing, VRAM model, gpu_mem_available
     checker.py             # AssumptionChecker: the batched-assumptions API face
   sampling/                # THE FLAGSHIP
@@ -67,8 +87,13 @@ archive/                   # concluded experiments (not maintained; see archive/
    soft=…)` — the whole randomized decide+propagate loop in one launch.
 
 `reset(K)` broadcast-restores the construction-time post-units-flush cache (no per-chunk flush).
-App code must go through these + the accessors (`sat_rows()`, work counters) — do NOT reach into
-`_packed`/`_assignment`. The engine picks the packed split per formula (16|16 / 8|24) and
+
+**Hot-path readout is the SELECTION api** (added with the C core): `make_pair_mask(vars)` once,
+then per chunk `select_complete(mask_id, slot) -> count` (the completion test runs on device; only
+the count crosses the bus), plus `check_sound(slot)` (per-row flag on device — no (rows, M)
+transfer), `var_bits(slot, cols, n)` and `assignment_rows_sel(slot, n)`. The tensor-shaped
+accessors (`assignment`, `conflict`, `active`, `sat_rows`) are copies for tests / off-hot-path
+consumers. App code must go through these — do NOT reach into the row state. The engine picks the packed split per formula (16|16 / 8|24) and
 REJECTS formulas outside both envelopes; the PyTorch path was deleted 2026-07-13 (packed
 kernels are the only path — the oracle is `tests/reference_bcp.py`).
 
@@ -113,6 +138,7 @@ kernels are the only path — the oracle is `tests/reference_bcp.py`).
 ## Running
 
 ```bash
+scripts/build_core.sh                 # build libgpap (kernels AOT + cmake); `gpap info` verifies
 pytest -m "not gpu and not slow"      # host-side logic smoke (parsers/preprocess/circuits/metrics
                                       #   run anywhere; ALL engine/sampler tests need CUDA+triton
                                       #   and self-skip without them)

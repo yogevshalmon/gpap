@@ -95,6 +95,17 @@ class OccurrenceList:
         return OccurrenceList.from_flat(num_vars, len(clauses), lit_idx ^ 1, cls_idx, device)
 
     @staticmethod
+    def from_arrays(num_vars: int, num_clauses: int, offsets, clauses,
+                    device: torch.device) -> 'OccurrenceList':
+        """Wrap a CSR the core already built (offsets, clause indices) as device tensors."""
+        occ = OccurrenceList(device)
+        occ._num_vars = num_vars
+        occ._num_clauses = num_clauses
+        occ._occ_offsets = torch.from_numpy(np.ascontiguousarray(offsets, np.int32)).to(device)
+        occ._occ_clauses = torch.from_numpy(np.ascontiguousarray(clauses, np.int32)).to(device)
+        return occ
+
+    @staticmethod
     def from_flat(num_vars: int, num_clauses: int, neg_lit_idx, cls_idx,
                   device: torch.device) -> 'OccurrenceList':
         """CSR build from pre-flattened arrays (see flat_lit_arrays). The stable argsort keeps
@@ -136,7 +147,12 @@ class OccurrenceList:
 
 
 class CnfFormula:
-    """CNF formula representation with occurrence lists and per-clause literal-index sums.
+    """CNF formula for the engine: occurrence lists and per-clause counters.
+
+    The structures are BUILT BY THE C++ CORE (`cpp/src/formula.cpp`) whenever libgpap is
+    available, so the engine's Python and C++ faces can never disagree about what a formula is.
+    A pure-numpy builder is kept as the fallback for hosts without the library (the portable
+    smoke suite runs there); `tests/test_core_equivalence.py` asserts the two agree exactly.
 
     No clause->literal structure is stored. Instead we maintain:
     - Occurrence lists (CSR, int32): for each literal l, clauses where ~l appears
@@ -147,16 +163,52 @@ class CnfFormula:
     An EMPTY clause makes the formula trivially UNSAT; it cannot be represented in the
     counters, so it is dropped from the structures and recorded in `has_empty_clause`
     (the engine turns that flag into an all-rows conflict).
+
+    `clause_sizes` / `init_lit_sum` / `occ_list` are materialized as torch tensors ON DEMAND —
+    the core keeps its own device copies, so a normal sampling run never pays for them. Prefer
+    `max_clause_len` / `total_lits` (free, from the core) over reductions over `clause_sizes`.
     """
 
     def __init__(self, device: torch.device):
         self._device = device
         self._occ_list: OccurrenceList = None
-        self._clause_sizes: torch.Tensor = None   # (M,) int32
+        self._clause_sizes: torch.Tensor = None   # (M,) int32, materialized on demand
         self._init_lit_sum: torch.Tensor = None   # (M,) int32 (sum mod 2^32, exact bit pattern)
         self._num_vars = 0
         self._num_clauses = 0
         self._has_empty_clause = False
+        self._core = None                         # gpap.engine._core.Formula when available
+        self._max_clause_len = 0
+        self._total_lits = 0
+
+    # ------------------------------------------------------------------ core handle
+
+    @property
+    def core(self):
+        """The `_core.Formula` handle the engine consumes. Raises if libgpap is unavailable."""
+        if self._core is None:
+            from gpap.engine._core import GpapError
+            raise GpapError(0, "this CnfFormula was built without libgpap",
+                            "rebuild the core (see cpp/README.md) or use GPAP_ENGINE=torch")
+        return self._core
+
+    @property
+    def has_core(self) -> bool:
+        return self._core is not None
+
+    def _adopt_core(self, cf) -> None:
+        """Take the shape from a core-built formula (the structures stay on the C++ side)."""
+        self._core = cf
+        self._num_vars = int(cf.info.num_vars)
+        self._num_clauses = int(cf.info.num_clauses)
+        self._has_empty_clause = bool(cf.info.has_empty_clause)
+        self._max_clause_len = int(cf.info.max_clause_len)
+        self._total_lits = int(cf.info.total_lits)
+        self._occ_list = None
+        self._clause_sizes = None
+        self._init_lit_sum = None
+
+    # ------------------------------------------------------------------ shape
 
     @property
     def device(self) -> torch.device:
@@ -171,16 +223,43 @@ class CnfFormula:
         return self._num_clauses
 
     @property
+    def max_clause_len(self) -> int:
+        """Longest clause — bounds the packed word's count field (free; no reduction)."""
+        if not self._max_clause_len and self._clause_sizes is not None and self._num_clauses:
+            self._max_clause_len = int(self._clause_sizes.max().item())
+        return self._max_clause_len
+
+    @property
+    def total_lits(self) -> int:
+        """Total literal occurrences (free; no reduction)."""
+        if not self._total_lits and self._clause_sizes is not None:
+            self._total_lits = int(self._clause_sizes.sum().item())
+        return self._total_lits
+
+    @property
     def occ_list(self) -> OccurrenceList:
+        if self._occ_list is None and self._core is not None:
+            off, cls_ = self._core.occ()
+            self._occ_list = OccurrenceList.from_arrays(self._num_vars, self._num_clauses,
+                                                        off, cls_, self._device)
         return self._occ_list
 
     @property
     def clause_sizes(self) -> torch.Tensor:
+        if self._clause_sizes is None and self._core is not None:
+            self._materialize_clause_arrays()
         return self._clause_sizes
 
     @property
     def init_lit_sum(self) -> torch.Tensor:
+        if self._init_lit_sum is None and self._core is not None:
+            self._materialize_clause_arrays()
         return self._init_lit_sum
+
+    def _materialize_clause_arrays(self) -> None:
+        sizes, lsum = self._core.clause_arrays()
+        self._clause_sizes = torch.from_numpy(sizes).to(self._device)
+        self._init_lit_sum = torch.from_numpy(lsum).to(self._device)
 
     @property
     def has_empty_clause(self) -> bool:
@@ -188,11 +267,25 @@ class CnfFormula:
         return self._has_empty_clause
 
     def init_formula(self, num_vars: int, clauses: list[ext_cls]):
-        """Initialize from a list of clauses (external literal format). Vectorised: one shared
-        flatten (flat_lit_arrays) feeds the occ CSR, clause_sizes and init_lit_sum — the old
+        """Build from a list of clauses (external DIMACS literals).
+
+        Goes through the C++ core when libgpap is available — the same builder C++ consumers
+        use — and falls back to the vectorised numpy path otherwise."""
+        from gpap.engine import _core
+        if _core.available():
+            self._adopt_core(_core.Formula.from_clauses(num_vars, clauses))
+            return
+        self._init_formula_numpy(num_vars, clauses)
+
+    def _init_formula_numpy(self, num_vars: int, clauses: list[ext_cls]):
+        """Fallback builder for hosts without libgpap. Vectorised: one shared flatten
+        (flat_lit_arrays) feeds the occ CSR, clause_sizes and init_lit_sum — the old
         per-literal Python loops cost seconds per build on 1M-clause circuit unrolls, and
         construction runs several times per instance (sampler, miner prober, post-mining
-        rebuild)."""
+        rebuild). Kept honest by tests/test_core_equivalence.py."""
+        self._core = None
+        self._max_clause_len = 0
+        self._total_lits = 0
         self._has_empty_clause = any(len(c) == 0 for c in clauses)
         if self._has_empty_clause:
             clauses = [c for c in clauses if c]
@@ -217,12 +310,20 @@ class CnfFormula:
         self._init_lit_sum = torch.from_numpy(sums).to(self._device)
 
     def parse_cnf_file(self, cnf_file: str):
-        """Parse a DIMACS CNF file and build the formula.
+        """Parse a DIMACS CNF file and build the formula (core parser when available).
 
         Token-stream parsing (clauses are 0-terminated, NOT line-based): multiple clauses on
         one line and clauses spanning lines are handled per the DIMACS standard, as is the
         SATLIB '%' end marker. N = max(header N, highest variable used) so trailing declared
         variables (e.g. support vars appearing only in `c ind` lines) keep their slots."""
+        from gpap.engine import _core
+        if _core.available():
+            self._adopt_core(_core.Formula.from_file(cnf_file))
+            return
+        self._parse_cnf_file_numpy(cnf_file)
+
+    def _parse_cnf_file_numpy(self, cnf_file: str):
+        """Fallback DIMACS parser (see _init_formula_numpy)."""
         header_n = 0
         body: list[str] = []
         with open(cnf_file) as f:
@@ -250,7 +351,7 @@ class CnfFormula:
             tail = arr[(ends[-1] + 1) if len(ends) else 0:]        # unterminated final clause
             clauses.append(tail.tolist())
         max_var = int(np.abs(arr).max()) if len(arr) else 0
-        self.init_formula(max(header_n, max_var), clauses)
+        self._init_formula_numpy(max(header_n, max_var), clauses)
 
     def print_stats(self):
         print(f"Variables: {self._num_vars}")

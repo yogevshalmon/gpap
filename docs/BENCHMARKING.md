@@ -10,6 +10,29 @@ cap** (default 80 W) and a **battery clock profile** (~1.6 GHz vs 3.1 GHz max), 
 uniformly ~halves every rate. Idle clocks read ~210 MHz and are meaningless — read clocks *during* a
 run. **Ratios in one power state are valid; absolute numbers across states or GPUs are not.**
 
+## 1b. Clocks move DURING a run — never compare rates across runs
+
+The power state is not a constant you check once. Sampled every 3 s through a full `seq` sweep on
+the 4080 laptop, the SM clock **while the GPU was >90% busy** ranged **615–1710 MHz** (mean 1373),
+and between rows it sat at 2190 MHz. Same box, same run, same power source: a **2.8× spread**.
+Clock and draw are not even monotonic together (1245 MHz at 96 W, 2190 MHz at 39 W) — occupancy
+and the CPU/GPU shared power budget both move it, so the instance mix ahead of a row changes the
+clock that row is measured at.
+
+Consequence: **a few-percent difference between two runs on different days, or between two
+differently-composed sweeps, is not resolvable on this hardware.** A GPAP-only sweep and a
+GPAP+CMSGen sweep are not comparable at that resolution either — CMSGen's CPU-only stretch is
+also a GPU idle stretch.
+
+What IS valid:
+- **Interleaved A/B in the same session**, alternating the arm order between rounds so neither
+  arm systematically gets the cooler slot.
+- **Model counts**, which are clock-independent (see §3) — the port gate uses these, not rates.
+- Ratios *within* one sweep, where both sides met the same clock.
+
+This is why the C++-core port was gated on model counts and on interleaved A/Bs (which showed
+1.013× at the kernel level and 1.028× at the sampler level), not on a before/after sweep.
+
 ## 2. The box SPILLS, it does not OOM — use the kill-switch, never an OOM probe
 
 On WSL2/WDDM, oversizing K makes tensors migrate to shared host RAM over PCIe (~12 GB/s vs
