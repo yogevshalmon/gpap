@@ -1,29 +1,35 @@
-"""BCPEngine — the K-parallel packed BCP engine (state management + kernel launches).
+"""BCPEngine — the K-parallel packed BCP engine, backed by the C++ core (libgpap).
 
-All propagation executes in the Triton kernels (gpap.engine.kernels); this class owns the
-state and the launch plumbing:
+The engine *implementation* lives in `cpp/` and is shared, byte for byte, with C++ consumers:
+one formula builder, one state layout, one set of AOT-compiled Triton kernels. This module is
+the Python face of it — argument marshalling and the torch-friendly accessors — over
+`gpap.engine._core` (a ctypes binding to the C ABI in `cpp/include/gpap/gpap.h`).
 
-  * packed clause state (K, M) int32 — sat_count | modular-SUM-of-remaining-literals, field
-    split chosen per formula (SHIFT = 16 or 8; formulas outside both envelopes are rejected);
+State layout (identical to the C core, see docs/ENGINE.md):
+  * packed clause word (K, M) int32 — low SHIFT bits = sat_count, high bits = the modular SUM
+    of the surviving literal indices; at sat_count == 1 that field IS the forced literal;
   * assignment BITMAP (K, ceil(2N/32)) int32 — bit l set = literal l TRUE (l and ~l share a
-    word, which is what makes the kernels' one-atomic dedup/contradiction work; 8x smaller
-    than a byte per literal). Consumers read it through the materializing accessors
-    (`assignment`, `assignment_rows`, `var_true_bits`, `any_free`, `flushed_assignment`) —
-    copies/derived tensors, never the live words;
-  * active / conflict (K,) bool;
-  * the post-units-flush cache: the state after asserting the formula's own unit clauses is
-    row-identical for every row of every chunk, so it is computed ONCE at construction (one
-    fixpoint launch at K=1) and `reset(K)` broadcast-restores it — no per-chunk flush;
-  * lifetime work counters accumulated ON GPU (no per-launch sync; the *_total() reads sync).
+    word, which is what makes the kernels' one-atomic dedup/contradiction work);
+  * the post-units-flush cache, computed ONCE at construction and broadcast-restored by
+    `reset(K)` — no per-chunk unit flush.
 
-Requires CUDA + a working triton; construction raises otherwise. There is no CPU fallback —
-correctness is validated against a pure-Python reference BCP (tests/reference_bcp.py) and by
-external-solver model verification, not by a second production path.
+Two entry points (`apply_and_propagate`, `run_trajectory`) plus accessors; application code
+never touches the row state directly. Hot paths should use the SELECTION api
+(`make_pair_mask` + `select_complete` + `var_bits` / `assignment_rows` / `check_sound`), which
+keeps the completion test and the soundness check on the GPU and returns only counts and small
+matrices. The tensor-shaped accessors (`assignment`, `conflict`, `active`, `sat_rows`) are
+convenience copies for tests and for off-hot-path consumers.
+
+`GPAP_ENGINE=torch` selects the historical PyTorch/Triton-JIT engine (`_torch_engine.py`) —
+kept for the equivalence gate during the migration and deleted once the core is the only path.
 """
+import os
+
+import numpy as np
 import torch
 
+from gpap.engine import _core
 from gpap.engine.formula import CnfFormula
-
 
 # ---------------------------------------------------------------------- packed envelopes
 # The sum-trick word is ONE int32: low SHIFT bits = sat_count, high (32-SHIFT) bits = the sum of
@@ -31,20 +37,16 @@ from gpap.engine.formula import CnfFormula
 # WHOLE overflow story:
 #   (a) the sum field must hold any single literal index  -> 2N <= 2^(32-SHIFT)
 #   (b) the count field must hold any clause's length     -> max clause len <= 2^SHIFT - 1
-# (a) is what makes "sat_count==1 => the field IS the forced literal" exact; (b) is what keeps the
-# count from carrying into the sum field at construction. Both are checked at construction and a
-# formula outside BOTH splits is REJECTED (no unpacked fallback exists) — callers that sweep a
-# benchmark suite should pre-check with packed_envelope() and skip, rather than take the raise.
+# Both are checked at construction and a formula outside BOTH splits is REJECTED (no unpacked
+# fallback exists) — callers sweeping a benchmark suite should pre-check with packed_envelope()
+# and skip, rather than take the exception.
 PACKED_SPLITS = ((16, 65535, 65535), (8, 0xFFFFFF, 255))   # (SHIFT, max 2N, max clause len)
 
 
 def packed_envelope(num_vars: int, max_clause_len: int) -> "tuple[int | None, str]":
-    """Pick the packed field split for a formula shape: returns (SHIFT, "") when it fits, or
-    (None, reason) when it is outside every envelope (the caller can then skip the instance
-    instead of catching the BCPEngine ValueError mid-suite).
-
-    Preference order is the measured one: 16|16 whenever 2N fits (the sat half then holds any
-    realistic clause), else the 8|24 "wide" split for the big unrolls."""
+    """Pick the packed field split for a formula shape: (SHIFT, "") when it fits, or
+    (None, reason) when it is outside every envelope. Preference order is the measured one:
+    16|16 whenever 2N fits, else the 8|24 "wide" split for the big unrolls."""
     n2 = 2 * num_vars
     for shift, max_2n, max_len in PACKED_SPLITS:
         if n2 <= max_2n and max_clause_len <= max_len:
@@ -59,15 +61,12 @@ def clauses_envelope(num_vars: int, clauses: list) -> "tuple[int | None, str]":
     return packed_envelope(num_vars, max((len(c) for c in clauses), default=0))
 
 
-def make_assumption_tensor(
-    assumptions_lit_indices: list[list[int]],
-    device: torch.device,
-) -> torch.Tensor:
-    """Convert list[list[int]] to a (K, L) int64 padded tensor for BCPEngine.apply_and_propagate.
+def make_assumption_tensor(assumptions_lit_indices: list[list[int]],
+                           device: torch.device) -> torch.Tensor:
+    """list[list[int]] -> a (K, L) int64 padded tensor for apply_and_propagate.
 
     L = max assumption count across all batches; empty slots filled with -1.
-    Build this once before any timed / hot path.
-    """
+    Build this once before any timed / hot path."""
     K = len(assumptions_lit_indices)
     L = max((len(lits) for lits in assumptions_lit_indices), default=0)
     t = torch.full((K, L), -1, dtype=torch.long)
@@ -77,380 +76,257 @@ def make_assumption_tensor(
     return t.to(device)
 
 
-class BCPEngine:
-    """Packed-state BCP over K independent rows. Two entry points (see gpap.engine.__init__):
+def core_available() -> bool:
+    """True iff libgpap can be loaded (see cpp/README.md for the two build commands)."""
+    return _core.available()
 
-        eng = BCPEngine(formula)                 # builds occ + packed init + the flush cache
+
+class BCPEngine:
+    """Packed-state BCP over K independent rows, on the C++ core.
+
+        eng = BCPEngine(formula)                 # occ + packed init + the flush cache
         eng.reset(K)                             # broadcast-restore the post-flush state
         eng.apply_and_propagate(dec)             # (K,L) int64 lit indices, -1 pad; ONE launch
         eng.run_trajectory(order, n_support, B, seed, soft=...)   # whole sampling loop, ONE launch
-        eng.active / eng.conflict / eng.assignment / eng.sat_rows(idx)
+
+        mid = eng.make_pair_mask(support_mask)   # register a variable set once
+        n   = eng.select_complete(mid, slot=0)   # active AND fully assigned -> count (hot path)
+        eng.check_sound(0) / eng.var_bits(0, cols, n) / eng.assignment_rows_sel(0, n)
 
     Setting literal l TRUE decrements the packed word of every clause in occ[l] (CSR lists of
     the NEGATED literal) and subtracts ~l from its remaining-literal sum field; sat==1 forces
     the literal the sum field holds, sat==0 conflicts the row. No clause scanning, ever.
     """
 
-    _WIDE_MAX_2N = 0xFFFFFF          # 8|24 split: 24-bit literal index ceiling
-    _WIDE_MAX_LEN = 255              # 8|24 split: 8-bit sat_count ceiling
-
     def __init__(self, formula: CnfFormula, *, force_wide: bool = False,
                  mode: "str | None" = None):
-        """`mode`: "scalar" (default) = the serial-trail kernels; "wave" (EXPERIMENTAL) = the
-        warp-wide wavefront propagate (see kernels._wave_propagate) — same state layout, same
-        fixpoints (confluence), different propagation order. Env override: GPAP_KERNEL=wave
-        (+ GPAP_WAVE_W for the lane width, default 32; GPAP_VSCAN=0 disables the warp-wide
-        decision scan in the trajectory kernel)."""
-        import os
-        from gpap.engine.kernels import kernel_available
+        """`mode`: "scalar" (default) = the serial-trail kernels, "wave" = the warp-wide
+        wavefront propagate — same state, same fixpoints (confluence), different propagation
+        order. Env override: GPAP_KERNEL=scalar|wave."""
         self._mode = mode or os.environ.get("GPAP_KERNEL", "scalar")
         if self._mode not in ("scalar", "wave"):
             raise ValueError(f"unknown kernel mode {self._mode!r} (scalar|wave)")
-        self._wave_w = int(os.environ.get("GPAP_WAVE_W", "32"))
-        self._vscan = 0 if os.environ.get("GPAP_VSCAN") == "0" else 1
+        # `force_wide` pins the 8|24 split on a formula that would otherwise take 16|16 — the
+        # A/B hook that lets the wide kernel be exercised on small, fast formulas.
         self._formula = formula
         self._device = formula.device
-        self._num_vars = formula.num_vars
-        self._num_clauses = formula.num_clauses
-        if self._device.type != "cuda" or not kernel_available():
-            raise RuntimeError(
-                "BCPEngine requires CUDA + a working triton kernel (the engine is packed-"
-                "kernel-only; there is no CPU path). Check `gpap info`.")
+        if self._device.type != "cuda":
+            raise RuntimeError("BCPEngine requires CUDA (the engine is GPU-only; there is no "
+                               "CPU path). Check `gpap info`.")
+        self._core = _core.Engine(formula.core, device=self._device.index or 0, mode=self._mode,
+                                  force_shift=8 if force_wide else 0)
+        self._K = 0
+        self._counter_base = (0, 0, 0, 0)
 
-        M, n2 = self._num_clauses, 2 * self._num_vars
-        max_len = int(formula.clause_sizes.max().item()) if M else 0
-        # Field split (see packed_envelope): both fields must be non-overflowing — 2N bounds the
-        # SUM field, max clause length bounds the COUNT field. A clause longer than 2^SHIFT-1
-        # (only reachable with repeated literals) would carry its count into the sum at
-        # construction, so it is checked for BOTH splits, not just the wide one.
-        shift, why = packed_envelope(self._num_vars, max_len)
-        if force_wide and n2 <= self._WIDE_MAX_2N and max_len <= self._WIDE_MAX_LEN:
-            shift = 8                    # test hook: force the wide split on a narrow formula
-        if shift is None:
-            raise ValueError(f"formula {why}. Split long clauses or reduce variables.")
-        self._shift = shift
-
-        # int32 CSR (formula already stores int32 — just pin contiguity for the kernels)
-        occ = formula.occ_list
-        self._occ_off = occ.occ_offsets.contiguous()
-        self._occ_cls = occ.occ_clauses.contiguous()
-
-        # packed init row: sat_count | (lit_sum << SHIFT), sum taken mod the field width.
-        # Packed in uint32 (the shifted sum may legitimately reach bit 31) then reinterpreted
-        # as the kernel's int32 — a numpy view is exact where an integer cast could saturate.
-        import numpy as np
-        sum_mask = (1 << (32 - self._shift)) - 1
-        sizes = formula.clause_sizes.cpu().numpy().astype(np.uint32)
-        sums = formula.init_lit_sum.cpu().numpy().astype(np.uint32)
-        packed = (sizes | ((sums & sum_mask) << self._shift)).view(np.int32)
-        self._packed_init = torch.from_numpy(packed).to(self._device)
-
-        # row-state tensors, sized on first reset()
-        self._nw = max(1, (n2 + 31) // 32)   # assignment-bitmap words per row
-        self._packed = None              # (K, M) int32
-        self._abits = None               # (K, NW) int32 assignment bitmap (bit l = lit l TRUE)
-        self._active = None              # (K,) bool
-        self._conflict = None            # (K,) bool
-        # kernel workspace / per-launch outputs (sized with K / B in _ensure)
-        self._trail = None               # (K, cap) int32
-        self._nprops = None              # (K,) int32: literals set TRUE last launch
-        self._nops = None                # (K,) int32: occ entries processed last launch
-        self._ndecs = None               # (K,) int32: decision literals last launch
-        self._nrounds = None             # (K,) int32: trajectory decision rounds last launch
-        # lifetime counters (GPU 0-d accumulators; *_total() syncs lazily)
-        self._ops_acc = torch.zeros((), dtype=torch.int64, device=self._device)
-        self._props_acc = torch.zeros((), dtype=torch.int64, device=self._device)
-        self._decs_acc = torch.zeros((), dtype=torch.int64, device=self._device)
-        self.launches = 0
-
-        self._build_flush_cache()
-
-    # ------------------------------------------------------------------ construction
-
-    @torch.inference_mode()
-    def _build_flush_cache(self) -> None:
-        """One fixpoint launch at K=1 seeded with the formula's unit-clause literals; the
-        resulting state is cached and broadcast-restored by every reset(K). An empty clause
-        (or contradictory/conflicting units) makes the flush itself conflict — reset() then
-        marks every row conflicted (the formula is UNSAT; 0 models either way)."""
-        f = self._formula
-        M = self._num_clauses
-        self.reset(1, _from_init=True)
-        if f.has_empty_clause:
-            self._conflict.fill_(True)
-            self._active.fill_(False)
-        elif M:
-            unit_mask = f.clause_sizes == 1
-            if bool(unit_mask.any()):
-                units = f.init_lit_sum[unit_mask].to(torch.int64).view(1, -1)
-                self.apply_and_propagate(units)
-        self._packed_flushed = self._packed[0].clone()
-        self._abits_flushed = self._abits[0].clone()
-        self._flush_conflict = bool(self._conflict[0].item())
-        # the flush is construction, not sampled work — reset the lifetime counters
-        self._ops_acc.zero_(); self._props_acc.zero_(); self._decs_acc.zero_()
-        self.launches = 0
+    # ------------------------------------------------------------------ configuration
 
     def set_mode(self, mode: str) -> None:
-        """Switch the propagate kernel variant ("scalar" | "wave"). The two variants share the
-        SAME state layout and reach the SAME fixpoints (confluence — gate-validated
-        bit-identical), so this is purely a launch-flag change and is safe at any point.
-        Measured (RTX 4080, 2026-07-13): wave wins where K is below warp saturation
-        (b14 K=280: 3.06x; b12 K=3k: 1.31x; b04 K=4k: 1.14x) and loses ~0.9x where DRAM is
-        already saturated (b03 K=30k) — GPUSampler auto-dispatches on K."""
-        if mode not in ("scalar", "wave"):
-            raise ValueError(f"unknown kernel mode {mode!r} (scalar|wave)")
+        """Switch the propagate kernel variant ("scalar" | "wave"). Both share the SAME state
+        and reach the SAME fixpoints (confluence — gate-validated bit-identical), so this is a
+        pure launch-flag change, safe at any point. Wave wins where K is below warp saturation;
+        GPUSampler auto-dispatches on the calibrated K."""
+        self._core.set_mode(mode)
         self._mode = mode
 
     @property
     def mode(self) -> str:
-        return self._mode
-
-    @torch.inference_mode()
-    def recache_flush(self) -> None:
-        """Re-cache the flush state from row 0 of the CURRENT state — the incremental-units
-        hook (miner): reset(1) + apply_and_propagate(new_units) + recache_flush() folds
-        entailed units into the cached flush without rebuilding the formula."""
-        self._packed_flushed = self._packed[0].clone()
-        self._abits_flushed = self._abits[0].clone()
-        self._flush_conflict = bool(self._conflict[0].item())
-
-    def _num_warps(self) -> int:
-        """Warps per program: in wave mode the W-wide tensors are spread over W/32 REAL warps
-        (one element per lane), multiplying scattered requests in flight per row — the old
-        W=64 test ran on one warp (2 elements/lane = serialization, measured worse) and is
-        superseded. Scalar mode stays single-warp (W is only the decision-scan width there)."""
-        return max(1, self._wave_w // 32) if self._mode == "wave" else 1
-
-    def _ensure(self, K: int, B: int) -> None:
-        cap = self._num_vars + max(B, 64) + 8
-        if self._trail is None or self._trail.size(0) != K or self._trail.size(1) < cap:
-            dev = self._device
-            self._trail = torch.empty((K, cap), dtype=torch.int32, device=dev)
-            self._nprops = torch.zeros(K, dtype=torch.int32, device=dev)
-            self._nops = torch.zeros(K, dtype=torch.int32, device=dev)
-            self._ndecs = torch.zeros(K, dtype=torch.int32, device=dev)
-            self._nrounds = torch.zeros(K, dtype=torch.int32, device=dev)
-
-    # ------------------------------------------------------------------ entry points
-
-    @torch.inference_mode()
-    def reset(self, K: int, _from_init: bool = False) -> None:
-        """Reset K rows to the cached post-flush state (allocations reused when K matches)."""
-        dev = self._device
-        M = self._num_clauses
-        if self._abits is None or self._abits.size(0) != K:
-            self._packed = torch.empty((K, M), dtype=torch.int32, device=dev)
-            self._abits = torch.empty((K, self._nw), dtype=torch.int32, device=dev)
-            self._active = torch.empty(K, dtype=torch.bool, device=dev)
-            self._conflict = torch.empty(K, dtype=torch.bool, device=dev)
-        if _from_init:                       # construction path: pre-flush init state
-            self._packed.copy_(self._packed_init.unsqueeze(0).expand(K, -1))
-            self._abits.zero_()
-            self._active.fill_(True)
-            self._conflict.fill_(False)
-            return
-        self._packed.copy_(self._packed_flushed.unsqueeze(0).expand(K, -1))
-        self._abits.copy_(self._abits_flushed.unsqueeze(0).expand(K, -1))
-        self._active.fill_(not self._flush_conflict)
-        self._conflict.fill_(self._flush_conflict)
-
-    @torch.inference_mode()
-    def apply_and_propagate(self, decisions: torch.Tensor) -> None:
-        """Apply a (K, L) int64 decision tensor (-1 = padding) and BCP to fixpoint — ONE launch.
-        Duplicate literals are skipped; l/~l pairs and decisions contradicting the existing
-        assignment conflict the row. Entry point 1 (batched assumption checking)."""
-        from gpap.engine.kernels import _bcp_fixpoint_kernel
-        K = self._abits.size(0)
-        decisions = decisions.to(self._device)
-        if decisions.dim() == 1:
-            decisions = decisions.unsqueeze(1)
-        B = decisions.size(1)
-        if decisions.numel() == 0:
-            return
-        self._ensure(K, B)
-        # Zero the per-row outputs: INACTIVE rows are left unwritten by the kernel, and
-        # summing stale values would corrupt the accumulators.
-        self._nprops.zero_(); self._nops.zero_(); self._ndecs.zero_()
-        dec = decisions.to(torch.int64).contiguous()
-        _bcp_fixpoint_kernel[(K,)](
-            self._packed, self._abits,
-            self._active.view(torch.int8), self._conflict.view(torch.int8),
-            dec, self._occ_off, self._occ_cls, self._trail,
-            self._nprops, self._nops, self._ndecs,
-            self._num_clauses, self._nw, B, self._trail.size(1),
-            SHIFT=self._shift, WAVE=(1 if self._mode == "wave" else 0), W=self._wave_w,
-            num_warps=self._num_warps(),
-        )
-        self.launches += 1
-        self._ops_acc += self._nops.sum()               # GPU-side, no sync
-        self._props_acc += self._nprops.sum()
-        self._decs_acc += self._ndecs.sum()
-
-    @torch.inference_mode()
-    def run_trajectory(self, order: torch.Tensor, n_support: int, B: int, seed: int,
-                       *, soft: bool = False) -> int:
-        """Whole randomized decide+propagate trajectories for every row — ONE launch. `order` =
-        (P,) var indices, support vars first; picking the next B still-free vars in `order` with
-        a stateless per-(chunk,k,v) hash polarity (the torch RNG stream is NOT consumed, so runs
-        are reproducible via `seed` alone). `soft` enables the in-kernel risk-polarity. Entry
-        point 2 (trajectory sampling). Returns the max decision rounds any row used (one sync)."""
-        from gpap.engine.kernels import _bcp_trajectory_kernel
-        K = self._abits.size(0)
-        self._ensure(K, 64)
-        self._nprops.zero_(); self._nops.zero_(); self._ndecs.zero_(); self._nrounds.zero_()
-        order = order.to(torch.int32).contiguous()
-        _bcp_trajectory_kernel[(K,)](
-            self._packed, self._abits,
-            self._active.view(torch.int8), self._conflict.view(torch.int8),
-            order, self._occ_off, self._occ_cls,
-            self._trail, self._nrounds, self._nops, self._nprops, self._ndecs,
-            self._num_clauses, self._nw, order.numel(), n_support, B,
-            self._trail.size(1), 1 << 30, seed,
-            SOFT=(1 if soft else 0), SHIFT=self._shift,
-            WAVE=(1 if self._mode == "wave" else 0), W=self._wave_w,
-            VSCAN=self._vscan, num_warps=self._num_warps(),
-        )
-        self.launches += 1
-        self._ops_acc += self._nops.sum()
-        self._props_acc += self._nprops.sum()
-        self._decs_acc += self._ndecs.sum()
-        return int(self._nrounds.max().item())
-
-    # ------------------------------------------------------------------ accessors
-
-    def sat_rows(self, row_idx: torch.Tensor) -> torch.Tensor:
-        """sat_count values for the given rows (extracted from the packed state). The supported
-        accessor for app-level soundness checks ('every clause > 0' on a fully-assigned row)."""
-        return self._packed[row_idx] & ((1 << self._shift) - 1)
-
-    @torch.inference_mode()
-    def _bits_to_bytes(self, words: torch.Tensor) -> torch.Tensor:
-        """(R, NW) int32 bitmap rows -> (R, 2N) int8, the historical byte-per-literal layout.
-        A COPY. Contiguous unpack (strided slice-writes measured 16x sector amplification);
-        row-sliced so the (rows, NW, 32) int32 transient stays <= ~256 MB."""
-        R = words.size(0)
-        shifts = torch.arange(32, dtype=torch.int32, device=words.device)
-        out = torch.empty((R, self._nw * 32), dtype=torch.int8, device=words.device)
-        step = max(1, int(256e6 // max(self._nw * 32 * 4, 1)))
-        for r0 in range(0, R, step):
-            w = words[r0:r0 + step]
-            out[r0:r0 + step] = ((w.unsqueeze(-1) >> shifts) & 1).to(torch.int8).view(
-                w.size(0), -1)
-        return out[:, :2 * self._num_vars]
-
-    @property
-    def assignment(self) -> torch.Tensor:
-        """(K, 2N) int8 (1 = TRUE) — MATERIALIZED from the bitmap on every call; a copy, not
-        the live state. Prefer assignment_rows / var_true_bits / any_free on hot paths."""
-        return self._bits_to_bytes(self._abits)
-
-    def assignment_rows(self, row_idx: torch.Tensor) -> torch.Tensor:
-        """(n, 2N) int8 assignments for the selected rows (bool mask or index tensor) —
-        materialized copy of just those rows."""
-        return self._bits_to_bytes(self._abits[row_idx])
-
-    @torch.inference_mode()
-    def var_true_bits(self, row_idx: torch.Tensor, var_cols: torch.Tensor) -> torch.Tensor:
-        """(n, V) uint8 — 1 iff var v is assigned TRUE (positive literal bit 2v set), for the
-        selected rows x selected var columns. Direct bit gather; no N-wide materialization."""
-        w = self._abits[row_idx][:, (var_cols >> 4).long()]
-        return ((w >> ((var_cols & 15).to(torch.int32) * 2)) & 1).to(torch.uint8)
-
-    @torch.inference_mode()
-    def make_pair_mask(self, var_mask: "torch.Tensor | None") -> torch.Tensor:
-        """(NW,) int32 with EVEN bit 2v set for every selected var (all vars when None) —
-        the required `pair_mask` for any_free(). Padding pairs beyond N stay 0 (a raw
-        even-bits constant would misread them as free)."""
-        import numpy as np
-        vs = (np.arange(self._num_vars, dtype=np.int64) if var_mask is None
-              else np.nonzero(var_mask.cpu().numpy())[0])
-        bits = np.zeros(self._nw, dtype=np.uint32)
-        np.bitwise_or.at(bits, vs >> 4, np.uint32(1) << (2 * (vs & 15)).astype(np.uint32))
-        return torch.from_numpy(bits.view(np.int32)).to(self._device)
-
-    @torch.inference_mode()
-    def any_free(self, pair_mask: torch.Tensor) -> torch.Tensor:
-        """(K,) bool — row has at least one free var among pair_mask (make_pair_mask output).
-        One bitwise pass over the bitmap words: pair v free iff bits 2v/2v+1 both 0, i.e.
-        even bit of ~(w | w>>1); no (K, N) mask is ever materialized."""
-        w = self._abits
-        return (((~(w | (w >> 1))) & pair_mask) != 0).any(dim=1)
-
-    @property
-    def active(self) -> torch.Tensor:
-        return self._active
-
-    @property
-    def conflict(self) -> torch.Tensor:
-        return self._conflict
-
-    @property
-    def num_propagated(self) -> torch.Tensor:
-        """(K,) int32 — unit-propagation IMPLICATIONS of the last launch (assigned minus
-        decisions)."""
-        return self._nprops - self._ndecs
-
-    @property
-    def flush_conflict(self) -> bool:
-        """True iff the formula's own units already conflict (formula UNSAT)."""
-        return self._flush_conflict
-
-    @property
-    def flushed_assignment(self) -> torch.Tensor:
-        """(2N,) int8 — the cached post-flush assignment row (formula units + implications).
-        Materialized from the cached bitmap row (a copy)."""
-        return self._bits_to_bytes(self._abits_flushed.unsqueeze(0))[0]
+        return self._core.mode
 
     @property
     def shift(self) -> int:
         """Packed field split: 16 (16|16) or 8 (8|24 'wide')."""
-        return self._shift
+        return self._core.shift
 
     @property
     def num_vars(self) -> int:
-        return self._num_vars
+        return self._core.num_vars
 
     @property
     def num_clauses(self) -> int:
-        return self._num_clauses
+        return self._core.num_clauses
 
     @property
     def device(self) -> torch.device:
         return self._device
 
+    @property
+    def K(self) -> int:
+        return self._K
+
+    # ------------------------------------------------------------------ entry points
+
+    def reset(self, K: int) -> None:
+        """Reset K rows to the cached post-units-flush state (allocations reused when K matches)."""
+        self._core.reset(K)
+        self._K = int(K)
+
+    def apply_and_propagate(self, decisions) -> None:
+        """Apply a (K, L) int64 decision tensor/array (-1 = padding) and BCP to fixpoint — ONE
+        launch. Duplicate literals are skipped; l/~l pairs and decisions contradicting the
+        existing assignment conflict the row. Entry point 1 (batched assumption checking)."""
+        if isinstance(decisions, torch.Tensor):
+            if decisions.dim() == 1:
+                decisions = decisions.unsqueeze(1)
+            if decisions.numel() == 0:
+                return
+            if decisions.is_cuda:
+                d = decisions.to(torch.int64).contiguous()
+                self._core.apply_dev(d.data_ptr(), d.size(1))
+                return
+            decisions = decisions.cpu().numpy()
+        d = np.ascontiguousarray(decisions, dtype=np.int64)
+        if d.ndim == 1:
+            d = d.reshape(1, -1)
+        if d.size == 0:
+            return
+        self._core.apply(d)
+
+    def run_trajectory(self, order, n_support: int, B: int, seed: int,
+                       *, soft: bool = False) -> int:
+        """Whole randomized decide+propagate trajectories for every row — ONE launch. `order` =
+        (P,) var indices, support vars first; the kernel picks the next B still-free vars in
+        `order` with a stateless per-(chunk,k,v) hash polarity (the torch RNG stream is NOT
+        consumed, so runs are reproducible via `seed` alone). Entry point 2. Returns the max
+        decision rounds any row used (one sync).
+
+        A CUDA tensor is passed by pointer (zero copy) — which is what keeps results identical
+        to a torch-built decision order."""
+        if isinstance(order, torch.Tensor) and order.is_cuda:
+            o = order.to(torch.int32).contiguous()
+            return self._core.trajectory_dev(o.data_ptr(), o.numel(), n_support, B, seed, soft)
+        if isinstance(order, torch.Tensor):
+            order = order.cpu().numpy()
+        return self._core.trajectory(np.ascontiguousarray(order, dtype=np.int32),
+                                     n_support, B, seed, soft)
+
+    def recache_flush(self) -> None:
+        """Re-cache the flush state from row 0 of the CURRENT state — the incremental-units
+        hook (miner): reset(1) + apply_and_propagate(new_units) + recache_flush() folds
+        entailed units into the cached flush without rebuilding the formula."""
+        self._core.recache_flush()
+
+    # ------------------------------------------------------------------ selections (hot path)
+
+    def make_pair_mask(self, var_mask: "torch.Tensor | None") -> int:
+        """Register the variable set a completion test considers; returns a mask id (cached).
+
+        `var_mask` is a (N,) bool tensor or None for "all variables". Padding pairs beyond N are
+        excluded by construction — a raw even-bits constant would misread them as free."""
+        if var_mask is None:
+            return self._core.pair_mask(None)
+        vs = torch.nonzero(var_mask.reshape(-1)).reshape(-1).cpu().numpy().astype(np.int32)
+        return self._core.pair_mask(vs)
+
+    def select_complete(self, mask_id: int, slot: int = 0) -> int:
+        """Rows that are active AND have no free variable under `mask_id` — the count of
+        guaranteed-valid models in this chunk. One kernel + one 4-byte sync; the (K,) mask never
+        crosses the bus. Two slots exist so a caller can hold "fully assigned" and "support
+        complete" at the same time."""
+        return self._core.select_complete(mask_id, slot)
+
+    def selection_rows(self, slot: int, count: int) -> np.ndarray:
+        """(count,) int32 ascending row indices of a selection."""
+        return self._core.selection_rows(slot, count)
+
+    def check_sound(self, slot: int = 0, max_rows: int = 4096) -> int:
+        """How many selected rows have ANY clause with sat_count == 0 — must be 0.
+
+        At a FULLY-assigned row, non-falsified <=> TRUE, so `all sat_count > 0` <=> satisfied.
+        Evaluated on device: no (rows, M) transfer, no slice budget."""
+        return self._core.check_sound(slot, max_rows)
+
+    def var_bits(self, slot: int, cols, count: int) -> np.ndarray:
+        """(count, len(cols)) uint8 — 1 iff variable cols[j] is TRUE in the i-th selected row.
+        Direct bit gather; no (K, N) materialization."""
+        if isinstance(cols, torch.Tensor):
+            cols = cols.cpu().numpy()
+        return self._core.var_bits(slot, np.asarray(cols, dtype=np.int32), count)
+
+    def assignment_rows_sel(self, slot: int, count: int) -> np.ndarray:
+        """(count, 2N) int8 assignment rows for a selection (1 = that literal index is TRUE)."""
+        return self._core.assignment_rows(slot, count)
+
+    # ------------------------------------------------------------------ accessors (copies)
+
+    @property
+    def active(self) -> torch.Tensor:
+        return torch.from_numpy(self._core.flags()[0]).to(self._device)
+
+    @property
+    def conflict(self) -> torch.Tensor:
+        return torch.from_numpy(self._core.flags()[1]).to(self._device)
+
+    @property
+    def assignment(self) -> torch.Tensor:
+        """(K, 2N) int8 (1 = TRUE) — MATERIALIZED from the bitmap on every call; a copy, not the
+        live state. Prefer the selection accessors on hot paths."""
+        return self.assignment_rows(np.arange(self._K, dtype=np.int32))
+
+    def assignment_rows(self, row_idx) -> torch.Tensor:
+        """(n, 2N) int8 assignments for the selected rows (bool mask or index tensor)."""
+        return torch.from_numpy(self._core.rows_assignment(_row_indices(row_idx))).to(self._device)
+
+    def var_true_bits(self, row_idx, var_cols) -> torch.Tensor:
+        """(n, V) uint8 — 1 iff var v is assigned TRUE, for the selected rows x var columns."""
+        if isinstance(var_cols, torch.Tensor):
+            var_cols = var_cols.cpu().numpy()
+        cols = np.asarray(var_cols, dtype=np.int32)
+        return torch.from_numpy(
+            self._core.rows_var_bits(_row_indices(row_idx), cols)).to(self._device)
+
+    def sat_rows(self, row_idx) -> torch.Tensor:
+        """sat_count values for the given rows (extracted from the packed state). The supported
+        accessor for app-level soundness checks; `check_sound` is the on-device version."""
+        return torch.from_numpy(self._core.sat_rows(_row_indices(row_idx))).to(self._device)
+
+    @property
+    def num_propagated(self) -> torch.Tensor:
+        """(K,) int32 — unit-propagation IMPLICATIONS of the last launch (assigned minus
+        decisions)."""
+        return torch.from_numpy(self._core.num_propagated()).to(self._device)
+
+    @property
+    def flush_conflict(self) -> bool:
+        """True iff the formula's own units already conflict (formula UNSAT)."""
+        return self._core.flush_conflict
+
+    @property
+    def flushed_assignment(self) -> torch.Tensor:
+        """(2N,) int8 — the cached post-flush assignment row (formula units + implications)."""
+        return torch.from_numpy(self._core.flushed_assignment()).to(self._device)
+
+    # ------------------------------------------------------------------ work counters
+
+    @property
+    def launches(self) -> int:
+        return int(self._core.counters().launches)
+
     def ops_total(self) -> int:
         """Occ entries processed so far (syncs; read off the hot path)."""
-        return int(self._ops_acc.item())
+        return int(self._core.counters().ops)
 
     def props_total(self) -> int:
         """Literals assigned so far — decisions + implications (syncs; off the hot path)."""
-        return int(self._props_acc.item())
+        return int(self._core.counters().props)
 
     def decs_total(self) -> int:
-        """Decision literals assigned so far (syncs; off the hot path).
-        Implications = props_total() - decs_total()."""
-        return int(self._decs_acc.item())
+        """Decision literals assigned so far. Implications = props_total() - decs_total()."""
+        return int(self._core.counters().decs)
 
 
-if __name__ == "__main__":
-    from gpap.engine.formula import ext_lit_to_lit_index
+def _row_indices(row_idx) -> np.ndarray:
+    """Accept a bool mask / index tensor / array and return ascending int32 row indices."""
+    if isinstance(row_idx, torch.Tensor):
+        if row_idx.dtype == torch.bool:
+            row_idx = torch.nonzero(row_idx).reshape(-1)
+        row_idx = row_idx.cpu().numpy()
+    idx = np.asarray(row_idx)
+    if idx.dtype == bool:
+        idx = np.nonzero(idx)[0]
+    return np.ascontiguousarray(idx, dtype=np.int32)
 
-    if not torch.cuda.is_available():
-        raise SystemExit("demo requires CUDA (the engine is kernel-only)")
-    device = torch.device("cuda")
-    formula = CnfFormula(device)
-    # (x1 OR x2), (~x1 OR x3), (~x2 OR ~x3), (x1 OR ~x2)
-    formula.init_formula(3, [[1, 2], [-1, 3], [-2, -3], [1, -2]])
 
-    engine = BCPEngine(formula)
-    engine.reset(2)
-    # batch 0: assume x1=TRUE, batch 1: assume x1=FALSE
-    dec = make_assumption_tensor([[ext_lit_to_lit_index(1)],
-                                  [ext_lit_to_lit_index(-1)]], device)
-    engine.apply_and_propagate(dec)
-
-    print("Conflicts:", engine.conflict.tolist())
-    print("Assignment batch 0:", engine.assignment[0].tolist())
-    print("Assignment batch 1:", engine.assignment[1].tolist())
-    print("Implications:", engine.num_propagated.tolist())
+# The historical PyTorch/Triton-JIT engine, kept behind GPAP_ENGINE=torch for the migration's
+# equivalence gate (tests/test_core_equivalence.py imports it directly).
+if os.environ.get("GPAP_ENGINE") == "torch":       # pragma: no cover - migration escape hatch
+    from gpap.engine._torch_engine import BCPEngine        # noqa: F401,F811

@@ -21,11 +21,17 @@ assumption sets at once** (PyTorch + fused Triton kernels), and a flagship appli
 ## Install
 
 ```bash
-pip install -e ".[cuda]"     # CUDA + the fused Triton kernels (ships with torch on Linux/Colab)
+pip install -e ".[cuda]"     # python side (torch + triton; triton ships with torch on Linux/Colab)
+scripts/build_core.sh        # the engine core: libgpap.so  (cmake + gcc; NO CUDA toolkit needed)
 pip install -e ".[dev]"      # + pytest, ruff  (for tests/lint)
 ```
 
-CPU-only works too (the PyTorch engine is the oracle/fallback) — the fused kernels simply switch off.
+The engine itself is a C++ library, [`libgpap`](cpp/) — the same one C++ consumers link against
+(see [cpp/README.md](cpp/README.md)). `scripts/build_core.sh` compiles the Triton kernels ahead of
+time into it and builds it; it needs a C++17 compiler, cmake, the NVIDIA driver and (at build time
+only) triton — **no CUDA toolkit and no nvcc**. `gpap info` reports whether it is there.
+
+A GPU is required: there is no CPU execution path.
 
 ## Quickstart — Python API
 
@@ -163,6 +169,45 @@ GPAP finds the binary via `$GPAP_ABC` → `abc` on `PATH` → `$GPAP_ABC_HOME/bi
 `--abc PATH`. The default encoder stays `tseitin` so results never change silently depending on
 whether ABC happens to be installed; `--encoder auto` opts into "abc if available".
 
+## Linking from C++
+
+The engine is the same library both faces use, so anything the Python API can do is available
+without Python — a C ABI (`gpap/gpap.h`) plus a header-only C++ layer (`gpap/gpap.hpp`).
+**Sampling a formula is three lines**, and needs no knowledge of how the engine works:
+
+```cpp
+#include <gpap/gpap.hpp>
+
+gpap::Sampler sampler("formula.cnf");
+gpap::Solutions sols = sampler.sample(100000);     // 100k satisfying assignments
+
+for (std::size_t i = 0; i < sols.size(); ++i)
+    for (std::size_t j = 0; j < sols.columns(); ++j)
+        bool value = sols(i, j);                   // of variable sols.variables()[j] (DIMACS)
+```
+
+The sampler sizes the GPU batch to free VRAM, picks the propagate kernel, orders decisions so
+propagation does the work, and verifies on the device that every row it returns is a real model.
+`gpap::AssumptionChecker` is the same deal for the other entry point — K assumption sets
+propagated independently in one launch. Underneath, `gpap::Formula` / `gpap::Engine` expose the
+engine directly for callers who want to own the loop:
+
+```cpp
+gpap::Engine engine(formula);
+engine.reset(65536);                                      // 65k independent trajectories
+engine.trajectory(order, n_support, /*B=*/8, seed);       // one fused launch
+int models = engine.select_complete(engine.pair_mask());  // guaranteed-valid solutions
+```
+
+```cmake
+find_package(gpap REQUIRED)
+target_link_libraries(my_solver PRIVATE gpap::gpap)
+```
+
+Runtime dependencies: `libcuda` only. Working examples in [`cpp/examples/`](cpp/examples/)
+(`sample.cpp`, `assumptions.cpp`, and `demo.c` for the raw C ABI); details in
+[cpp/README.md](cpp/README.md).
+
 ## The core idea (no clause scanning)
 
 Instead of a clause matrix, GPAP keeps:
@@ -174,16 +219,18 @@ Instead of a clause matrix, GPAP keeps:
      falsification. `== 0` ⇒ conflict, `== 1` ⇒ unit.
    - `lit_sum (K, M)` — running sum of non-falsified literal *indices*.
 3. **The sum trick**: when `sat_count == 1`, the surviving literal's index **is** `lit_sum`. No
-   scan, no gather — pure arithmetic. (The fused kernel packs both counters into one 32-bit word,
-   replacing the sum with an XOR that never overflows; see [`gpap/engine/kernels.py`](gpap/engine/kernels.py).)
+   scan, no gather — pure arithmetic. The kernels pack both counters into ONE 32-bit word, which
+   makes the whole clause update a single `atomic_add` whose return value *is* the conflict/unit
+   detection; see [`gpap/engine/kernels.py`](gpap/engine/kernels.py) and [docs/ENGINE.md](docs/ENGINE.md).
 
 Literal indexing (2N scheme): `+v → 2(v-1)`, `-v → 2(v-1)+1`, negation `l ^ 1`.
 
 ## Layout
 
 ```
+cpp/            # THE ENGINE CORE — libgpap: C ABI + C++ wrapper, shared by both faces
 gpap/
-  engine/       # THE PRIMITIVE — formula, bcp_engine (oracle), kernels (fused Triton), calibrate, checker
+  engine/       # the Python face of the core (ctypes) + kernels.py, the Triton kernel SOURCE
   sampling/     # THE FLAGSHIP — sampler, pipeline (e2e flow), miner, preprocess, metrics
   circuits/     # bench.py: parse/unroll/Tseitin/pin .bench circuits -> projected-sampling CNF
   cli.py        # `gpap` subcommands

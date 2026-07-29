@@ -9,7 +9,7 @@ description = "GPU-parallel BCP over independent assumption sets, and GPU Circui
 readme = "README.md"
 requires-python = ">=3.10"
 authors = [{ name = "Yogev Shalmon" }]
-keywords = ["SAT", "sampling", "GPU", "BCP", "CircuitSAT", "triton", "pytorch"]
+keywords = ["SAT", "sampling", "GPU", "BCP", "CircuitSAT", "triton", "pytorch", "cuda"]
 classifiers = [
     "Programming Language :: Python :: 3",
     "Topic :: Scientific/Engineering",
@@ -32,6 +32,12 @@ gpap = "gpap.cli:main"
 
 [tool.setuptools.packages.find]
 include = ["gpap*"]
+
+# The engine core (libgpap) is a compiled artifact, built by scripts/build_core.sh. When it is
+# installed into the package (build_core.sh --install), ship it with the wheel; the ctypes
+# binding also finds a repo-local build/ automatically.
+[tool.setuptools.package-data]
+gpap = ["lib/libgpap.so*"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

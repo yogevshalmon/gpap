@@ -41,6 +41,19 @@ CIRCUIT_PORTFOLIO = [(True, 8, False), (True, 1, False), (True, 8, "soft")]
 DEFAULT_PORTFOLIO = [(True, 8, False), (True, 1, False), (False, 1, False)]
 
 
+def _core_provenance() -> str:
+    """Which engine build produced a result: "libgpap <version>", or "torch-jit" when the
+    GPAP_ENGINE=torch migration escape hatch is in use."""
+    import os
+    if os.environ.get("GPAP_ENGINE") == "torch":
+        return "torch-jit"
+    try:
+        from gpap.engine import _core
+        return f"libgpap {_core.version()}"
+    except Exception:       # noqa: BLE001 — provenance must never break a run
+        return "unknown"
+
+
 def _uniformity_readout(smp, clauses, sup1, rate, config, max_rounds, mode="fast", target=2000):
     """The uniformity readout (OFF the timing path; see metrics.py for the statistics).
 
@@ -263,12 +276,16 @@ def sample_clauses(nv, clauses, support, device, *, simplify=True, els=False, n_
     # ran, and at what K. Captured here — after the (possible) post-mining rebuild, before the
     # coverage pass lowers K. This is the evidence that a headline number came from the sum-trick
     # packed kernel inside its non-overflowing envelope (see engine.packed_envelope).
+    # `core` records WHICH build produced the number — results from before the C++ core
+    # (2026-07-28) carry no such field, which is exactly how a pre/post-port comparison is told
+    # apart. The kernels themselves are unchanged (AOT vs JIT of the same source, bit-identical
+    # SASS), so the two are comparable; the field just makes the provenance explicit.
     engine_info = {"kernel": "triton-packed-sum", "mode": smp.engine.mode,
                    "shift": smp.engine.shift,
                    "split": f"{smp.engine.shift}|{32 - smp.engine.shift}",
                    "K": smp.K, "K_fused": smp.K_fused, "N_eff": smp.N, "M_eff": smp.M,
-                   "max_clause_len": (int(smp.formula.clause_sizes.max().item())
-                                      if smp.M else 0)}
+                   "core": _core_provenance(),
+                   "max_clause_len": smp.formula.max_clause_len if smp.M else 0}
     # Headline throughput = the best-THROUGHPUT config's steady-state rate (best_rate_sps), NOT the
     # end-to-end blend. With the adaptive bandit the run measures every config once (see sampler.py);
     # on a big-K GPU a single chunk exceeds n_time, so the blend would report whatever config ran

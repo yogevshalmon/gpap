@@ -7,8 +7,8 @@ DPLL-completions in parallel on the GPU. Each "trajectory" repeatedly:
   2. assigns each a *random per-sample polarity* (a decision),
   3. runs BCP to fixpoint,
 
-all inside ONE fused Triton kernel launch per chunk (engine.run_trajectory — the engine is
-packed-kernel-only and requires CUDA + triton).
+all inside ONE fused kernel launch per chunk (engine.run_trajectory — the engine is the C++
+core `libgpap`, which requires CUDA; its kernels are Triton, compiled ahead of time).
 
 A trajectory that reaches a conflict is a dead-end (discarded); a trajectory whose
 variables all become assigned with no conflict is a **guaranteed-valid model** — every
@@ -41,6 +41,7 @@ import os
 os.environ.setdefault("PYTORCH_CUDA_ALLOC_CONF", "expandable_segments:True")
 import time
 
+import numpy as np
 import torch
 
 from gpap.engine.formula import CnfFormula
@@ -63,11 +64,12 @@ class GPUSampler:
         self.device = device
         self.N = formula.num_vars
         self.M = formula.num_clauses
-        # The packed-Triton engine (the ONLY execution path — raises off-CUDA / without triton;
+        # The engine core (the ONLY execution path — raises off-CUDA / without libgpap;
         # field split 16|16 or 8|24 picked per formula, see gpap.engine).
         self.engine = BCPEngine(formula)
-        self._max_cls = int(formula.clause_sizes.max().item()) if self.M else 1
-        self._total_lits = int(formula.clause_sizes.sum().item()) if self.M else 0
+        # Shape comes from the engine core (free) — never a reduction over a (M,) tensor.
+        self._max_cls = formula.max_clause_len or 1
+        self._total_lits = formula.total_lits
         # RNG + state must exist before K calibration (the probe chunk in _calibrate_k uses _gen).
         self._gen = torch.Generator(device=device)
         if seed is not None:
@@ -226,9 +228,9 @@ class GPUSampler:
     # ----------------------------------------------------------------- one chunk
 
     def _pair_masks(self, support_mask: "torch.Tensor | None"):
-        """(all_vars_words, support_words|None) engine pair masks for the completion checks.
+        """(all_vars_id, support_id|None) engine pair-mask IDs for the completion checks.
         Cached; keyed by support-mask IDENTITY with a strong ref held — sample() builds ONE
-        support_mask per call, so this rebuilds once per sample() not per chunk."""
+        support_mask per call, so this registers once per sample() not per chunk."""
         if getattr(self, "_pm_ref", "unset") is not support_mask:
             self._pm_ref = support_mask
             self._pm_all = self.engine.make_pair_mask(None)
@@ -246,9 +248,11 @@ class GPUSampler:
         accepted for API compatibility but never applied (the kernel structurally terminates in
         <= |order| decision groups; a cap cripples B=1 on large supports — measured 2x on s832).
 
-        Returns (fully_assigned, support_complete, rounds, free_after_support):
-          fully_assigned     : active AND no free var -> a guaranteed full model.
-          support_complete   : active AND no free *support* var -> support projection fixed.
+        Returns (n_fully, n_support_complete, rounds, free_after_support):
+          n_fully            : rows that are active AND have no free var -> guaranteed models.
+                               The row selection stays on the GPU in engine slot 0 (slot 1 holds
+                               the support-complete selection); read it out with the engine's
+                               selection accessors, no (K,) mask ever crosses the bus.
           free_after_support : always 0.0 (unmeasurable mid-trajectory in the fused path).
         """
         eng = self.engine
@@ -274,14 +278,13 @@ class GPUSampler:
                                  device=self.device).item())
         rounds = eng.run_trajectory(order, n_support, B, seed,
                                     soft=(lookahead in ("soft", "fsoft")))
-        # Completion checks straight off the assignment BITMAP (one bitwise pass over the
-        # words; the former (K, N) free-mask materialization cost ~16x its bytes in strided
-        # sector RMWs and dragged the big-K instances ~15-25%).
+        # Completion checks straight off the assignment BITMAP (one bitwise pass over the words
+        # inside the engine; only the COUNT crosses the bus). The former (K, N) free-mask
+        # materialization cost ~16x its bytes in strided sector RMWs.
         pm_all, pm_sup = self._pair_masks(support_mask)
-        fully = eng.active & ~eng.any_free(pm_all)
-        support_complete = (eng.active & ~eng.any_free(pm_sup)
-                            if support_mask is not None else eng.active)
-        return fully, support_complete, rounds, 0.0
+        n_fully = eng.select_complete(pm_all, slot=0)
+        n_sup = (eng.select_complete(pm_sup, slot=1) if support_mask is not None else n_fully)
+        return n_fully, n_sup, rounds, 0.0
 
     @torch.inference_mode()
     def _autotune(self, K, B_hint, max_rounds, support_mask, complete, lookahead, probe_k=2048):
@@ -301,8 +304,8 @@ class GPUSampler:
 
         def probe(rv, B):
             self._sync(); t0 = time.perf_counter()
-            fully, _, _, _ = self._run_chunk(pk, B, rv, max_rounds, support_mask, complete, lookahead)
-            n = int(fully.sum().item()); self._sync()
+            n, _, _, _ = self._run_chunk(pk, B, rv, max_rounds, support_mask, complete, lookahead)
+            self._sync()
             return n, time.perf_counter() - t0
 
         n0, dt0 = probe(True, B_hint)
@@ -434,7 +437,6 @@ class GPUSampler:
         are all original variables (the full model). Returns/caches the plan dict."""
         if getattr(self, "_proj_plan", None) is not None:
             return self._proj_plan
-        dev = self.device
         r = self._recon
         if r is not None and r.get("orig_support"):
             cols = list(r["orig_support"])                                 # 0-based support vars
@@ -481,30 +483,33 @@ class GPUSampler:
                     rgroup[i] = _group(("free", v0))
         self._proj_plan = {
             "cols_1based": [v0 + 1 for v0 in cols], "S": S, "n_groups": len(groups),
-            "gcol": torch.tensor(gcol, dtype=torch.long, device=dev),
-            "flip": torch.tensor(flip, dtype=torch.uint8, device=dev),
-            "const": torch.tensor(const, dtype=torch.uint8, device=dev),
-            "rgroup": torch.tensor(rgroup, dtype=torch.long, device=dev),
+            "gcol": np.asarray(gcol, dtype=np.int64),
+            "flip": np.asarray(flip, dtype=np.uint8),
+            "const": np.asarray(const, dtype=np.uint8),
+            "rgroup": np.asarray(rgroup, dtype=np.int64),
         }
         return self._proj_plan
 
     @torch.inference_mode()
-    def _project(self, fully: torch.Tensor) -> torch.Tensor:
-        """(n_done, S) uint8 support projection for the fully-assigned rows, via the cached plan.
-        Pure GPU tensor ops — the whole point is to avoid the per-row Python reconstruct."""
+    def _project(self, n: int, slot: int = 0):
+        """(n, S) uint8 support projection for the rows selected in `slot`, via the cached plan.
+
+        The only bytes that leave the device are the gathered support bits themselves (the
+        engine does the bit gather); the constant / polarity-flip / don't-care columns are
+        assembled here. No per-row Python reconstruct — that was the measured delivery
+        bottleneck — and no (K, N) mask."""
         plan = self._build_projection_plan()
-        n = int(fully.sum().item()) if fully.dtype == torch.bool else fully.numel()
-        dev = self.device
-        proj = plan["const"].unsqueeze(0).expand(n, -1).clone()  # (n, S) uint8
+        proj = np.broadcast_to(plan["const"], (n, plan["S"])).copy()   # (n, S) uint8
         g = plan["gcol"] >= 0
-        if bool(g.any()):
+        if g.any():
             # gather ONLY the needed var columns' TRUE bits straight from the bitmap
-            pos = self.engine.var_true_bits(fully, plan["gcol"][g])   # (n, |g|) uint8
+            pos = self.engine.var_bits(slot, plan["gcol"][g], n)       # (n, |g|) uint8
             proj[:, g] = pos ^ plan["flip"][g]
         rm = plan["rgroup"] >= 0
-        if plan["n_groups"] and bool(rm.any()):
+        if plan["n_groups"] and rm.any():
+            # torch RNG keeps the don't-care draw stream identical to the historical engine
             bits = torch.randint(0, 2, (n, plan["n_groups"]), generator=self._gen,
-                                 device=dev).to(torch.uint8)
+                                 device=self.device).to(torch.uint8).cpu().numpy()
             proj[:, rm] = bits[:, plan["rgroup"][rm]] ^ plan["flip"][rm]
         return proj
 
@@ -517,7 +522,6 @@ class GPUSampler:
         cols_1based lists the ORIGINAL variable id of each column. Sound: every row is a valid
         support projection (forced pinned, compacted vars from a real model, don't-cares free,
         ELS-equivalent vars kept equal via shared random groups)."""
-        import numpy as np
         rv, B, la = config[0], max(1, config[1]), (config[2] if len(config) > 2 else False)
         plan = self._build_projection_plan()
         support_mask = None
@@ -533,18 +537,16 @@ class GPUSampler:
             if max_chunks is not None and chunk >= max_chunks:
                 break
             chunk += 1
-            fully, _, _, _ = self._run_chunk(K, B, rv, max_decision_rounds,
-                                             support_mask, True, la)
-            n_done = int(fully.sum().item())
+            n_done, _, _, _ = self._run_chunk(K, B, rv, max_decision_rounds,
+                                              support_mask, True, la)
             if n_done == 0:
                 if chunk >= 3:                    # cold start + grace: instance is producing nothing
                     break
                 continue
             take = min(n_done, n_target - got)
-            mats.append(self._project(fully)[:take].cpu())
+            mats.append(self._project(n_done)[:take])
             got += take
-        M = (torch.cat(mats).numpy() if mats
-             else np.zeros((0, plan["S"]), dtype=np.uint8))
+        M = (np.concatenate(mats) if mats else np.zeros((0, plan["S"]), dtype=np.uint8))
         return M, plan["cols_1based"]
 
     # ----------------------------------------------------------------- public
@@ -709,14 +711,13 @@ class GPUSampler:
                     p_before = self.engine.props_total()
                     d_before = self.engine.decs_total()
                     t_cfg = time.perf_counter()
-                fully, sup_complete, rounds, free_after = self._run_chunk(
+                n_done, n_sup, rounds, free_after = self._run_chunk(
                     K_c, B_c, rv_c, max_decision_rounds, support_mask, complete, la_c)
                 rounds_hist.append(rounds)
                 free_after_hist.append(free_after)
                 attempts += K_c
-                n_done = int(fully.sum().item())
                 n_models += n_done
-                n_support_complete += int(sup_complete.sum().item())
+                n_support_complete += n_sup
                 cfg_stats[cfg]["models"] += n_done
                 cfg_stats[cfg]["attempts"] += K_c
                 cfg_stats[cfg]["chunks"] += 1
@@ -728,22 +729,20 @@ class GPUSampler:
                     # GPU soundness (cheap): for a FULLY-assigned row, non-falsified ⟺ TRUE, so
                     # "every clause has sat_count > 0" ⟺ "every clause has a TRUE literal" ⟺ satisfied.
                     # (Holds ONLY at a complete assignment — sat_count>0 on a PARTIAL assignment just
-                    # means "not yet violated". We gate on `fully`, so it's valid.) Redundant with
-                    # `active` (cleared the instant a clause hits 0); CPU `_satisfies()` is the real check.
-                    # Capped to 4096 rows AND read in bounded slices: the (rows, M) int32 temp is
-                    # kept under _SOUND_SLICE_BYTES — the old single 4096×M slice reached ~3.3 GB
-                    # on b05-c50 and forced the K budget to keep silent headroom for it.
-                    idx = fully.nonzero().view(-1)[:4096]
-                    step = max(64, int(self._SOUND_SLICE_BYTES // max(4 * self.M, 1)))
-                    for s0 in range(0, idx.numel(), step):
-                        sat_rows = self.engine.sat_rows(idx[s0:s0 + step])
-                        if not bool((sat_rows > 0).all()):
-                            gpu_unsound += int((sat_rows <= 0).any(dim=1).sum().item())
+                    # means "not yet violated". We gate on the completed selection, so it's valid.)
+                    # Redundant with `active` (cleared the instant a clause hits 0); CPU
+                    # `_satisfies()` is the real check. Evaluated entirely on device (one flag per
+                    # row): the old path shipped a (rows, M) int32 slice to the host, which on
+                    # b05-c50 reached ~3.3 GB and forced the K budget to keep silent headroom.
+                    gpu_unsound += self.engine.check_sound(slot=0, max_rows=4096)
                 if n_done and keep_rows:
-                    asg = self.engine.assignment_rows(fully)    # (n_done, 2N) int8 copy
-                    pos = asg[:, 0::2] == 1                      # (n_done, N) bool, var v TRUE
-                    vidx = torch.arange(1, self.N + 1, device=self.device)
-                    comp_rows = torch.where(pos, vidx, -vidx).to(torch.int32).cpu().tolist()
+                    # Gather just the variables' TRUE bits — (n, N), half of what the full
+                    # (n, 2N) assignment would cost, and no polarity slice on the host.
+                    if getattr(self, "_all_vars", None) is None:
+                        self._all_vars = np.arange(self.N, dtype=np.int32)
+                    pos = self.engine.var_bits(0, self._all_vars, n_done)   # (n_done, N) uint8
+                    vidx = np.arange(1, self.N + 1, dtype=np.int32)
+                    comp_rows = np.where(pos, vidx, -vidx).tolist()
                     if self._recon is not None and not self._recon.get("unsat"):
                         # reconstruct full ORIGINAL models (forced pinned, don't-cares randomized)
                         out_rows, projs = self._reconstruct(comp_rows)
@@ -874,7 +873,6 @@ def simplify_cnf(nv: int, clauses: list, support: list | None):
     support projections is unchanged, provided forced support vars are pinned to their forced value
     and free_support vars are randomized. Validated by tests/test_sampler.py.
     """
-    import numpy as np
     from itertools import chain
     from gpap.sampling.preprocess import unit_closure
     out, assigned, status = unit_closure(clauses, [])   # reads only — no defensive copy needed

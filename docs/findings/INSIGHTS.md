@@ -2,11 +2,43 @@
 
 One-paragraph summaries of every settled (measured, often multi-day) result in this project.
 Code that produced a **negative** result may be deleted; the insight lives here. Deep write-ups:
-[GPU_SAMPLING_FINDINGS.md](GPU_SAMPLING_FINDINGS.md), [ELS_INPROCESSING_FINDINGS.md](ELS_INPROCESSING_FINDINGS.md).
+[GPU_SAMPLING_FINDINGS.md](GPU_SAMPLING_FINDINGS.md), [ELS_INPROCESSING_FINDINGS.md](ELS_INPROCESSING_FINDINGS.md),
+[CPP_BACKEND_FINDINGS.md](CPP_BACKEND_FINDINGS.md).
 Do **not** re-litigate these without new evidence (a new GPU class or a new regime counts;
 "maybe it'll work this time" does not).
 
 ## Engine & memory model
+
+**The engine became a C++ library (libgpap) shared by Python and C++; performance is a TIE
+(2026-07-28).** The kernels were NOT rewritten — Triton AOT-compiles `kernels.py` unmodified,
+and the AOT cubin is bit-identical to the JIT one at SASS level (55,008 B, REG:80, clean
+`nvdisasm` diff), so the port could not change behaviour by construction. Measured, interleaved,
+identical model sets: geomean **1.013×** over b03/b04/b06/b10/b12. Python is not on the critical
+path either — 79-86% of a chunk is the fused kernel, the Triton launch costs 22-41 µs (≤0.07%),
+and the residual ~6% "host gap" is WSL2 submit/completion latency that a bare `matmul` shows too.
+Toolchain: no CUDA toolkit, no nvcc (triton bundles ptxas + `cuda.h`; runtime needs `libcuda`
+alone). RETRACTED en route: "owning the device memory is worth 1.2-1.35×" — that was a
+device-memory PLACEMENT effect (the same cubin on the same input runs 43-44 ms or 54-56 ms
+depending on where the 2 GB (K,M) buffer lands), it did not transfer to the core, and it would
+help either engine. State-arena follow-up in docs/plans/CPP_CORE_PLAN.md §8. Full write-up:
+[CPP_BACKEND_FINDINGS.md](CPP_BACKEND_FINDINGS.md).
+
+**Portability: AMD is a small port, Apple is a kernel reimplementation (2026-07-29).** MEASURED
+after the libgpap port: only **75 of 1273 lines** of the C++ core touch CUDA (formula.cpp is 0),
+and the whole host surface is **18 driver calls** (init/query/alloc/copy/module/launch), each with
+a 1:1 HIP counterpart. The kernels contain **zero** `shfl`/`ballot`/`__syncwarp`/`inline_asm` —
+the WAVE variant's cross-lane races are resolved by ATOMIC RETURN VALUES, not warp-synchronous
+execution, and `W=32` is a tile width, not a hardware requirement. The AOT builder is already
+backend-shaped (`make_backend(target)` + `backend.binary_ext`: cubin/hsaco/spv) — and triton 3.6
+ships the `amd` backend in the SAME wheel we build with, so **all 29 kernel specializations
+already cross-compile unmodified for gfx90a / gfx942 / gfx1100 (0 failures, measured on the
+NVIDIA box with no AMD hardware)**. ⇒ ROCm ≈ 1-2 weeks and NONE of it is kernel work (a HIP shim
+over the 18 calls, two builder assumptions — `int(arch)` and `threads = 32*num_warps` — and
+re-tuning the 30×-resident crossover for wavefront 64), Intel 2-4 weeks.
+**Apple has no Triton Metal backend**, so it needs a hand-written MSL (or WGSL) kernel layer —
+4-8 weeks AND a permanent second kernel source, the exact thing the port removed; plus the
+unified-memory model invalidates `compute_k_safe`/the spill story. Full analysis:
+[PORTABILITY.md](PORTABILITY.md).
 
 **K calibration = fixed 4×-floor multiple; runtime memory probes are unreliable (2026-06-30 →
 07-01).** The sampler's "mid-run RAM growth" that forced a small K was allocator FRAGMENTATION,
@@ -28,6 +60,21 @@ meaningless here; validate any K-sizing change with a real run under an nvidia-s
 max 105 W) under battery/whisper profiles, uniformly halving all rates. Check
 `nvidia-smi -q -d POWER` and SM clocks under load (>2.5 GHz boost) before trusting absolute
 numbers; A/B ratios within one state remain valid.
+
+**...and the clock moves WITHIN a run, so cross-run rates are not comparable at the few-percent
+level (2026-07-29).** Sampled every 3 s through a full `seq` sweep: SM clock **615-1710 MHz while
+>90% busy** (mean 1373), 2190 MHz between rows — a 2.8× spread on one box, one run, on AC. Not
+monotonic with draw either (1245 MHz @ 96 W vs 2190 MHz @ 39 W): occupancy and the shared
+CPU/GPU power budget both move it, so a row's clock depends on what ran before it. Re-running the
+seq family on the C++ core against the stored pre-port numbers gave stage geomeans of 0.955× /
+0.942× / 1.019× / 0.969× (92 paired rows, overall 0.969×) — straddling 1.0 with no consistent
+sign, while the engine PATH was identical on 91 of 92 rows (same split, same kernel variant, K
+within 2%). Three interleaved same-morning A/B rounds of the two engines on the same instances
+gave 1.079× / 1.003× / 1.033× with **identical model counts every time**, and b06 alone swung
+1.31× / 0.88× / 0.97× on identical work — one cell spanning the entire cross-run offset.
+Conclusion: use interleaved same-session A/Bs and model counts for verdicts; a before/after sweep
+on this box cannot resolve a few percent. Protocol: [BENCHMARKING.md §1b](../BENCHMARKING.md),
+gate G6 in [CPP_CORE_PLAN.md](../plans/CPP_CORE_PLAN.md).
 
 **The engine is packed-XOR-Triton-only; the PyTorch execution path was DELETED (2026-07-13).**
 Architecture-review decision: every path except the packed (sat|xor in one int32, SHIFT=16|8)
