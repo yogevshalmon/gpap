@@ -21,7 +21,7 @@ def _cmd_sample(args):
     import json
     import torch
     from gpap.sampling.metrics import format_uniformity
-    from gpap.sampling.pipeline import sample_file, CIRCUIT_PORTFOLIO, DEFAULT_PORTFOLIO
+    from gpap.sampling.pipeline import sample_file, describe_portfolio, portfolio as _portfolio
 
     if not torch.cuda.is_available():
         raise SystemExit("gpap sample requires CUDA + triton (the engine is packed-kernel-"
@@ -52,7 +52,12 @@ def _cmd_sample(args):
         print(f"  encoded in {encode_s:.1f}s [{args.encoder}"
               f"{'/' + args.abc_opt if args.encoder != 'tseitin' else ''}]")
         path = tmp
-    portfolio = CIRCUIT_PORTFOLIO if args.portfolio == "circuit" else DEFAULT_PORTFOLIO
+    portfolio = _portfolio(args.portfolio, allow_soft=args.allow_soft)
+    if args.allow_soft:
+        print("  [warn] --allow-soft: the soft risk-polarity config is in the portfolio. It\n"
+              "         raises success rate on tight circuits but is NOT uniform (Barbarik\n"
+              "         rejects it 5/5) — do not use these samples for a distribution claim.")
+    print(f"  portfolio [{args.portfolio}]: {describe_portfolio(portfolio)}")
     # Collect sample bits when an output file is requested (up to `-n` solutions, never more
     # than the --max-samples safety ceiling) — or when --sim-check needs rows to simulate.
     out_cap = min(args.n, args.max_samples) if (args.out or args.sim_check) else 0
@@ -316,6 +321,11 @@ def main(argv=None):
     s.add_argument("--n-cov", type=int, default=0, help="collect this many for quality/soundness")
     s.add_argument("--device", default=None)
     s.add_argument("--portfolio", choices=["circuit", "default"], default="circuit")
+    s.add_argument("--allow-soft", action="store_true",
+                   help="add the soft risk-polarity config to the bandit portfolio. Higher "
+                        "success on tight/deep circuits, but it BIASES the distribution "
+                        "(Barbarik rejects it 5/5) — opt in only when throughput matters and "
+                        "uniformity does not")
     s.add_argument("--no-simplify", action="store_true")
     s.add_argument("--els", action="store_true", help="equivalent-literal substitution (removes vars)")
     s.add_argument("--cycles", type=int, default=25,
@@ -371,6 +381,11 @@ def main(argv=None):
                    help="skip rows already in --output and append (re-run after an interruption)")
     b.add_argument("--tag", default=None, help="free-form label stored in the results JSON")
     b.add_argument("--portfolio", choices=["circuit", "default"], default="circuit")
+    b.add_argument("--allow-soft", action="store_true",
+                   help="add the soft risk-polarity config to the bandit portfolio. Higher "
+                        "success on tight/deep circuits, but it BIASES the distribution "
+                        "(Barbarik rejects it 5/5) — opt in only when throughput matters and "
+                        "uniformity does not")
     b.add_argument("--device", default=None)
     b.add_argument("--output", default=None)
     b.add_argument("--cycles", type=int, default=25,

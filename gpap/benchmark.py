@@ -277,6 +277,10 @@ def _build_argparser():
     ap.add_argument("--portfolio", choices=["circuit", "default"], default="circuit",
                     help="bandit config portfolio: 'circuit' (fused/fsoft — the CircuitSAT "
                          "focus, default) or 'default' (the sk_ projected-sampling portfolio)")
+    ap.add_argument("--allow-soft", action="store_true",
+                    help="add the soft risk-polarity config to the portfolio. Higher success on "
+                         "tight/deep circuits but NOT uniform (Barbarik rejects it 5/5) — never "
+                         "use for a distribution claim")
     ap.add_argument("--b", type=int, default=8,
                     help="decisions per round (8 is the throughput sweet spot: fewer rounds while "
                          "success barely drops; B>=16 over-constrains and collapses success)")
@@ -338,14 +342,14 @@ def main(argv=None):
     import numpy as np
     import torch
     from gpap.sampling.metrics import distinct_projections, format_uniformity, two_wise_coverage
-    from gpap.sampling.pipeline import CIRCUIT_PORTFOLIO, DEFAULT_PORTFOLIO, sample_file
+    from gpap.sampling.pipeline import describe_portfolio, portfolio as _portfolio, sample_file
 
     ap = _build_argparser()
     args = ap.parse_args(argv)
     device = (torch.device(args.device) if args.device
               else torch.device("cuda" if torch.cuda.is_available() else "cpu"))
     files = sorted(glob.glob(args.glob))
-    portfolio = CIRCUIT_PORTFOLIO if args.portfolio == "circuit" else DEFAULT_PORTFOLIO
+    portfolio = _portfolio(args.portfolio, allow_soft=args.allow_soft)
     if args.twise and args.n_cov == 0:
         args.n_cov = 2000                          # 2-wise needs the collected quality sample
     quality = args.n_cov > 0
@@ -405,6 +409,7 @@ def main(argv=None):
                 f"target={args.target}" if has_circuits else "")
     cms_note = ("no" if not args.cmsgen else
                 ("yes [patched: nowrite]" if cms_patched else "yes [STOCK: writes samples]"))
+    print(f"  portfolio [{args.portfolio}]: {describe_portfolio(portfolio)}")
     print(f"device={device} | simplify={args.simplify} | portfolio={args.portfolio} "
           f"| n_time={args.n_time:,} (limit {args.time_limit:g}s/inst) n_cov={args.n_cov:,} "
           f"| cmsgen={cms_note}{enc_note}\n{len(files)} benchmarks x {len(specs)} encoder(s)\n")

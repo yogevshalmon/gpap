@@ -828,7 +828,11 @@ class GPUSampler:
             out["config_policy"] = "adaptive" if adaptive else "static"
 
             def _lab(c):
-                return f"rv={c[0]},B={c[1]}" + (f",la={c[2]}" if c[2] else "")
+                # bool()/str() rather than the raw values: a config may be authored with the
+                # pipeline's VarOrder/Lookahead enums, whose repr would otherwise leak into the
+                # results-JSON KEYS ("rv=VarOrder.RANDOM,B=8") and break comparison against rows
+                # recorded before those enums existed.
+                return f"rv={bool(c[0])},B={c[1]}" + (f",la={str(c[2])}" if c[2] else "")
             out["config_breakdown"] = {
                 _lab(c): {
                     "models": s["models"], "attempts": s["attempts"], "chunks": s["chunks"],
