@@ -241,3 +241,48 @@ def test_simplify_dontcare_both_polarities():
     out = smp.sample(20_000, decisions_per_round=1, max_chunks=60, collect=True)
     vals = {(1 if (dc + 1) in set(m) else 0) for m in out["models"]}
     assert vals == {0, 1}, "don't-care support var was not sampled in both polarities"
+
+
+# --------------------------------------------------------------------- portfolio configs
+
+def test_portfolio_configs_are_tuple_compatible():
+    """The portfolios are `SamplingConfig` NamedTuples (self-describing enums) since 2026-07-30.
+    They must still BE the `(random_var, B, lookahead)` triples every consumer has always read,
+    or the refactor silently changed behaviour."""
+    from gpap.sampling.pipeline import (CIRCUIT_PORTFOLIO, DEFAULT_PORTFOLIO, Lookahead,
+                                        SOFT_CONFIG, SamplingConfig, VarOrder)
+    for c in (*CIRCUIT_PORTFOLIO, *DEFAULT_PORTFOLIO, SOFT_CONFIG):
+        assert isinstance(c, tuple) and len(c) == 3
+        assert bool(c[0]) is (c[0] is VarOrder.RANDOM)     # the kernel flag reads `if random_var:`
+        assert isinstance(c[1], int) and c[1] >= 1
+        # The sampler tests `lookahead in ("soft", "fsoft")`; everything else must be falsy.
+        assert (c[2] in ("soft", "fsoft")) == (c[2] is Lookahead.SOFT)
+        assert bool(c[2]) == (c[2] is Lookahead.SOFT)
+    assert SamplingConfig(VarOrder.STRUCTURED, 1) == (False, 1, Lookahead.NONE)
+    assert CIRCUIT_PORTFOLIO[0].describe() == "random order, B=8"
+    assert "soft-polarity" in SOFT_CONFIG.describe()
+
+
+def test_soft_is_not_in_any_default_portfolio():
+    """`soft` biases the distribution (Barbarik rejects it 5/5, docs/findings/
+    UNIFORMITY_FINDINGS.md), and the bandit selects on throughput with no uniformity term — so it
+    must never arrive without the caller asking for it."""
+    from gpap.sampling.pipeline import (CIRCUIT_PORTFOLIO, DEFAULT_PORTFOLIO, Lookahead,
+                                        SOFT_CONFIG, portfolio)
+    for name in ("circuit", "default"):
+        assert all(c[2] is Lookahead.NONE for c in portfolio(name)), \
+            f"{name} portfolio must be uniformity-safe by default"
+        assert SOFT_CONFIG in portfolio(name, allow_soft=True)
+    assert all(c[2] is Lookahead.NONE for c in (*CIRCUIT_PORTFOLIO, *DEFAULT_PORTFOLIO))
+
+
+@pytest.mark.skipif(not CUDA, reason="needs CUDA")
+def test_config_breakdown_keys_stay_legacy_formatted():
+    """The results-JSON config keys must not gain the enum repr — rows recorded before the enums
+    existed are compared against new ones."""
+    from gpap.sampling.pipeline import portfolio
+    smp = GPUSampler.from_clauses(4, [[1, 2], [-1, 3], [-2, -3], [2, 3, 4]], DEV, k_cap=256,
+                                  seed=1)
+    r = smp.sample(300, configs=portfolio("default"), collect=False, max_chunks=9)
+    for k in (r.get("config_breakdown") or {}):
+        assert k.startswith("rv=True,") or k.startswith("rv=False,"), k

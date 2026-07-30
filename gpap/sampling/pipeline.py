@@ -13,32 +13,106 @@ simplification and mining (what a CMSGen comparison must charge).
 """
 import sys
 import time
+from enum import Enum
+from typing import NamedTuple
 
 import torch
 
 from gpap.sampling.sampler import GPUSampler, parse_independent_support
 
-# Every config now runs the fused packed trajectory kernel at the boosted K_fused (the engine
-# is packed-kernel-only since 2026-07-13); a config is (random_var, B, lookahead) with
-# lookahead in {False, "soft"} — "soft" = the in-kernel ε-greedy risk-polarity.
-#
-# CIRCUIT portfolio (the default for circuit-unroll evaluation). Measured per-config on 22+
-# circuit instances (RTX 4080, 2026-07-02..04); each entry is the outright winner somewhere,
-# the adaptive bandit picks per instance:
-#   (True, 8, False)  — broad deep-circuit winner.
-#   (True, 1, False)  — B=1's success edge is free in-kernel: wins the conflict-heavy deep set.
-#   (True, 8, "soft") — soft risk-polarity: wins the tight-cascade family.
-# ("orac" — high-B on the retired PYTHON engine — was removed 2026-07-06 after 0/64 wins, and
-# the engine path it needed was deleted 2026-07-13.)
-CIRCUIT_PORTFOLIO = [(True, 8, False), (True, 1, False), (True, 8, "soft")]
+class VarOrder(int, Enum):
+    """Which unassigned variable each decision picks.
 
-# Default portfolio for projected sampling (the sk_ / CMSGen-comparison story):
-#   (True, 8, False)   — the classic niche config (BCP-determined support).
-#   (True, 1, False)   — the sk_ winner (B=1's success edge is free in-kernel).
-#   (False, 1, False)  — structured/index order for the search-heavy "service" family.
-# NOTE 2026-07-13: the (True,8) and (False,1) entries used to run the retired PyTorch v1 path;
-# they now run in-kernel — sk_-suite numbers published before this date predate that switch.
-DEFAULT_PORTFOLIO = [(True, 8, False), (True, 1, False), (False, 1, False)]
+    int-valued on purpose: a config IS the `(random_var, B, lookahead)` tuple the sampler has
+    always consumed, and the kernel path tests it with a plain `if random_var:`. An `int` mixin
+    keeps RANDOM truthy and STRUCTURED falsy, so nothing downstream has to learn about the enum.
+    """
+
+    RANDOM = 1        # uniform random free variable — CMSGen's Algorithm 1. Diverse; the default.
+    STRUCTURED = 0    # first free variable in index order (= the gate DAG order on a Tseitin CNF).
+    #                   Wins the search-heavy "service" family, where a random order keeps picking
+    #                   variables propagation would have implied anyway.
+
+
+class Lookahead(str, Enum):
+    """Polarity heuristic inside the fused trajectory kernel.
+
+    str-valued, and NONE is the EMPTY string so it stays falsy and compares unequal to "soft" —
+    the sampler normalises `lookahead in ("soft", "fsoft")` and treats everything else as off.
+    """
+
+    NONE = ""         # uniform random polarity. THE UNIFORMITY-SAFE CHOICE: Barbarik Accepts B=8
+    #                   and B=1 5/5 at the CMSGen paper's parameters.
+    SOFT = "soft"     # ε-greedy CONFLICT-RISK polarity: prefer the value less likely to conflict.
+    #                   Big success-rate win on the tight/deep circuit family (b03-c25: 10% -> 88%)
+    #                   — but it BIASES the distribution by construction, and Barbarik REJECTS it
+    #                   5/5 (in 156-936 samples, vs the 1,872 an Accept costs; exact-oracle TV
+    #                   median 0.694, max 0.907). See docs/findings/UNIFORMITY_FINDINGS.md.
+    #                   OPT-IN ONLY — never in a default portfolio.
+
+
+class SamplingConfig(NamedTuple):
+    """One portfolio entry: how a trajectory decides, and how many decisions it makes per
+    propagation round. Subclasses tuple, so it is accepted anywhere the old
+    `(random_var, B, lookahead)` triples were.
+
+    `decisions_per_round` (B) is both a throughput and a UNIFORMITY knob. At B >= |support| one
+    round assigns the whole support a uniform random polarity and, because GPAP DISCARDS
+    conflicted trajectories rather than backtracking, keeping the survivors is exact rejection
+    sampling — i.e. exactly uniform (measured; see UNIFORMITY_FINDINGS.md §3). Smaller B
+    interleaves propagation with the decisions and weights solutions by their attraction basin.
+    """
+
+    var_order: VarOrder
+    decisions_per_round: int
+    lookahead: Lookahead = Lookahead.NONE
+
+    def describe(self) -> str:
+        la = "" if self.lookahead is Lookahead.NONE else f", {self.lookahead.name.lower()}-polarity"
+        return f"{self.var_order.name.lower()} order, B={self.decisions_per_round}{la}"
+
+
+# CIRCUIT portfolio (circuit-unroll evaluation). Measured per-config on 22+ circuit instances
+# (RTX 4080, 2026-07-02..04); each entry is the outright winner somewhere and the adaptive bandit
+# picks per instance. ("orac" — high-B on the retired PYTHON engine — was removed 2026-07-06 after
+# 0/64 wins, and the engine path it needed was deleted 2026-07-13.)
+CIRCUIT_PORTFOLIO = [
+    SamplingConfig(VarOrder.RANDOM, 8),    # broad deep-circuit winner
+    SamplingConfig(VarOrder.RANDOM, 1),    # B=1's success edge is free in-kernel: wins the
+    #                                        conflict-heavy deep set
+]
+
+# Default portfolio for projected sampling (the sk_ / CMSGen-comparison story).
+# NOTE 2026-07-13: the (RANDOM,8) and (STRUCTURED,1) entries used to run the retired PyTorch v1
+# path; they now run in-kernel — sk_-suite numbers published before this date predate that switch.
+DEFAULT_PORTFOLIO = [
+    SamplingConfig(VarOrder.RANDOM, 8),        # the classic niche config (BCP-determined support)
+    SamplingConfig(VarOrder.RANDOM, 1),        # the sk_ winner
+    SamplingConfig(VarOrder.STRUCTURED, 1),    # the search-heavy "service" family
+]
+
+# OPT-IN ONLY (`--allow-soft`). Removed from CIRCUIT_PORTFOLIO 2026-07-30: the bandit selects on
+# models/second with NO uniformity term, so leaving soft in the default portfolio meant any
+# instance where it won silently emitted a Barbarik-REJECTED distribution. Nothing unsound — every
+# row is a real solution — but it is not what someone asking for a *sampler* expects. It stays
+# reachable because the regime-dependence rule stands: it is the right config for "many solutions
+# fast, distribution does not matter".
+SOFT_CONFIG = SamplingConfig(VarOrder.RANDOM, 8, Lookahead.SOFT)
+
+PORTFOLIOS = {"circuit": CIRCUIT_PORTFOLIO, "default": DEFAULT_PORTFOLIO}
+
+
+def portfolio(name: str = "default", allow_soft: bool = False) -> list:
+    """The named portfolio, optionally with the non-uniform soft-polarity config appended."""
+    if name not in PORTFOLIOS:
+        raise ValueError(f"unknown portfolio {name!r} (have: {', '.join(PORTFOLIOS)})")
+    return [*PORTFOLIOS[name], SOFT_CONFIG] if allow_soft else list(PORTFOLIOS[name])
+
+
+def describe_portfolio(configs) -> str:
+    """Human-readable one-line-per-config rendering, for CLI output and results metadata."""
+    return "; ".join(c.describe() if isinstance(c, SamplingConfig)
+                     else SamplingConfig(*c).describe() for c in configs)
 
 
 def _core_provenance() -> str:

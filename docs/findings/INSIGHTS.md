@@ -284,6 +284,96 @@ the bulk path got it 2026-07-03 (+ regression test). Any new engine entry point 
 and collapses success.** B=1's success edge is FREE in-kernel (fused configs), which is why
 B1-fused wins broadly.
 
+**B is also an EXACTNESS knob, and at B ≥ |support| the sampler is exactly uniform**
+(2026-07-30, `docs/findings/UNIFORMITY_FINDINGS.md`). One decision round assigns the whole
+support a uniform random polarity and GPAP DISCARDS conflicted trajectories instead of
+backtracking ⇒ keeping the survivors IS rejection sampling over the projection. Measured against
+exhaustively enumerated solution sets: TV drops to the exactly-uniform control's floor (0.039 vs
+the control's 0.040) once B reaches |support|. **CORRECTION 2026-07-30: `B ≥ |support|` is
+SUFFICIENT but is NOT a sharp threshold** — on circuits at |support| 18-20, B=16 (strictly below
+the support) is already at the floor 12/12, because the residual rounds decide only 2-4 vars and
+circuits have little within-support propagation. The sharp reading came from a CNF-dominated
+suite. Skew at small B is instance-specific, NOT monotone in |support|/B. On 24 instances generated
+with |support| 12-16 (i.e. STRICTLY above the default B=8, which is what makes a campaign
+informative — at B ≥ |support| the result is trivially uniform, so a small-support suite measures
+nothing): **B=16 and B=32 are ok 24/24, TV median 0.0392**, against 9/24 ok and TV median
+0.22-0.24 for B=8/B=1. CMSGen structurally cannot reach this limit — it is a CDCL solver
+and must backtrack, which is what makes its distribution basin-weighted (TV median 0.175 on the
+same files). Scope: needs propagation to CLOSE the formula from the support (Tseitin circuits,
+or support = all vars); on a general CNF whose `c ind` set doesn't BCP-close, B improves the skew
+but "exact" is not claimed. Cost is set by |support| not N ⇒ ~1.4× on 27.sk_3_32 and free on
+53.sk_4_32 (|sup|=32, N=1509/2586). **HARD LIMIT (measured): the mechanism IS rejection sampling,
+so yield = p_accept and it COLLAPSES when p_accept is tiny — GPAP produced 0/50 and 11/50 samples
+on Barbarik's kernel formulas at B≥|support|, i.e. the claim CANNOT be cross-validated by
+Barbarik (b8 Accepts 1,872 on the same two instances). The exactness evidence is the exact-oracle
+layer alone, and a `--uniform` mode pinning B≥|support| would be conditional on p_accept, not
+general.** NOTE this qualifies the throughput claim above: the
+"B≥16 collapses success" measurement was on the retired tensor path — in-kernel, yield was
+unchanged across B=1..2048 on those instances.
+
+**THE ADAPTIVE BANDIT IS THE PIPELINE'S UNIFORMITY COST** (2026-07-30, 600-instance circuit
+campaign = 10,800 sampler runs, ZERO unsound). The shipped pipeline is **2.8× worse in TV median
+than the `b8` config it contains** (0.113 vs 0.041). Isolated by restricting the portfolio to one
+config: full pipeline with [b8] only = TV 0.0420 ≡ raw b8 0.0422 ⇒ **simplify + mining + the
+projection path cost NOTHING** (they are model-preserving and it shows); the whole gap is the
+bandit, which **picked B=1 on 30/30 instances** because B=1 wins on throughput and B=1 is more
+skewed than B=8. Same failure mode as `soft`: the bandit optimises models/s with NO uniformity
+term. **But do NOT delete B=1** — unlike soft it is Barbarik-ACCEPTED (more skewed, not
+certifiably non-uniform) and it is worth 5-7× throughput on deep unrolls (interleaved A/B, B=8
+relative to B=1: b03-c25 **0.15×**, b06-c25 **0.18×**, vs b10-c25 1.33×, 27.sk 1.03×, 53.sk
+1.18×). Options ranked in the doc: surface the chosen config + caveat / a `--uniform` mode
+restricting to B≥8. Campaign totals: gpap:b8 ok 57% TV 0.041 (**GPAP-only skew 0/600**, CMSGen-only
+200), pipeline 45% / 0.113, CMSGen 24% / 0.102; controls 0/600 false positives, 600/600 power.
+
+**The |support| >> B regime (where real benchmarks live) is FINE — it gets BETTER, not worse**
+(2026-07-30). It cannot be probed directly (|S| grows exponentially with T, |support| only
+linearly ⇒ a large-support real unroll is exactly what enumeration can't reach: b01 T=6 →
+|sup|=12, |S|=480 enumerable; T=10 → |sup|=20, |S| past a 4,000 cap). Two proxies, both run:
+(a) synthetic circuits at |support| 18-20 (pin count scaled to input count) — **GPAP TV median
+0.0406 at EVERY B ∈ {1,2,4,8} (control floor 0.0399), 12/12 ok at B≥16; CMSGen 0.0766, only
+3/12 ok; GPAP-only skew = 0 at every B**. (b) Reach real ROUND counts by lowering B instead
+(rounds = |support|/B): B=1 at |sup|=13 gives 13 rounds ≈ a real unroll's ~25 → TV median 0.0394
+and 9/12 ok, IDENTICAL to B=8's 1.6 rounds. ⇒ round count alone does not drive circuit skew; 5 of
+12 instances carry nearly all of it and which ones is not predicted by |support|/B.
+
+**Uniformity vs CMSGen is REGIME-SPLIT — never quote the aggregate** (2026-07-30, same doc). On
+24 instances with |support| 12-16, TV median of the FULL shipped pipeline vs CMSGen:
+**circuit (support = primary inputs): 0.040 vs 0.087, ok 9/12 vs 4/12 — GPAP WINS, and 0.040 IS
+the exact-uniform control's floor** (indistinguishable from uniform). **cnf (support = every var
+of a dense random k-CNF): 0.441 vs 0.272, both 0/12 — GPAP LOSES.** The 0.298-vs-0.177 aggregate
+describes the generator mix, not either tool. Mechanism: skew comes from propagation AMONG SUPPORT
+variables — a Tseitin circuit propagates forward into gates and rarely forces one primary input
+from another, so support decisions stay near-independent; support=all-vars propagates constantly
+within the support (= attraction-basin weighting). ⇒ **the flagship projected-circuit regime is
+exactly where GPAP is uniform and CMSGen is not.** The pipeline TRACKS its raw config per family
+(0.441/0.446 cnf, 0.040/0.039 circuit): simplify+mining+bandit neither help nor hurt.
+
+**`soft` (risk-polarity) is NON-UNIFORM enough for Barbarik to REJECT it, 5/5.** Same doc.
+`gpap:b8`, `gpap:b1` and CMSGen all get Accept 5/5 at the CMSGen paper's own parameters
+(ε=0.3, η=1.8, δ=0.1 ⇒ 1,872 samples); `soft` is rejected in 156-936 samples. Exact-layer TV
+median 0.694 (max 0.907). Its original-instance TV UNDERSTATES the problem — cnf-028 reads TV
+0.136 yet is still rejected, because Barbarik samples the KERNEL formulas it builds and the bias
+is more extreme there. Consequence: the adaptive bandit selects configs on models/s with NO
+uniformity term, so an instance where `soft` wins silently emitted a Barbarik-rejected
+distribution (nothing UNSOUND — every row is a real solution).
+**ACTED ON 2026-07-30: `soft` REMOVED from CIRCUIT_PORTFOLIO, now opt-in via `--allow-soft`**
+(gpap sample/bench, prints a warning naming the trade; `pipeline.SOFT_CONFIG`). The lever stays
+(regime-dependence rule) — still right for "many solutions fast, distribution irrelevant" — but a
+throughput bandit can no longer choose it for someone who asked for a *sampler*.
+**COST IS LARGE ON THE CIRCUIT FLAGSHIP — profiled 2026-07-30 on all 19 seq benches, abc:fast,
+T=25, target rare, both portfolios back-to-back in one process, order alternated over 2 reps:
+geomean ratio new/base 0.410 ⇒ removing soft is 2.44× SLOWER** (median 0.788, so the loss is
+CONCENTRATED: soft won the bandit on 7/15 non-vacuous — b03 0.41×, b06 0.64×, s1196 0.55×,
+b13 0.28×, s832 0.14× — and 5 instances were untouched; the 4 vacuous ones ~1.00 as they must be).
+**Two are CAPABILITY losses, not slowdowns: b11 11,269 models → 0, b12 50,434 @ 10,997/s → 789 @
+27/s.** (b15 = 0 in both arms, pre-existing.) The "~1.3×" figure quoted earlier came from
+27.sk_3_32 alone — an sk_ projected instance, NOT the circuit regime soft exists for — and
+understated it badly. On the fuzz suite `--allow-soft` moves the pipeline's TV median 0.325→0.335
+and its MAX 0.489→0.776. `--allow-soft` restores the old behaviour exactly. Portfolios are now self-describing `SamplingConfig` NamedTuples over
+`VarOrder`/`Lookahead` enums — still tuple-compatible (gated, test_sampler.py). Watch the
+`config_breakdown` JSON keys: the enum repr leaked in as `rv=VarOrder.RANDOM,B=8` and would have
+broken comparison against pre-enum rows; fixed at the label with bool()/str().
+
 **Config value is REGIME-DEPENDENT — keep losing levers as bandit options, don't globally
 discard.** Soft (risk-polarity) lookahead BACKFIRES on the sk_ niche (sat_count is a
 non-falsified count, not a quality signal; a clause going 2→1 becomes a unit i.e. PROPAGATES —

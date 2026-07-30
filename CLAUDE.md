@@ -54,7 +54,9 @@ gpap/
     checker.py             # AssumptionChecker: the batched-assumptions API face
   sampling/                # THE FLAGSHIP
     sampler.py             # GPUSampler (trajectories, bandit, soft-stop) — engine consumer only
-    pipeline.py            # sample_file / sample_clauses: the full e2e flow + the two portfolios
+    pipeline.py            # sample_file / sample_clauses: the full e2e flow + the portfolios
+                           #   (VarOrder/Lookahead enums + SamplingConfig NamedTuple, so a config
+                           #   documents itself; `portfolio(name, allow_soft=)` is the accessor)
     miner.py               # entailed-clause mining (the lose-set killer)
     preprocess.py          # unit_closure / equivalent_literal_substitution (ELS) primitives
     metrics.py             # distinct/two-wise + UNIFORMITY (exact chi2/TV or collision l2_ratio)
@@ -69,7 +71,9 @@ gpap/
   benchmark.py             # the `gpap bench` suite driver (in-package so it works installed)
 eval/                      # the experiment layer: run_full_eval.sh (staged/resumable terminal
                            #   sweep) + eval_plots.py + rivals_{demotic,recurrent,hts}.py +
-                           #   rivals_setup.sh + barbarik_gpap.py + the cross-GPU Colab driver
+                           #   rivals_setup.sh + barbarik_gpap.py (CM_test, gpap|cmsgen under
+                           #   test) + fuzz_uniformity.py (exact-oracle uniformity fuzzing)
+                           #   + the cross-GPU Colab driver
 scripts/                   # shims (sample_benchmark -> gpap.benchmark), bench_to_cnf,
                            #   build_abc.sh, build_cmsgen.sh + cmsgen_gpap_eval.patch,
                            #   external_solver.py (PySAT utility, kept for future use)
@@ -198,8 +202,29 @@ observed⊆enumerated soundness cross-check — the sensitive test (catches TV=0
 when the space/formula defeats enumeration it falls back to the repeat-rate line with an
 honest "barbarik for certification" hint (`enum_status` capped/timeout/skipped-large).
 Certificates on big spaces = conditional sampling = Barbarik (`eval/barbarik_gpap.py`, GPAP
-hooked in-process, SPUR reference; Accept 2/2 so far). chi2 sf is native (`metrics._gammq`) —
-no scipy dep. **2-wise coverage** (CMSGen-paper spread metric, NOT uniformity) is opt-in via
+hooked in-process OR `--sampler cmsgen`, SPUR reference; defaults are the CMSGen paper's
+ε=0.3/η=1.8/δ=0.1 ⇒ 1,872 samples/instance, 38× cheaper than ε=0.1/η=0.9). chi2 sf is native
+(`metrics._gammq`) — no scipy dep.
+**Uniformity FUZZING against an exact oracle** (`eval/fuzz_uniformity.py`, 2026-07-30, full
+writeup `docs/findings/UNIFORMITY_FINDINGS.md`): generates small random CNFs / random Tseitin
+circuits whose solution set is enumerated EXHAUSTIVELY (solver-free oracle; the circuit generator
+proves its own encoding over the whole truth table), then runs GPAP and CMSGen on identical files
+with negative + positive **controls** (exact-uniform must not be flagged; a known TV must be —
+these calibrate the instrument, sensitivity floor TV≈0.05 at n=100|S|×3 seeds). Two settled
+results: **B ≥ |support| ⇒ exactly uniform** (rejection sampling, since GPAP discards conflicted
+trajectories) and **`soft` is Barbarik-REJECTED 5/5** while b8/b1/CMSGen are Accepted 5/5 — the
+bandit picks configs on models/s with no uniformity term, so `soft` winning was silent ⇒
+**`soft` was REMOVED from CIRCUIT_PORTFOLIO 2026-07-30 and is now opt-in via `--allow-soft`**
+(`gpap sample`/`gpap bench`; prints a warning; `pipeline.SOFT_CONFIG`).
+⚠️ **OPEN DECISION — the throughput price is BIG and is parked, not settled** (user, 2026-07-30:
+"that's a big loss, keep it for now, we'll think about it later"). Profiled on all 19 seq benches,
+abc:fast, T=25, target rare: **geomean 0.410 ⇒ 2.44× slower**, median 0.788 (loss is CONCENTRATED —
+soft won the bandit on 7/15 non-vacuous), and **two CAPABILITY losses: b11 11,269 models → 0,
+b12 50,434 @ 11k/s → 789 @ 27/s**. Re-measure with `eval/profile_soft_portfolio.py` (encodes once,
+runs both portfolios in one process, alternates arm order — clock drift makes any other method
+meaningless). Sketched middle path, NOT implemented: let the bandit fall back to soft only when
+every uniformity-safe config yields ~nothing (exactly the b11/b12 signature). Gated by
+`tests/test_uniformity_fuzz.py` (<1 s; soundness at every B + the B≥|support| property). **2-wise coverage** (CMSGen-paper spread metric, NOT uniformity) is opt-in via
 `gpap bench --twise` (auto-bumps n_cov to 2000) and vectorised (one matmul; the old O(S²·n)
 pair loop dominated the quality pass).
 Sample output = compact support projections (1 bit/support var; GPU-projected so only the bit
@@ -259,7 +284,10 @@ Cross-GPU K-scaling: `eval/colab_sampling_benchmark.py` + `notebooks/gpap_colab_
 - This box SPILLS to host RAM (never OOMs) → validate every K change under the nvidia-smi
   kill-switch; check the power state first (a 40 W cap / battery clocks ~halve every rate).
 - `mono` kernel (0.93× vs wide), `orac` circuit config (0/64 wins), full/soft global lookahead:
-  measured out — soft stays a per-instance bandit option (regime-dependent), never a global default.
+  measured out. **soft is now OPT-IN (`--allow-soft`), not a default portfolio member** — it is
+  Barbarik-rejected 5/5 (2026-07-30), so a throughput bandit must not be able to choose it for a
+  user who asked for a sampler. It stays reachable: regime-dependence rule, it still wins
+  tight/deep circuits on success rate.
 - `--n-time` is a delivery contract; safety valves are `--time-limit` + the zero-progress stop.
 - **VACUOUS-PIN instances**: at T=25 the last-cycle outputs of `b02`, `b05`, `b07`, `s526` are
   CONSTANT for every input sequence ⇒ pinning them is a tautology and "sampling" is a free
