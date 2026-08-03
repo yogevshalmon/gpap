@@ -112,3 +112,17 @@ cpp/src/generated/
 
 # libgpap installed into the package by scripts/build_core.sh --install
 gpap/lib/
+
+# LaTeX build artifacts (the .tex is the source; the built .pdf is kept)
+docs/slides/*.aux
+docs/slides/*.log
+docs/slides/*.nav
+docs/slides/*.snm
+docs/slides/*.out
+docs/slides/*.toc
+docs/slides/*.vrb
+docs/slides/*.fls
+docs/slides/*.fdb_latexmk
+docs/slides/*.synctex.gz
+docs/slides/*.bbl
+docs/slides/*.blg

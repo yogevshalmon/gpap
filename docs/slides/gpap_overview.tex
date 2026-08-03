@@ -1,0 +1,691 @@
+% ---------------------------------------------------------------------------
+%  GPAP -- project status deck, told as the paper we are about to write.
+%  Visual-first: every architectural idea is a TikZ figure; text is captions.
+%  Compile:  pdflatex gpap_overview.tex   (twice, for the TOC/nav)
+%  Deps: base beamer + booktabs + tikz (positioning, arrows.meta). Nothing exotic.
+% ---------------------------------------------------------------------------
+\documentclass[aspectratio=169,11pt]{beamer}
+
+\usetheme{Boadilla}
+\usecolortheme{whale}
+\setbeamertemplate{navigation symbols}{}
+\setbeamerfont{frametitle}{size=\large}
+\setbeamertemplate{itemize items}[circle]
+
+\usepackage[T1]{fontenc}
+\usepackage[utf8]{inputenc}
+\usepackage{amsmath,amssymb}
+\usepackage{booktabs}
+\usepackage{xcolor}
+\usepackage{tikz}
+\usetikzlibrary{positioning,arrows.meta}
+
+\definecolor{gpapblue}{RGB}{31,78,121}
+\definecolor{gpapred}{RGB}{170,40,40}
+\definecolor{gpapgreen}{RGB}{20,110,70}
+\definecolor{gpapgray}{RGB}{115,115,115}
+\definecolor{gpapamber}{RGB}{180,120,20}
+
+\newcommand{\good}[1]{\textcolor{gpapgreen}{#1}}
+\newcommand{\bad}[1]{\textcolor{gpapred}{#1}}
+\newcommand{\rem}[1]{{\footnotesize\textcolor{gpapgray}{#1}}}
+\newcommand{\NC}{\textsc{NobleCount}}
+\newcommand{\GPAP}{\textsc{Gpap}}
+\newcommand{\keyw}[1]{\textcolor{gpapblue}{\textbf{#1}}}
+
+\tikzset{
+  bx/.style  = {draw, rounded corners, align=center, minimum height=0.85cm, fill=gpapblue!8,  font=\small},
+  bxg/.style = {draw, rounded corners, align=center, minimum height=0.85cm, fill=gpapgreen!12, font=\small},
+  bxr/.style = {draw, rounded corners, align=center, minimum height=0.85cm, fill=gpapred!10,  font=\small},
+  bxn/.style = {draw, rounded corners, align=center, minimum height=0.85cm, fill=black!4,     font=\small},
+  ar/.style  = {-{Latex[length=2mm]}, thick, gpapgray},
+}
+
+\title[GPAP]{From \NC{} to the GPU}
+\subtitle{A $K$-parallel BCP primitive, and guaranteed-valid SAT solution sampling}
+\author[Y. Shalmon]{Yogev Shalmon}
+\institute[Technion]{Technion --- Faculty of Data and Decision Sciences}
+\date[\today]{Project status --- \today}
+
+\begin{document}
+
+% == 1 =======================================================================
+\begin{frame}[plain]
+  \titlepage
+\end{frame}
+
+% == 2 =======================================================================
+\begin{frame}{The story}
+  \begin{center}
+  \begin{tikzpicture}[font=\small]
+    \node[bxn, text width=3.0cm] (a) at (0,0)    {\NC\\ \scriptsize FMCAD'26};
+    \node[bx,  text width=3.0cm] (b) at (3.9,0)  {\textbf{\GPAP{} engine}\\ \scriptsize $K$-parallel BCP};
+    \node[bxg, text width=3.0cm] (c) at (7.8,0)  {\textbf{Sampling}\\ \scriptsize the flagship app};
+    \node[bxg, text width=3.0cm] (d) at (11.7,0) {\textbf{Uniformity}\\ \scriptsize measured, not claimed};
+    \draw[ar] (a)--(b); \draw[ar] (b)--(c); \draw[ar] (c)--(d);
+
+    \node[font=\scriptsize, text width=3.3cm, align=center, gpapgray, below=4mm of a]
+      {no clause scans,\\ one assignment, one core};
+    \node[font=\scriptsize, text width=3.3cm, align=center, gpapgray, below=4mm of b]
+      {count $+$ \emph{sum},\\ one assignment per warp};
+    \node[font=\scriptsize, text width=3.3cm, align=center, gpapgray, below=4mm of c]
+      {every sample is a real\\ solution, by construction};
+    \node[font=\scriptsize, text width=3.3cm, align=center, gpapgray, below=4mm of d]
+      {exact oracle,\\ turned on ourselves};
+  \end{tikzpicture}
+  \end{center}
+  \vspace{1.2em}
+  \begin{center}
+  \rem{The data structure is the thread: what removed clause scans from a CPU flip is what makes
+  the GPU update race-free.}
+  \end{center}
+\end{frame}
+
+% == 3 =======================================================================
+\begin{frame}{Where this starts: \NC{} (FMCAD'26)}
+  \begin{columns}[T]
+    \begin{column}{0.53\textwidth}
+      \centering
+      \begin{tikzpicture}[font=\small]
+        \draw[fill=black!3] (0,2.2) rectangle (6.4,2.9);
+        \node[gpapred]   at (1.2,2.55) {$\ell_1$};
+        \node[gpapgreen] at (3.2,2.55) {$\ell_2$};
+        \node[gpapred]   at (5.2,2.55) {$\ell_3$};
+        \node[font=\scriptsize,gpapgray,anchor=west] at (0,3.3)
+          {a clause, \good{one} literal currently true};
+
+        \draw[ar] (3.2,2.15) -- (3.2,1.55);
+
+        \draw[fill=gpapgreen!14] (0.4,0.8) rectangle (2.9,1.5);
+        \draw[fill=gpapblue!12]  (2.9,0.8) rectangle (6.0,1.5);
+        \node at (1.65,1.15) {count $=1$};
+        \node at (4.45,1.15) {key $=\mathrm{int}(\ell_2)$};
+        \node[font=\scriptsize,gpapgray,anchor=west] at (0.4,0.45)
+          {two fields per clause, updated branch-free on every flip};
+
+        \node[bxg,text width=5.8cm,font=\small] at (3.2,-0.6)
+          {count $=1$ $\Rightarrow$ the key \keyw{is} the surviving literal\\
+           \scriptsize $\Rightarrow$ \textbf{no clause scan, ever}};
+      \end{tikzpicture}
+    \end{column}
+    \begin{column}{0.44\textwidth}
+      \small
+      Dropped into ProbCCAnr, the SOTA local-search solver.
+      \keyw{No heuristic changes, no re-tuning.}
+      \\[0.6em]
+      New state of the art on \textbf{FCC} (PAR2 $\bad{-24.8\%}$) \emph{and} \textbf{SC22}.
+      \\[0.2em]
+      \rem{A data-structure win, orthogonal to heuristic design.}
+      \\[0.8em]
+      \begin{block}{\small Its own closing sentence}
+        \footnotesize
+        ``\ldots{} making it \keyw{a promising candidate for parallel clause-state maintenance in
+        SIMD- or GPU-based implementations}.''
+      \end{block}
+    \end{column}
+  \end{columns}
+\end{frame}
+
+% == 4 =======================================================================
+\begin{frame}{Same idea, different question}
+  \begin{center}
+  \resizebox{\textwidth}{!}{%
+  \begin{tikzpicture}[font=\small]
+    \node[bxn,text width=4.8cm,minimum height=2.4cm] (l) at (0,0)
+      {\textbf{Local search}\\[0.3em]
+       complete assignment\\ count \emph{satisfied} literals\\[0.3em]
+       \emph{which literal still satisfies it?}};
+    \node[bx,text width=4.8cm,minimum height=2.4cm] (r) at (6.8,0)
+      {\textbf{BCP}\\[0.3em]
+       partial assignment\\ count \emph{non-falsified} literals\\[0.3em]
+       \emph{unit (which literal?) or empty?}};
+    \draw[ar] (l)--(r);
+    \node[bxg,text width=4.6cm,minimum height=2.4cm] (k) at (12.4,0)
+      {\keyw{$\times\,K$}\\[0.3em] independent assignments\\ propagated at once\\[0.3em]
+       \emph{one per GPU warp}};
+    \draw[ar] (r)--(k);
+  \end{tikzpicture}}
+  \end{center}
+  \vspace{0.8em}
+  \begin{block}{The primitive, in one line}
+    \keyw{Negated occurrence lists}: setting $\ell$ true falsifies $\lnot\ell$ in \emph{exactly}
+    the clauses of $\mathrm{occ}[\ell]$ --- a decision touches only what it can affect.
+  \end{block}
+\end{frame}
+
+% == 5 =======================================================================
+\begin{frame}{One word per clause --- and the update is its own detector}
+  \begin{center}
+  \begin{tikzpicture}[font=\small]
+    % --- packed word
+    \draw[fill=gpapblue!12]  (0,1.9)  rectangle (7.0,2.6);
+    \draw[fill=gpapgreen!14] (7.0,1.9) rectangle (10.4,2.6);
+    \node at (3.5,2.25) {$\sum$ surviving literal indices $(\bmod\ 2^{F})$};
+    \node at (8.7,2.25) {\texttt{sat\_count}};
+    \node[font=\scriptsize,gpapgray,anchor=south west] at (0,2.65) {bit 31};
+    \node[font=\scriptsize,gpapgray,anchor=south east] at (10.4,2.65) {bit 0};
+
+    % --- the update
+    \draw[ar] (2.6,1.85) -- (2.6,0.5);
+    \node[bxn,text width=5.6cm,font=\small,minimum height=1.0cm] (upd) at (2.6,-0.10)
+      {falsifying $\lnot\ell$ is \keyw{one subtraction},\\ hence \keyw{one \texttt{atomic\_add}}:\\[0.2em]
+       \texttt{st} $\mathrel{-}=\ 1 + (\lnot\ell \ll \mathrm{SHIFT})$};
+
+    % --- the fan
+    \node[bxr,text width=4.2cm,minimum height=0.7cm] (o1) at (9.0,0.95)  {old count $=1$: \bad{conflict}};
+    \node[bxg,text width=4.2cm,minimum height=0.95cm] (o2) at (9.0,-0.10)
+      {old count $=2$: \good{unit},\\ forced literal $=$ old sum $-\ \lnot\ell$};
+    \node[bxn,text width=4.2cm,minimum height=0.7cm] (o3) at (9.0,-1.15) {otherwise: nothing to do};
+    \draw[ar] (upd.east) -- (o1.west);
+    \draw[ar] (upd.east) -- (o2.west);
+    \draw[ar] (upd.east) -- (o3.west);
+    \node[font=\scriptsize,gpapblue,anchor=south,fill=white,inner sep=1pt] at (6.4,1.55)
+      {\textbf{the returned OLD word is the whole detection logic}};
+  \end{tikzpicture}
+  \end{center}
+  \vspace{0.4em}
+  \centering
+  \rem{The \keyw{assignment} is the same trick: a bitmap where $\ell$ and $\lnot\ell$ share a word,
+  so one \texttt{atomic\_or} returns duplicate \emph{and} contradiction together.
+  \\ On a CPU, XOR and sum are equivalent --- \NC{} used XOR. On a GPU they are not: the sum makes
+  the update an atomic whose \emph{return value} resolves every race --- no locks, no
+  \texttt{shfl}/\texttt{ballot}.}
+\end{frame}
+
+% == 6 =======================================================================
+\begin{frame}{The architecture: one assignment per warp}
+  \begin{center}
+  \begin{tikzpicture}[font=\scriptsize]
+    % ---- state rows
+    \node[font=\small,anchor=south] at (1.7,2.5) {state: $K$ independent rows};
+    \node[font=\scriptsize,gpapgray,anchor=south] at (1.7,2.15) {clause words $(M)$ $+$ assignment bits $(2N)$};
+    \foreach \y in {1.65, 1.25, 0.85, 0.45} {
+      \draw[fill=gpapblue!12] (0,\y) rectangle (3.4,\y+0.3);
+    }
+    \node at (1.7,0.2) {$\vdots$};
+    \draw[fill=gpapblue!12] (0,-0.35) rectangle (3.4,-0.05);
+
+    \foreach \y in {1.8, 1.4, 1.0, 0.6, -0.2} {
+      \draw[ar] (3.55,\y) -- (4.25,\y);
+      \draw[fill=black!6] (4.35,\y-0.15) rectangle (5.45,\y+0.15);
+      \node[font=\tiny] at (4.9,\y) {warp};
+    }
+    \node[font=\scriptsize,gpapgreen,align=center,text width=3.4cm,anchor=north] at (2.7,-0.75)
+      {a row is program-private\\ $\Rightarrow$ \textbf{no cross-row races}};
+
+    % ---- SCALAR panel
+    \node[font=\small,gpapblue,anchor=west] at (6.6,2.35) {\textbf{SCALAR} --- small formulas, huge $K$};
+    \foreach \i in {0,...,15} {
+      \draw[fill=black!8] (6.7+\i*0.26,1.72) rectangle (6.92+\i*0.26,1.96);
+      \draw[fill=black!8] (6.7+\i*0.26,1.42) rectangle (6.92+\i*0.26,1.66);
+    }
+    \draw[fill=gpapblue!80] (6.7,1.72) rectangle (6.92,1.96);
+    \node[font=\scriptsize,align=left,text width=6.4cm,anchor=north west] at (6.6,1.28)
+      {1 lane walks $\mathrm{occ}[\ell]$, 31 idle --- \good{no atomics needed}: thousands of rows
+       already saturate DRAM.};
+
+    % ---- WAVE panel
+    \node[font=\small,gpapgreen,anchor=west] at (6.6,0.25) {\textbf{WAVE} --- large formulas, $K$-starved};
+    \foreach \i in {0,...,15} {
+      \draw[fill=gpapgreen!60] (6.7+\i*0.26,-0.38) rectangle (6.92+\i*0.26,-0.14);
+      \draw[fill=gpapgreen!60] (6.7+\i*0.26,-0.68) rectangle (6.92+\i*0.26,-0.44);
+    }
+    \node[font=\scriptsize,align=left,text width=6.4cm,anchor=north west] at (6.6,-0.82)
+      {32 clause updates in flight \emph{inside one assignment}; the atomics resolve the lane races.};
+
+    % ---- the dispatch rule
+    \node[bxn,font=\small,anchor=north,inner xsep=8mm] at (6.2,-1.85)
+      {\keyw{Auto-dispatch}: \ WAVE while $K < 30\times$ the GPU's resident warps, \ scalar beyond it};
+  \end{tikzpicture}
+  \end{center}
+  \centering
+  \rem{VRAM caps $K$ at hundreds of rows on big formulas, so each row is latency-starved --- that
+  is what the extra lanes are for. Both variants share the state and give the same results.}
+\end{frame}
+
+% == 7 =======================================================================
+\begin{frame}{The tool}
+  \begin{center}
+  \begin{tikzpicture}[font=\small]
+    \draw[fill=black!4,rounded corners]      (0,0)    rectangle (12.4,0.6);
+    \node at (6.2,0.3) {NVIDIA driver \ (\texttt{libcuda})};
+
+    \draw[fill=gpapamber!18,rounded corners] (0,0.8)  rectangle (12.4,1.4);
+    \node at (6.2,1.1) {Triton kernels \ $\rightarrow$ \ \textbf{AOT cubins} \ (29 specializations)};
+
+    \draw[fill=gpapblue!14,rounded corners]  (0,1.6)  rectangle (12.4,2.6);
+    \node[font=\small] at (6.2,2.33) {\textbf{\texttt{libgpap}} --- the C++ core};
+    \node[font=\scriptsize] at (6.2,1.88)
+      {formula $+$ occ CSR \ $\cdot$ \ engine state \ $\cdot$ \ readout \ $\cdot$ \ $K$ calibration \ $\cdot$ \ launches};
+
+    \draw[fill=gpapblue!8,rounded corners]   (0,2.8)  rectangle (12.4,3.35);
+    \node[font=\small] at (6.2,3.08) {\textbf{C ABI} \ \texttt{gpap.h}};
+
+    \draw[fill=gpapgreen!12,rounded corners] (0,3.55)   rectangle (6.0,4.4);
+    \node[font=\scriptsize,align=center] at (3.0,3.98)
+      {\textbf{C++} \ \texttt{gpap.hpp}\\ \texttt{Sampler} / \texttt{AssumptionChecker}};
+    \draw[fill=gpapgreen!12,rounded corners] (6.4,3.55) rectangle (12.4,4.4);
+    \node[font=\scriptsize,align=center] at (9.4,3.98)
+      {\textbf{Python} (\texttt{ctypes}) \ \texttt{gpap.engine}\\ \texttt{BCPEngine} / \texttt{AssumptionChecker}};
+
+    \draw[fill=gpapgreen!22,rounded corners] (6.4,4.6)  rectangle (12.4,5.45);
+    \node[font=\scriptsize,align=center] at (9.4,5.03)
+      {\texttt{gpap.sampling} \ $\cdot$ \ \texttt{gpap.circuits}\\ CLI \ $\cdot$ \ \texttt{eval/}};
+
+    \draw[ar] (3.0,3.4) -- (3.0,3.5);
+    \draw[ar] (9.4,3.4) -- (9.4,3.5);
+    \draw[ar] (9.4,4.45) -- (9.4,4.55);
+  \end{tikzpicture}
+  \end{center}
+  \vspace{0.4em}
+  \centering
+  \rem{\keyw{One implementation}: both faces link the same library, so there is no second engine to
+  drift. The build needs no CUDA toolkit and no \texttt{nvcc}; the runtime needs \texttt{libcuda}
+  alone.}
+\end{frame}
+
+% == 8 =======================================================================
+\begin{frame}{The engine, in features}
+  \begin{columns}[T]
+    \begin{column}{0.48\textwidth}
+      \begin{itemize}\small
+        \item one packed \texttt{int32} per clause --- update is a single atomic
+        \item assignment as a bitmap --- one atomic gives dedup \emph{and} contradiction
+        \item two propagate kernels, \keyw{auto-dispatched} per formula
+        \item the whole decide$+$propagate trajectory \keyw{fused into one launch}
+      \end{itemize}
+    \end{column}
+    \begin{column}{0.48\textwidth}
+      \begin{itemize}\small
+        \item $K$ sized analytically from free VRAM; unit-flush cached at construction
+        \item readout stays \keyw{on device} --- only counts and projections cross the bus
+        \item two packed splits chosen per formula; out-of-envelope formulas rejected, never
+          silently degraded
+      \end{itemize}
+    \end{column}
+  \end{columns}
+  \vspace{0.6em}
+  \begin{block}{Bottom line}
+    \centering
+    \good{\textbf{Up to $5.7\times$ end-to-end}} over the pre-WAVE engine --- with
+    \keyw{bit-identical model sets} at every step.
+  \end{block}
+  \rem{Negative results, kept because they cost weeks: classic \textbf{2-watched-literals on GPU
+  is $1.8$--$2.6\times$ slower} than \NC-style counting, on ${\sim}5\times$ the per-row state;
+  1-byte clause state, clause renumbering and multi-warp tiles all measured out.}
+\end{frame}
+
+% == 9 =======================================================================
+\begin{frame}{What is a $K$-parallel BCP primitive good for?}
+  \begin{center}
+  \resizebox{\textwidth}{!}{%
+  \begin{tikzpicture}[font=\small]
+    \node[bx,text width=3.0cm,minimum height=1.3cm] (e) at (0,0)
+      {\textbf{\GPAP{} engine}\\ \scriptsize $K$ independent\\ \scriptsize assumption sets};
+
+    \node[bxg,text width=4.4cm,minimum height=1.1cm] (s) at (5.8,1.7)
+      {\keyw{Solution sampling} \scriptsize --- taken\\ \scriptsize the flagship of this project};
+    \node[bxn,text width=4.4cm] (c) at (5.8,0.25) {cube-and-conquer cubing};
+    \node[bxn,text width=4.4cm] (u) at (5.8,-0.95) {one-shot UNSAT proving};
+    \node[bxn,text width=4.4cm] (p) at (5.8,-2.15) {pre-/inprocessing: probing, ELS, vivify};
+
+    \draw[ar] (e) -- (s); \draw[ar] (e) -- (c); \draw[ar] (e) -- (u); \draw[ar] (e) -- (p);
+
+    \node[draw,dashed,rounded corners,gpapamber,text width=3.6cm,align=center,font=\scriptsize]
+      at (10.6,-0.95)
+      {\textcolor{gpapamber}{\textbf{Open --- worth re-testing}}\\[0.3em]
+       measured on the \emph{old} engine, before assignment-per-warp (up to $5.7\times$)
+       --- those verdicts are stale};
+    \draw[gpapamber,dashed] (8.1,0.25) -- (8.7,-0.4);
+    \draw[gpapamber,dashed] (8.1,-0.95) -- (8.7,-0.95);
+    \draw[gpapamber,dashed] (8.1,-2.15) -- (8.7,-1.5);
+  \end{tikzpicture}}
+  \end{center}
+  \centering
+  \rem{Sampling fits the layout exactly: millions of independent randomized completions over one
+  shared, read-only occurrence structure.}
+\end{frame}
+
+% == 10 ======================================================================
+\begin{frame}{\GPAP{} $=$ GPU-parallel CMSGen}
+  \begin{center}
+  \begin{tikzpicture}[font=\scriptsize]
+    \node[font=\small,anchor=west] at (-0.4,2.4) {$K$ trajectories, one kernel launch};
+    \foreach \x in {0, 1.5, 3.0, 4.5, 6.0, 7.5} {
+      \draw[gpapgray] (\x,2.0) -- (\x,0.2);
+      \foreach \y in {1.7,1.3,0.9,0.5} { \fill[gpapblue] (\x,\y) circle (1.6pt); }
+    }
+    \foreach \x in {1.5, 4.5} {
+      \node[gpapred,font=\large] at (\x,-0.05) {$\times$};
+      \node[gpapred,font=\tiny,anchor=north] at (\x,-0.3) {conflict};
+    }
+    \foreach \x in {0, 3.0, 6.0, 7.5} {
+      \node[gpapgreen,font=\small] at (\x,-0.05) {$\checkmark$};
+      \node[gpapgreen,font=\tiny,anchor=north] at (\x,-0.3) {model};
+    }
+    \draw[ar] (8.2,1.1) -- (8.8,1.1);
+    \node[font=\scriptsize,gpapgray,align=left,text width=3.0cm,anchor=west] at (9.0,1.1)
+      {pick $B$ free vars\\ random polarity\\ propagate\\ repeat};
+  \end{tikzpicture}
+  \end{center}
+  \vspace{0.5em}
+  \begin{columns}[T]
+    \begin{column}{0.46\textwidth}
+      CMSGen's Algorithm 1, exactly --- but $K$ at a time on the GPU.
+      \\[0.3em]
+      \rem{One structural difference: CMSGen backtracks; \GPAP{} \emph{discards}.}
+    \end{column}
+    \begin{column}{0.5\textwidth}
+      \begin{block}{Two consequences}
+        \small
+        \good{Every emitted row is a real model} --- no gradient, no rounding, no repair.\\[0.3em]
+        Discarding \emph{is} rejection sampling $\Rightarrow$ an exactness knob (later).
+      \end{block}
+    \end{column}
+  \end{columns}
+\end{frame}
+
+% == 11 ======================================================================
+\begin{frame}{The flagship pipeline}
+  \begin{center}
+  \resizebox{\textwidth}{!}{%
+  \begin{tikzpicture}[font=\scriptsize, node distance=5mm]
+    \node[bx,text width=1.9cm] (a) {\texttt{.bench}\\ AIGER};
+    \node[bx,text width=1.9cm,right=of a] (b) {unroll $T$\\ cycles};
+    \node[bx,text width=1.9cm,right=of b] (c) {pin last-cycle\\ outputs};
+    \node[bx,text width=1.9cm,right=of c] (d) {Tseitin\\ \emph{or} ABC};
+    \node[bx,text width=1.9cm,right=of d] (e) {simplify\\ $+$ mine};
+    \node[bxg,text width=2.4cm,right=of e] (f) {\textbf{\GPAP{}}\\ $K$ trajectories};
+    \node[bxg,text width=2.4cm,below=6mm of f] (g) {bit-projection\\ on the GPU};
+    \draw[ar] (a)--(b); \draw[ar] (b)--(c); \draw[ar] (c)--(d);
+    \draw[ar] (d)--(e); \draw[ar] (e)--(f); \draw[ar] (f)--(g);
+  \end{tikzpicture}}
+  \end{center}
+  \vspace{0.8em}
+  \begin{columns}[T]
+    \begin{column}{0.3\textwidth}
+      \keyw{Support} $=$ primary inputs $\times$ cycles.
+      \rem{Only the bit matrix leaves the device.}
+    \end{column}
+    \begin{column}{0.32\textwidth}
+      \keyw{Encoder} is a choice: native Tseitin, or ABC.
+      \rem{Same projected solution set --- gated by set-equality tests.}
+    \end{column}
+    \begin{column}{0.32\textwidth}
+      \keyw{Config} is per instance: a bandit measures at full $K$.
+      \rem{The right answer is instance-dependent, so we never guess it.}
+    \end{column}
+  \end{columns}
+\end{frame}
+
+% == 12 ======================================================================
+\begin{frame}{The question we asked before a reviewer could: why not just simulate?}
+  \begin{columns}[T]
+    \begin{column}{0.56\textwidth}
+      \resizebox{\linewidth}{!}{%
+      \begin{tikzpicture}[font=\scriptsize]
+        \foreach \i/\h in {0/2.2, 1/1.75, 2/1.4, 3/1.05, 4/0.8, 5/0.6, 6/0.45, 7/0.32, 8/0.22, 9/0.14, 10/0.09, 11/0.05} {
+          \draw[fill=gpapblue!35] (\i*0.55,0) rectangle (\i*0.55+0.42,\h);
+        }
+        \draw[gpapgray] (-0.1,0) -- (7.0,0);
+        \node[font=\scriptsize,gpapgray,anchor=north] at (3.4,-0.15) {output patterns, by probability};
+
+        \draw[ar,gpapred] (1.7,3.05) -- (0.28,2.3);
+        \node[font=\scriptsize,gpapred,align=center,text width=3.4cm,anchor=south] at (3.0,3.1)
+          {\textbf{default pin} lands here --- it is drawn from this very distribution};
+        \draw[ar,gpapgreen] (7.0,1.55) -- (6.3,0.3);
+        \node[font=\scriptsize,gpapgreen,align=center,text width=2.6cm,anchor=south] at (7.4,1.65)
+          {\texttt{-{}-target rare}\\ still SAT, but adversarial};
+      \end{tikzpicture}}
+    \end{column}
+    \begin{column}{0.42\textwidth}
+      \small
+      At default pins, CPU rejection \bad{beat us on 17/19} --- so we changed the protocol, not
+      the claim.
+      \\[0.5em]
+      \keyw{We use rejection, we do not just compete with it}: it picks the targets, it audits every
+      emitted sample, and at $B \ge |\text{support}|$ our sampler \emph{is} rejection sampling.
+      \\[0.5em]
+      \good{\textbf{And there are instances where it simply cannot play}} --- EPFL at rare targets:
+      \good{0 hits in ${\sim}10$M random patterns} while \GPAP{} holds $87$k--$64$M samples/s at
+      $89$--$100\%$ success.
+    \end{column}
+  \end{columns}
+  \vspace{0.8em}
+  \centering
+  \rem{Also fixed before publishing: vacuous output pins (b02/b05/b07/s526 are constant at $T{=}25$),
+  CMSGen timed \emph{with} sample emission ($5.3\times$ its wall), and a GPU clock that swings
+  615--1710\,MHz mid-run $\Rightarrow$ interleaved A/Bs, 3-seed medians.}
+\end{frame}
+
+% == 13 ======================================================================
+\begin{frame}{Headline: 357 rows, 13 stages, 0 errors}
+  \centering
+  \small
+  \begin{tabular}{@{}llrl@{}}
+    \toprule
+    family & targets & GPAP / CMSGen & wins \\
+    \midrule
+    ITC'99 $+$ ISCAS-89 sequential, $T{=}25$ & \keyw{rare} & \good{$47.7\times$} & 17/18 \\
+    ITC'99 $+$ ISCAS-89 sequential, $T{=}25$ & random & $107.9\times$ & 18/18 \\
+    ISCAS-85 combinational & \keyw{rare} & $538\times$ & 10/10 \\
+    HWMCC'17 (curated), $T{=}25$ & \keyw{rare} & $156\times$ & 7/7 \\
+    EPFL combinational & \keyw{rare} & $12.7\times$ & 13/17 \\
+    Sketch / \texttt{sk\_} projected CNFs & --- & $48.5\times$ & 27/29 \\
+    \bottomrule
+  \end{tabular}
+  \\[1.0em]
+  \rem{RTX 4080 laptop vs.\ single-core patched CMSGen; per instance at its best encoder.
+  Rare targets cost ${\sim}4\times$ of the ratio versus rejection-easy random pins --- \keyw{quote
+  the rare column}. Every row carries its engine provenance (packed split, propagate variant, $K$).}
+\end{frame}
+
+% == 14 ======================================================================
+\begin{frame}{Versus the GPU gradient samplers}
+  \centering
+  \small
+  \begin{tabular}{@{}lll@{}}
+    \toprule
+    rival & on \emph{their} pins & on \keyw{rare} pins \\
+    \midrule
+    HTS \rem{(arXiv 2502.08673)}      & GPAP $26\times$ ahead & \bad{0--17 solutions found, total} \\
+    DEMOTIC \rem{(ASP-DAC'25)}        & their own targets     & ${\approx}12{,}000\times$ behind \\
+    Recurrent CircuitSAT \rem{(MLCAD'25)} & \bad{wins 3 instances} & $10^2$--$10^5\times$ behind \\
+    \bottomrule
+  \end{tabular}
+  \\[1.2em]
+  \begin{columns}[T]
+    \begin{column}{0.46\textwidth}
+      \keyw{Their pins are rejection-easy} --- so the ranking flips once targets get rare.
+      \rem{All three run on \emph{our} hardware, with \emph{their} metric and \emph{their}
+      protocol; their timings exclude model build, ours include construction.}
+    \end{column}
+    \begin{column}{0.46\textwidth}
+      \bad{Honest losses}: \texttt{75-10}, \texttt{prod-20}, the ``service'' family ---
+      jointly-constrained residuals that need clause \emph{learning}, which gradient methods
+      survive and we do not.
+    \end{column}
+  \end{columns}
+\end{frame}
+
+% == 15 ======================================================================
+\begin{frame}{Uniformity: measured against an exact oracle}
+  \begin{columns}[T]
+    \begin{column}{0.5\textwidth}
+      \centering
+      \resizebox{\linewidth}{!}{%
+      \begin{tikzpicture}[font=\scriptsize]
+        \draw[gpapgray] (0,0) -- (7.6,0);
+        \draw[gpapgray] (0,0) -- (0,4.9);
+        \node[rotate=90,font=\scriptsize,gpapgray] at (-0.55,2.4) {TV from uniform};
+        \draw[dashed,gpapgray] (0,0.4) -- (7.6,0.4);
+        \node[font=\tiny,gpapgray,anchor=south east] at (7.6,0.42) {uniform floor};
+
+        \draw[fill=gpapgreen!55] (0.5,0) rectangle (1.2,0.40);
+        \draw[fill=gpapred!55]   (1.4,0) rectangle (2.1,0.87);
+        \draw[fill=gray!45]      (2.3,0) rectangle (3.0,0.40);
+        \node[font=\tiny,anchor=south] at (0.85,0.42) {.040};
+        \node[font=\tiny,anchor=south] at (1.75,0.89) {.087};
+        \node[font=\scriptsize,anchor=north] at (1.75,-0.15) {\textbf{circuits}};
+        \node[font=\tiny,gpapgray,anchor=north] at (1.75,-0.55) {support $=$ primary inputs};
+
+        \draw[fill=gpapgreen!55] (4.4,0) rectangle (5.1,4.41);
+        \draw[fill=gpapred!55]   (5.3,0) rectangle (6.0,2.72);
+        \draw[fill=gray!45]      (6.2,0) rectangle (6.9,0.40);
+        \node[font=\tiny,anchor=south] at (4.75,4.43) {.441};
+        \node[font=\tiny,anchor=south] at (5.65,2.74) {.272};
+        \node[font=\scriptsize,anchor=north] at (5.65,-0.15) {\textbf{random $k$-CNF}};
+        \node[font=\tiny,gpapgray,anchor=north] at (5.65,-0.55) {support $=$ every variable};
+      \end{tikzpicture}}
+      \\[0.3em]
+      \rem{\good{green} $=$ \GPAP, \bad{red} $=$ CMSGen, grey $=$ exact-uniform control.}
+    \end{column}
+    \begin{column}{0.48\textwidth}
+      \small
+      \keyw{The instrument}: generate small formulas, enumerate their solutions exhaustively
+      (solver-free), test $\chi^2$ $+$ TV against the \emph{known} uniform.
+      \rem{Calibrated: 0/120 false positives on an exact-uniform control, 97\% power at TV 0.05.
+      600 instances, 10{,}800 runs, \good{zero unsound rows}.}
+      \\[0.5em]
+      \good{On the flagship regime we are \emph{at} the floor} --- and CMSGen is not.
+      \bad{On random $k$-CNF we are worse.} \keyw{Never quote the aggregate.}
+      \\[0.5em]
+      \keyw{An exactness knob}: at $B \ge |\text{support}|$ one round fixes the whole support and
+      we discard failures --- exact rejection sampling, \good{24/24 at TV 0.0392}.
+      \bad{Bounded by yield} when $p_{\text{accept}}$ is small.
+    \end{column}
+  \end{columns}
+\end{frame}
+
+% == 16 ======================================================================
+\begin{frame}{The uncomfortable one: our own bandit optimizes the wrong thing}
+  \begin{center}
+  \resizebox{\textwidth}{!}{%
+  \begin{tikzpicture}[font=\small]
+    \node[bx,text width=3.4cm,minimum height=1.0cm] (b) at (0,0) {adaptive bandit\\ \scriptsize picks per instance};
+    \node[bxg,text width=3.2cm] (f) at (5.0,0.8) {\good{fastest config}};
+    \node[bxr,text width=3.2cm] (u) at (5.0,-0.8) {\bad{no uniformity term}};
+    \draw[ar] (b)--(f); \draw[ar] (b)--(u);
+    \node[bxr,text width=4.6cm,font=\small] (s) at (10.0,-0.8)
+      {\texttt{soft} was Barbarik-\bad{REJECTED 5/5}\\ \scriptsize (b8, b1, CMSGen: Accept 5/5)};
+    \draw[ar] (u)--(s);
+  \end{tikzpicture}}
+  \end{center}
+  \vspace{0.8em}
+  \begin{columns}[T]
+    \begin{column}{0.47\textwidth}
+      \good{Acted on}: \texttt{soft} removed from the default portfolio, opt-in behind
+      \texttt{-{}-allow-soft}.
+      \\[0.4em]
+      \rem{Nothing unsound --- every row is a real solution --- but a throughput bandit must not
+      pick a rejected distribution for someone who asked for a \emph{sampler}.}
+    \end{column}
+    \begin{column}{0.5\textwidth}
+      \bad{The price is large, and this is parked, not settled:}
+      \begin{itemize}\small
+        \item geomean \bad{$2.44\times$ slower} on the seq suite
+        \item \texttt{b11} $11{,}269$ models $\rightarrow$ \bad{0}; \ \texttt{b12}
+          $50{,}434 \rightarrow$ \bad{789}
+        \item same story one level up: the bandit picks $B{=}1$ (faster, more skewed) on 30/30
+      \end{itemize}
+    \end{column}
+  \end{columns}
+\end{frame}
+
+% == 17 ======================================================================
+\begin{frame}{Status, and what is open}
+  \begin{columns}[T]
+    \begin{column}{0.4\textwidth}
+      \good{\textbf{Done}}
+      \begin{itemize}\small
+        \item engine: packed kernels, scalar $+$ WAVE, \texttt{libgpap}, three language faces
+        \item sampler: pipeline, portfolios, mining, ELS, GPU projection
+        \item front-ends: \texttt{.bench}, AIGER, ABC, simulation
+        \item evaluation: resumable sweep, 3-seed medians, fair CMSGen, 3 GPU rivals
+        \item uniformity: 3-tier readout, Barbarik, exact-oracle fuzzing
+      \end{itemize}
+    \end{column}
+    \begin{column}{0.29\textwidth}
+      \textbf{Open --- build}
+      \begin{itemize}\small
+        \item \keyw{uniformity-aware config choice} --- the one item that changes what a user gets
+        \item per-instance encoder auto-pick
+        \item state arena (${\sim}1.2\times$)
+        \item ROCm port \rem{(no kernel work)}
+        \item re-test the other applications
+      \end{itemize}
+    \end{column}
+    \begin{column}{0.29\textwidth}
+      \textbf{Open --- measure}
+      \begin{itemize}\small
+        \item \keyw{A100 rerun} --- every number is $K$-bound on a 12\,GB card
+        \item multi-core CMSGen, QuickSampler
+        \item break-even simulation throughput
+        \item Barbarik $\times 10$ / ScalBarbarik
+        \item one single-session ablation
+      \end{itemize}
+    \end{column}
+  \end{columns}
+\end{frame}
+
+% == 18 ======================================================================
+\begin{frame}{Turning this into a paper}
+  \begin{center}
+  \begin{tikzpicture}[font=\small]
+    \foreach \i/\txt/\sub in {
+      0/{A GPU-native clause-state primitive}/{one atomic's return value \emph{is} the unit/conflict detection},
+      1/{A batched-assumption BCP engine}/{$K$ independent assignments, one per warp $+$ a measured dispatch rule},
+      2/{A sampler}/{guaranteed-valid; $12$--$538\times$ over CMSGen, $10^2$--$10^5\times$ over GPU rivals at rare targets},
+      3/{A measurement standard}/{rejection baseline, target rarity, vacuous pins, emission fairness, uniformity}} {
+      \node[bx,text width=5.0cm,anchor=west] at (0,-\i*1.15) {\txt};
+      \node[anchor=west,font=\scriptsize,gpapgray,text width=7.0cm] at (5.6,-\i*1.15) {\sub};
+    }
+  \end{tikzpicture}
+  \end{center}
+  \vspace{0.6em}
+  \centering
+  \small
+  \good{Have}: every figure on these slides, the 357-row sweep, three rival tables, the uniformity
+  campaign.\\
+  \bad{Need}: the A100 column, a multi-core CMSGen row, one single-session ablation, and a
+  decision on the bandit/uniformity trade.
+\end{frame}
+
+% == 19 ======================================================================
+\appendix
+\begin{frame}{Backup: numbers on hand}
+  \footnotesize
+  \begin{columns}[T]
+    \begin{column}{0.48\textwidth}
+      \textbf{Engine}
+      \begin{itemize}
+        \item vs pre-WAVE: b14 $5.7\times$, b12 $2.8\times$, b04 $1.8\times$, b03 $1.5\times$
+        \item rates: b03 631k, b06 945k, b04 81k, b12 50k, b14 4.0k attempts/s
+        \item C++ port: $1.013\times$ geomean, identical model sets
+        \item portability: 75/1273 CUDA lines, 18 driver calls, 29/29 specializations cross-compile
+      \end{itemize}
+      \textbf{Encoder}
+      \begin{itemize}
+        \item ABC shrink $2.2$--$7.8\times$ clauses; at rare targets bimodal (unlocks b14, collapses b13)
+        \item \texttt{fast} vs \texttt{full}: b15 encode $99$\,s $\rightarrow$ ${\le}4$\,s
+      \end{itemize}
+    \end{column}
+    \begin{column}{0.48\textwidth}
+      \textbf{Uniformity}
+      \begin{itemize}
+        \item 600 instances, 10{,}800 runs, 0 unsound; controls 0/600 FP, 600/600 power
+        \item $B\ge|\text{sup}|$: 24/24 ok, TV 0.0392 (theory floor 0.0399)
+        \item circuits 0.040 vs CMSGen 0.087; CNF 0.441 vs 0.272
+        \item \texttt{soft}: Reject 5/5 in 156--936 samples, TV median 0.694
+      \end{itemize}
+      \textbf{Baselines / method}
+      \begin{itemize}
+        \item CMSGen emission $= 5.3\times$ its wall (373\,MB on 27.sk)
+        \item rare-target amplification $500$--$500{,}000\times$
+        \item SM clock 615--1710\,MHz while $>$90\% busy; draw noise $\pm40\%$
+      \end{itemize}
+    \end{column}
+  \end{columns}
+\end{frame}
+
+\end{document}
