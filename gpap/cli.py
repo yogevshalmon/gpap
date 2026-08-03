@@ -330,7 +330,9 @@ def main(argv=None):
     s.add_argument("--k-cap", type=_k_cap_arg, default="auto",
                    help="ceiling on the per-chunk batch K. 'auto' (default) sizes it to this "
                         "GPU's VRAM; pass an int to fix it (needed to A/B two different GPUs)")
-    s.add_argument("--portfolio", choices=["circuit", "default"], default="circuit")
+    s.add_argument("--portfolio", choices=["circuit", "default", "b8", "b1", "s1"],
+                   default="circuit",
+                   help="single-config choices (b8/b1/s1) pin ONE config and disable the bandit — use them for any cross-GPU or before/after MEASUREMENT, since the bandit can otherwise pick differently per machine and confound the comparison")
     s.add_argument("--allow-soft", action="store_true",
                    help="add the soft risk-polarity config to the bandit portfolio. Higher "
                         "success on tight/deep circuits, but it BIASES the distribution "
@@ -393,7 +395,9 @@ def main(argv=None):
     b.add_argument("--resume", action="store_true",
                    help="skip rows already in --output and append (re-run after an interruption)")
     b.add_argument("--tag", default=None, help="free-form label stored in the results JSON")
-    b.add_argument("--portfolio", choices=["circuit", "default"], default="circuit")
+    b.add_argument("--portfolio", choices=["circuit", "default", "b8", "b1", "s1"],
+                   default="circuit",
+                   help="single-config choices (b8/b1/s1) pin ONE config and disable the bandit — use them for any cross-GPU or before/after MEASUREMENT, since the bandit can otherwise pick differently per machine and confound the comparison")
     b.add_argument("--allow-soft", action="store_true",
                    help="add the soft risk-polarity config to the bandit portfolio. Higher "
                         "success on tight/deep circuits, but it BIASES the distribution "

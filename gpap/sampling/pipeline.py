@@ -100,11 +100,32 @@ DEFAULT_PORTFOLIO = [
 # fast, distribution does not matter".
 SOFT_CONFIG = SamplingConfig(VarOrder.RANDOM, 8, Lookahead.SOFT)
 
-PORTFOLIOS = {"circuit": CIRCUIT_PORTFOLIO, "default": DEFAULT_PORTFOLIO}
+# SINGLE-CONFIG portfolios — the MEASUREMENT escape hatch. A one-entry portfolio leaves the
+# bandit nothing to select (`sample()` sets adaptive only when len(plan) > 1), so the run is a
+# fixed algorithm rather than an adaptive one.
+#
+# Why this exists: the bandit optimises models/wall with no stability term, so on instances where
+# two configs are close it can pick differently between machines or between repeats of the same
+# command — and then a comparison silently A/Bs the bandit instead of the thing under test.
+# MEASURED 2026-08-03: the same b12-c25 chose B=1 on the 4080 (succ 0.53) but B=8 on an A100
+# (succ 0.27), which is most of why that instance's cross-GPU speedup read 1.19x while its raw
+# work rate was 2.16x; and 27.sk_3_32 alternated between 491,806 and 581,412 models across
+# repeated identical local runs. Pin a config for any cross-GPU or before/after comparison.
+SINGLE_PORTFOLIOS = {
+    "b8": [SamplingConfig(VarOrder.RANDOM, 8)],        # throughput-leaning; over-constrains
+    "b1": [SamplingConfig(VarOrder.RANDOM, 1)],        # success-leaning; the deep-circuit winner
+    "s1": [SamplingConfig(VarOrder.STRUCTURED, 1)],    # gate-DAG order, the "service" family
+}
+
+PORTFOLIOS = {"circuit": CIRCUIT_PORTFOLIO, "default": DEFAULT_PORTFOLIO, **SINGLE_PORTFOLIOS}
 
 
 def portfolio(name: str = "default", allow_soft: bool = False) -> list:
-    """The named portfolio, optionally with the non-uniform soft-polarity config appended."""
+    """The named portfolio, optionally with the non-uniform soft-polarity config appended.
+
+    `b8`/`b1`/`s1` are single-config portfolios: no bandit, no adaptive selection. Use one when
+    the run is a MEASUREMENT and the config must not be a free variable (see SINGLE_PORTFOLIOS).
+    """
     if name not in PORTFOLIOS:
         raise ValueError(f"unknown portfolio {name!r} (have: {', '.join(PORTFOLIOS)})")
     return [*PORTFOLIOS[name], SOFT_CONFIG] if allow_soft else list(PORTFOLIOS[name])
