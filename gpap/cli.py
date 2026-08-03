@@ -17,6 +17,12 @@ import sys
 CIRCUIT_EXTS = (".bench", ".aig", ".aag")   # the single source for "is this a circuit input?"
 
 
+def _k_cap_arg(v):
+    """--k-cap accepts 'auto' or an int. Deliberately duplicated in gpap/benchmark.py rather
+    than shared: this module stays import-light (no torch at parser-build time)."""
+    return v if v == "auto" else int(v)
+
+
 def _cmd_sample(args):
     import json
     import torch
@@ -64,7 +70,7 @@ def _cmd_sample(args):
     mine = {"auto": "auto", "on": True, "off": False}[args.mine]
     info = sample_file(path, device, n_time=args.n, n_cov=args.n_cov, out_cap=out_cap,
                        seed=args.seed, simplify=not args.no_simplify, els=args.els, mine=mine,
-                       uniformity=args.uniformity, configs=portfolio,
+                       uniformity=args.uniformity, configs=portfolio, k_cap=args.k_cap,
                        time_limit=args.time_limit)
     if encode_s is not None:
         info["encode_s"] = encode_s          # circuit->CNF encode wall (stats sidecar honesty)
@@ -160,7 +166,8 @@ def _cmd_bench(args):
             "--portfolio", args.portfolio,
             "--encoder", args.encoder, "--abc-opt", args.abc_opt, "--mine", args.mine,
             "--uniformity", args.uniformity, "--target", args.target,
-            "--cycles", str(args.cycles), "--seed", str(args.seed)]
+            "--cycles", str(args.cycles), "--seed", str(args.seed),
+            "--k-cap", str(args.k_cap)]
     if args.seeds:
         argv += ["--seeds"] + [str(s) for s in args.seeds]
     if args.twise:
@@ -320,6 +327,9 @@ def main(argv=None):
     s.add_argument("--seed", type=int, default=5)
     s.add_argument("--n-cov", type=int, default=0, help="collect this many for quality/soundness")
     s.add_argument("--device", default=None)
+    s.add_argument("--k-cap", type=_k_cap_arg, default="auto",
+                   help="ceiling on the per-chunk batch K. 'auto' (default) sizes it to this "
+                        "GPU's VRAM; pass an int to fix it (needed to A/B two different GPUs)")
     s.add_argument("--portfolio", choices=["circuit", "default"], default="circuit")
     s.add_argument("--allow-soft", action="store_true",
                    help="add the soft risk-polarity config to the bandit portfolio. Higher "
@@ -367,6 +377,9 @@ def main(argv=None):
     b.add_argument("-n", "--n-time", dest="n", type=int, default=50_000)
     b.add_argument("--time-limit", type=float, default=60.0)
     b.add_argument("--n-cov", type=int, default=0)
+    b.add_argument("--k-cap", type=_k_cap_arg, default="auto",
+                   help="ceiling on the per-chunk batch K. 'auto' (default) sizes it to this "
+                        "GPU's VRAM; pass an int to fix it (needed to A/B two different GPUs)")
     b.add_argument("--cmsgen", default=None,
                    help="path to a cmsgen binary (enables the comparison). Prefer the one built "
                         "by scripts/build_cmsgen.sh — its --nowrite gives the emission-free, "

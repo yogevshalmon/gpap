@@ -18,6 +18,7 @@ from typing import NamedTuple
 
 import torch
 
+from gpap.engine import resolve_k_cap
 from gpap.sampling.sampler import GPUSampler, parse_independent_support
 
 class VarOrder(int, Enum):
@@ -206,7 +207,7 @@ def sample_file(path, device, **kw):
 
 
 def sample_clauses(nv, clauses, support, device, *, simplify=True, els=False, n_time=50_000,
-                   n_cov=0, out_cap=0, uniformity="off", n_uni=2000, b=8, k_cap=49152,
+                   n_cov=0, out_cap=0, uniformity="off", n_uni=2000, b=8, k_cap="auto",
                    max_chunks=None, time_limit=60.0, cov_chunks=4, max_rounds=300,
                    lookahead=False, verify_clauses=None, verify_cpu=False, cov_k_cap=2048,
                    random_var="auto", configs="default", mine="auto",
@@ -228,9 +229,17 @@ def sample_clauses(nv, clauses, support, device, *, simplify=True, els=False, n_
 
     The coverage run COLLECTS models to host RAM (one chunk = K models × N ints reconstructed),
     so its K is capped to `cov_k_cap` independently of the (full-K) timing run — otherwise a
-    large auto-K on a low-RAM host (12 GB Colab) OOM-kills the session collecting a full chunk."""
+    large auto-K on a low-RAM host (12 GB Colab) OOM-kills the session collecting a full chunk.
+
+    `k_cap="auto"` (default) sizes the cap to THIS GPU's VRAM (engine.default_k_cap) instead of
+    the historical hardcoded 49,152 — which pinned every GPU to the 12 GB laptop's batch size and
+    made a bigger card report the laptop's throughput. It is an exact no-op at or below the
+    reference budget; pass an int to force a fixed cap (what a cross-GPU A/B needs)."""
     if configs == "default":
         configs = DEFAULT_PORTFOLIO
+    # Resolve ONCE: every GPUSampler built below (initial + post-mining rebuilds) must get the
+    # same cap, or a rebuild could land on a different K than the warmed-up run it replaces.
+    k_cap = resolve_k_cap(k_cap, device)
     t_start = _t_start if _t_start is not None else time.perf_counter()
     phases = _phases if _phases is not None else {}
 
@@ -248,14 +257,16 @@ def sample_clauses(nv, clauses, support, device, *, simplify=True, els=False, n_
         # round budget at the warmup's K<=1024.
         # Returns "best_success" = the best warmed config's completion rate — THE stuck signal.
         cw = list(configs) if configs else None
-        _k = s.K
-        s.K = min(s.K, 1024)
-        w = s.sample(1, configs=cw, decisions_per_round=b, random_var=random_var,
-                     max_decision_rounds=max_rounds, max_chunks=len(cw) if cw else 1,
-                     collect=False, lookahead=lookahead)
+        # pinned_batch, not a raw `s.K = min(s.K, 1024)`: lowering K only disables the fused boost
+        # when it lands BELOW the construction value, so on a sampler built with a small k_cap the
+        # "cheap" warmup silently ran a full boosted chunk instead. Pinning makes the bound real
+        # and restores both models on the way out.
+        with s.pinned_batch(min(s.K, 1024)):
+            w = s.sample(1, configs=cw, decisions_per_round=b, random_var=random_var,
+                         max_decision_rounds=max_rounds, max_chunks=len(cw) if cw else 1,
+                         collect=False, lookahead=lookahead)
         bd = (w.get("config_breakdown") or {}).values()
         w["best_success"] = max((c["success_rate"] for c in bd), default=w["success_rate"])
-        s.K = _k
         s._gen.manual_seed(seed)
         import random as _r
         s._pyrng = _r.Random(seed)
@@ -357,7 +368,14 @@ def sample_clauses(nv, clauses, support, device, *, simplify=True, els=False, n_
     engine_info = {"kernel": "triton-packed-sum", "mode": smp.engine.mode,
                    "shift": smp.engine.shift,
                    "split": f"{smp.engine.shift}|{32 - smp.engine.shift}",
-                   "K": smp.K, "K_fused": smp.K_fused, "N_eff": smp.N, "M_eff": smp.M,
+                   # k_cap is the RESOLVED ceiling (auto -> VRAM-proportional). Without it a
+                   # cross-GPU row is unreadable: a small K could mean "this GPU is small" or
+                   # "the cap bound it", and those are different results.
+                   # `batch` is what actually ran; K/K_fused are the two memory models behind it
+                   # (see GPUSampler.batch_size) and are kept for provenance.
+                   "batch": smp.batch_size,
+                   "K": smp.K, "K_fused": smp.K_fused, "k_cap": k_cap,
+                   "N_eff": smp.N, "M_eff": smp.M,
                    "core": _core_provenance(),
                    "max_clause_len": smp.formula.max_clause_len if smp.M else 0}
     # Headline throughput = the best-THROUGHPUT config's steady-state rate (best_rate_sps), NOT the
@@ -399,7 +417,11 @@ def sample_clauses(nv, clauses, support, device, *, simplify=True, els=False, n_
                                         max_decision_rounds=max_rounds)
         phases["output"] = time.perf_counter() - _to
     if n_cov:
-        smp.K = min(smp.K, cov_k_cap)                # bound host RAM from collected/reconstructed models
+        # Bound host RAM: this run RECONSTRUCTS every completed row into python lists, so the batch
+        # is a hard requirement, not a preference — pin_batch guarantees it, whereas the old
+        # `smp.K = min(smp.K, cov_k_cap)` left the fused boost on whenever K was already <=
+        # cov_k_cap (the same hole that made one test collect a 242k-row chunk at 28 GB).
+        smp.pin_batch(min(smp.K, cov_k_cap))
     # Coverage / UNIQUE-solution run: collect models with the winning config and count distinct
     # support-projections. Deliberately SEPARATE from the timed run above (which is collect=False), so
     # the model reconstruction / dedup cost is NOT charged to samples/s — this is a correctness/quality

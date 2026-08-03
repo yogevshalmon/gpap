@@ -208,6 +208,13 @@ def enc_key(encoder, abc_opt):
 
 # --------------------------------------------------------------------------- driver
 
+def _k_cap_arg(v):
+    """--k-cap accepts the literal 'auto' or an int; the pipeline resolves 'auto' per device."""
+    if v == "auto":
+        return v
+    return int(v)
+
+
 def _build_argparser():
     ap = argparse.ArgumentParser(prog="gpap bench")
     ap.add_argument("--glob", default="benchmarks/sampling/*.cnf",
@@ -284,7 +291,12 @@ def _build_argparser():
     ap.add_argument("--b", type=int, default=8,
                     help="decisions per round (8 is the throughput sweet spot: fewer rounds while "
                          "success barely drops; B>=16 over-constrains and collapses success)")
-    ap.add_argument("--k-cap", type=int, default=49152)
+    ap.add_argument("--k-cap", type=_k_cap_arg, default="auto",
+                    help="ceiling on the per-chunk batch K. 'auto' (default) sizes it to this "
+                         "GPU's VRAM, so a 48 GB L40S / 80 GB A100 is not pinned to the 12 GB "
+                         "laptop's K (throughput is ~linear in K); no-op at or below that "
+                         "budget. Pass an int to FIX the cap — what a cross-GPU A/B needs, "
+                         "since 'auto' deliberately differs per card")
     ap.add_argument("--use-kernel", choices=["auto", "off"], default="auto",
                     help="DEPRECATED no-op (the engine is packed-kernel-only; 'off' no longer "
                          "exists) — kept so older drivers/notebooks don't break")

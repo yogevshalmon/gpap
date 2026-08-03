@@ -36,7 +36,7 @@ def run_one(path: str, K: int, B: int, seed: int, chunks: int, mode: str | None)
     formula = CnfFormula(dev)
     formula.parse_cnf_file(path)
     smp = GPUSampler(formula, dev, k_cap=K, seed=seed)
-    smp.K = smp.K_fused = K                       # pin: no calibration, no fused boost
+    smp.pin_batch(K)                              # pin: no calibration, no fused boost
     smp.support = parse_independent_support(path)
     if mode:
         smp.engine.set_mode(mode)

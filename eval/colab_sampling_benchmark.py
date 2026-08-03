@@ -51,7 +51,7 @@ if REPO_ROOT not in sys.path:
     sys.path.insert(0, REPO_ROOT)
 
 from gpap.sampling.sampler import GPUSampler   # sets expandable_segments
-from gpap.engine.calibrate import gpu_mem_available
+from gpap.engine.calibrate import default_k_cap
 from scripts.sample_benchmark import cmsgen_sample
 from gpap.sampling.metrics import distinct_projections, two_wise_coverage
 from gpap.sampling.pipeline import sample_file as gpap_sample
@@ -93,19 +93,9 @@ def _slug(name: str) -> str:
 DEFAULT_SAMPLING_DIR = os.path.join(REPO_ROOT, "benchmarks", "sampling")
 DEFAULT_OUT_DIR = os.path.join(REPO_ROOT, "benchmarks", "colab_sampling_results")
 
-# K auto-sizes to 4× the proven-safe floor (GPUSampler._calibrate_k) under CUDA expandable_segments,
-# but for SMALL post-ELS formulas 4×floor can exceed the (K,N)-mask memory budget, so a cap is needed.
-# Anchor it at the RTX 4080's validated-safe value (49,152 ≈ 23% of its ~8 GB budget) and scale it
-# with free VRAM, so every GPU runs the SAME safe memory fraction — an A100 (80 GB) then gets ~7× the
-# K, which is exactly the cross-GPU headroom this benchmark is meant to expose.
-_KCAP_REF, _BUDGET_REF = 49_152, 8.0e9
-
-
-def default_k_cap(device: torch.device) -> int:
-    """VRAM-proportional K cap (see above): max(ref, ref · free_budget / ref_budget)."""
-    if device.type != "cuda":
-        return _KCAP_REF
-    return max(_KCAP_REF, int(_KCAP_REF * gpu_mem_available(device) / _BUDGET_REF))
+# The VRAM-proportional K cap now lives in gpap.engine.calibrate (imported above) — it used to be
+# defined here, which is precisely why `gpap bench` and eval/run_full_eval.sh never got it and
+# pinned every GPU to the 12 GB laptop's K. One definition, every driver.
 
 # The validated niche (freeAftSup≈0 ∧ high supOK): numeric sk_ where GPAP beats CMSGen. Used for the
 # quick run + K-sweep; the full run sweeps every *.cnf so the niche boundary (service family, low-supOK
@@ -160,7 +150,10 @@ def k_scaling(path: str, device: torch.device, *, b: int, chunks: int, k_cap: in
     ~linearly with K. Builds one simplified sampler, then runs `chunks` chunks at each K in a
     geometric ladder up to the GPU's auto-K. Returns {auto_K, points:[{K,samples_per_s,success}]}."""
     smp = GPUSampler.from_cnf_file(path, device, simplify=True, els=els, k_cap=k_cap, seed=seed)
-    auto_K = smp.K
+    # `batch_size`, not `K`: K is a memory model, the batch a fused chunk actually runs is
+    # batch_size (usually much larger). Topping the ladder at K put the sweep's "auto-K" marker
+    # somewhere production never operates.
+    auto_K = smp.batch_size
     if smp._recon and smp._recon.get("unsat"):
         return None
     # geometric ladder ending at auto_K: auto_K/2^(n-1) .. auto_K, floored at 256
@@ -170,7 +163,10 @@ def k_scaling(path: str, device: torch.device, *, b: int, chunks: int, k_cap: in
     for k in ks:
         if k > auto_K:
             continue
-        smp.K = k
+        # pin_batch, not `smp.K = k`: assigning K leaves the fused boost ON whenever k is still
+        # >= the construction value, so the TOP point of the ladder silently ran the boosted batch
+        # instead of k — i.e. the one plot meant to show throughput-vs-K mismeasured its own x-axis.
+        smp.pin_batch(k)
         # Reseed per point so every K samples the SAME trajectory distribution — isolates the
         # throughput-vs-K effect from random success-rate noise across the sweep.
         smp._gen.manual_seed(seed)
