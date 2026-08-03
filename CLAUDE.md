@@ -110,6 +110,32 @@ kernels are the only path — the oracle is `tests/reference_bcp.py`).
   validated: the old 4×0.7·free/(70M+40N) floor modeled the deleted PyTorch path and bound K at
   ~1/3 of the packed fit; the 4096×M soundness transient is now read in ≤256 MB slices). A
   runtime memory PROBE is unreliable here — do not resurrect it.
+- **The `cap` is VRAM-proportional** (`engine.calibrate.default_k_cap`, 2026-08-03; `--k-cap auto`
+  is the default of `gpap sample`/`gpap bench`/`pipeline.sample_clauses`). `K_CAP_REF ·
+  total_VRAM / K_CAP_VRAM_REF` floored at K_CAP_REF — EXACT no-op on this box and smaller (gated
+  by tests/test_k_cap.py + a bit-identical model-count A/B). Keys off **total** VRAM, not free: a
+  free-memory cap drifted between runs in one session (49,526 vs 49,671), and a sweep whose K
+  depends on what else was resident is not a measurement. Resolved value in every row's
+  `engine.k_cap`; **a cross-GPU A/B must pass an explicit `--k-cap N`** since `auto` differs per
+  card. ⚠️ **This is HYGIENE, not a throughput lever — measured, Colab A100+L4 2026-08-03**: auto
+  vs pinned bought 1.012× (A100) / 0.985× (L4), and 4× `K_fused` bought 2.8%. The cap only binds
+  for M ≲ 20k (above that the analytic bound is lower — and it ALREADY scales with free VRAM on
+  its own), and those small-M instances are already occupancy-saturated. The cross-GPU win is the
+  hardware: **A100 1.71× / L4 0.874× vs the 4080 at matched K** — and 1.71× off 3.6× the
+  bandwidth says we are occupancy-bound, not bandwidth-bound. In the FLAGSHIP large-M regime
+  (deep tseitin unrolls, T=25, rare) the A100's analytic K really is 3.9-6.4× the laptop's and
+  throughput STILL only follows sublinearly: **b12 3.89× K → 1.19×, b14 6.37× K → 2.37×**. Budget
+  a big GPU at ~1.2-2.4×, NOT the VRAM ratio. See docs/EVAL_RUNBOOK.md.
+- **Read `smp.batch_size`, set it with `smp.pin_batch(n)` / `with smp.pinned_batch(n):`**
+  (2026-08-03). K and K_fused are two MEMORY MODELS, not two batch sizes to choose between:
+  `batch_size` = `K_fused if K >= K_init else K` is the single number that says what a chunk
+  runs, and it is in every row as `engine.batch`. Poking the attributes directly was the bug
+  factory — `K_fused = K` and `K = min(K, n)` only bound the batch when they happened to drop K
+  BELOW its construction value, so at `n >= K` the boost stayed on and the chunk ran orders of
+  magnitude wider than asked. That cost 28 GB of host RAM in one test, left the same hole in the
+  pipeline's coverage run, and made the colab K-sweep mismeasure its own x-axis. `pin_batch`
+  states a bound that holds in both states. Gated by tests/test_k_cap.py; the refactor was
+  no-change-gated (identical model counts AND identical K/K_fused on 4 sk_ instances).
 - **`K_fused`** (every chunk is fused now): a boosted per-chunk K. The `eng_hold` deduction stays
   UNCONDITIONAL — skipping it spilled b05-c50 under the kill-switch (the headroom covers the fixed
   4096×M soundness temp). Don't re-try without an explicit 4096·M reservation + kill-switch

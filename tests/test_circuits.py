@@ -37,14 +37,30 @@ def _inst(circuit_cnfs, name):
     return d["nv"], d["clauses"], d["support"]
 
 
+def _collecting_sampler(nv, clauses, support, *, k_cap, seed=5, **kw):
+    """A sampler whose COLLECTED chunk is actually bounded by `k_cap`.
+
+    THE TRAP: `k_cap` bounds K, but the batch a fused chunk runs is `batch_size`, which sizes
+    itself from free VRAM — on these tiny circuit formulas it lands orders of magnitude higher
+    (b10-c5 measured K=1024 but a 242,423-row batch). Under `collect=True` every completed row is
+    reconstructed into python lists of ints (~36 B each), so a test asking for 1000 models peaked
+    at **28 GB** of host RAM and 341 s, enough to push a 48 GB box into swap.
+
+    `pin_batch` is the fix and exists precisely for this: it states a bound that holds, instead of
+    hoping the boost happens to be off.
+    """
+    smp = GPUSampler.from_clauses(nv, clauses, DEV, support=support, k_cap=k_cap, seed=seed, **kw)
+    smp.pin_batch(smp.K)
+    return smp
+
+
 # --------------------------------------------------------------------------- soundness
 
 @pytest.mark.parametrize("name", SMOKE)
 def test_circuit_models_sound(circuit_cnfs, name):
     """Every emitted model (simplify on) satisfies the ORIGINAL clauses."""
     nv, clauses, support = _inst(circuit_cnfs, name)
-    smp = GPUSampler.from_clauses(nv, clauses, DEV, simplify=True, support=support,
-                                  k_cap=256, seed=5)
+    smp = _collecting_sampler(nv, clauses, support, k_cap=256, simplify=True)
     out = smp.sample(400, configs=[(True, 8, False)], max_chunks=3, collect=True,
                      verify_clauses=clauses)
     assert out["n_models"] > 0
@@ -57,8 +73,7 @@ def test_circuit_models_sound(circuit_cnfs, name):
 def test_circuit_models_sound_matrix(circuit_cnfs, name):
     """Broader matrix: models sound under the circuit portfolio (plain + soft)."""
     nv, clauses, support = _inst(circuit_cnfs, name)
-    smp = GPUSampler.from_clauses(nv, clauses, DEV, simplify=True, support=support,
-                                  k_cap=1024, seed=5)
+    smp = _collecting_sampler(nv, clauses, support, k_cap=1024, simplify=True)
     out = smp.sample(1000, configs=[(True, 8, False), (True, 8, "soft")], max_chunks=4,
                      collect=True, verify_clauses=clauses)
     assert out["n_models"] > 0 and out["all_valid"] and out["gpu_sound"]
@@ -76,7 +91,7 @@ def test_circuit_determinism(circuit_cnfs, name):
     for _ in range(2):
         smp = GPUSampler.from_clauses(nv, clauses, DEV, simplify=True, support=support,
                                       k_cap=256, seed=7)
-        smp.K_fused = smp.K
+        smp.pin_batch(smp.K)
         out = smp.sample(300, configs=[(True, 8, False)], max_chunks=3, collect=True)
         runs.append(sorted(tuple(m) for m in out["models"]))
     assert runs[0] == runs[1], f"{name}: same seed produced different model sets"
@@ -117,8 +132,7 @@ def test_circuit_kernel_matches_reference(circuit_cnfs, name):
 def test_circuit_reconstruction_els(circuit_cnfs, name):
     """simplify + ELS on => reconstructed models still satisfy the ORIGINAL formula."""
     nv, clauses, support = _inst(circuit_cnfs, name)
-    smp = GPUSampler.from_clauses(nv, clauses, DEV, els=True, support=support,
-                                  k_cap=256, seed=5)
+    smp = _collecting_sampler(nv, clauses, support, k_cap=256, els=True)
     out = smp.sample(400, configs=[(True, 8, False)], max_chunks=3, collect=True,
                      verify_clauses=clauses)
     assert out["n_models"] > 0
@@ -144,8 +158,7 @@ def test_circuit_contract_delivers_n_time(circuit_cnfs):
 def test_circuit_distinct_fraction(circuit_cnfs):
     """A non-tiny instance emits (nearly) all-distinct support projections."""
     nv, clauses, support = _inst(circuit_cnfs, "b03-c10")
-    smp = GPUSampler.from_clauses(nv, clauses, DEV, simplify=True, support=support,
-                                  k_cap=1024, seed=5)
+    smp = _collecting_sampler(nv, clauses, support, k_cap=1024, simplify=True)
     out = smp.sample(2000, configs=[(True, 8, False)], max_chunks=4, collect=True)
     if out["n_models"] >= 200:
         assert out["n_distinct"] / out["n_models"] > 0.9
@@ -158,8 +171,7 @@ def test_circuit_distinct_fraction(circuit_cnfs):
 def test_circuit_deep_cascade_c25(circuit_cnfs):
     """The deep 25-cycle unroll: sound under the soft-lookahead config (the circuit-regime win)."""
     nv, clauses, support = _inst(circuit_cnfs, "b03-c25")
-    smp = GPUSampler.from_clauses(nv, clauses, DEV, simplify=True, support=support,
-                                  k_cap=1024, seed=5)
+    smp = _collecting_sampler(nv, clauses, support, k_cap=1024, simplify=True)
     out = smp.sample(1000, configs=[(True, 1, "soft"), (True, 8, False)], max_chunks=6,
                      collect=True, verify_clauses=clauses)
     assert out["n_models"] > 0 and out["all_valid"] and out["gpu_sound"]

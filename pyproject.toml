@@ -18,7 +18,13 @@ classifiers = [
 dependencies = [
     "torch>=2.1",
     "numpy>=1.24",
-    "python-sat>=0.1.8",
+    # `.dev0` in the specifier is LOAD-BEARING, not sloppiness: python-sat ships only
+    # pre-releases for recent CPython (1.9.dev7 is the sole cp312 wheel), and PEP 440 says pip
+    # ignores pre-releases unless the specifier itself mentions one. With a plain `>=0.1.8`,
+    # `pip install -e .` dies with "No matching distribution found for python-sat" on any clean
+    # Python 3.12 box — it only ever worked here because this venv already had 1.9.dev2. Found
+    # on a fresh Colab VM 2026-08-03; it would have hit the HPC cluster identically.
+    "python-sat>=0.1.8.dev0",
     "tqdm>=4.65",
 ]
 

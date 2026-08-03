@@ -53,6 +53,52 @@ Measured end-to-end on an RTX 4080 laptop (2026-07-28, 357 rows, 13 stages, 0 er
 the five benchmark stages** plus the rivals, on any machine. If you need it shorter, cut the
 matrix (`TARGETS=rare CYCLES=25`) rather than the per-instance budget.
 
+### Batch size on a bigger GPU (read before booking cluster time)
+
+**Measured on Colab 2026-08-03 (A100-40GB + L4), not reasoned about.** The short version: the
+`--k-cap` ceiling is NOT where cross-GPU scaling comes from, and an earlier draft of this section
+claimed it was. It is wrong and the numbers below are why.
+
+`--k-cap` defaults to `auto` (VRAM-proportional, `gpap.engine.calibrate.default_k_cap`; exact
+no-op at or below the 12 GB reference card). Treat it as hygiene — removing an arbitrary
+constant — **not as a throughput lever**:
+
+| | 4080 laptop | L4 24 GB | A100 40 GB |
+|---|---:|---:|---:|
+| auto k_cap | 49,152 | 90,300 | 161,851 |
+| models/s vs 4080 at **matched** K | 1.00 | **0.874** | **1.710** |
+| auto-K ÷ pinned-K (same GPU, geomean) | — | 0.985 | **1.012** |
+
+Raising the cap bought **nothing** (±1.5%), and pushing `K_fused` to 4× its default moved
+throughput 2.8% at 8.8 GB of 41 GB used. Two reasons, and they compose:
+
+1. **The cap only binds for small formulas.** K is `min(analytic, cap)`, and the analytic VRAM
+   bound falls below the cap once M ≳ 20k (M=100k: 9,696 on the 4080, 37,440 on the A100). Every
+   real circuit unroll is far past that, so the cap is irrelevant there — and the analytic bound
+   **already scales with free VRAM by itself**, needing no fix.
+2. **Where the cap does bind, the GPU is already saturated.** Those are exactly the small-M
+   instances, and they hit occupancy limits well below 262,144 rows.
+
+So the cross-GPU win is the hardware, not the batch. And in the **flagship large-M regime** — deep
+tseitin unrolls, T=25, `--target rare`, where the analytic bound genuinely gives the A100 several
+times the K — throughput still does not follow K:
+
+| instance | M_eff | K 4080 → A100 | K ratio | models/s 4080 → A100 | **speedup** |
+|---|---:|---|---:|---|---:|
+| b12 | 66,205 | 13,016 → 50,573 | 3.89× | 41,678 → 49,586 | **1.19×** |
+| b14 | 916,783 | 510 → 3,249 | 6.37× | 2.5 → 6.0 | **2.37×** |
+
+**A 3.9× larger batch bought 19%.** Throughput is sublinear in K everywhere we can measure it:
+b12 is already near occupancy saturation on the laptop, and b14 — the instance where K is tiny
+(510 rows) and extra parallelism should pay most — returns 2.37× for 6.4×. Expect an A100 to be
+worth roughly **1.2–2.4×** on real instances, not the 4–6× the VRAM ratio suggests. The 1.71× on
+small formulas came from a card with ~3.6× the memory bandwidth, which is the same story from the
+other side: we are occupancy-bound, not bandwidth-bound. Budget cluster time on ~1.5×, not ~5×.
+
+The measurement rule still holds: **an A/B across two GPUs must pin `--k-cap N` on both arms**,
+because `auto` deliberately differs per card and would confound "faster GPU" with "larger batch".
+Read the resolved ceiling back from each row's `engine.k_cap`.
+
 ## 2. Run a family
 
 ```bash

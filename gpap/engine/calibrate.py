@@ -67,6 +67,46 @@ def gpu_mem_available(device: torch.device, fraction: float = 0.75) -> int:
     return int(max(0, free - _WDDM_RESERVE_BYTES) * fraction)
 
 
+# ------------------------------------------------------------------ K cap (VRAM-proportional)
+# The benchmark drivers used to hardcode a 49,152 cap, which silently pinned a 48 GB L40S or an
+# 80 GB A100 to the 12 GB laptop's batch size. Throughput is ~linear in K, so a bigger GPU
+# reproduced the laptop's numbers and the "does this scale with the GPU?" question could not be
+# answered at all. K_CAP_REF is that historical constant and K_CAP_VRAM_REF the TOTAL VRAM of the
+# box it was validated on (RTX 4080 Laptop, 11.994 GiB). Scaling one by the other leaves the
+# reference GPU at EXACTLY 49,152 — and max() floors every smaller card there too, so no existing
+# result moves — while a larger card may use the VRAM it has (L40S 48 GB ~4x, A100 80 GB ~6.7x).
+#
+# TOTAL memory, deliberately, NOT gpu_mem_available()'s live free budget: free memory moves with
+# whatever else touches the GPU, so a free-based cap made K jitter run-to-run on an idle box
+# (measured 49,526 vs 49,671 across two runs in the same session) and the sweep stopped being
+# reproducible. Total VRAM is a fixed property of the card.
+#
+# This is a CAP, not a K. The actual K is min(compute_k_safe(...), cap) against the LIVE free
+# budget, so raising the cap can only ever expose the analytic memory model's own bound; it never
+# authorises an allocation that model says does not fit. Per CLAUDE.md's ground rules a K change
+# still wants nvidia-smi kill-switch validation on any box where this cap stops binding.
+K_CAP_REF = 49_152
+K_CAP_VRAM_REF = 12_878_086_144   # RTX 4080 Laptop, torch.cuda.get_device_properties().total_memory
+
+
+def default_k_cap(device: torch.device) -> int:
+    """K cap sized to this GPU: K_CAP_REF scaled by its total VRAM vs the reference box."""
+    if device.type != "cuda":
+        return K_CAP_REF
+    total = torch.cuda.get_device_properties(device).total_memory
+    return max(K_CAP_REF, int(K_CAP_REF * total / K_CAP_VRAM_REF))
+
+
+def resolve_k_cap(k_cap: int | str | None, device: torch.device) -> int | None:
+    """Resolve the "auto" sentinel to `default_k_cap(device)`; pass ints and None through.
+
+    Deliberately separate from default_k_cap so GPUSampler's own `k_cap` contract is untouched:
+    there, None still means "no cap" (the analytic bound alone). "auto" is an app-level default,
+    resolved once at the pipeline/CLI boundary where the device is known.
+    """
+    return default_k_cap(device) if k_cap == "auto" else k_cap
+
+
 def compute_k_safe(
     M: int,
     N: int,

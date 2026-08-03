@@ -29,6 +29,7 @@ Design knobs (the throughput vs. success-rate tradeoff):
 
 K is auto-sized to the GPU (capped by default to stay off the WSL2 host-RAM spill cliff).
 """
+import contextlib
 import os
 # Use CUDA expandable-segments allocation BEFORE torch initializes its CUDA allocator. The sampler's
 # hot loop churns many VARIABLE-sized temporaries per round (propagate scratch sized by the frontier;
@@ -128,6 +129,58 @@ class GPUSampler:
             props = torch.cuda.get_device_properties(device)
             resident = props.multi_processor_count * (props.max_threads_per_multi_processor // 32)
             self.engine.set_mode("wave" if self.K_fused < 30 * resident else "scalar")
+
+    # ---------------------------------------------------------------- THE batch size
+    # Read `batch_size`; set it with pin_batch()/pinned_batch(). K and K_fused below it are the
+    # two MEMORY MODELS that produce that number, not two batch sizes to choose between:
+    #
+    #   K        rows that fit under `compute_k_safe`'s analytic model. That model was calibrated
+    #            on the DELETED PyTorch path, whose per-round (K,N) scatter temporaries dominated
+    #            its peak, so it over-reserves badly. Kept unchanged on purpose: every K it has
+    #            produced was validated spill-safe under the nvidia-smi kill-switch with exactly
+    #            these numbers, and this box degrades to host RAM instead of erroring, so an
+    #            optimistic model silently halves throughput instead of failing loudly.
+    #   K_fused  rows that fit given what a fused chunk ACTUALLY costs (no (K,N) decide masks —
+    #            everything stays in-kernel). Every chunk is fused, so this is the real batch.
+    #
+    # K survives for three reasons: it floors K_fused, it sizes the `eng_hold` deduction, and
+    # dropping it below its construction value is the switch that turns the boost off (that is
+    # what `_boosted` reads). Callers should not poke either attribute directly.
+    @property
+    def batch_size(self) -> int:
+        """Trajectories the next chunk will run — the number that sets throughput."""
+        return self.K_fused if self._boosted else self.K
+
+    @property
+    def _boosted(self) -> bool:
+        """Whether fused chunks may use K_fused: true while K is at its construction value."""
+        return self.K >= self._K_init
+
+    def pin_batch(self, n: int) -> int:
+        """Force every chunk to EXACTLY `n` rows, and return it.
+
+        Setting both models equal makes the boost a no-op, so this is the only way to state a
+        batch size that holds regardless of how K compares to its construction value. Use it
+        whenever a bound is required rather than merely intended — above all when rows are
+        reconstructed to host RAM, where an unbounded fused chunk is tens of GB (that is exactly
+        how tests/test_circuits.py reached 28 GB asking for 1000 models).
+
+        Pinning ABOVE the calibrated value is allowed and is how the no-change gate fixes K
+        across builds, but it overrides the memory model — this box then spills to host RAM
+        rather than erroring, so size it yourself (docs/BENCHMARKING.md §2, kill-switch).
+        """
+        self.K = self.K_fused = max(1, int(n))
+        return self.batch_size
+
+    @contextlib.contextmanager
+    def pinned_batch(self, n: int):
+        """`pin_batch(n)` for the duration of the block, restoring both models afterwards."""
+        k, k_fused = self.K, self.K_fused
+        self.pin_batch(n)
+        try:
+            yield self
+        finally:
+            self.K, self.K_fused = k, k_fused
 
     # Byte cap for one (rows, M) int32 soundness-check slice (see sample()); bounds the
     # transient regardless of M so the K budget needs no silent headroom for it.
@@ -528,9 +581,7 @@ class GPUSampler:
         if self.support:
             support_mask = torch.zeros(self.N, dtype=torch.bool, device=self.device)
             support_mask[torch.tensor(self.support, dtype=torch.long, device=self.device)] = True
-        # Every chunk is fused; run at the boosted K_fused while K is at its construction value
-        # (a caller-lowered K — e.g. the coverage run — is honoured).
-        K = self.K_fused if self.K >= self._K_init else self.K
+        K = self.batch_size
         mats: list = []
         got = chunk = 0
         while got < n_target:
@@ -699,12 +750,11 @@ class GPUSampler:
                           if adaptive else plan)
             for cfg in chunk_cfgs:
                 rv_c, B_c, la_c = cfg
-                # Fused-trajectory chunks (fused AND fsoft — both are single-launch kernels with no
-                # (K,N) decide masks — see K_fused) run at the boosted K. Only while K is at its
-                # construction value: a caller-lowered K (coverage run) is honoured.
-                # every chunk is fused: run at the boosted K_fused while K is at its
-                # construction value (a caller-lowered K — coverage run — is honoured)
-                K_c = self.K_fused if self.K >= self._K_init else K_sub
+                # Every chunk is fused, so the boosted batch applies. NOTE the fallback is K_sub,
+                # not batch_size: once the boost is off, a STATIC multi-config plan splits K
+                # across the configs it runs in the same chunk (adaptive runs one config, so
+                # K_sub == K there).
+                K_c = self.batch_size if self._boosted else K_sub
                 if adaptive:
                     self._sync()
                     # read BEFORE t_cfg so the (synced) counter reads aren't charged to wall

@@ -71,7 +71,7 @@ def test_wide_engages_past_16bit_boundary():
     clauses = [[-i, i + 1] for i in range(1, nv)]
     # sampler path: valid models, wide selected
     smp = GPUSampler.from_clauses(nv, clauses, DEV, k_cap=32, seed=23)
-    smp.K_fused = smp.K
+    smp.pin_batch(smp.K)
     assert smp.engine.shift == 8, "auto should select the 8|24 wide split at 2N=80,000"
     out = smp.sample(10 ** 9, configs=[(True, 1, False)], max_chunks=1, collect=True,
                      verify_clauses=clauses)

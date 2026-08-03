@@ -61,12 +61,18 @@ from gpap.engine.bcp_engine import (
     packed_envelope,
 )
 from gpap.engine.checker import AssumptionChecker
-from gpap.engine.calibrate import compute_k_safe, gpu_mem_available
+from gpap.engine.calibrate import (
+    compute_k_safe,
+    default_k_cap,
+    gpu_mem_available,
+    resolve_k_cap,
+)
 from gpap.engine.kernels import kernel_available
 
 __all__ = [
     "CnfFormula", "OccurrenceList", "BCPEngine", "make_assumption_tensor", "core_available",
     "AssumptionChecker", "compute_k_safe", "gpu_mem_available", "kernel_available",
+    "default_k_cap", "resolve_k_cap",
     "packed_envelope", "clauses_envelope",
     "ext_lit_to_lit_index", "lit_index_to_ext_lit", "lit_index_negation", "lit_index_to_var",
 ]
