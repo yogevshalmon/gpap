@@ -620,6 +620,25 @@ Sketch/service family), n=10k, SAME per-instance wall cap both sides (cmsgen_sam
 
 ## Measurement methodology (the traps that actually bit)
 
+**A bigger GPU is worth ~1.8×, not the VRAM ratio — and the batch is not the lever
+(2026-08-03).** Three cards, config pinned, 8 instances: **A100-40GB 1.822× / L4 0.838×** vs the
+RTX 4080 laptop (work rate 1.905/0.838, success 1.006/0.956). The work rate is FLAT in M and lands
+on the A100's 1.86× SM-count ratio, not its ~3.6× bandwidth ratio ⇒ **occupancy/compute-bound**.
+K is not the lever: same GPU, 4× the batch → **+2.8%** (already ~38× oversubscribed), and the
+`--k-cap` ceiling only binds for M ≲ 20k where the GPU is saturated anyway — the analytic VRAM
+bound governs everything larger and already scaled by itself. The L4 is **slower than the laptop**
+(same 58 SMs, lower clock) and is NOT an L40S stand-in; Colab offers no L40S.
+**TWO TRAPS, each of which produced a confident wrong answer first**: (1) the adaptive bandit
+picks differently per machine (b12-c25: B=1 on the 4080, B=8 on the A100) and turned a real 1.85×
+into a reported 1.19× — fixed by `--portfolio b8|b1|s1`, single-config, no bandit; (2)
+`--n-time 20000` against a 262k batch finishes in ONE chunk and measures first-chunk overhead —
+that read 2.42×/1.30×, off ~30% the other way. Also cross-machine: the miner is TIME-budgeted so a
+faster GPU learns a different clause set. Two retractions en route (the cap is the lever; the work
+rate rises with M) — both were artifacts of the confounded data. **OPEN**: b12 loses 2× success on
+the A100 (0.530→0.265) between K=20k and 28k, sound throughout; int32 `K*M` overflow was the
+obvious cause and a K-ladder **falsified** it. Full write-up:
+[CROSS_GPU_FINDINGS.md](CROSS_GPU_FINDINGS.md).
+
 **Same-seed repeats measure TIMING noise only, not DRAW noise.** Portfolio-membership changes
 shift RNG consumption → every chunk's trajectories change → per-instance rates jump ±20–40%
 both directions with identical walls. On low-success instances, 8-chunk portfolio numbers have

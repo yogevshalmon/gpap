@@ -121,11 +121,17 @@ kernels are the only path — the oracle is `tests/reference_bcp.py`).
   vs pinned bought 1.012× (A100) / 0.985× (L4), and 4× `K_fused` bought 2.8%. The cap only binds
   for M ≲ 20k (above that the analytic bound is lower — and it ALREADY scales with free VRAM on
   its own), and those small-M instances are already occupancy-saturated. The cross-GPU win is the
-  hardware: **A100 1.71× / L4 0.874× vs the 4080 at matched K** — and 1.71× off 3.6× the
-  bandwidth says we are occupancy-bound, not bandwidth-bound. In the FLAGSHIP large-M regime
-  (deep tseitin unrolls, T=25, rare) the A100's analytic K really is 3.9-6.4× the laptop's and
-  throughput STILL only follows sublinearly: **b12 3.89× K → 1.19×, b14 6.37× K → 2.37×**. Budget
-  a big GPU at ~1.2-2.4×, NOT the VRAM ratio. See docs/EVAL_RUNBOOK.md.
+  hardware. **Corroborated with the CONFIG PINNED (`--portfolio b1|b8`) + a multi-chunk budget,
+  3 GPUs, 8 instances: A100 1.822× / L4 0.838× vs the 4080** (work rate 1.905/0.838, success
+  1.006/0.956 — machine-INDEPENDENT at exactly 1.000 on 13/14 cells). Work rate is FLAT in M and
+  tracks the SM-count ratio (1.86×), not bandwidth (~3.6×) ⇒ occupancy/compute-bound. Budget a big
+  GPU at ~1.8×, an L4 at ~0.85× (it is NOT an L40S stand-in — same 58 SMs, lower clock).
+  ⚠️ **Two measurement traps, both of which produced wrong numbers first**: (1) a free bandit
+  picks differently per machine (b12 chose B=1 on the 4080, B=8 on the A100) — always pin;
+  (2) `--n-time 20000` against a 262k batch finishes in ONE chunk and measures first-chunk
+  overhead — that read A100 2.42×/L4 1.30×, off by ~30%. ⚠️ **OPEN**: b12 on the A100 loses 2× of
+  its success (0.530→0.265) somewhere between K=20k and K=28k, machine- AND K-dependent, sound
+  throughout; int32 `K*M` overflow was tested by K-ladder and FALSIFIED. See docs/EVAL_RUNBOOK.md.
 - **Read `smp.batch_size`, set it with `smp.pin_batch(n)` / `with smp.pinned_batch(n):`**
   (2026-08-03). K and K_fused are two MEMORY MODELS, not two batch sizes to choose between:
   `batch_size` = `K_fused if K >= K_init else K` is the single number that says what a chunk

@@ -281,9 +281,15 @@ def _build_argparser():
                          "SKIPS it: the collect run's Python model-reconstruction dominated instance "
                          "wall (measured 26s of 34s on s1196 T=25) while distinct≈100%% on all non-tiny "
                          "circuits. Pass e.g. 5000 for the paper-quality metrics")
-    ap.add_argument("--portfolio", choices=["circuit", "default"], default="circuit",
-                    help="bandit config portfolio: 'circuit' (fused/fsoft — the CircuitSAT "
-                         "focus, default) or 'default' (the sk_ projected-sampling portfolio)")
+    ap.add_argument("--portfolio", choices=["circuit", "default", "b8", "b1", "s1"],
+                    default="circuit",
+                    help="bandit config portfolio: 'circuit' (the CircuitSAT focus, default) or "
+                         "'default' (the sk_ projected-sampling portfolio). 'b8'/'b1'/'s1' pin "
+                         "ONE config and disable the bandit — use those for any cross-GPU or "
+                         "before/after MEASUREMENT, since the bandit optimises models/wall with "
+                         "no stability term and can pick differently per machine (measured: "
+                         "b12-c25 chose B=1 on a 4080 but B=8 on an A100), which silently "
+                         "confounds the comparison")
     ap.add_argument("--allow-soft", action="store_true",
                     help="add the soft risk-polarity config to the portfolio. Higher success on "
                          "tight/deep circuits but NOT uniform (Barbarik rejects it 5/5) — never "

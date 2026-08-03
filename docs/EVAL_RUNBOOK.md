@@ -79,21 +79,58 @@ throughput 2.8% at 8.8 GB of 41 GB used. Two reasons, and they compose:
 2. **Where the cap does bind, the GPU is already saturated.** Those are exactly the small-M
    instances, and they hit occupancy limits well below 262,144 rows.
 
-So the cross-GPU win is the hardware, not the batch. And in the **flagship large-M regime** — deep
-tseitin unrolls, T=25, `--target rare`, where the analytic bound genuinely gives the A100 several
-times the K — throughput still does not follow K:
+So the cross-GPU win is the hardware, not the batch.
 
-| instance | M_eff | K 4080 → A100 | K ratio | models/s 4080 → A100 | **speedup** |
-|---|---:|---|---:|---|---:|
-| b12 | 66,205 | 13,016 → 50,573 | 3.89× | 41,678 → 49,586 | **1.19×** |
-| b14 | 916,783 | 510 → 3,249 | 6.37× | 2.5 → 6.0 | **2.37×** |
+#### Why more K does not mean more throughput
 
-**A 3.9× larger batch bought 19%.** Throughput is sublinear in K everywhere we can measure it:
-b12 is already near occupancy saturation on the laptop, and b14 — the instance where K is tiny
-(510 rows) and extra parallelism should pay most — returns 2.37× for 6.4×. Expect an A100 to be
-worth roughly **1.2–2.4×** on real instances, not the 4–6× the VRAM ratio suggests. The 1.71× on
-small formulas came from a card with ~3.6× the memory bandwidth, which is the same story from the
-other side: we are occupancy-bound, not bandwidth-bound. Budget cluster time on ~1.5×, not ~5×.
+**The clean experiment is the same-GPU one above**: one A100, one formula, `K_fused` 262,144 →
+1,048,576, everything else fixed → **+2.8%**. At 262,144 rows over the A100's ~6,912 resident
+warps we are already ~38× oversubscribed, so extra rows queue rather than run. That is the whole
+K result, and it is the only measurement here in which K is the only thing that moved.
+
+#### The corroborated cross-GPU numbers (pinned config)
+
+**Always pin the config for a cross-GPU or before/after run** — `--portfolio b1|b8|s1` are
+single-config portfolios that leave the bandit nothing to select. The bandit optimises models/wall
+with no stability term, so it picks differently per machine (measured: b12-c25 chose B=1 on the
+4080 but B=8 on an A100) and a comparison then silently A/Bs the bandit.
+
+Also **give the run enough budget to span several chunks.** At `--n-time 20000` against a 262,144-
+row batch the small instances finish in ONE chunk, so the "rate" is first-chunk overhead; that
+measurement read A100 2.42×/L4 1.30×, and both moved by ~30% once multiple chunks ran. The numbers
+below use `--n-time 2000000 --time-limit 20`, `--k-cap 49152` pinned on all arms, both configs,
+two reps with the order alternated, 4 sk_ CNFs + b03/s1196/b12/b14 at T=25 rare:
+
+| vs RTX 4080 laptop | **models/s** | work rate (assigns/s) | success |
+|---|---:|---:|---:|
+| **L4 24 GB** | **0.838×** | 0.838× | 1.006 |
+| **A100 40 GB** | **1.822×** | 1.905× | 0.956 |
+
+Two things this settles:
+
+* **Success is now machine-INDEPENDENT — exactly 1.000 on 13 of 14 cells.** That was the whole
+  confound; with it gone, `models/s ≈ work rate` and the per-instance spread collapses to
+  1.58–2.32× on the A100 (it was 1.19–2.37× with the bandit free). b12 in particular goes from a
+  misleading 1.19× to a normal 1.85×.
+* **The work rate is roughly FLAT in M** (sk_ 1.58–2.02, b03 1.90, s1196 1.71–2.31, b12 1.91–2.05),
+  not rising as an earlier draft of this section claimed from the confounded data. Flat, and close
+  to the A100's 1.86× SM-count advantage rather than its ~3.6× bandwidth advantage — so
+  **occupancy/compute-bound, not bandwidth-bound**, and the "it depends on M" correction in that
+  draft was itself an artifact. The L4 is genuinely *slower than the laptop* (same 58 SMs, lower
+  clock), confirming it is not an L40S stand-in.
+
+**Budget a big GPU at ~1.8×, an L4 at ~0.85×.** b14 (M_eff 917k) is below measurement resolution
+on all three (0/2/5 models in 20 s) and is excluded from the geomeans.
+
+> ⚠️ **OPEN, unexplained**: on b12 the A100 shows a reproducible ~2× success drop (0.530 → 0.265)
+> that appears between K=20,000 and K=28,000 and then stays flat to K=49,152. It is not noise
+> (0.2649–0.2653 across seven K values), not the config (pinned), not the miner (the L4 learned an
+> almost identical unit count at 0.530), and **not an int32 `K*M` overflow** — that was the obvious
+> hypothesis and a K-ladder falsified it: the drop happens at `K*M ≈ 0.9 × 2^31` and does not
+> worsen at 1.55×. Soundness is unaffected (`gpu_sound=True` throughout) — we get half as many
+> models, not wrong ones. The L4 at K=27,760 shows 0.530 while the A100 at K=28,000 shows 0.265,
+> so it is machine- AND K-dependent. Worth chasing before a cluster run, since it costs 2× on
+> exactly the large-M instances a big GPU is bought for.
 
 The measurement rule still holds: **an A/B across two GPUs must pin `--k-cap N` on both arms**,
 because `auto` deliberately differs per card and would confound "faster GPU" with "larger batch".
