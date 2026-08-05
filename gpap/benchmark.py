@@ -415,7 +415,7 @@ def main(argv=None):
             return
         os.makedirs(os.path.dirname(args.output) or ".", exist_ok=True)
         payload = {"schema": SCHEMA, "device": str(device), "tag": args.tag,
-                   "gpu": _gpu_info(device), "args": vars(args),
+                   "gpu": _gpu_info(device), "cpu": _cpu_info(), "args": vars(args),
                    "encoders": [enc_key(e, o) for e, o in specs],
                    "cmsgen_patched": cms_patched, "results": results}
         tmp = args.output + ".tmp"
@@ -524,6 +524,32 @@ def _drop_cnf(row, args):
         os.remove(p)
     except OSError:
         pass
+
+
+def _cpu_info():
+    """Host CPU provenance — REQUIRED to quote any GPAP/CMSGen ratio.
+
+    CMSGen is single-core CPU, so the ratio moves with the host as much as with the GPU:
+    measured 2026-08-04, the same 29 sk_ instances gave 48.5x on an RTX 4080 laptop and 113.1x on
+    a Colab L4 box, and CMSGen's OWN propagation and decision counters both put that host at
+    0.413x the laptop's. A sweep that records the GPU but not the CPU cannot tell those apart,
+    and a reviewer reading 113x without the CPU alongside would be right to call it a rigged
+    baseline (docs/BENCHMARKING.md)."""
+    info = {"count": os.cpu_count()}
+    try:
+        with open("/proc/cpuinfo") as fh:
+            for line in fh:
+                if line.startswith("model name"):
+                    info["model"] = line.split(":", 1)[1].strip()
+                    break
+    except OSError:
+        pass
+    try:
+        import platform
+        info["machine"] = platform.machine()
+    except Exception:      # noqa: BLE001 — provenance must never break a sweep
+        pass
+    return info
 
 
 def _gpu_info(device):

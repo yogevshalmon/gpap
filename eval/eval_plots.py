@@ -32,6 +32,12 @@ sys.path.insert(0, REPO_ROOT)
 # reference palette. One role per hue, kept identical across every figure so a colour always
 # means the same thing: encoder A / encoder B / CMSGen / rival-or-rejection.
 C_TSEITIN, C_ABC, C_CMS, C_RIVAL = "#2a78d6", "#eb6834", "#1baf7a", "#4a3aa7"
+
+# VACUOUS-PIN instances: at T=25 their last-cycle outputs are CONSTANT for every input sequence,
+# so pinning them is a tautology and "sampling" is a free hypercube — every sampler scores ~100%.
+# Measured effect on the sequential geomeans: seq-c25-rare 58.2x -> 39.1x, seq-c50-rare
+# 26.3x -> 14.0x. They must not sit inside a headline number (see CLAUDE.md, ground rules).
+VACUOUS_PINS = {"b02", "b05", "b07", "s526"}
 SURFACE, INK, INK2, GRID = "#fcfcfb", "#0b0b0b", "#52514e", "#d9d8d4"
 ENC_COLOR = {"tseitin": C_TSEITIN, "abc:fast": C_ABC, "abc:full": C_ABC, "abc:auto": C_ABC}
 
@@ -388,14 +394,24 @@ def fig_rivals(plt, path, out_dir):
 def write_summary(stages, out_dir, src_dir):
     lines = ["# GPAP full evaluation — summary", ""]
     gpu = next((p.get("gpu", {}).get("name") for p in stages.values() if p.get("gpu")), "?")
-    lines += [f"GPU: **{gpu}**  |  source: `{src_dir}`", "",
+    cpu = next((p.get("cpu", {}) for p in stages.values() if p.get("cpu")), {})
+    cpu_s = f"{cpu.get('model', '?')} ({cpu.get('count', '?')} threads)" if cpu else "**not recorded**"
+    lines += [f"GPU: **{gpu}**  |  CPU: **{cpu_s}**  |  source: `{src_dir}`", "",
+              "The CPU matters as much as the GPU here: CMSGen is single-core, so the ratio moves",
+              "with the host. Measured 2026-08-04, the same 29 `sk_` instances gave 48.5x on an RTX",
+              "4080 laptop and 113.1x on a Colab L4 box whose CPU is 0.41x as fast — none of that",
+              "difference is GPAP. Never quote a ratio without the CPU beside it.", "",
               "`GPAP/CMSGen` is per INSTANCE at its best encoder — the configuration a user would",
               "ship. The per-ROW figure (every instance x every encoder) is given alongside it;",
               "they differ whenever one encoder collapses on an instance the other handles, which",
               "is a real per-instance effect, not an aggregate one.", "",
+              f"**no-vac** excludes the VACUOUS-PIN instances ({', '.join(sorted(VACUOUS_PINS))}),",
+              "whose last-cycle outputs are constant at T=25 so pinning them is a tautology and any",
+              "sampler scores ~100%. They inflate the rare-target geomeans by up to 1.9x, so the",
+              "no-vac column is the one to quote for the sequential family.", "",
               "| stage | rows | inst | skipped | errors | encoders | GPAP/CMSGen (best enc) | "
-              "(per row) | wins | encoder A/B | CMSGen emission cost |",
-              "|---|---|---|---|---|---|---|---|---|---|---|"]
+              "**no-vac** | (per row) | wins | encoder A/B | CMSGen emission cost |",
+              "|---|---|---|---|---|---|---|---|---|---|---|---|"]
     for stage, payload in sorted(stages.items()):
         rows = rows_of(payload)
         allr = payload.get("results", [])
@@ -409,6 +425,8 @@ def write_summary(stages, out_dir, src_dir):
             if k not in best or (r.get("ratio") or 0) > (best[k].get("ratio") or 0):
                 best[k] = r
         gm = _gm([r.get("ratio") for r in best.values()])
+        gm_nv = _gm([r.get("ratio") for k, r in best.items()
+                     if k.split(".")[0] not in VACUOUS_PINS])
         n_win = sum(1 for r in best.values() if (r.get("ratio") or 0) >= 1)
         n_cmp = sum(1 for r in best.values() if r.get("ratio") is not None)
         pairs = paired_by_encoder(rows)
@@ -421,8 +439,9 @@ def write_summary(stages, out_dir, src_dir):
                 wins = sum(1 for a, b in items if b["gpap_sps"] > a["gpap_sps"])
                 ab = f"{other} {r:.2f}x vs {base} (wins {wins}/{len(items)})"
         pen = _gm([r.get("cms_write_penalty") for r in rows])
+        nv = f"**{gm_nv:.1f}x**" if (gm_nv and gm and abs(gm_nv - gm) > 1e-9) else "—"
         lines.append(f"| {stage} | {len(rows)} | {len(best)} | {n_skip} | {n_err} | "
-                     f"{'+'.join(encs) or '—'} | {f'{gm:.1f}x' if gm else '—'} | "
+                     f"{'+'.join(encs) or '—'} | {f'{gm:.1f}x' if gm else '—'} | {nv} | "
                      f"{f'{gm_row:.1f}x' if gm_row else '—'} | "
                      f"{n_win}/{n_cmp} | {ab} | {f'{pen:.1f}x' if pen else '—'} |")
     # skipped/error detail — a sweep that silently dropped instances is not a result

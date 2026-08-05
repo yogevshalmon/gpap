@@ -19,9 +19,15 @@ Dependencies are deliberately minimal so it also compiles on Overleaf as-is: bas
 (Boadilla theme), `booktabs`, `xcolor`, `tikz` (`positioning`, `arrows.meta`). No `metropolis`, no
 external images — every figure is TikZ.
 
-Builds clean (19 pages, one 0.7pt overfull box). Build artifacts (`.aux`, `.log`, `.nav`, `.snm`,
+Builds clean (20 pages, one 0.7pt overfull box). Build artifacts (`.aux`, `.log`, `.nav`, `.snm`,
 `.out`, `.toc`, …) are gitignored under `docs/slides/`; the `.pdf` is kept.
 
 Sources for the numbers: `docs/findings/INSIGHTS.md` (settled results index),
 `docs/findings/UNIFORMITY_FINDINGS.md`, `docs/ENGINE.md`, and
 `.experiments/full_eval/<gpu>/plots/summary.md` (the 357-row sweep).
+
+The cross-GPU rival frame ("Does that verdict survive a different GPU?") is generated from
+`eval/rivals_summary.py <4080-dir> <l4-dir> --variant raw`, which pairs the two machines on the
+`(instance, variant)` cells BOTH produced — that is why its 4080 column can differ from the
+single-machine frame before it (Recurrent: $599\times$ paired over 3 instances vs $1{,}200\times$
+over all 7).
