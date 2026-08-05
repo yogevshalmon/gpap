@@ -112,6 +112,14 @@ def main():
     ap.add_argument("--gpap-time-limit", type=float, default=60.0,
                     help="sampling wall cap for the GPAP side (s)")
     ap.add_argument("--output", default=None)
+    ap.add_argument("--resume", action="store_true",
+                    help="keep the rows already in --output and re-run only what is missing "
+                         "(a rented VM can be reclaimed mid-stage; see eval/colab_supervisor.py)")
+    ap.add_argument("--retry-errors", action="store_true",
+                    help="with --resume, also re-run rows that previously ERRORED. Off by "
+                         "default: a rival timeout is a recorded result and costs the full "
+                         "timeout to rediscover on every restart. Turn it on when the failure "
+                         "was ENVIRONMENTAL (e.g. a missing dependency), not the rival's.")
     args = ap.parse_args()
     if not os.path.isdir(os.path.join(args.hts, "src")):
         sys.exit(f"no HTS checkout at {args.hts} (see module docstring)")
@@ -125,8 +133,21 @@ def main():
            f"{'GPAP u/s~':>13}{'GPAP/s':>13}{'succ%':>7}{'ratio':>14}")
     print(hdr); print("-" * len(hdr))
     out = []
+    done = set()
+    if args.resume and args.output and os.path.isfile(args.output):
+        try:
+            out = json.load(open(args.output)) or []
+            if args.retry_errors:      # drop them so the retry REPLACES rather than appends
+                out = [r for r in out if "error" not in (r.get("hts") or {})]
+            done = {r["name"] for r in out}
+            print(f"[resume] {len(out)} rows already in {args.output}")
+        except Exception as e:      # noqa: BLE001 — a truncated checkpoint must not kill the run
+            print(f"[resume] ignoring unreadable {args.output}: {e}")
+            out, done = [], set()
     for cnf in files:
         name = os.path.basename(cnf)
+        if name in done:
+            continue
         best = None
         for b in args.batch:
             r = run_hts(args.hts, cnf, args.steps, b, timeout=args.timeout)

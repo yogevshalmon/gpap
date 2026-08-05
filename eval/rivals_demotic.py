@@ -257,6 +257,14 @@ def main():
     ap.add_argument("--gpap-time-limit", type=float, default=60.0,
                     help="per-seed sampling wall cap for the GPAP side (s)")
     ap.add_argument("--output", default=None)
+    ap.add_argument("--resume", action="store_true",
+                    help="keep the rows already in --output and re-run only what is missing "
+                         "(a rented VM can be reclaimed mid-stage; see eval/colab_supervisor.py)")
+    ap.add_argument("--retry-errors", action="store_true",
+                    help="with --resume, also re-run rows that previously ERRORED. Off by "
+                         "default: a rival timeout is a recorded result and costs the full "
+                         "timeout to rediscover on every restart. Turn it on when the failure "
+                         "was ENVIRONMENTAL (e.g. a missing dependency), not the rival's.")
     args = ap.parse_args()
     if not os.path.isdir(os.path.join(args.demotic, "src")):
         sys.exit(f"no DEMOTIC checkout at {args.demotic} (see module docstring)")
@@ -276,7 +284,33 @@ def main():
     print(hdr)
     print("-" * len(hdr))
     out = []
+    done = set()
+    if args.resume and args.output and os.path.isfile(args.output):
+        try:
+            prev = json.load(open(args.output))
+            out = (prev.get("rows") if isinstance(prev, dict) else prev) or []
+            if args.retry_errors:      # drop them so the retry REPLACES rather than appends
+                out = [r for r in out if "error" not in (r.get("demotic") or {})]
+            done = {(r["name"], r.get("variant", "-")) for r in out}
+            print(f"[resume] {len(out)} rows already in {args.output}")
+        except Exception as e:      # noqa: BLE001 — a truncated checkpoint must not kill the run
+            print(f"[resume] ignoring unreadable {args.output}: {e}")
+            out, done = [], set()
+
+    def checkpoint():
+        """Write the JSON after every row, not only at the end — this stage runs for hours on a
+        remote box, and a run that dies at 90% used to leave nothing at all behind."""
+        if not args.output:
+            return
+        os.makedirs(os.path.dirname(args.output) or ".", exist_ok=True)
+        json.dump({"mode": args.mode, "circuit_type": args.circuit_type, "cycles": args.cycles,
+                   "target": args.target, "steps": args.steps,
+                   "circuit_variants": list(args.circuit_variants), "rows": out},
+                  open(args.output, "w"), indent=1)
+
     for name, variant in ((n, v) for n in args.names for v in args.circuit_variants):
+        if (name, variant) in done:
+            continue
         src0 = os.path.join(bench_dir, f"{name}.bench")
         if not os.path.isfile(src0):
             print(f"{name:<10}  no such bench file ({src0}), skipped")
@@ -342,6 +376,7 @@ def main():
             row["p_miter"] = p_miter
             row["miter_inputs"] = n_in
         out.append(row)
+        checkpoint()
         pa = sim["p_accept"] or sim.get("p_accept_lt", 0.0)
         pa_s = f"{pa:.2e}" if sim["p_accept"] else f"<{pa:.0e}"
         pin_desc = pin_desc if len(pin_desc) <= 14 else pin_desc[:11] + "..."   # keep the columns
@@ -363,11 +398,7 @@ def main():
         for r in out:
             print(f"  {r['name']:<8} {variant_note(r['circuit'])}")
     if args.output:
-        os.makedirs(os.path.dirname(args.output) or ".", exist_ok=True)
-        json.dump({"mode": args.mode, "circuit_type": args.circuit_type, "cycles": args.cycles,
-                   "target": args.target, "steps": args.steps,
-                   "circuit_variants": list(args.circuit_variants), "rows": out},
-                  open(args.output, "w"), indent=1)
+        checkpoint()
         print(f"wrote {args.output}")
     shutil.rmtree(tmp, ignore_errors=True)
 
