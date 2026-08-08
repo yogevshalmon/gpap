@@ -131,7 +131,11 @@ extern "C" gpap_status gpap_engine_create(const gpap_formula *f, const gpap_engi
                                           gpap_engine **out) {
     if (!f || !out) return GPAP_ERR_ARG;
     *out = nullptr;
-    const gpap_engine_options defaults = {0, GPAP_MODE_SCALAR, 0, -1};
+    /* All-zero, i.e. exactly what a C caller writing `gpap_engine_options o = {0}` gets — the
+     * header documents both spellings as "the defaults" and they must not differ. This field
+     * used to be -1 here, so passing NULL silently turned the warp-wide decision scan OFF while
+     * `{0}` left it on (worth 12-19% on wave instances, same picks either way). */
+    const gpap_engine_options defaults = {0, GPAP_MODE_SCALAR, 0, 0};
     const gpap_engine_options o = opts ? *opts : defaults;
     const int device = o.device;
     GPAP_CU(cuInit(0));

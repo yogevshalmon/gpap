@@ -85,7 +85,7 @@ Work:
   mostly mechanical.
 - **Re-tuning, not re-writing**: the wave/scalar crossover (30× resident warps), `W`, and
   `compute_k_safe`'s constants were all measured on a 4080 and must be re-measured. The
-  no-change gate (`tests/test_core_equivalence.py` against `reference_bcp.py`) transfers
+  no-change gate (`tests/test_core.py` against `reference_bcp.py`) transfers
   unchanged and is what proves correctness on the new device.
 
 Estimate: **1–2 weeks** to a validated build, and essentially none of it is kernel work — it is

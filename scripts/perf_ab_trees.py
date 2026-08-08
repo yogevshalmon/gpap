@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
 """Throughput A/B between TWO CHECKOUTS — "did my refactor cost performance?".
 
-Complements scripts/engine_ab.py, which answers the different question "are the models
-bit-identical?" (docs/BENCHMARKING.md §3). Use both: identical counts prove correctness, this
-proves you did not pay for them.
+Complements the no-change gate, which answers the different question "are the models
+bit-identical?" — pinned K, one config, one seed, compare model COUNTS (docs/BENCHMARKING.md
+§3). Use both: identical counts prove correctness, this proves you did not pay for them.
 
     git worktree add /tmp/base HEAD
     export GPAP_LIB=$(readlink -f build/libgpap.so)      # ONE lib for both arms

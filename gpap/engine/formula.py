@@ -51,11 +51,6 @@ def ext_lit_to_lit_index(ext_lit: int) -> int:
     return 2 * (var - 1) + (0 if ext_lit > 0 else 1)
 
 
-def lit_index_to_var(lit_index: int) -> int:
-    """Literal index to 0-based variable index."""
-    return lit_index // 2
-
-
 def lit_index_to_ext_lit(lit_index: int) -> int:
     """Inverse of ext_lit_to_lit_index: internal index -> DIMACS literal.
     Even index -> +var, odd index -> -var (1-based variable).
@@ -93,17 +88,6 @@ class OccurrenceList:
         """
         _, lit_idx, cls_idx = flat_lit_arrays(clauses)
         return OccurrenceList.from_flat(num_vars, len(clauses), lit_idx ^ 1, cls_idx, device)
-
-    @staticmethod
-    def from_arrays(num_vars: int, num_clauses: int, offsets, clauses,
-                    device: torch.device) -> 'OccurrenceList':
-        """Wrap a CSR the core already built (offsets, clause indices) as device tensors."""
-        occ = OccurrenceList(device)
-        occ._num_vars = num_vars
-        occ._num_clauses = num_clauses
-        occ._occ_offsets = torch.from_numpy(np.ascontiguousarray(offsets, np.int32)).to(device)
-        occ._occ_clauses = torch.from_numpy(np.ascontiguousarray(clauses, np.int32)).to(device)
-        return occ
 
     @staticmethod
     def from_flat(num_vars: int, num_clauses: int, neg_lit_idx, cls_idx,
@@ -150,9 +134,10 @@ class CnfFormula:
     """CNF formula for the engine: occurrence lists and per-clause counters.
 
     The structures are BUILT BY THE C++ CORE (`cpp/src/formula.cpp`) whenever libgpap is
-    available, so the engine's Python and C++ faces can never disagree about what a formula is.
-    A pure-numpy builder is kept as the fallback for hosts without the library (the portable
-    smoke suite runs there); `tests/test_core_equivalence.py` asserts the two agree exactly.
+    available — the ONE builder Python and C++ consumers share. The pure-numpy path below is
+    the REFERENCE build: it runs where the library does not (the driverless CI smoke suite) and
+    it is the oracle `tests/test_core.py` checks the core against, exactly as
+    `tests/reference_bcp.py` is the oracle for propagation.
 
     No clause->literal structure is stored. Instead we maintain:
     - Occurrence lists (CSR, int32): for each literal l, clauses where ~l appears
@@ -164,8 +149,8 @@ class CnfFormula:
     counters, so it is dropped from the structures and recorded in `has_empty_clause`
     (the engine turns that flag into an all-rows conflict).
 
-    `clause_sizes` / `init_lit_sum` / `occ_list` are materialized as torch tensors ON DEMAND —
-    the core keeps its own device copies, so a normal sampling run never pays for them. Prefer
+    `clause_sizes` / `init_lit_sum` are materialized as torch tensors ON DEMAND — the core keeps
+    its own device copies, so a normal sampling run never pays for them. Prefer
     `max_clause_len` / `total_lits` (free, from the core) over reductions over `clause_sizes`.
     """
 
@@ -189,12 +174,8 @@ class CnfFormula:
         if self._core is None:
             from gpap.engine._core import GpapError
             raise GpapError(0, "this CnfFormula was built without libgpap",
-                            "rebuild the core (see cpp/README.md) or use GPAP_ENGINE=torch")
+                            "build the core with scripts/build_core.sh (see cpp/README.md)")
         return self._core
-
-    @property
-    def has_core(self) -> bool:
-        return self._core is not None
 
     def _adopt_core(self, cf) -> None:
         """Take the shape from a core-built formula (the structures stay on the C++ side)."""
@@ -237,11 +218,10 @@ class CnfFormula:
         return self._total_lits
 
     @property
-    def occ_list(self) -> OccurrenceList:
-        if self._occ_list is None and self._core is not None:
-            off, cls_ = self._core.occ()
-            self._occ_list = OccurrenceList.from_arrays(self._num_vars, self._num_clauses,
-                                                        off, cls_, self._device)
+    def occ_list(self) -> "OccurrenceList | None":
+        """The REFERENCE builder's occurrence CSR, or None on a core-built formula (the core
+        keeps its own device copy and the kernels read that; nothing here needs a second one).
+        `tests/test_core.py` compares the two builds entry for entry."""
         return self._occ_list
 
     @property
@@ -278,11 +258,10 @@ class CnfFormula:
         self._init_formula_numpy(num_vars, clauses)
 
     def _init_formula_numpy(self, num_vars: int, clauses: list[ext_cls]):
-        """Fallback builder for hosts without libgpap. Vectorised: one shared flatten
-        (flat_lit_arrays) feeds the occ CSR, clause_sizes and init_lit_sum — the old
-        per-literal Python loops cost seconds per build on 1M-clause circuit unrolls, and
-        construction runs several times per instance (sampler, miner prober, post-mining
-        rebuild). Kept honest by tests/test_core_equivalence.py."""
+        """The REFERENCE builder (used where libgpap is absent, and as the core's oracle).
+        Vectorised: one shared flatten (flat_lit_arrays) feeds the occ CSR, clause_sizes and
+        init_lit_sum — the old per-literal Python loops cost seconds per build on 1M-clause
+        circuit unrolls. tests/test_core.py asserts the core reproduces this exactly."""
         self._core = None
         self._max_clause_len = 0
         self._total_lits = 0
@@ -352,9 +331,3 @@ class CnfFormula:
             clauses.append(tail.tolist())
         max_var = int(np.abs(arr).max()) if len(arr) else 0
         self._init_formula_numpy(max(header_n, max_var), clauses)
-
-    def print_stats(self):
-        print(f"Variables: {self._num_vars}")
-        print(f"Clauses: {self._num_clauses}")
-        print(f"Total literal occurrences: {self._occ_list.occ_clauses.numel()}")
-        print(f"Clause sizes: min={self._clause_sizes.min().item()}, max={self._clause_sizes.max().item()}, avg={self._clause_sizes.float().mean().item():.2f}")

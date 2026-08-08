@@ -255,6 +255,13 @@ flips to `core` only after G1-G4. The torch engine is deleted in M4, not before.
 implementation left, it is what `scripts/engine_ab.py` compares against, and it costs one file.
 It goes when the eval has been re-run on the core.
 
+> **STATUS 2026-08-08 — done.** The full eval has been re-run on the core (L4 + 4080), so
+> `gpap/engine/_torch_engine.py` and `scripts/engine_ab.py` were deleted. The port gate
+> `tests/test_core_equivalence.py` became `tests/test_core.py`: same degenerate-shape and
+> readout regressions, now checked against the pure-Python oracles (`_init_formula_numpy`,
+> `reference_bcp.py`) and against clause satisfaction, rather than against a second engine.
+> Everything below this line is the historical plan and is left as written.
+
 ## 7. Milestones (original)
 
 **M1 — the core runs (no Python).** Build pipeline + `gpap.h` + formula + engine state +

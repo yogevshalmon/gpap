@@ -19,9 +19,6 @@ never touches the row state directly. Hot paths should use the SELECTION api
 keeps the completion test and the soundness check on the GPU and returns only counts and small
 matrices. The tensor-shaped accessors (`assignment`, `conflict`, `active`, `sat_rows`) are
 convenience copies for tests and for off-hot-path consumers.
-
-`GPAP_ENGINE=torch` selects the historical PyTorch/Triton-JIT engine (`_torch_engine.py`) —
-kept for the equivalence gate during the migration and deleted once the core is the only path.
 """
 import os
 
@@ -91,7 +88,7 @@ class BCPEngine:
 
         mid = eng.make_pair_mask(support_mask)   # register a variable set once
         n   = eng.select_complete(mid, slot=0)   # active AND fully assigned -> count (hot path)
-        eng.check_sound(0) / eng.var_bits(0, cols, n) / eng.assignment_rows_sel(0, n)
+        eng.check_sound(0) / eng.var_bits(0, cols, n)
 
     Setting literal l TRUE decrements the packed word of every clause in occ[l] (CSR lists of
     the NEGATED literal) and subtracts ~l from its remaining-literal sum field; sat==1 forces
@@ -242,10 +239,6 @@ class BCPEngine:
             cols = cols.cpu().numpy()
         return self._core.var_bits(slot, np.asarray(cols, dtype=np.int32), count)
 
-    def assignment_rows_sel(self, slot: int, count: int) -> np.ndarray:
-        """(count, 2N) int8 assignment rows for a selection (1 = that literal index is TRUE)."""
-        return self._core.assignment_rows(slot, count)
-
     # ------------------------------------------------------------------ accessors (copies)
 
     @property
@@ -265,14 +258,6 @@ class BCPEngine:
     def assignment_rows(self, row_idx) -> torch.Tensor:
         """(n, 2N) int8 assignments for the selected rows (bool mask or index tensor)."""
         return torch.from_numpy(self._core.rows_assignment(_row_indices(row_idx))).to(self._device)
-
-    def var_true_bits(self, row_idx, var_cols) -> torch.Tensor:
-        """(n, V) uint8 — 1 iff var v is assigned TRUE, for the selected rows x var columns."""
-        if isinstance(var_cols, torch.Tensor):
-            var_cols = var_cols.cpu().numpy()
-        cols = np.asarray(var_cols, dtype=np.int32)
-        return torch.from_numpy(
-            self._core.rows_var_bits(_row_indices(row_idx), cols)).to(self._device)
 
     def sat_rows(self, row_idx) -> torch.Tensor:
         """sat_count values for the given rows (extracted from the packed state). The supported
@@ -324,9 +309,3 @@ def _row_indices(row_idx) -> np.ndarray:
     if idx.dtype == bool:
         idx = np.nonzero(idx)[0]
     return np.ascontiguousarray(idx, dtype=np.int32)
-
-
-# The historical PyTorch/Triton-JIT engine, kept behind GPAP_ENGINE=torch for the migration's
-# equivalence gate (tests/test_core_equivalence.py imports it directly).
-if os.environ.get("GPAP_ENGINE") == "torch":       # pragma: no cover - migration escape hatch
-    from gpap.engine._torch_engine import BCPEngine        # noqa: F401,F811

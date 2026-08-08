@@ -1,8 +1,6 @@
 import torch
 
-from gpap.engine.formula import CnfFormula
-from gpap.engine.formula import ext_lit_to_lit_index
-from gpap.engine.formula import ext_assumptions
+from gpap.engine.formula import CnfFormula, ext_assumptions, ext_lit_to_lit_index
 from gpap.engine.bcp_engine import BCPEngine, make_assumption_tensor
 
 
@@ -64,23 +62,3 @@ class AssumptionChecker:
             'num_propagated': engine.num_propagated,
             'sat_count': engine.sat_rows(torch.arange(K, device=self._device)),
         }
-
-
-if __name__ == "__main__":
-    if not torch.cuda.is_available():
-        raise SystemExit("demo requires CUDA (the engine is kernel-only)")
-    checker = AssumptionChecker()
-
-    # manually set formula: (x1 OR x2), (~x1 OR x3), (~x2 OR ~x3)
-    checker.formula.init_formula(3, [[1, 2], [-1, 3], [-2, -3]])
-
-    results = checker.check_assumptions([
-        [1, 2],    # assume x1=T, x2=T
-        [-1, -2],  # assume x1=F, x2=F -> both lits false in clause 1 -> conflict
-        [1],       # assume x1=T -> BCP should propagate
-    ])
-
-    print("Conflicts:", results['conflict'])
-    print("Num propagated:", results['num_propagated'])
-    for k in range(3):
-        print(f"Batch {k} assignment:", results['assignment'][k])

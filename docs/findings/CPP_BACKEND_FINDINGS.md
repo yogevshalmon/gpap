@@ -174,4 +174,5 @@ AOT-vs-JIT bit-identity gate compares the same source through two paths, which i
   over the same state, so anything other than equality is a bug.
 - The measurement scripts and the standalone-C harness live in the session scratchpad, which is
   wiped between sessions; the durable artifacts are `cpp/` and
-  `tests/test_core_equivalence.py`, which re-proves the equality claim on every run.
+  `tests/test_core.py`, which re-proves the core's contract against the pure-Python oracles on
+  every run. (The torch engine itself was deleted 2026-08-08 — the A/B had served its purpose.)

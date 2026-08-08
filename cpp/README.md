@@ -177,7 +177,7 @@ examples/sample.cpp      solution sampling from C++ (gpap::Sampler)
 examples/assumptions.cpp batched assumption checking from C++ (gpap::AssumptionChecker)
 ```
 
-Equivalence against the historical torch/Triton engine is gated by
-[`tests/test_core_equivalence.py`](../tests/test_core_equivalence.py): identical formula
-structures, identical conflict flags and assignments, identical model sets, in both kernel modes
-and both packed splits.
+The core's contract is gated by [`tests/test_core.py`](../tests/test_core.py) against two
+pure-Python oracles — the reference formula builder in `gpap/engine/formula.py` and the
+reference BCP in `tests/reference_bcp.py` — plus direct clause-satisfaction checks on every
+emitted model, in both kernel modes and both packed splits.

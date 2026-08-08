@@ -138,11 +138,7 @@ def describe_portfolio(configs) -> str:
 
 
 def _core_provenance() -> str:
-    """Which engine build produced a result: "libgpap <version>", or "torch-jit" when the
-    GPAP_ENGINE=torch migration escape hatch is in use."""
-    import os
-    if os.environ.get("GPAP_ENGINE") == "torch":
-        return "torch-jit"
+    """Which engine build produced a result, for the results JSON: "libgpap <version>"."""
     try:
         from gpap.engine import _core
         return f"libgpap {_core.version()}"

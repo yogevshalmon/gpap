@@ -14,8 +14,8 @@ from __future__ import annotations
 
 import ctypes
 import os
-from ctypes import (POINTER, byref, c_char_p, c_double, c_int, c_int8, c_int32, c_int64,
-                    c_size_t, c_void_p)
+from ctypes import (POINTER, byref, c_char_p, c_int, c_int8, c_int32, c_int64, c_size_t,
+                    c_void_p)
 from pathlib import Path
 
 import numpy as np
@@ -150,11 +150,8 @@ def _declare(lib: ctypes.CDLL) -> None:
         ("gpap_num_propagated", [c_void_p, _I32P], c_int),
         ("gpap_sat_rows", [c_void_p, _I32P, c_int32, _I32P], c_int),
         ("gpap_counters_get", [c_void_p, POINTER(Counters)], c_int),
-        ("gpap_counters_reset", [c_void_p], None),
-        ("gpap_mem_available", [c_int, c_double], c_int64),
         ("gpap_formula_mem_bytes", [c_int32, c_int32, c_int64], c_int64),
         ("gpap_compute_k_safe", [c_int32, c_int32, c_int64, c_int32, c_int32, c_int64], c_int32),
-        ("gpap_resident_warps", [c_int], c_int32),
         ("gpap_last_error", [], c_char_p),
         ("gpap_version", [], c_char_p),
     ]
@@ -183,14 +180,6 @@ def i32(arr) -> np.ndarray:
 
 def version() -> str:
     return load().gpap_version().decode()
-
-
-def mem_available(device: int = 0, fraction: float = 0.75) -> int:
-    return int(load().gpap_mem_available(device, fraction))
-
-
-def resident_warps(device: int = 0) -> int:
-    return int(load().gpap_resident_warps(device))
 
 
 def compute_k_safe(M: int, N: int, gpu_mem_bytes: float, cap: "int | None" = 65536,
@@ -427,11 +416,6 @@ class Engine:
         n = self.selection_set(self.SCRATCH_SLOT, rows)
         return self.assignment_rows(self.SCRATCH_SLOT, n)
 
-    def rows_var_bits(self, rows, cols) -> np.ndarray:
-        """(len(rows), len(cols)) uint8 TRUE-bits for arbitrary rows x variable columns."""
-        n = self.selection_set(self.SCRATCH_SLOT, rows)
-        return self.var_bits(self.SCRATCH_SLOT, cols, n)
-
     def check_sound(self, slot: int = 0, max_rows: int = 4096) -> int:
         """How many selected rows have a clause with sat_count == 0 (must be 0)."""
         n = c_int32(0)
@@ -488,9 +472,6 @@ class Engine:
         c = Counters()
         check(load().gpap_counters_get(self._h, byref(c)), "counters")
         return c
-
-    def counters_reset(self) -> None:
-        load().gpap_counters_reset(self._h)
 
     def __del__(self):
         try:

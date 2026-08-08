@@ -28,18 +28,11 @@ Design knobs (the throughput vs. success-rate tradeoff):
                         one (cheap, low-index-biased).
 
 K is auto-sized to the GPU (capped by default to stay off the WSL2 host-RAM spill cliff).
+`PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True` is what makes that K reachable; it is set in
+`gpap/__init__.py`, which always runs before this module (see there for the measurement).
 """
 import contextlib
 import os
-# Use CUDA expandable-segments allocation BEFORE torch initializes its CUDA allocator. The sampler's
-# hot loop churns many VARIABLE-sized temporaries per round (propagate scratch sized by the frontier;
-# the (K,N) decision masks), which fragments the default caching allocator badly: measured peak
-# RESERVED = 6.5 GB while live tensors were only 2.5 GB (62% wasted to fragmentation), and that
-# fragmentation is what "grows mid-run" and forces a small K. expandable_segments grows one virtual
-# segment instead of many fixed blocks → reserved tracks allocated (6.5→2.8 GB here, ~2.3× more K
-# for the same VRAM). setdefault so an explicit user PYTORCH_CUDA_ALLOC_CONF still wins. Must be set
-# before the first CUDA allocation; importing this module before any CUDA use guarantees that.
-os.environ.setdefault("PYTORCH_CUDA_ALLOC_CONF", "expandable_segments:True")
 import time
 
 import numpy as np
@@ -567,7 +560,7 @@ class GPUSampler:
         return proj
 
     @torch.inference_mode()
-    def sample_bits(self, n_target: int, *, config=(True, 8, "fused"),
+    def sample_bits(self, n_target: int, *, config=(True, 8, False),
                     max_decision_rounds: "int | None" = 300, max_chunks: "int | None" = None):
         """Collect up to `n_target` support-projection bit-rows efficiently. Only the small
         (n, S) bit matrix crosses to host RAM per chunk (not full N-var models), so a big output
@@ -617,7 +610,6 @@ class GPUSampler:
         complete: bool = True,
         lookahead: bool = False,
         configs: "list[tuple[bool, int]] | None" = None,
-        config_policy: str = "adaptive",
         min_measure_chunks: int = 1,
         max_seconds: "float | None" = None,
     ) -> dict:
@@ -646,14 +638,12 @@ class GPUSampler:
         pick the best-throughput combo per formula (recommended; overrides `decisions_per_round` with
         the tuned B — cracks the service family with (structured, B=1) without hurting the niche's B=8).
 
-        `configs`: a PORTFOLIO of (random_var, B) tuples, with `config_policy`:
-          - "adaptive" (default): a throughput BANDIT — each chunk runs ONE config at full K, picked by
-            its measured models/wall so far, dynamically switching to the winner and re-checking the
-            rest (decaying-epsilon). Robust like a portfolio yet ~as fast as the best single config; it
-            fixes the autotune's small-K mis-estimate (it measures full-K) and its permanent commit
-            (it can switch). Recommended.
-          - "static": run ALL configs as sub-batches every chunk (K split) — guarantees per-chunk
-            coverage but a slow config's K-independent round count drags every chunk (~1.5-2.7× niche).
+        `configs`: a PORTFOLIO of (random_var, B) tuples, run as a throughput BANDIT — each chunk
+        runs ONE config at full K, picked by its measured models/wall so far, dynamically switching
+        to the winner and re-checking the rest (decaying-epsilon). Robust like a portfolio yet ~as
+        fast as the best single config; it fixes both of `_autotune`'s weaknesses (it measures at
+        full K, and it can change its mind). A one-entry portfolio leaves it nothing to select, which
+        is how a MEASUREMENT pins the algorithm (see pipeline.SINGLE_PORTFOLIOS).
         `config_breakdown` reports each config's models/chunks/throughput. Overrides
         random_var/decisions_per_round when set.
         """
@@ -669,13 +659,6 @@ class GPUSampler:
         if configs is None and isinstance(random_var, str) and random_var == "auto":
             random_var, B = self._autotune(self.K, B, max_decision_rounds, support_mask,
                                            complete, lookahead)
-        # Config portfolio. Two policies (when len>1):
-        #  - "adaptive" (default): a THROUGHPUT BANDIT — each chunk runs ONE config at full K, chosen by
-        #    its measured models/wall so far, dynamically switching to the winner (and re-checking the
-        #    rest). Robust like a portfolio but ~as fast as the best single config — fixes both the
-        #    autotune's small-K mis-estimate and its permanent commit.
-        #  - "static": run ALL configs as sub-batches every chunk (K split). Guarantees per-chunk
-        #    coverage but a slow config's K-independent round count drags every chunk (~1.5-2.7×).
         # Normalise the portfolio to (random_var, B, lookahead) triples. A config may be a 2-tuple
         # (rv, B) — lookahead defaults off — or a 3-tuple (rv, B, lookahead), lookahead ∈
         # {False, "soft"} ("fused"/"fsoft" accepted as aliases from the pre-packed-only era).
@@ -696,14 +679,15 @@ class GPUSampler:
         # c50 wide instances under the kill-switch (11.7 GB on the 12 GB 4080). If the ~9% is
         # ever wanted back, it must go with an explicit 4096·M reservation + kill-switch re-run.
         K = self.K
-        adaptive = configs is not None and config_policy == "adaptive" and len(plan) > 1
+        # More than one config => the bandit picks per chunk. Exactly one => nothing to pick, and
+        # per-config timing is skipped (that is the pinned-algorithm measurement mode).
+        adaptive = configs is not None and len(plan) > 1
         # Per-config work counters (decs/props) alongside models/wall so the reported dec/s, impl/s,
         # assigns/s can be attributed to the SAME config as the headline samples/s (best_rate) —
         # otherwise they blend over the bandit's exploration (incl. the slow orac chunk), understating
         # the winner ~2x and diverging across GPUs (measured on b06.c25, 2026-07-04).
         cfg_stats = {c: {"models": 0, "attempts": 0, "wall": 0.0, "chunks": 0,
                          "decs": 0, "props": 0} for c in plan}
-        K_sub = max(1, K // len(plan)) if (configs and not adaptive and len(plan) > 1) else K
         models: list[list[int]] = []
         attempts = 0
         n_models = 0
@@ -746,15 +730,13 @@ class GPUSampler:
             # Once past n_target but short of the measurement window, EXPLOIT the winner (no eps
             # exploration) so its stable rate is measured on back-to-back chunks, not diluted.
             topup = adaptive and not cold and n_models >= n_target
-            chunk_cfgs = ([self._select_config(plan, cfg_stats, chunk, exploit=topup)]
-                          if adaptive else plan)
+            chunk_cfgs = [self._select_config(plan, cfg_stats, chunk, exploit=topup)
+                          if adaptive else plan[0]]
             for cfg in chunk_cfgs:
                 rv_c, B_c, la_c = cfg
-                # Every chunk is fused, so the boosted batch applies. NOTE the fallback is K_sub,
-                # not batch_size: once the boost is off, a STATIC multi-config plan splits K
-                # across the configs it runs in the same chunk (adaptive runs one config, so
-                # K_sub == K there).
-                K_c = self.batch_size if self._boosted else K_sub
+                # Every chunk is fused, so the boosted batch applies; with the boost off (a lowered
+                # or pinned K) the chunk runs exactly K rows.
+                K_c = self.batch_size if self._boosted else K
                 if adaptive:
                     self._sync()
                     # read BEFORE t_cfg so the (synced) counter reads aren't charged to wall
@@ -875,7 +857,6 @@ class GPUSampler:
             out["best_rate_implications_per_s"] = ((brs["props"] - brs["decs"]) / bw) if bw > 0 else None
             out["best_rate_assigns_per_s"] = (brs["props"] / bw) if bw > 0 else None
             out["best_rate_chunks"] = brs["chunks"]
-            out["config_policy"] = "adaptive" if adaptive else "static"
 
             def _lab(c):
                 # bool()/str() rather than the raw values: a config may be authored with the

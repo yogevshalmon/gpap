@@ -48,7 +48,6 @@ gpap/
     _core.py               # ctypes binding to libgpap (private)
     formula.py             # CnfFormula: facade over the core's builder (numpy fallback off-GPU)
     bcp_engine.py          # BCPEngine: marshalling + torch-friendly accessors over the core
-    _torch_engine.py       # the retired PyTorch/Triton-JIT engine — equivalence-gate reference only
     kernels.py             # the 2 Triton kernels (fixpoint + trajectory, SHIFT=16|8) + scalar/WAVE
     calibrate.py           # K sizing, VRAM model, gpu_mem_available
     checker.py             # AssumptionChecker: the batched-assumptions API face
@@ -101,7 +100,7 @@ archive/                   # concluded experiments (not maintained; see archive/
 **Hot-path readout is the SELECTION api** (added with the C core): `make_pair_mask(vars)` once,
 then per chunk `select_complete(mask_id, slot) -> count` (the completion test runs on device; only
 the count crosses the bus), plus `check_sound(slot)` (per-row flag on device — no (rows, M)
-transfer), `var_bits(slot, cols, n)` and `assignment_rows_sel(slot, n)`. The tensor-shaped
+transfer) and `var_bits(slot, cols, n)`. The tensor-shaped
 accessors (`assignment`, `conflict`, `active`, `sat_rows`) are copies for tests / off-hot-path
 consumers. App code must go through these — do NOT reach into the row state. The engine picks the packed split per formula (16|16 / 8|24) and
 REJECTS formulas outside both envelopes; the PyTorch path was deleted 2026-07-13 (packed
@@ -157,9 +156,10 @@ kernels are the only path — the oracle is `tests/reference_bcp.py`).
   share a word) — 8× smaller than byte-per-literal (small-2N rows go L1-resident), and in
   WAVE a forced-literal push is ONE `tl.atomic_or` whose RETURN deduplicates (old bit l) and
   detects contradiction (old bit l^1) race-free — the old W×W in-warp dedup is deleted.
-  Readout goes through materializing accessors (`assignment`, `assignment_rows`,
-  `var_true_bits`, `any_free` — the sampler's completion check is one bitwise pass, never a
-  (K,N) mask; strided bit-unpack slice-writes cost 16× sector RMW amplification, measured).
+  Readout goes through the selection api (`select_complete` — the completion check is one
+  bitwise pass on device, never a (K,N) mask — and `var_bits`' direct bit gather; `assignment`
+  / `assignment_rows` materialize int8 rows only off the hot path. Strided bit-unpack
+  slice-writes cost 16× sector RMW amplification, measured).
 - **Kernel variant auto-dispatch** (same state, pure launch flag; gate-validated bit-identical):
   warp-wide **WAVE** propagate (≤W trail lits at once, occ segments flattened, the packed-word
   `atomic_add` return value resolving cross-literal clause races) when calibrated K_fused <

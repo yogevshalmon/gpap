@@ -14,9 +14,9 @@ len <= 255; anything larger is rejected. Setting literal l TRUE updates exactly 
 occ[l] (CSR occurrence lists of the NEGATED literal). No clause scanning, ever.
 
 REQUIREMENTS: CUDA + libgpap (`core_available()`; build it with scripts/build_core.sh). There
-is NO CPU execution path. Triton is needed only to BUILD the library, never to run it —
-`kernel_available()` reports whether the JIT reference path is usable, which the equivalence
-tests need but production does not.
+is NO CPU execution path. Triton is needed only to BUILD the library, never to run it;
+`kernel_available()` reports whether a triton JIT is usable on this host, which is how the GPU
+test suite decides to run.
 
 ## The contract: exactly two entry points
 
@@ -47,11 +47,9 @@ emitted model is externally verifiable (clause satisfaction; tests do both).
 """
 from gpap.engine.formula import (
     CnfFormula,
-    OccurrenceList,
     ext_lit_to_lit_index,
     lit_index_to_ext_lit,
     lit_index_negation,
-    lit_index_to_var,
 )
 from gpap.engine.bcp_engine import (
     BCPEngine,
@@ -70,9 +68,9 @@ from gpap.engine.calibrate import (
 from gpap.engine.kernels import kernel_available
 
 __all__ = [
-    "CnfFormula", "OccurrenceList", "BCPEngine", "make_assumption_tensor", "core_available",
+    "CnfFormula", "BCPEngine", "make_assumption_tensor", "core_available",
     "AssumptionChecker", "compute_k_safe", "gpu_mem_available", "kernel_available",
     "default_k_cap", "resolve_k_cap",
     "packed_envelope", "clauses_envelope",
-    "ext_lit_to_lit_index", "lit_index_to_ext_lit", "lit_index_negation", "lit_index_to_var",
+    "ext_lit_to_lit_index", "lit_index_to_ext_lit", "lit_index_negation",
 ]

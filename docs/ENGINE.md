@@ -78,7 +78,7 @@ flowchart TD
     end
     EP1 --> READ
     EP2 --> READ
-    READ["accessors (materialized copies):<br/>conflict · active · any_free · var_true_bits · assignment"]
+    READ["readout:<br/>select_complete · check_sound · var_bits (on device)<br/>conflict · active · assignment (copies)"]
 ```
 
 The flush cache is the key construction-time optimization: the state *after* asserting the formula's
@@ -206,9 +206,10 @@ flowchart TD
 | **Dispatch threshold** | 6× resident | **30× resident** | bitmap removed WAVE's large-K tax; wave wins further out |
 
 **Readout note:** the bitmap must never be unpacked with strided slice-writes (16× sector-RMW
-amplification). Hot paths use `any_free` (one bitwise pass over the words, no `(K,N)` mask) and
-`var_true_bits` (direct bit gather for just the needed columns); `assignment` /
-`assignment_rows` materialize the historical int8 layout only when a caller genuinely needs it.
+amplification). Hot paths use `select_complete` (one bitwise pass over the words inside the core — only the
+count crosses the bus, no `(K,N)` mask) and `var_bits` (direct bit gather for just the needed
+columns); `assignment` / `assignment_rows` materialize the historical int8 layout only when a
+caller genuinely needs it.
 
 ---
 

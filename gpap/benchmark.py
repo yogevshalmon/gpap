@@ -303,9 +303,6 @@ def _build_argparser():
                          "laptop's K (throughput is ~linear in K); no-op at or below that "
                          "budget. Pass an int to FIX the cap — what a cross-GPU A/B needs, "
                          "since 'auto' deliberately differs per card")
-    ap.add_argument("--use-kernel", choices=["auto", "off"], default="auto",
-                    help="DEPRECATED no-op (the engine is packed-kernel-only; 'off' no longer "
-                         "exists) — kept so older drivers/notebooks don't break")
     ap.add_argument("--no-simplify", dest="simplify", action="store_false", default=True)
     ap.add_argument("--els", action="store_true",
                     help="also do equivalent-literal substitution (removes vars: faster propagate + "
@@ -372,9 +369,6 @@ def main(argv=None):
         args.n_cov = 2000                          # 2-wise needs the collected quality sample
     quality = args.n_cov > 0
     mine = {"auto": "auto", "on": True, "off": False}[args.mine]
-    if args.use_kernel == "off":
-        print("[warn] --use-kernel off is retired (packed-kernel-only engine); ignoring",
-              file=sys.stderr)
     specs = parse_encoder_specs(args.encoders, args.encoder, args.abc_opt)
     os.makedirs(args.scratch, exist_ok=True)       # converted CNFs + CMSGen samplefiles land here
     show_unif = args.uniformity != "off"           # gates the unif column

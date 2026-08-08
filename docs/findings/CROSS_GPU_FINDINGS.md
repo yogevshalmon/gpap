@@ -158,8 +158,9 @@ Read back per row: `engine.batch` (what actually ran), `engine.K` / `K_fused` / 
 `succ`, `assigns_per_s`. If `succ` differs across machines for the same instance+config,
 something is confounded — stop and find it before believing the rates.
 
-Before/after on one machine: `scripts/perf_ab_trees.py` (throughput) and `scripts/engine_ab.py`
-(bit-identical model sets). Use both.
+Before/after on one machine: `scripts/perf_ab_trees.py` (throughput) plus a pinned-K,
+single-config, fixed-seed run whose MODEL COUNT must be identical (docs/BENCHMARKING.md §3).
+Use both — identical counts prove correctness, the throughput arm proves you did not pay.
 
 ---
 

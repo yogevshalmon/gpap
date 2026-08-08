@@ -147,12 +147,11 @@ def _cmd_sample(args):
                           wire_map=info.get("wire_map"), meta=meta)
             print(f"  wrote {len(mat):,} samples ({mat.shape[1]} cols) -> {args.out} "
                   f"[{args.out_format}]")
-    stats_path = args.stats or args.json
-    if stats_path:
+    if args.stats:
         # Drop the bulky arrays from the JSON — it is the stats/info sidecar, not the samples.
         stats = {k: v for k, v in info.items() if k not in ("samples", "models", "cols")}
-        json.dump(stats, open(stats_path, "w"), indent=1, default=str)
-        print(f"  wrote stats -> {stats_path}")
+        json.dump(stats, open(args.stats, "w"), indent=1, default=str)
+        print(f"  wrote stats -> {args.stats}")
     if tmp:
         os.unlink(tmp)
 
@@ -371,7 +370,6 @@ def main(argv=None):
     s.add_argument("--max-samples", type=int, default=100_000,
                    help="cap on solutions written to --out (default 100k; raise for a full dump)")
     s.add_argument("--stats", default=None, help="write the run's info/stats JSON here")
-    s.add_argument("--json", default=None, help=argparse.SUPPRESS)   # deprecated alias for --stats
     s.set_defaults(func=_cmd_sample)
 
     b = sub.add_parser("bench", help="benchmark a glob of instances (vs CMSGen if given)")
