@@ -57,6 +57,11 @@ TIME_LIMIT="${TIME_LIMIT:-60}"
 N_COV="${N_COV:-0}"                 # >0 adds the quality pass (2-wise + distinct); costs a 2nd pass
 SEEDS="${SEEDS:-}"                  # e.g. "5 6 7" -> median-of-3 (docs/BENCHMARKING.md §3)
 MAX_CLAUSES="${MAX_CLAUSES:-4000000}"
+# Extra args appended to EVERY `gpap bench` call. The reason this exists rather than a flag: the
+# uniformity arm of the sweep is the SAME matrix with `--allow-soft`, and the only honest way to
+# price a configuration change is to run the identical protocol through the identical code path.
+# A second copy of this script would drift. Set OUT too, or the arms overwrite each other.
+EXTRA_ARGS="${EXTRA_ARGS:-}"
 SCRATCH="${SCRATCH:-$OUT/cnf}"
 STAGE="${1:-all}"
 mkdir -p "$SCRATCH"
@@ -116,7 +121,8 @@ bench() {
         --n-time "$N_TIME" --time-limit "$TIME_LIMIT" --n-cov "$N_COV" \
         --max-clauses "$MAX_CLAUSES" --scratch "$SCRATCH" \
         --output "$json" --resume --tag "$name" \
-        ${CMS_ARGS[@]+"${CMS_ARGS[@]}"} ${SEED_ARGS[@]+"${SEED_ARGS[@]}"} "$@" 2>&1 | tee -a "$log"
+        ${CMS_ARGS[@]+"${CMS_ARGS[@]}"} ${SEED_ARGS[@]+"${SEED_ARGS[@]}"} \
+        $EXTRA_ARGS "$@" 2>&1 | tee -a "$log"
 }
 
 stage_check() { bash "$REPO_ROOT/eval/rivals_setup.sh" check; }

@@ -49,12 +49,12 @@
 
 \begin{document}
 
-% == 1 =====================================================================
+% == 1 ===================================================================
 \begin{frame}[plain]
   \titlepage
 \end{frame}
 
-% == 2 =====================================================================
+% == 2 ===================================================================
 \begin{frame}{The story}
   \begin{center}
   \begin{tikzpicture}[font=\small]
@@ -81,7 +81,7 @@
   \end{center}
 \end{frame}
 
-% == 3 =====================================================================
+% == 3 ===================================================================
 \begin{frame}{Where this starts: \NC{} (FMCAD'26)}
   \begin{columns}[T]
     \begin{column}{0.53\textwidth}
@@ -126,7 +126,7 @@
   \end{columns}
 \end{frame}
 
-% == 4 =====================================================================
+% == 4 ===================================================================
 \begin{frame}{Same idea, different question}
   \begin{center}
   \resizebox{\textwidth}{!}{%
@@ -153,7 +153,7 @@
   \end{block}
 \end{frame}
 
-% == 5 =====================================================================
+% == 5 ===================================================================
 \begin{frame}{One word per clause --- and the update is its own detector}
   \begin{center}
   \begin{tikzpicture}[font=\small]
@@ -192,7 +192,7 @@
   \texttt{shfl}/\texttt{ballot}.}
 \end{frame}
 
-% == 6 =====================================================================
+% == 6 ===================================================================
 \begin{frame}{The architecture: one assignment per warp}
   \begin{center}
   \begin{tikzpicture}[font=\scriptsize]
@@ -243,7 +243,7 @@
   is what the extra lanes are for. Both variants share the state and give the same results.}
 \end{frame}
 
-% == 7 =====================================================================
+% == 7 ===================================================================
 \begin{frame}{The tool}
   \begin{center}
   \begin{tikzpicture}[font=\small]
@@ -284,7 +284,7 @@
   alone.}
 \end{frame}
 
-% == 8 =====================================================================
+% == 8 ===================================================================
 \begin{frame}{The engine, in features}
   \begin{columns}[T]
     \begin{column}{0.48\textwidth}
@@ -315,7 +315,7 @@
   1-byte clause state, clause renumbering and multi-warp tiles all measured out.}
 \end{frame}
 
-% == 9 =====================================================================
+% == 9 ===================================================================
 \begin{frame}{What is a $K$-parallel BCP primitive good for?}
   \begin{center}
   \resizebox{\textwidth}{!}{%
@@ -346,7 +346,7 @@
   shared, read-only occurrence structure.}
 \end{frame}
 
-% == 10 ====================================================================
+% == 10 ==================================================================
 \begin{frame}{\GPAP{} $=$ GPU-parallel CMSGen}
   \begin{center}
   \begin{tikzpicture}[font=\scriptsize]
@@ -385,7 +385,7 @@
   \end{columns}
 \end{frame}
 
-% == 11 ====================================================================
+% == 11 ==================================================================
 \begin{frame}{The flagship pipeline}
   \begin{center}
   \resizebox{\textwidth}{!}{%
@@ -418,7 +418,7 @@
   \end{columns}
 \end{frame}
 
-% == 12 ====================================================================
+% == 12 ==================================================================
 \begin{frame}{The question we asked before a reviewer could: why not just simulate?}
   \begin{columns}[T]
     \begin{column}{0.56\textwidth}
@@ -458,7 +458,7 @@
   615--1710\,MHz mid-run $\Rightarrow$ interleaved A/Bs, 3-seed medians.}
 \end{frame}
 
-% == 13 ====================================================================
+% == 13 ==================================================================
 \begin{frame}{Headline: 357 rows, 13 stages, 0 errors}
   \centering
   \small
@@ -470,22 +470,26 @@
     ITC'99 $+$ ISCAS-89 sequential, $T{=}25$ & random & $105.8\times$ & 18/18 \\
     ISCAS-85 combinational & \keyw{rare} & $538\times$ & 10/10 \\
     HWMCC'17 (curated), $T{=}25$ & \keyw{rare} & $156\times$ & 7/7 \\
-    EPFL combinational & \keyw{rare} & $12.7\times$ & 13/17 \\
-    Sketch / \texttt{sk\_} projected CNFs & --- & $48.5\times$ & 27/29 \\
+    EPFL combinational & \keyw{rare} & $6.4\times$ & 13/17 \\
+    Sketch / \texttt{sk\_} projected CNFs & --- & $46.2\times$ & 27/29 \\
     \bottomrule
   \end{tabular}
   \\[1.0em]
   \rem{RTX 4080 laptop (\texttt{i7-13800H}) vs.\ single-core patched CMSGen; per instance at its
   best encoder. Rare targets cost ${\sim}3\times$ of the ratio versus rejection-easy random pins
   --- \keyw{quote the rare column}.
-  \\ \bad{Corrected 2026-08-04}: the sequential rows now \keyw{exclude the vacuous-pin instances}
-  (\texttt{b02/b05/b07/s526}, constant outputs at $T{=}25$). Including them read $47.7\times$ /
-  $107.9\times$ --- an inflation of up to $1.9\times$ that fell almost entirely on the rare
-  column. \keyw{The ratio also depends on the CPU}, because CMSGen is single-core: see the next
+  \\ \bad{Corrected 2026-08-04/05}, both by the same rule --- \keyw{a cell that measures the
+  instance instead of the sampler does not belong in a geomean}. (i)~vacuous output pins
+  (\texttt{b02/b05/b07/s526}, constant at $T{=}25$): including them read $47.7\times$, an
+  inflation of up to $1.9\times$ falling almost entirely on the rare column. (ii)~instances that
+  sample with \keyw{zero decisions and zero implications} --- the support is free after
+  propagation, so there is no search to do, and the best-encoder rule \emph{prefers} them because
+  they carry the highest ratio: EPFL read $12.7\times$, \texttt{sk\_} $48.5\times$.
+  \keyw{The ratio also depends on the CPU}, because CMSGen is single-core: see the next
   frame but one.}
 \end{frame}
 
-% == 14 ====================================================================
+% == 14 ==================================================================
 \begin{frame}{The same suite on a datacenter GPU --- and what actually moved}
   \centering
   \small
@@ -493,11 +497,11 @@
     \toprule
     family & targets & 4080 laptop & \textbf{Colab L4} & wins (L4) \\
     \midrule
-    ITC'99 $+$ ISCAS-89 seq, $T{=}25$ & \keyw{rare} & $36.5\times$  & $39.1\times$  & 13/14 \\
+    ITC'99 $+$ ISCAS-89 seq, $T{=}25$ & \keyw{rare} & $36.5\times$  & $39.1\times$  & 17/18 \\
     ISCAS-85 combinational            & \keyw{rare} & $538\times$   & $615\times$   & 10/10 \\
     HWMCC'17, $T{=}25$                & \keyw{rare} & $156\times$   & $196\times$   & 7/7 \\
-    EPFL combinational                & \keyw{rare} & $12.7\times$  & $29.0\times$  & 13/16 \\
-    Sketch / \texttt{sk\_} CNFs       & ---         & $48.5\times$  & $113\times$   & 27/28 \\
+    EPFL combinational                & \keyw{rare} & $6.4\times$   & $9.4\times$   & 13/17 \\
+    Sketch / \texttt{sk\_} CNFs       & ---         & $46.2\times$  & $98.9\times$  & 27/29 \\
     \bottomrule
   \end{tabular}
   \\[0.8em]
@@ -516,56 +520,97 @@
       \\[0.3em]
       CMSGen is single-core, so this number is as much a property of the host as of the sampler.
       A datacenter comparison is fair \emph{only} when reported this way --- otherwise a reviewer
-      reads $113\times$ and correctly calls it a rigged baseline.
+      reads $98.9\times$ and correctly calls it a rigged baseline.
       \rem{The same caution applies in advance to the Technion cluster runs.}
     \end{column}
   \end{columns}
   \vspace{0.3em}
   \centering
-  \rem{$317$ cells, $173$ instance-slots, \good{0 skipped, 0 errors, 0 unsound}. Sequential rows
-  exclude the vacuous pins. Full per-family tables in the appendix.}
+  \rem{$357$ cells, $193$ instance-slots, \good{0 skipped, 0 errors, 0 unsound}. Geomeans exclude
+  the vacuous pins and the zero-search cells. Full per-family tables in the appendix.}
 \end{frame}
 
-% == 15 ====================================================================
+% == 15 ==================================================================
+\begin{frame}{Is the speedup the engine, or the benchmark?}
+  \centering
+  \small
+  \begin{tabular}{@{}lrrrr@{}}
+    \toprule
+     & \multicolumn{2}{c}{implications$/$s} & \multicolumn{2}{c}{implications$/$sample} \\
+    \cmidrule(lr){2-3}\cmidrule(lr){4-5}
+    family (\keyw{rare}) & \GPAP{} & CMSGen & \GPAP{} & CMSGen \\
+    \midrule
+    ISCAS-85 combinational      & $1.05{\times}10^{9}$ & $1.67{\times}10^{6}$ & $517$      & $507$      \\
+    ITC'99/ISCAS-89, $T{=}25$   & $1.14{\times}10^{9}$ & $5.20{\times}10^{6}$ & $30{,}538$ & $5{,}422$  \\
+    HWMCC'17, $T{=}25$          & $1.05{\times}10^{9}$ & $4.58{\times}10^{6}$ & $12{,}615$ & $10{,}737$ \\
+    EPFL combinational          & $1.08{\times}10^{9}$ & $2.14{\times}10^{6}$ & $12{,}139$ & $226$      \\
+    Sketch / \texttt{sk\_} CNFs & $1.00{\times}10^{9}$ & $4.23{\times}10^{6}$ & $851$      & $355$      \\
+    \bottomrule
+  \end{tabular}
+  \\[0.6em]
+  \begin{columns}[T]
+    \begin{column}{0.46\textwidth}
+      \good{\textbf{The engine's rate is flat}} --- ${\sim}10^{9}$ impl/s on every family, spread
+      only $1.41\times$, while the \emph{sample-rate} ratio moves ${\sim}2$ orders across the same
+      rows. It is a property of the GPU, not the instance.
+      \rem{CMSGen's column is its own \texttt{--statsevery} counters.}
+    \end{column}
+    \begin{column}{0.52\textwidth}
+      \keyw{\textbf{The two are linked exactly:}}
+      \; $\text{samples/s ratio}=\dfrac{\text{impl/s ratio}}{\text{impl/sample ratio}}$
+      \\[0.3em]
+      Within $1\%$ on $9/9$ families, \keyw{re-derived from raw rows} by
+      \texttt{verify\_artifact.py}. The engine buys a flat $197$--$631\times$;
+      \bad{rejection sampling spends part back} ($1.0\times$ ISCAS-85, $5.6\times$ seq,
+      \bad{$53.7\times$ EPFL}) --- we discard a conflicted trajectory, CMSGen backtracks.
+    \end{column}
+  \end{columns}
+  \centering
+  \rem{EPFL has the largest penalty \emph{and} the only instance we could not sample
+  (\texttt{bar}) --- one mechanism, read twice.}
+\end{frame}
+
+% == 16 ==================================================================
 \begin{frame}{Versus the GPU gradient samplers}
   \centering
   \small
-  \begin{tabular}{@{}llrrr@{}}
+  \begin{tabular}{@{}llrrrrr@{}}
     \toprule
-    rival & protocol & GPAP $/$ rival & wins & rival failed \\
+    rival & protocol & GPAP $/$ rival & wins & R$=$0 & G$=$0 & failed \\
     \midrule
-    DEMOTIC \rem{(ASP-DAC'25)} & \emph{their} ISCAS-85 pins & $2.5\times$ & 19/20 & 0 \\
-    DEMOTIC                    & our \keyw{rare} pins       & $2{,}427\times$ & 18/18 & 0 \\
-    Recurrent \rem{(MLCAD'25)} & \emph{their} target table  & $4.4\times$ & 6/6 & 3 \\
-    Recurrent                  & our \keyw{rare} pins       & \good{$635\times$} & 5/6 & 3 \\
-    HTS \rem{(arXiv 2502.08673)} & our CNFs, both encoders  & $1{,}584\times$ & 14/15 & 3 \\
+    DEMOTIC \rem{(ASP-DAC'25)} & \emph{their} ISCAS-85 pins & $2.5\times$ & 19/20 & 0 & 0 & 0 \\
+    DEMOTIC                    & our \keyw{rare} pins       & $2{,}427\times$ & 16/16 & 0 & 0 & 0 \\
+    Recurrent \rem{(MLCAD'25)} & \emph{their} target table  & $4.4\times$ & 6/6 & 0 & 0 & 3 \\
+    Recurrent                  & our \keyw{rare} pins       & \good{$635\times$} & 5/6 & 1 & 0 & 3 \\
+    HTS \rem{(arXiv 2502.08673)} & our CNFs, both encoders  & $1{,}584\times$ & 13/14 & 2 & \bad{1} & 3 \\
     \bottomrule
   \end{tabular}
-  \\[1.0em]
+  \\[0.7em]
   \begin{columns}[T]
     \begin{column}{0.48\textwidth}
+      \small
       \keyw{\textbf{The protocol matters more than the rival.}} Recurrent-CircuitSAT --- the
       closest rival to our domain --- reads $4.4\times$ on \emph{their} pins and $635\times$ on
-      ours. \bad{A $140$-fold swing}, same sampler, same GPU, same day: only the target rarity
+      ours. \bad{A $140$-fold swing}, same sampler, same GPU, same day: only target rarity
       changed.
-      \\[0.3em]
       \rem{Their pins are rejection-easy \emph{by construction}, so winning there is not a
-      sampling result --- which is exactly why \texttt{-{}-target rare} exists.}
+      sampling result --- which is why \texttt{-{}-target rare} exists.}
     \end{column}
     \begin{column}{0.48\textwidth}
-      \rem{All three run on the \emph{same} card, with \emph{their} metric (uniques $/$ their
-      \texttt{model\_runtime}, which excludes model build while ours includes construction).
-      \keyw{rival failed} $=$ timeout or no gradient path: reported, \textbf{never folded in as a
-      zero}.}
-      \\[0.3em]
+      \rem{Same card, \emph{their} metric (uniques $/$ their \texttt{model\_runtime}, which
+      excludes model build while ours includes construction). \keyw{failed} $=$ timeout or no
+      gradient path: reported, \textbf{never folded in as a zero}. \keyw{R$=$0} rival emitted
+      nothing (our win); \bad{G$=$0} \emph{we} emitted nothing (our loss); \emph{neither} counts
+      as neither --- \bad{correcting DEMOTIC-miter 18/18 and HTS 14/15}.}
+      \\[0.2em]
+      \small
       \bad{Honest losses}: \texttt{75-10}, \texttt{prod-20}, the ``service'' family ---
-      jointly-constrained residuals needing clause \emph{learning}, which gradient methods
-      survive and we do not.
+      jointly-constrained residuals needing clause \emph{learning}.
     \end{column}
   \end{columns}
 \end{frame}
 
-% == 16 ====================================================================
+% == 17 ==================================================================
 \begin{frame}{Does that verdict survive a different GPU?}
   \centering
   \small
@@ -605,7 +650,7 @@
   \keyw{CMSGen absent by design} --- a CPU baseline needs cluster hardware.}
 \end{frame}
 
-% == 17 ====================================================================
+% == 18 ==================================================================
 \begin{frame}{Uniformity: measured against an exact oracle}
   \begin{columns}[T]
     \begin{column}{0.5\textwidth}
@@ -654,10 +699,10 @@
   \end{columns}
 \end{frame}
 
-% == 18 ====================================================================
+% == 19 ==================================================================
 \begin{frame}{The uncomfortable one: our own bandit optimizes the wrong thing}
   \begin{center}
-  \resizebox{\textwidth}{!}{%
+  \resizebox{0.86\textwidth}{!}{%
   \begin{tikzpicture}[font=\small]
     \node[bx,text width=3.4cm,minimum height=1.0cm] (b) at (0,0) {adaptive bandit\\ \scriptsize picks per instance};
     \node[bxg,text width=3.2cm] (f) at (5.0,0.8) {\good{fastest config}};
@@ -668,30 +713,43 @@
     \draw[ar] (u)--(s);
   \end{tikzpicture}}
   \end{center}
-  \vspace{0.8em}
+  \vspace{0.2em}
   \begin{columns}[T]
-    \begin{column}{0.47\textwidth}
-      \good{Acted on}: \texttt{soft} removed from the default portfolio, opt-in behind
-      \texttt{-{}-allow-soft}.
-      \\[0.4em]
-      \rem{Nothing unsound --- every row is a real solution --- but a throughput bandit must not
-      pick a rejected distribution for someone who asked for a \emph{sampler}.}
+    \begin{column}{0.43\textwidth}
+      \small
+      \good{Acted on}: \texttt{soft} is opt-in behind \texttt{-{}-allow-soft}.
+      \\[0.3em]
+      \bad{\textbf{The price, on the published comparison}} --- the whole $357$-cell matrix run
+      \emph{twice}, one flag changed: \bad{up to $4.6\times$ on deep sequential unrolls}
+      ($14.0{\rightarrow}64.9\times$ at $T{=}50$), \good{${\approx}1.0\times$ on ISCAS-85,
+      \texttt{sk\_} and HWMCC-random}.
     \end{column}
-    \begin{column}{0.5\textwidth}
-      \bad{The price is large, and now measured TWICE:}
-      \begin{itemize}\small
-        \item geomean \bad{$0.423\times$} on the L4 ($0.410\times$ on the 4080) --- the safe
-          portfolio is ${\approx}2.4\times$ slower
-        \item but \texttt{soft} only wins the bandit on \textbf{7/15}, so where it applies the
-          loss is far larger: \texttt{b12} $10{,}864 \rightarrow \bad{23}$ samples/s
-        \item \texttt{b11} is a \bad{capability loss}: $276 \rightarrow 0$
-      \end{itemize}
-      \rem{Two machines, same verdict $\Rightarrow$ a property of the method, not the hardware.}
+    \begin{column}{0.55\textwidth}
+      \centering\scriptsize
+      \begin{tabular}{@{}lrrr@{}}
+        \toprule
+        safe-arm success & cells & safe$/$soft & \texttt{soft} chosen \\
+        \midrule
+        $<10^{-4}$           & 13  & \bad{$0.119\times$}  & 5/13 \\
+        $10^{-4}$--$10^{-2}$ & 22  & \bad{$0.313\times$}  & 12/22 \\
+        $10^{-2}$--$0.5$     & 86  & $0.822\times$        & 24/86 \\
+        $>0.5$               & 196 & \good{$0.988\times$} & 25/196 \\
+        \bottomrule
+      \end{tabular}
+      \\[0.2em]
+      \raggedright\small
+      \good{\textbf{Nearly free where the sampler already works}}; expensive only where it does
+      not --- exactly where \texttt{soft} wins.
     \end{column}
   \end{columns}
+  \vspace{0.2em}
+  \centering
+  \rem{\keyw{The single geomean ($0.796\times$, headline $1.30\times$) pools regimes and is the
+  least useful number.} Control: CMSGen $1.004\times$ between arms, $0/357$ cells differ in $M$ or
+  $|\text{support}|$.}
 \end{frame}
 
-% == 19 ====================================================================
+% == 20 ==================================================================
 \begin{frame}{Status, and what is open}
   \begin{columns}[T]
     \begin{column}{0.4\textwidth}
@@ -727,7 +785,7 @@
   \end{columns}
 \end{frame}
 
-% == 20 ====================================================================
+% == 21 ==================================================================
 \begin{frame}{Turning this into a paper}
   \begin{center}
   \begin{tikzpicture}[font=\small]
@@ -750,7 +808,7 @@
   decision on the bandit/uniformity trade.
 \end{frame}
 
-% == 21 ====================================================================
+% == 22 ==================================================================
 \appendix
 \begin{frame}{Backup: numbers on hand}
   \footnotesize

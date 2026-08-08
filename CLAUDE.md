@@ -73,7 +73,13 @@ eval/                      # the experiment layer: run_full_eval.sh (staged/resu
                            #   sweep) + eval_plots.py + rivals_{demotic,recurrent,hts}.py +
                            #   rivals_setup.sh + barbarik_gpap.py (CM_test, gpap|cmsgen under
                            #   test) + fuzz_uniformity.py (exact-oracle uniformity fuzzing)
-                           #   + the cross-GPU Colab driver
+                           #   + the cross-GPU Colab driver + colab_supervisor.py (survives the
+                           #   ~1h VM lifetime: mirror every cycle, reseed, resume)
+                           #   PAPER OUTPUT: paper_tables.py is THE generator (all exclusion
+                           #   rules live there ONCE; slide_tables.py IMPORTS them so the deck
+                           #   cannot drift) + soft_price_tables.py (safe-vs-soft paired sweeps)
+                           #   + verify_artifact.py (publishability gate) + make_artifact.sh
+                           #   RAW DATA LIVES OUTSIDE THE REPO: $GPAP_RESULTS (../gpap-results)
 scripts/                   # shims (sample_benchmark -> gpap.benchmark), bench_to_cnf,
                            #   build_abc.sh, build_cmsgen.sh + cmsgen_gpap_eval.patch,
                            #   external_solver.py (PySAT utility, kept for future use)
@@ -326,6 +332,27 @@ Cross-GPU K-scaling: `eval/colab_sampling_benchmark.py` + `notebooks/gpap_colab_
   hypercube over |PI|·T bits (any sampler gets ~100% success; ABC collapses the whole output cone,
   so its "shrink" there is instance degeneracy, not encoder merit). Exclude them from headline
   encoder/sampler comparisons, or report them separately. `b01`/`b09` are near-vacuous (2 patterns).
+- **ZERO-SEARCH cells are the same trap, found per-row not per-name** (2026-08-05): a row with
+  `n_models > 0` but `decisions_per_s == 0 AND implications_per_s == 0` samples at 235-240M/s with
+  succ 1.0 because the support is FREE after propagation — no search happened. EPFL `ctrl`, `dec`,
+  `square` + sk_ `tableBasedAddition`. Worse than vacuous pins in one way: **the best-encoder rule
+  PREFERS them** (they carry the family's top ratio — `ctrl` tseitin succ 0.07 @2M/s vs abc:fast
+  succ 1.0 @240M/s). Leaving them in: epfl-rare 9.4→29.0×, epfl-random 8.2→19.5×, sk 98.9→113.1×.
+  Excluded by `paper_tables.zero_search`; flagged by `verify_artifact.py`.
+- **The zero ledger MUST be symmetric.** CMSGen-zero → `ratio=inf`, GPAP-zero → `ratio=0.0`,
+  both-zero → `ratio=None`. The last two are FALSY, so branching on `ratio` alone counts their
+  zeros as our wins and drops ours entirely (38 shown vs 14 hidden, until 2026-08-05). Report
+  `CMSGen=0 / GPAP=0 / both=0` as columns that SUM with the geomean's instances to the instance
+  count — a reader must be able to add them up.
+- **Propagation rate isolates the engine from the sampler** (2026-08-05): GPAP holds ~1e9
+  implications/s on EVERY family (geomean 1.07e9, spread 1.41× over the 9 families with n>=3,
+  occupancy-bound) vs CMSGen's 1.7-5.4e6 (its
+  OWN `--statsevery` counters). The identity **samples/s ratio = (impl/s ratio) / (impl-per-sample
+  ratio)** closes to <1% on 9/9 families ⇒ the 3-orders-of-magnitude spread in the headline is
+  REJECTION COST (we discard a conflicted trajectory; CMSGen backtracks and keeps it): 1.0× on
+  ISCAS-85, 5.6× seq-c25, 14.4× seq-c50, 53.7× EPFL; engine advantage 197-631× (geomean 306×). ⚠️ Every column must use the SAME rows — filtering per column
+  lets an instance that propagates hard but emits nothing (EPFL `bar`) into the numerator only,
+  breaking the identity by 3×. Table 3 of `eval/paper_tables.py`; figure `propagation_summary.png`.
 - Measurement protocol: [`docs/BENCHMARKING.md`](docs/BENCHMARKING.md).
 
 ## Tests / methodology

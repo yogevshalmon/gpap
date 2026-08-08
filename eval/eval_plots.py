@@ -10,6 +10,9 @@ plus the rival head-to-head JSONs, and writes PNGs + a markdown summary:
   vs_cmsgen_<stage>.png       GPAP vs CMSGen, emission-free both sides
   cmsgen_emission.png         CMSGen with vs without writing its samples (the fairness control)
   work_rates_<stage>.png      implications/s and decisions/s, GPU vs CPU, log-log
+  propagation_summary.png     the engine across ALL families at once: GPAP's implication rate is
+                              flat (~1e9/s, 1.41x spread) while the sample-rate ratio moves three
+                              orders of magnitude, and the exact factorisation of why
   amplification_<stage>.png   p_accept vs GPAP's constraint amplification (the rejection rival)
   rivals_<name>.png           unique solutions/s vs DEMOTIC / Recurrent-CircuitSAT / HTS
   summary.md                  every stage's geomeans, win counts and skips, as a table
@@ -328,6 +331,84 @@ def fig_work_rates(plt, stage, payload, out_dir):
     return _save(fig, os.path.join(out_dir, f"work_rates_{stage}.png"))
 
 
+def fig_prop_summary(plt, stages, out_dir):
+    """The engine claim, across every family at once, and what the sampler does with it.
+
+    Left: implication rate per family. GPAP's is nearly FLAT (the propagator is occupancy-bound,
+    so its rate is a property of the GPU, not of the instance) while CMSGen's varies with the
+    formula. Right: the exact factorisation of the headline,
+
+        samples/s ratio  =  (implications/s ratio)  /  (work-per-sample ratio)
+
+    which separates what the engine buys from what rejection sampling spends — GPAP throws away a
+    conflicted trajectory, CMSGen backtracks and keeps the partial work. The sample-rate spread
+    across families is three orders of magnitude on top of a flat engine number, so it belongs to
+    the right-hand factor.
+    """
+    fams = []
+    for stage, payload in sorted(stages.items()):
+        best = {}
+        for r in rows_of(payload):
+            k = r["name"].split(".")[0]
+            if k not in best or (r.get("ratio") or 0) > (best[k].get("ratio") or 0):
+                best[k] = r
+        keep = []
+        for k, r in best.items():
+            if k in VACUOUS_PINS:
+                continue
+            a, b = r.get("implications_per_s"), r.get("cms_implications_per_s")
+            s, t = r.get("gpap_sps"), r.get("cms_sps")
+            if all(x and x > 0 for x in (a, b, s, t)):
+                keep.append((a, b, s, t))
+        if len(keep) >= 3:
+            fams.append((stage,
+                         _gm([a for a, _, _, _ in keep]), _gm([b for _, b, _, _ in keep]),
+                         _gm([a / b for a, b, _, _ in keep]),
+                         _gm([(a / s) / (b / t) for a, b, s, t in keep])))
+    if len(fams) < 2:
+        return None
+    names = [f[0] for f in fams]
+    fig, axes = plt.subplots(1, 2, figsize=(12.4, 4.8))
+    for ax in axes:
+        ax.set_facecolor(SURFACE)
+        ax.grid(True, axis="y", color=GRID, lw=0.6, alpha=0.7)
+        for sp in ax.spines.values():
+            sp.set_color(GRID)
+    fig.patch.set_facecolor(SURFACE)
+    x = range(len(fams))
+    w = 0.38
+    axes[0].bar([i - w / 2 for i in x], [f[1] for f in fams], w, color=C_TSEITIN, label="GPAP (GPU)")
+    axes[0].bar([i + w / 2 for i in x], [f[2] for f in fams], w, color=C_CMS,
+                label="CMSGen (1 CPU core)")
+    axes[0].set_yscale("log")
+    axes[0].set_ylabel("implications / s", fontsize=9, color=INK2)
+    spread = max(f[1] for f in fams) / min(f[1] for f in fams)
+    axes[0].set_title(f"Propagation rate is a property of the engine, not the benchmark\n"
+                      f"GPAP varies only {spread:.2f}x across families",
+                      fontsize=10.5, color=INK, loc="left")
+    axes[0].legend(frameon=False, fontsize=8.5, labelcolor=INK2)
+
+    axes[1].bar([i - w / 2 for i in x], [f[3] for f in fams], w, color=C_TSEITIN,
+                label="engine advantage (impl/s ratio)")
+    axes[1].bar([i + w / 2 for i in x], [f[4] for f in fams], w, color=C_RIVAL,
+                label="rejection cost (work per sample)")
+    axes[1].plot(list(x), [f[3] / f[4] for f in fams], "o-", color=C_ABC, lw=1.6, ms=5,
+                 label="net = samples/s ratio")
+    axes[1].axhline(1.0, color=INK2, ls="--", lw=1.0)
+    axes[1].set_yscale("log")
+    axes[1].set_ylabel("x (log)", fontsize=9, color=INK2)
+    axes[1].set_title("What the engine buys, what rejection sampling spends\n"
+                      "left bar / right bar = the published ratio, exactly",
+                      fontsize=10.5, color=INK, loc="left")
+    axes[1].legend(frameon=False, fontsize=8.5, labelcolor=INK2)
+    for ax in axes:
+        ax.set_xticks(list(x))
+        ax.set_xticklabels(names, rotation=30, ha="right", fontsize=8, color=INK2)
+        ax.tick_params(colors=INK2, labelsize=8)
+    fig.tight_layout()
+    return _save(fig, os.path.join(out_dir, "propagation_summary.png"))
+
+
 def fig_amplification(plt, stage, payload, out_dir):
     """The rejection-sampling rival: where does propagation actually earn its keep?"""
     rows = [r for r in rows_of(payload)
@@ -398,20 +479,23 @@ def write_summary(stages, out_dir, src_dir):
     cpu_s = f"{cpu.get('model', '?')} ({cpu.get('count', '?')} threads)" if cpu else "**not recorded**"
     lines += [f"GPU: **{gpu}**  |  CPU: **{cpu_s}**  |  source: `{src_dir}`", "",
               "The CPU matters as much as the GPU here: CMSGen is single-core, so the ratio moves",
-              "with the host. Measured 2026-08-04, the same 29 `sk_` instances gave 48.5x on an RTX",
-              "4080 laptop and 113.1x on a Colab L4 box whose CPU is 0.41x as fast — none of that",
+              "with the host. Measured 2026-08-04, the same 29 `sk_` instances gave 46.2x on an RTX",
+              "4080 laptop and 98.9x on a Colab L4 box whose CPU is 0.41x as fast — none of that",
               "difference is GPAP. Never quote a ratio without the CPU beside it.", "",
               "`GPAP/CMSGen` is per INSTANCE at its best encoder — the configuration a user would",
               "ship. The per-ROW figure (every instance x every encoder) is given alongside it;",
               "they differ whenever one encoder collapses on an instance the other handles, which",
               "is a real per-instance effect, not an aggregate one.", "",
-              f"**no-vac** excludes the VACUOUS-PIN instances ({', '.join(sorted(VACUOUS_PINS))}),",
-              "whose last-cycle outputs are constant at T=25 so pinning them is a tautology and any",
-              "sampler scores ~100%. They inflate the rare-target geomeans by up to 1.9x, so the",
-              "no-vac column is the one to quote for the sequential family.", "",
+              "**clean** applies the two exclusions the paper generator applies, for the same",
+              "reason — a cell that measures the INSTANCE is not a measurement of the sampler:",
+              f"(1) VACUOUS PINS ({', '.join(sorted(VACUOUS_PINS))}), whose last-cycle outputs are",
+              "constant at T=25 so pinning them is a tautology (up to 1.9x on the rare column); and",
+              "(2) ZERO-SEARCH cells, which emit samples with no decisions AND no implications",
+              "because the support is free after propagation (EPFL 29.0x -> 9.4x). **Quote the",
+              "clean column.** `eval/paper_tables.py` is authoritative; this is the same rule.", "",
               "| stage | rows | inst | skipped | errors | encoders | GPAP/CMSGen (best enc) | "
-              "**no-vac** | (per row) | wins | encoder A/B | CMSGen emission cost |",
-              "|---|---|---|---|---|---|---|---|---|---|---|---|"]
+              "**clean** | (per row) | wins | GPAP=0 | encoder A/B | CMSGen emission cost |",
+              "|---|---|---|---|---|---|---|---|---|---|---|---|---|"]
     for stage, payload in sorted(stages.items()):
         rows = rows_of(payload)
         allr = payload.get("results", [])
@@ -425,10 +509,19 @@ def write_summary(stages, out_dir, src_dir):
             if k not in best or (r.get("ratio") or 0) > (best[k].get("ratio") or 0):
                 best[k] = r
         gm = _gm([r.get("ratio") for r in best.values()])
+        # `clean` = the paper's rule: drop vacuous pins AND cells that sampled without searching
+        # (no decisions, no implications — the support is free after propagation, so the ratio
+        # describes the instance). Detected per row, not by a name list.
         gm_nv = _gm([r.get("ratio") for k, r in best.items()
-                     if k.split(".")[0] not in VACUOUS_PINS])
+                     if k.split(".")[0] not in VACUOUS_PINS
+                     and not ((r.get("n_models") or 0) > 0
+                              and not (r.get("decisions_per_s") or 0)
+                              and not (r.get("implications_per_s") or 0))])
         n_win = sum(1 for r in best.values() if (r.get("ratio") or 0) >= 1)
         n_cmp = sum(1 for r in best.values() if r.get("ratio") is not None)
+        # our own zeros, stated as plainly as CMSGen's
+        n_g0 = sum(1 for r in best.values()
+                   if (r.get("cms_n_samples") or 0) > 0 and not (r.get("n_models") or 0))
         pairs = paired_by_encoder(rows)
         ab = "—"
         if len(encs) >= 2 and pairs:
@@ -443,7 +536,7 @@ def write_summary(stages, out_dir, src_dir):
         lines.append(f"| {stage} | {len(rows)} | {len(best)} | {n_skip} | {n_err} | "
                      f"{'+'.join(encs) or '—'} | {f'{gm:.1f}x' if gm else '—'} | {nv} | "
                      f"{f'{gm_row:.1f}x' if gm_row else '—'} | "
-                     f"{n_win}/{n_cmp} | {ab} | {f'{pen:.1f}x' if pen else '—'} |")
+                     f"{n_win}/{n_cmp} | {n_g0} | {ab} | {f'{pen:.1f}x' if pen else '—'} |")
     # skipped/error detail — a sweep that silently dropped instances is not a result
     detail = []
     for stage, payload in sorted(stages.items()):
@@ -500,12 +593,13 @@ def main():
                 p = None
             if p:
                 made.append(p)
-    try:
-        p = fig_cmsgen_emission(plt, stages, out_dir)
-        if p:
-            made.append(p)
-    except Exception as e:  # noqa: BLE001
-        print(f"  [warn] fig_cmsgen_emission: {e}")
+    for fn in (fig_cmsgen_emission, fig_prop_summary):
+        try:
+            p = fn(plt, stages, out_dir)
+            if p:
+                made.append(p)
+        except Exception as e:  # noqa: BLE001
+            print(f"  [warn] {fn.__name__}: {e}")
     for rp in sorted(glob.glob(os.path.join(args.results_dir, "rivals*.json"))):
         try:
             p = fig_rivals(plt, rp, out_dir)
