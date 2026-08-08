@@ -679,6 +679,12 @@ GPAP/CMSGen geomean, per instance at its best encoder (per-row figure in bracket
 sk 48.5×; seq-c25 rare **47.7×** (22.2×) / random 107.9× (90.1×); seq-c50 rare 47.6× (35.2×) /
 random 137.7× (113.1×); comb rare 538× / random 555×; hwmcc-c25 rare 156× / random 496×;
 hwmcc-c50 rare 30.9× / random 230×; epfl rare **12.7×** (3.4×) / random 11.0×.
+⚠️ **SUPERSEDED 2026-08-04/05 — three of those figures were inflated by cells that measure the
+INSTANCE, not the sampler** (`docs/findings/L4_EVAL_FINDINGS.md` §2; re-derive with
+`eval/paper_tables.py`, which applies the exclusions in one place): vacuous pins put seq-c25 rare
+at 47.7× when it is **36.5×**, and zero-search cells (samples emitted with 0 decisions AND 0
+implications — the support is free after propagation) put epfl rare at 12.7× when it is **6.4×**
+and sk at 48.5× when it is **46.2×**. The encoder and regime conclusions below are unaffected.
 Three things the sweep settled: (1) rare targets cost ~4× of the ratio versus rejection-easy
 random pins, on identical instances — quote the rare column; (2) per-ROW and per-INSTANCE
 geomeans diverge (epfl 3.4× vs 12.7×) whenever one encoder collapses on an instance the other

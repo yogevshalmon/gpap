@@ -91,8 +91,81 @@ def main():
         if 0 < len(finite) < 3:
             warn.append(f"{stem}: geomean stands on only {len(finite)} instance(s) "
                         f"(CMSGen scored zero on the rest) — flag it, do not quote it")
+
+        # SYMMETRY of the zero ledger. Reporting the instances CMSGen could not sample while
+        # dropping the ones WE could not is the single easiest way to publish a flattering table
+        # by accident; it is exactly what the first version of paper_tables.py did, because a
+        # GPAP-zero row carries ratio == 0.0 and fell through every branch.
+        g0 = [k for k, r in best.items()
+              if (r.get("cms_n_samples") or 0) > 0 and not (r.get("n_models") or 0)]
+        b0 = [k for k, r in best.items()
+              if not (r.get("cms_n_samples") or 0) and not (r.get("n_models") or 0)]
+        if g0:
+            warn.append(f"{stem}: GPAP emitted NOTHING on {len(g0)} instance(s) that CMSGen "
+                        f"sampled ({', '.join(sorted(g0))}) — these are losses and must appear "
+                        f"in the table, not only CMSGen's zeros")
+        if b0:
+            warn.append(f"{stem}: {len(b0)} instance(s) defeated both samplers "
+                        f"({', '.join(sorted(b0))}) — report as a limit of the comparison")
+
+        # ZERO-SEARCH cells: samples emitted with no decisions and no implications means the
+        # support is free after propagation, so the ratio measures the instance. Worse, the
+        # best-encoder rule PREFERS them, because they carry the family's highest ratio.
+        free = [k for k, r in best.items()
+                if (r.get("n_models") or 0) > 0 and not (r.get("decisions_per_s") or 0)
+                and not (r.get("implications_per_s") or 0)]
+        if free:
+            warn.append(f"{stem}: {len(free)} instance(s) sample with ZERO search "
+                        f"({', '.join(sorted(free))}) — no decisions, no implications, the "
+                        f"support is a free hypercube. Exclude as for vacuous pins")
     if tot_unsound == 0 and tot_cells:
         ok.append(f"soundness: {tot_cells} scored cells, 0 unsound")
+
+    # ---------------------------------------------------------------- the propagation identity
+    # Table 3 claims  samples/s ratio == (impl/s ratio) / (impl-per-sample ratio)  on every
+    # family. It is algebra, so it cannot fail unless the aggregation is wrong — which is exactly
+    # what happened once (columns filtered independently let EPFL `bar`, which propagates hard
+    # and emits nothing, into the numerator only, breaking the family by 3x). Re-derive it here
+    # from the raw rows rather than trusting the generator that produced the claim.
+    ident_bad, ident_ok = [], 0
+    for p in stages:
+        d = load(p)
+        if not d:
+            continue
+        stem = os.path.basename(p)[:-5]
+        best = {}
+        for r in d.get("results", []):
+            if r.get("skipped") or r.get("error"):
+                continue
+            k = r["name"].split(".")[0]
+            if k not in best or (r.get("ratio") or 0) > (best[k].get("ratio") or 0):
+                best[k] = r
+        quad = []
+        for k, r in best.items():
+            if k in VACUOUS_PINS:
+                continue
+            a, b = r.get("implications_per_s"), r.get("cms_implications_per_s")
+            s, t = r.get("gpap_sps"), r.get("cms_sps")
+            if all(x and x > 0 for x in (a, b, s, t)):
+                quad.append((a, b, s, t))
+        if len(quad) < 3:
+            continue
+
+        def _gm(xs):
+            return math.exp(sum(math.log(x) for x in xs) / len(xs))
+        impl = _gm([a / b for a, b, _, _ in quad])
+        work = _gm([(a / s) / (b / t) for a, b, s, t in quad])
+        samp = _gm([s / t for _, _, s, t in quad])
+        if not (0.99 <= (impl / work) / samp <= 1.01):
+            ident_bad.append(f"{stem} ({impl / work:,.1f}x vs {samp:,.1f}x)")
+        else:
+            ident_ok += 1
+    if ident_bad:
+        fail.append("propagation identity BROKEN on: " + ", ".join(ident_bad)
+                    + " — the impl/s and work-per-sample columns are not over the same rows")
+    elif ident_ok:
+        ok.append(f"propagation identity holds on {ident_ok}/{ident_ok} families "
+                  f"(impl/s ratio / work-per-sample ratio == samples/s ratio, within 1%)")
 
     # coverage: a stage below its family's max instance count is partial
     for fam, d in sorted(fam_inst.items()):

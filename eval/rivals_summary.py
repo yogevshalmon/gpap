@@ -76,10 +76,20 @@ def report_one(d, variant, markdown):
             continue
         ratios = [r["ratio"] for r in rows.values() if r["ratio"]]
         only = sum(1 for r in rows.values() if r["ratio"] is None and not r["error"] and r["gpap"])
+        gz = sum(1 for r in rows.values()
+                 if not r["error"] and r["rival"] and not r["gpap"])
         errs = sum(1 for r in rows.values() if r["error"])
-        wins = sum(1 for x in ratios if x >= 1)
+        # Count wins the way eval/paper_tables.py does, or the deck and the paper disagree in
+        # print. A cell the rival scored ZERO on is an outright win and belongs in BOTH sides of
+        # the fraction; a cell WE scored zero on is an outright loss and belongs in the
+        # denominator only. Neither has a finite ratio, so neither enters the geomean. Printing
+        # the stricter "finite ratios only" count here is a different, narrower question, and it
+        # differed from the published table by exactly the zero-scoring cells.
+        wins = sum(1 for x in ratios if x >= 1) + only
+        n = len(ratios) + only + gz
         print(f"\n=== {label}   n={len(rows)}  geomean={fmt(gm(ratios), 'x')}  "
-              f"GPAP wins {wins}/{len(ratios)}  rival-scored-0: {only}  rival-errored: {errs}")
+              f"GPAP wins {wins}/{n}  rival-scored-0: {only}  GPAP-scored-0: {gz}  "
+              f"rival-errored: {errs}")
         if markdown:
             print("\n| instance | p_acc | rival u/s | GPAP u/s | ratio |\n|---|---|---|---|---|")
         for (name, var), r in rows.items():

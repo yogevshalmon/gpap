@@ -8,18 +8,22 @@ never transcribed by hand — the failure mode that put an inflated 47.7x on the
     eval/slide_tables.py --cmsgen .experiments/cmsgen_l4_2026-08-03 \\
         --rivals .experiments/l4_rivals --out docs/slides/l4_results.tex
 
-Everything it prints is derived, and the two rules that make the numbers honest are applied
-here, in one place:
-  * VACUOUS-PIN instances (constant outputs at T=25) are excluded from the sequential geomeans.
-  * ratio = inf (CMSGen produced ZERO samples in budget) never enters a geomean; it is counted
-    and reported separately as an outright win.
+Everything it prints is derived, and the aggregation rules live in `eval/paper_tables.py` — this
+module IMPORTS them rather than restating them. That is deliberate: the two files each had their
+own copy of "best encoder per instance, drop vacuous pins, exclude infinite ratios", and the
+moment the paper generator learned to count GPAP's own zeros and to exclude zero-search cells,
+the slide generator would have gone on quoting the old, flattering numbers. A deck that disagrees
+with the paper is worse than a deck with no numbers on it.
 """
 import argparse
 import json
 import math
 import os
+import sys
 
-VACUOUS_PINS = {"b02", "b05", "b07", "s526"}
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+from eval.paper_tables import (cms_family, prop_rates,  # noqa: E402
+                               rival_family)
 
 # (stem, human label) in the order they should appear
 CMS_STAGES = [
@@ -61,56 +65,16 @@ def fmt(x, suffix=r"$\times$"):
 
 
 def cms_stage(d, stem):
-    p = os.path.join(d, f"{stem}.json")
-    if not os.path.isfile(p):
-        return None
-    payload = json.load(open(p))
-    rows = [r for r in payload.get("results", []) if not r.get("skipped") and not r.get("error")]
-    if not rows:
-        return None
-    best = {}
-    for r in rows:
-        k = r["name"].split(".")[0]
-        if k not in best or (r.get("ratio") or 0) > (best[k].get("ratio") or 0):
-            best[k] = r
-    finite = {k: r for k, r in best.items()
-              if r.get("ratio") and math.isfinite(r["ratio"])}
-    novac = [r["ratio"] for k, r in finite.items() if k not in VACUOUS_PINS]
-    n_inf = sum(1 for r in best.values() if r.get("ratio") and not math.isfinite(r["ratio"]))
-    return {
-        "cells": len(rows), "inst": len(best),
-        "gm": gm([r["ratio"] for r in finite.values()]),
-        "gm_novac": gm(novac), "n_novac": len(novac),
-        "wins": sum(1 for r in finite.values() if r["ratio"] >= 1) + n_inf,
-        "n": len(finite) + n_inf, "inf": n_inf,
-        "vac": bool(set(best) & VACUOUS_PINS),
-        "skipped": sum(1 for r in payload.get("results", []) if r.get("skipped")),
-        "errors": sum(1 for r in payload.get("results", []) if r.get("error")),
-    }
+    """Thin adapter over paper_tables.cms_family — the slide's `gm` IS the paper's headline."""
+    v = cms_family(d, stem)
+    if v:
+        v["vac"] = v["has_vac"]
+        v["gm_novac"] = v["gm"]            # the paper's `gm` already applies every exclusion
+    return v
 
 
 def rival_stage(d, stem, key):
-    p = os.path.join(d, f"rivals_{stem}.json")
-    if not os.path.isfile(p):
-        return None
-    payload = json.load(open(p))
-    rows = (payload.get("rows") if isinstance(payload, dict) else payload) or []
-    seen = {}
-    for r in rows:
-        seen[(r["name"], r.get("variant", "-"))] = r      # last wins (a retry supersedes)
-    ratios, errs, zero = [], 0, 0
-    for r in seen.values():
-        rv, g = r.get(key) or {}, r.get("gpap") or {}
-        if rv.get("error"):
-            errs += 1
-            continue
-        rate = rv.get("unique_per_s") or 0.0
-        if not rate:
-            zero += 1
-            continue
-        ratios.append((g.get("unique_per_s_est") or 0.0) / rate)
-    return {"cells": len(seen), "gm": gm(ratios), "n": len(ratios),
-            "wins": sum(1 for x in ratios if x >= 1), "errors": errs, "zero": zero}
+    return rival_family(d, stem, key)
 
 
 def main():
@@ -145,9 +109,9 @@ def main():
     # ---------------------------------------------------------------- frame 1: vs CMSGen
     a(r"\begin{frame}{Appendix: every CMSGen family measured on the L4}")
     a(r"  \centering \scriptsize")
-    a(r"  \begin{tabular}{@{}llrrrrr@{}}")
+    a(r"  \begin{tabular}{@{}llrrrrrr@{}}")
     a(r"    \toprule")
-    a(r"    family & targets & inst & GPAP$/$CMSGen & \textbf{no-vac} & wins & CMSGen 0 \\")
+    a(r"    family & targets & inst & \textbf{GPAP$/$CMSGen} & wins & C$=$0 & G$=$0 & both \\")
     a(r"    \midrule")
     # A stage that ran out of budget mid-family must not look like a complete one. The family's
     # own maximum instance count is the expected size; anything short of it is marked.
@@ -162,25 +126,30 @@ def main():
         v = cms.get(stem)
         if not v:
             continue
-        nv = fmt(v["gm_novac"]) if v["vac"] else "---"
         tgtx = r"\keyw{rare}" if tgt == "rare" else tgt
         exp = expected.get(stem.split("-")[0], v["inst"])
         mark = ""
         if v["inst"] < exp:
             mark = r"$^{\dagger}$"
             partial.append(f"{stem} ({v['inst']}/{exp})")
-        a(f"    {label} & {tgtx} & {v['inst']}{mark} & {fmt(v['gm'])} & {nv} & "
-          f"{v['wins']}/{v['n']} & {v['inf']} \\\\")
+        g = fmt(v["gm"])
+        if v["gm"] and v["n_gm"] < 3:
+            g += r"$^{\ddagger}$"
+        a(f"    {label} & {tgtx} & {v['inst']}{mark} & {g} & "
+          f"{v['wins']}/{v['n']} & {v['inf']} & {v['gpap0']} & {v['both0']} \\\\")
     a(r"    \bottomrule")
     a(r"  \end{tabular}")
     a(r"  \\[0.7em]")
     a(r"  \rem{\textbf{" + f"{total_cells} cells, {total_inst} instance-slots, {n_skip} skipped, "
       f"{n_err} errors" + r"}. GPU \textbf{" + gpu + r"}, CPU \textbf{" + cpu_s + r"}.")
-    a(r"  \keyw{no-vac} drops \texttt{b02/b05/b07/s526}, whose outputs are constant at $T{=}25$ so"
-      r"  any sampler scores ${\sim}100\%$ --- quote it, not the raw column.")
-    a(r"  \keyw{CMSGen 0} counts instances where CMSGen emitted \emph{zero} samples in budget:"
-      r"  outright wins, but ratio $=\infty$, so they are EXCLUDED from every geomean above."
-      r"  The numbers are therefore conservative.")
+    a(r"  Geomeans already EXCLUDE \texttt{b02/b05/b07/s526} (outputs constant at $T{=}25$, so"
+      r"  pinning is a tautology) and any instance that samples with zero search.")
+    a(r"  \keyw{The zero columns are symmetric}: \keyw{C$=$0} instances CMSGen could not sample"
+      r"  (our wins), \bad{G$=$0} instances \emph{we} could not (our losses), \keyw{both} neither"
+      r"  could. None has a finite ratio, so none enters a geomean --- and the four counts plus"
+      r"  the geomean's instances sum to \keyw{inst}.")
+    a(r"  $^{\ddagger}$geomean over ${<}3$ instances (CMSGen scored zero on the rest):"
+      r"  an illustration, \bad{not an estimate}.")
     if partial:
         a(r"  $^{\dagger}$\bad{incomplete stage} (rented-GPU budget ran out): "
           + ", ".join(r"\texttt{" + p.replace("_", r"\_") + "}" for p in partial) + ".")
@@ -190,26 +159,62 @@ def main():
     # ---------------------------------------------------------------- frame 2: vs rivals
     a(r"\begin{frame}{Appendix: every GPU rival measured on the L4}")
     a(r"  \centering \scriptsize")
-    a(r"  \begin{tabular}{@{}llrrrr@{}}")
+    a(r"  \begin{tabular}{@{}llrrrrrr@{}}")
     a(r"    \toprule")
-    a(r"    rival & protocol & cells & GPAP$/$rival & wins & rival failed \\")
+    a(r"    rival & protocol & cells & GPAP$/$rival & wins & R$=$0 & G$=$0 & failed \\")
     a(r"    \midrule")
     for stem, key, rival, proto in RIVAL_STAGES:
         v = riv.get(stem)
         if not v:
-            a(f"    {rival} & {proto} & \\multicolumn{{4}}{{c}}{{\\bad{{not run}}}} \\\\")
+            a(f"    {rival} & {proto} & \\multicolumn{{6}}{{c}}{{\\bad{{not run}}}} \\\\")
             continue
         a(f"    {rival} & {proto} & {v['cells']} & {fmt(v['gm'])} & "
-          f"{v['wins']}/{v['n']} & {v['errors']} \\\\")
+          f"{v['wins']}/{v['n']} & {v['zero']} & {v['gpap0']} & {v['errors']} \\\\")
     a(r"    \bottomrule")
     a(r"  \end{tabular}")
     a(r"  \\[0.7em]")
     a(r"  \rem{Their metric: unique solutions $/$ their \texttt{model\_runtime}, which excludes"
-      r"  their model build while ours includes construction. \keyw{rival failed} = timeout or"
-      r"  no gradient path; those rows are reported, never folded in as a zero. Rows where the"
-      r"  rival scored $0$ are excluded from the geomean for the same reason as above.}")
+      r"  their model build while ours includes construction. \keyw{failed} = timeout or"
+      r"  no gradient path; those rows are reported, never folded in as a zero."
+      r"  \keyw{R$=$0} the rival emitted nothing, \bad{G$=$0} \emph{we} emitted nothing ---"
+      r"  neither has a finite ratio, both are counted.}")
     a(r"\end{frame}")
     a("")
+    # ---------------------------------------------------------------- frame: the engine itself
+    prop = {s: prop_rates(args.cmsgen, s) for s, _, _ in CMS_STAGES}
+    if any(prop.values()):
+        a(r"\begin{frame}{Appendix: the engine, isolated from the sampler}")
+        a(r"  \centering \scriptsize")
+        a(r"  \begin{tabular}{@{}llrrrrr@{}}")
+        a(r"    \toprule")
+        a(r"    & & & \multicolumn{2}{c}{implications$/$s} & "
+          r"\multicolumn{2}{c}{implications$/$sample} \\")
+        a(r"    \cmidrule(lr){4-5}\cmidrule(lr){6-7}")
+        a(r"    family & targets & $n$ & GPAP & CMSGen & GPAP & CMSGen \\")
+        a(r"    \midrule")
+        for stem, label, tgt in CMS_STAGES:
+            v = prop.get(stem)
+            if not v:
+                continue
+            tgtx = r"\keyw{rare}" if tgt == "rare" else tgt
+            a(f"    {label} & {tgtx} & {v['n']} & "
+              f"${v['gpap'] / 1e9:.2f}\\!\\times\\!10^{{9}}$ & "
+              f"${v['cms'] / 1e6:.2f}\\!\\times\\!10^{{6}}$ & "
+              f"{v['gper']:,.0f} & {v['cper']:,.0f} \\\\")
+        a(r"    \bottomrule")
+        a(r"  \end{tabular}")
+        a(r"  \\[0.7em]")
+        rates = [v["gpap"] for v in prop.values() if v]
+        spread = max(rates) / min(rates)
+        a(r"  \rem{GPAP's rate is from the packed-word kernel; CMSGen's from \emph{its own}"
+          r"  counters (\texttt{--statsevery}). \good{GPAP holds ${\sim}10^{9}$ implications$/$s"
+          r"  on every family} --- spread only $" + f"{spread:.2f}" + r"\times$ --- while the"
+          r"  sample-rate ratio spans ${\sim}2$ orders of magnitude. The two are linked exactly:"
+          r"  \keyw{samples$/$s ratio $=$ (impl$/$s ratio) $/$ (impl$/$sample ratio)}, so the"
+          r"  variation is \keyw{rejection cost}, not the propagator. We discard a conflicted"
+          r"  trajectory; CMSGen backtracks and keeps the partial work.}")
+        a(r"\end{frame}")
+        a("")
     # ---------------------------------------------------------------- frame 3: uniformity
     uni = json.load(open(args.uniformity)) if args.uniformity and os.path.isfile(args.uniformity) \
         else None
