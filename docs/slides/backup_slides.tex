@@ -1,0 +1,68 @@
+% ---------------------------------------------------------------------------
+%  Backup frames for gpap_overview.tex — detail that would slow the main talk
+%  but that an advisor may well ask about. \input from the appendix.
+%
+%  These were main-deck frames until 2026-08-06; moved here so the narrative
+%  runs engine -> application -> evidence without a feature list or a
+%  superseded single-machine result interrupting it.
+% ---------------------------------------------------------------------------
+
+% --- was frame 8: the engine feature list (too technical for the main line) ---
+\begin{frame}{Backup: the engine, in features}
+  \begin{columns}[T]
+    \begin{column}{0.48\textwidth}
+      \begin{itemize}\small
+        \item one packed \texttt{int32} per clause --- update is a single atomic
+        \item assignment as a bitmap --- one atomic gives dedup \emph{and} contradiction
+        \item two propagate kernels, \keyw{auto-dispatched} per formula
+        \item the whole decide$+$propagate trajectory \keyw{fused into one launch}
+      \end{itemize}
+    \end{column}
+    \begin{column}{0.48\textwidth}
+      \begin{itemize}\small
+        \item $K$ sized analytically from free VRAM; unit-flush cached at construction
+        \item readout stays \keyw{on device} --- only counts and projections cross the bus
+        \item two packed splits chosen per formula; out-of-envelope formulas rejected, never
+          silently degraded
+      \end{itemize}
+    \end{column}
+  \end{columns}
+  \vspace{0.6em}
+  \begin{block}{Bottom line}
+    \centering
+    \good{\textbf{Up to $5.7\times$ end-to-end}} over the pre-WAVE engine --- with
+    \keyw{bit-identical model sets} at every step.
+  \end{block}
+  \rem{Negative results, kept because they cost weeks: classic \textbf{2-watched-literals on GPU
+  is $1.8$--$2.6\times$ slower} than \NC-style counting, on ${\sim}5\times$ the per-row state;
+  1-byte clause state, clause renumbering and multi-warp tiles all measured out.}
+\end{frame}
+
+% --- was frame 13: the single-machine (4080 laptop) headline ---
+\begin{frame}{Backup: the same suite on the 4080 laptop}
+  \centering
+  \small
+  \begin{tabular}{@{}llrl@{}}
+    \toprule
+    family & targets & GPAP $/$ CMSGen & wins \\
+    \midrule
+    ITC'99 $+$ ISCAS-89 sequential, $T{=}25$ & \keyw{rare} & \good{$36.5\times$} & 17/18 \\
+    ITC'99 $+$ ISCAS-89 sequential, $T{=}25$ & random & $105.8\times$ & 18/18 \\
+    ISCAS-85 combinational & \keyw{rare} & $538\times$ & 10/10 \\
+    HWMCC'17 (curated), $T{=}25$ & \keyw{rare} & $156\times$ & 7/7 \\
+    EPFL combinational & \keyw{rare} & $6.4\times$ & 13/17 \\
+    Sketch / \texttt{sk\_} projected CNFs & --- & $46.2\times$ & 27/29 \\
+    \bottomrule
+  \end{tabular}
+  \\[1.0em]
+  \rem{RTX 4080 laptop (\texttt{i7-13800H}) vs.\ single-core patched CMSGen; per instance at its
+  best encoder. Superseded by the L4 sweep in the main deck --- kept because it is the machine the
+  engine was developed on.
+  \\ \bad{Corrected 2026-08-04/05}, by one rule: \keyw{a cell that measures the instance instead of
+  the sampler does not belong in a geomean}. (i)~vacuous output pins
+  (\texttt{b02/b05/b07/s526} are constant at $T{=}25$, so pinning them is a tautology): including
+  them read $47.7\times$, an inflation of up to $1.9\times$ falling almost entirely on the rare
+  column. (ii)~instances that sample with \keyw{zero decisions and zero implications} --- the
+  support is free after propagation, so no search happens, and the best-encoder rule \emph{prefers}
+  them because they carry the highest ratio: EPFL read $12.7\times$, \texttt{sk\_} $48.5\times$.}
+\end{frame}

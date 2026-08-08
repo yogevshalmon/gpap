@@ -41,47 +41,53 @@
   ar/.style  = {-{Latex[length=2mm]}, thick, gpapgray},
 }
 
-\title[GPAP]{From \NC{} to the GPU}
-\subtitle{A $K$-parallel BCP primitive, and guaranteed-valid SAT solution sampling}
+\title[GPAP]{\GPAP{} --- \textbf{G}PU-\textbf{P}arallel \textbf{A}ssumption \textbf{P}ropagation}
+\subtitle{A $K$-parallel BCP engine --- and guaranteed-valid SAT solution sampling built on it}
 \author[Y. Shalmon]{Yogev Shalmon}
 \institute[Technion]{Technion --- Faculty of Data and Decision Sciences}
 \date[\today]{Project status --- \today}
 
 \begin{document}
 
-% == 1 ===================================================================
+% == 1 =================================================================
 \begin{frame}[plain]
   \titlepage
 \end{frame}
 
-% == 2 ===================================================================
-\begin{frame}{The story}
+% == 2 =================================================================
+\begin{frame}{The headline: a BCP engine that runs $300\times$ a CPU core}
   \begin{center}
   \begin{tikzpicture}[font=\small]
-    \node[bxn, text width=3.0cm] (a) at (0,0)    {\NC\\ \scriptsize FMCAD'26};
-    \node[bx,  text width=3.0cm] (b) at (3.9,0)  {\textbf{\GPAP{} engine}\\ \scriptsize $K$-parallel BCP};
-    \node[bxg, text width=3.0cm] (c) at (7.8,0)  {\textbf{Sampling}\\ \scriptsize the flagship app};
-    \node[bxg, text width=3.0cm] (d) at (11.7,0) {\textbf{Uniformity}\\ \scriptsize measured, not claimed};
-    \draw[ar] (a)--(b); \draw[ar] (b)--(c); \draw[ar] (c)--(d);
-
-    \node[font=\scriptsize, text width=3.3cm, align=center, gpapgray, below=4mm of a]
-      {no clause scans,\\ one assignment, one core};
-    \node[font=\scriptsize, text width=3.3cm, align=center, gpapgray, below=4mm of b]
-      {count $+$ \emph{sum},\\ one assignment per warp};
-    \node[font=\scriptsize, text width=3.3cm, align=center, gpapgray, below=4mm of c]
-      {every sample is a real\\ solution, by construction};
-    \node[font=\scriptsize, text width=3.3cm, align=center, gpapgray, below=4mm of d]
-      {exact oracle,\\ turned on ourselves};
+    \node[bxn,text width=2.4cm] (nc) at (0,0) {\NC\\ \scriptsize FMCAD'26};
+    \node[draw,very thick,gpapblue,rounded corners,fill=gpapblue!10,
+          text width=5.8cm,align=center,minimum height=1.5cm] (eng) at (5.2,0)
+      {\large\textbf{The \GPAP{} engine}\\[0.2em]
+       \small $K$ independent assignments,\\ propagated at once on the GPU};
+    \node[bxg,text width=3.0cm] (s) at (10.6,0.55) {\textbf{Sampling}\\ \scriptsize the flagship app};
+    \node[bxg,text width=3.0cm] (u) at (10.6,-0.75) {\textbf{Uniformity}\\ \scriptsize measured, not claimed};
+    \draw[ar] (nc) -- (eng);
+    \draw[ar] (eng) -- (s);
+    \draw[ar] (s) -- (u);
+    \node[font=\scriptsize,gpapgray,align=center,text width=2.8cm,anchor=north] at (0,-0.6)
+      {the data structure\\ that made it possible};
   \end{tikzpicture}
   \end{center}
-  \vspace{1.2em}
-  \begin{center}
-  \rem{The data structure is the thread: what removed clause scans from a CPU flip is what makes
-  the GPU update race-free.}
-  \end{center}
+  \vspace{0.5em}
+  \begin{block}{The result}
+    \centering
+    \good{\Large $\mathbf{\sim 10^{9}}$ \textbf{propagations/s}} \quad vs.\
+    ${\sim}5{\times}10^{6}$ on a single CPU core
+    \\[0.3em]
+    \good{\textbf{$197$--$631\times$}} --- and \keyw{essentially flat across every benchmark family}
+  \end{block}
+  \vspace{0.3em}
+  \centering
+  \keyw{\textbf{But an engine alone is not a contribution.}} So we built the application that needs
+  exactly this shape of parallelism --- \good{\textbf{SAT solution sampling}} --- and measured it
+  against the state of the art.
 \end{frame}
 
-% == 3 ===================================================================
+% == 3 =================================================================
 \begin{frame}{Where this starts: \NC{} (FMCAD'26)}
   \begin{columns}[T]
     \begin{column}{0.53\textwidth}
@@ -126,7 +132,7 @@
   \end{columns}
 \end{frame}
 
-% == 4 ===================================================================
+% == 4 =================================================================
 \begin{frame}{Same idea, different question}
   \begin{center}
   \resizebox{\textwidth}{!}{%
@@ -153,7 +159,7 @@
   \end{block}
 \end{frame}
 
-% == 5 ===================================================================
+% == 5 =================================================================
 \begin{frame}{One word per clause --- and the update is its own detector}
   \begin{center}
   \begin{tikzpicture}[font=\small]
@@ -192,58 +198,104 @@
   \texttt{shfl}/\texttt{ballot}.}
 \end{frame}
 
-% == 6 ===================================================================
-\begin{frame}{The architecture: one assignment per warp}
-  \begin{center}
-  \begin{tikzpicture}[font=\scriptsize]
-    % ---- state rows
-    \node[font=\small,anchor=south] at (1.7,2.5) {state: $K$ independent rows};
-    \node[font=\scriptsize,gpapgray,anchor=south] at (1.7,2.15) {clause words $(M)$ $+$ assignment bits $(2N)$};
-    \foreach \y in {1.65, 1.25, 0.85, 0.45} {
-      \draw[fill=gpapblue!12] (0,\y) rectangle (3.4,\y+0.3);
-    }
-    \node at (1.7,0.2) {$\vdots$};
-    \draw[fill=gpapblue!12] (0,-0.35) rectangle (3.4,-0.05);
+% == 6 =================================================================
+\begin{frame}{A one-slide GPU primer: SMs, warps, and why occupancy is everything}
+  \begin{columns}[T]
+    \begin{column}{0.46\textwidth}
+      \centering
+      \begin{tikzpicture}[font=\scriptsize]
+        \node[font=\small,anchor=west] at (0,3.05) {\textbf{A GPU is many cores (SMs)}};
+        \foreach \i in {0,...,5} {
+          \draw[fill=gpapblue!12,rounded corners=1pt] (\i*0.7,2.25) rectangle (\i*0.7+0.58,2.8);
+          \node[font=\tiny] at (\i*0.7+0.29,2.53) {SM};
+        }
+        \node[font=\tiny,gpapgray,anchor=west] at (4.3,2.53) {$\dots$};
+        \node[font=\tiny,gpapgray,anchor=west] at (0,1.95) {L4: \textbf{58} \ $\cdot$ \ A100: \textbf{108}};
 
-    \foreach \y in {1.8, 1.4, 1.0, 0.6, -0.2} {
-      \draw[ar] (3.55,\y) -- (4.25,\y);
-      \draw[fill=black!6] (4.35,\y-0.15) rectangle (5.45,\y+0.15);
-      \node[font=\tiny] at (4.9,\y) {warp};
-    }
-    \node[font=\scriptsize,gpapgreen,align=center,text width=3.4cm,anchor=north] at (2.7,-0.75)
-      {a row is program-private\\ $\Rightarrow$ \textbf{no cross-row races}};
-
-    % ---- SCALAR panel
-    \node[font=\small,gpapblue,anchor=west] at (6.6,2.35) {\textbf{SCALAR} --- small formulas, huge $K$};
-    \foreach \i in {0,...,15} {
-      \draw[fill=black!8] (6.7+\i*0.26,1.72) rectangle (6.92+\i*0.26,1.96);
-      \draw[fill=black!8] (6.7+\i*0.26,1.42) rectangle (6.92+\i*0.26,1.66);
-    }
-    \draw[fill=gpapblue!80] (6.7,1.72) rectangle (6.92,1.96);
-    \node[font=\scriptsize,align=left,text width=6.4cm,anchor=north west] at (6.6,1.28)
-      {1 lane walks $\mathrm{occ}[\ell]$, 31 idle --- \good{no atomics needed}: thousands of rows
-       already saturate DRAM.};
-
-    % ---- WAVE panel
-    \node[font=\small,gpapgreen,anchor=west] at (6.6,0.25) {\textbf{WAVE} --- large formulas, $K$-starved};
-    \foreach \i in {0,...,15} {
-      \draw[fill=gpapgreen!60] (6.7+\i*0.26,-0.38) rectangle (6.92+\i*0.26,-0.14);
-      \draw[fill=gpapgreen!60] (6.7+\i*0.26,-0.68) rectangle (6.92+\i*0.26,-0.44);
-    }
-    \node[font=\scriptsize,align=left,text width=6.4cm,anchor=north west] at (6.6,-0.82)
-      {32 clause updates in flight \emph{inside one assignment}; the atomics resolve the lane races.};
-
-    % ---- the dispatch rule
-    \node[bxn,font=\small,anchor=north,inner xsep=8mm] at (6.2,-1.85)
-      {\keyw{Auto-dispatch}: \ WAVE while $K < 30\times$ the GPU's resident warps, \ scalar beyond it};
-  \end{tikzpicture}
-  \end{center}
+        \node[font=\small,anchor=west] at (0,1.35) {\textbf{Each SM juggles many \keyw{warps}}};
+        \node[font=\scriptsize,gpapgray,anchor=west] at (0,1.02) {a warp $=$ \textbf{32 threads in lockstep}};
+        \foreach \j in {0,...,3} {
+          \foreach \i in {0,...,15} {
+            \draw[fill=gpapgreen!45] (\i*0.16,0.55-\j*0.22) rectangle (\i*0.16+0.13,0.72-\j*0.22);
+          }
+          \node[font=\tiny,gpapgray,anchor=west] at (2.65,0.63-\j*0.22) {warp \j};
+        }
+      \end{tikzpicture}
+    \end{column}
+    \begin{column}{0.5\textwidth}
+      \small
+      \textbf{Memory is ${\sim}400$ cycles away.} A GPU does not hide that with caches --- it hides
+      it by having \keyw{another warp ready to run} the moment one stalls.
+      \\[0.7em]
+      $\Rightarrow$ \good{\textbf{You must supply enough independent work.}}
+      \\[0.3em]
+      Too few warps and the machine sits idle waiting on DRAM, no matter how fast the arithmetic
+      is.
+      \\[0.7em]
+      \rem{``Occupancy'' $=$ resident warps $/$ the maximum the SMs can hold.}
+    \end{column}
+  \end{columns}
+  \vspace{0.5em}
   \centering
-  \rem{VRAM caps $K$ at hundreds of rows on big formulas, so each row is latency-starved --- that
-  is what the extra lanes are for. Both variants share the state and give the same results.}
+  \rem{This is the whole design constraint for what follows: \keyw{our unit of parallelism is one
+  assignment} --- so the question is always \emph{how many can we keep in flight?}}
 \end{frame}
 
-% == 7 ===================================================================
+% == 7 =================================================================
+\begin{frame}{The architecture: one assignment per warp}
+  \begin{columns}[T]
+    % ============ LEFT: small formula, K huge ============
+    \begin{column}{0.48\textwidth}
+      \centering
+      \textbf{\color{gpapblue}Small formula} $\Rightarrow$ $K$ \textbf{huge} (${\sim}100$k rows)
+      \\[0.4em]
+      \begin{tikzpicture}[font=\tiny]
+        \foreach \y in {0,1,2,3,4} { \draw[fill=gpapblue!25] (0,\y*0.26) rectangle (4.6,\y*0.26+0.19); }
+        \node[gpapgray,anchor=north] at (2.3,-0.05) {$\vdots$ \ tens of thousands more};
+      \end{tikzpicture}
+      \\[0.5em]
+      \small
+      \good{\textbf{GPU oversubscribed}} --- a stall is hidden by the next row.
+      \bad{More compute per row buys nothing}: we are \keyw{waiting on memory}.
+      \\[0.5em]
+      \begin{tikzpicture}
+        \foreach \i in {0,...,15} { \draw[fill=black!10] (\i*0.2,0) rectangle (\i*0.2+0.16,0.2); }
+        \draw[fill=gpapblue!85] (0,0) rectangle (0.16,0.2);
+      \end{tikzpicture}
+      \\[0.2em]
+      \textbf{SCALAR}: \keyw{1 lane of 32} walks $\mathrm{occ}[\ell]$ --- \good{no atomics needed}
+    \end{column}
+    % ============ RIGHT: big formula, K tiny ============
+    \begin{column}{0.48\textwidth}
+      \centering
+      \textbf{\color{gpapgreen}Big formula} $\Rightarrow$ VRAM caps $K$ \textbf{low} (hundreds)
+      \\[0.4em]
+      \begin{tikzpicture}[font=\tiny]
+        \foreach \y in {3,4} { \draw[fill=gpapgreen!35] (0,\y*0.26) rectangle (4.6,\y*0.26+0.19); }
+        \draw[dashed,gpapgray] (0,0) rectangle (4.6,0.72);
+        \node[gpapgray] at (2.3,0.36) {SMs with nothing to run};
+      \end{tikzpicture}
+      \\[0.5em]
+      \small
+      \bad{\textbf{GPU starved}} --- too few rows to hide latency, most of the machine idles.
+      \good{\textbf{Now we \emph{want} more work per row.}}
+      \\[0.5em]
+      \begin{tikzpicture}
+        \foreach \i in {0,...,15} { \draw[fill=gpapgreen!70] (\i*0.2,0) rectangle (\i*0.2+0.16,0.2); }
+      \end{tikzpicture}
+      \\[0.2em]
+      \textbf{WAVE}: \keyw{all 32 lanes} update clauses \emph{inside one assignment}
+    \end{column}
+  \end{columns}
+  \vspace{0.5em}
+  \centering
+  \keyw{One dispatch rule, measured}: WAVE while $K < 30\times$ resident warps, SCALAR beyond.
+  \\[0.2em]
+  \rem{Same state, bit-identical results --- the formula size that starves one variant is exactly
+  what feeds the other.}
+\end{frame}
+
+% == 8 =================================================================
 \begin{frame}{The tool}
   \begin{center}
   \begin{tikzpicture}[font=\small]
@@ -284,38 +336,7 @@
   alone.}
 \end{frame}
 
-% == 8 ===================================================================
-\begin{frame}{The engine, in features}
-  \begin{columns}[T]
-    \begin{column}{0.48\textwidth}
-      \begin{itemize}\small
-        \item one packed \texttt{int32} per clause --- update is a single atomic
-        \item assignment as a bitmap --- one atomic gives dedup \emph{and} contradiction
-        \item two propagate kernels, \keyw{auto-dispatched} per formula
-        \item the whole decide$+$propagate trajectory \keyw{fused into one launch}
-      \end{itemize}
-    \end{column}
-    \begin{column}{0.48\textwidth}
-      \begin{itemize}\small
-        \item $K$ sized analytically from free VRAM; unit-flush cached at construction
-        \item readout stays \keyw{on device} --- only counts and projections cross the bus
-        \item two packed splits chosen per formula; out-of-envelope formulas rejected, never
-          silently degraded
-      \end{itemize}
-    \end{column}
-  \end{columns}
-  \vspace{0.6em}
-  \begin{block}{Bottom line}
-    \centering
-    \good{\textbf{Up to $5.7\times$ end-to-end}} over the pre-WAVE engine --- with
-    \keyw{bit-identical model sets} at every step.
-  \end{block}
-  \rem{Negative results, kept because they cost weeks: classic \textbf{2-watched-literals on GPU
-  is $1.8$--$2.6\times$ slower} than \NC-style counting, on ${\sim}5\times$ the per-row state;
-  1-byte clause state, clause renumbering and multi-warp tiles all measured out.}
-\end{frame}
-
-% == 9 ===================================================================
+% == 9 =================================================================
 \begin{frame}{What is a $K$-parallel BCP primitive good for?}
   \begin{center}
   \resizebox{\textwidth}{!}{%
@@ -346,8 +367,8 @@
   shared, read-only occurrence structure.}
 \end{frame}
 
-% == 10 ==================================================================
-\begin{frame}{\GPAP{} $=$ GPU-parallel CMSGen}
+% == 10 ================================================================
+\begin{frame}{The sampler: inspired by CMSGen, run $K$ at a time}
   \begin{center}
   \begin{tikzpicture}[font=\scriptsize]
     \node[font=\small,anchor=west] at (-0.4,2.4) {$K$ trajectories, one kernel launch};
@@ -371,9 +392,12 @@
   \vspace{0.5em}
   \begin{columns}[T]
     \begin{column}{0.46\textwidth}
-      CMSGen's Algorithm 1, exactly --- but $K$ at a time on the GPU.
+      \small
+      \keyw{Inspired by CMSGen's Algorithm 1} --- random variable, random polarity, propagate ---
+      but $K$ trajectories at a time.
       \\[0.3em]
-      \rem{One structural difference: CMSGen backtracks; \GPAP{} \emph{discards}.}
+      \rem{The structural difference: CMSGen backtracks out of a conflict; \GPAP{}
+      \emph{discards} the trajectory.}
     \end{column}
     \begin{column}{0.5\textwidth}
       \begin{block}{Two consequences}
@@ -385,7 +409,7 @@
   \end{columns}
 \end{frame}
 
-% == 11 ==================================================================
+% == 11 ================================================================
 \begin{frame}{The flagship pipeline}
   \begin{center}
   \resizebox{\textwidth}{!}{%
@@ -418,7 +442,7 @@
   \end{columns}
 \end{frame}
 
-% == 12 ==================================================================
+% == 12 ================================================================
 \begin{frame}{The question we asked before a reviewer could: why not just simulate?}
   \begin{columns}[T]
     \begin{column}{0.56\textwidth}
@@ -440,97 +464,59 @@
     \end{column}
     \begin{column}{0.42\textwidth}
       \small
-      At default pins, CPU rejection \bad{beat us on 17/19} --- so we changed the protocol, not
-      the claim.
-      \\[0.5em]
-      \keyw{We use rejection, we do not just compete with it}: it picks the targets, it audits every
-      emitted sample, and at $B \ge |\text{support}|$ our sampler \emph{is} rejection sampling.
-      \\[0.5em]
-      \good{\textbf{And there are instances where it simply cannot play}} --- EPFL at rare targets:
-      \good{0 hits in ${\sim}10$M random patterns} while \GPAP{} holds $87$k--$64$M samples/s at
-      $89$--$100\%$ success.
+      At default pins, plain CPU simulation $+$ filtering \bad{beat us on 17/19}.
+      \\[0.6em]
+      \keyw{So we changed the protocol, not the claim}: pin a \emph{rare} output pattern ---
+      still reachable, but adversarial for rejection.
+      \\[0.6em]
+      \good{\textbf{At rare targets it cannot play at all}}: on EPFL, \good{0 hits in ${\sim}10$M
+      random patterns} while \GPAP{} samples at $89$--$100\%$ success.
     \end{column}
   \end{columns}
-  \vspace{0.8em}
+  \vspace{0.5em}
   \centering
-  \rem{Also fixed before publishing: vacuous output pins (b02/b05/b07/s526 are constant at $T{=}25$),
-  CMSGen timed \emph{with} sample emission ($5.3\times$ its wall), and a GPU clock that swings
-  615--1710\,MHz mid-run $\Rightarrow$ interleaved A/Bs, 3-seed medians.}
+  \rem{Rejection is not just a rival --- it picks our targets and audits every emitted sample.}
 \end{frame}
 
-% == 13 ==================================================================
-\begin{frame}{Headline: 357 rows, 13 stages, 0 errors}
-  \centering
-  \small
-  \begin{tabular}{@{}llrl@{}}
-    \toprule
-    family & targets & GPAP / CMSGen & wins \\
-    \midrule
-    ITC'99 $+$ ISCAS-89 sequential, $T{=}25$ & \keyw{rare} & \good{$36.5\times$} & 17/18 \\
-    ITC'99 $+$ ISCAS-89 sequential, $T{=}25$ & random & $105.8\times$ & 18/18 \\
-    ISCAS-85 combinational & \keyw{rare} & $538\times$ & 10/10 \\
-    HWMCC'17 (curated), $T{=}25$ & \keyw{rare} & $156\times$ & 7/7 \\
-    EPFL combinational & \keyw{rare} & $6.4\times$ & 13/17 \\
-    Sketch / \texttt{sk\_} projected CNFs & --- & $46.2\times$ & 27/29 \\
-    \bottomrule
-  \end{tabular}
-  \\[1.0em]
-  \rem{RTX 4080 laptop (\texttt{i7-13800H}) vs.\ single-core patched CMSGen; per instance at its
-  best encoder. Rare targets cost ${\sim}3\times$ of the ratio versus rejection-easy random pins
-  --- \keyw{quote the rare column}.
-  \\ \bad{Corrected 2026-08-04/05}, both by the same rule --- \keyw{a cell that measures the
-  instance instead of the sampler does not belong in a geomean}. (i)~vacuous output pins
-  (\texttt{b02/b05/b07/s526}, constant at $T{=}25$): including them read $47.7\times$, an
-  inflation of up to $1.9\times$ falling almost entirely on the rare column. (ii)~instances that
-  sample with \keyw{zero decisions and zero implications} --- the support is free after
-  propagation, so there is no search to do, and the best-encoder rule \emph{prefers} them because
-  they carry the highest ratio: EPFL read $12.7\times$, \texttt{sk\_} $48.5\times$.
-  \keyw{The ratio also depends on the CPU}, because CMSGen is single-core: see the next
-  frame but one.}
-\end{frame}
-
-% == 14 ==================================================================
-\begin{frame}{The same suite on a datacenter GPU --- and what actually moved}
+% == 13 ================================================================
+\begin{frame}{Headline: \GPAP{} vs.\ CMSGen, 357 cells, 0 errors}
   \centering
   \small
   \begin{tabular}{@{}llrrr@{}}
     \toprule
-    family & targets & 4080 laptop & \textbf{Colab L4} & wins (L4) \\
+    family & targets & \textbf{Colab L4} & 4080 laptop & wins \\
     \midrule
-    ITC'99 $+$ ISCAS-89 seq, $T{=}25$ & \keyw{rare} & $36.5\times$  & $39.1\times$  & 17/18 \\
-    ISCAS-85 combinational            & \keyw{rare} & $538\times$   & $615\times$   & 10/10 \\
-    HWMCC'17, $T{=}25$                & \keyw{rare} & $156\times$   & $196\times$   & 7/7 \\
-    EPFL combinational                & \keyw{rare} & $6.4\times$   & $9.4\times$   & 13/17 \\
-    Sketch / \texttt{sk\_} CNFs       & ---         & $46.2\times$  & $98.9\times$  & 27/29 \\
+    ITC'99 $+$ ISCAS-89 seq, $T{=}25$ & \keyw{rare} & \good{$39.1\times$}  & $36.5\times$ & 17/18 \\
+    ISCAS-85 combinational            & \keyw{rare} & \good{$615\times$}   & $538\times$  & 10/10 \\
+    HWMCC'17, $T{=}25$                & \keyw{rare} & \good{$196\times$}   & $156\times$  & 7/7 \\
+    EPFL combinational                & \keyw{rare} & $9.4\times$          & $6.4\times$  & 13/17 \\
+    Sketch / \texttt{sk\_} CNFs       & ---         & \good{$98.9\times$}  & $46.2\times$ & 27/29 \\
     \bottomrule
   \end{tabular}
-  \\[0.8em]
+  \\[1.0em]
   \begin{columns}[T]
     \begin{column}{0.48\textwidth}
-      \bad{\textbf{Every ratio went UP. None of it is \GPAP{}.}}
-      \\[0.3em]
-      Paired on identical cells: \GPAP{} $0.96\times$ (it is the \emph{same} engine, on a slightly
-      slower card) while \keyw{CMSGen runs at $0.41\times$} --- a Xeon @ 2.2\,GHz against an
-      \texttt{i7-13800H}.
-      \rem{CMSGen's own propagation \emph{and} decision counters independently both give
-      $0.413\times$.}
+      \bad{\textbf{Every ratio is higher on the L4 --- and none of that is \GPAP{}.}}
+      \\[0.4em]
+      \small
+      Paired on identical cells: \GPAP{} $0.96\times$, \keyw{CMSGen $0.41\times$}.
+      The Colab host is a slower CPU, and CMSGen is single-core.
     \end{column}
     \begin{column}{0.48\textwidth}
-      \good{\textbf{So the rule: never quote a ratio without the CPU.}}
-      \\[0.3em]
-      CMSGen is single-core, so this number is as much a property of the host as of the sampler.
-      A datacenter comparison is fair \emph{only} when reported this way --- otherwise a reviewer
-      reads $98.9\times$ and correctly calls it a rigged baseline.
-      \rem{The same caution applies in advance to the Technion cluster runs.}
+      \good{\textbf{The rule we adopted: never quote a ratio without the CPU.}}
+      \\[0.4em]
+      \small
+      Otherwise a reviewer reads $98.9\times$ and correctly calls it a rigged baseline.
     \end{column}
   \end{columns}
-  \vspace{0.3em}
+  \vspace{0.5em}
   \centering
-  \rem{$357$ cells, $193$ instance-slots, \good{0 skipped, 0 errors, 0 unsound}. Geomeans exclude
-  the vacuous pins and the zero-search cells. Full per-family tables in the appendix.}
+  \rem{$357$ cells, \good{0 skipped, 0 errors, 0 unsound}. Per instance at its best encoder;
+  geomeans exclude tautological pins and instances that need no search. Full tables in the
+  appendix.}
 \end{frame}
 
-% == 15 ==================================================================
+% == 14 ================================================================
 \begin{frame}{Is the speedup the engine, or the benchmark?}
   \centering
   \small
@@ -549,68 +535,106 @@
   \end{tabular}
   \\[0.6em]
   \begin{columns}[T]
-    \begin{column}{0.46\textwidth}
-      \good{\textbf{The engine's rate is flat}} --- ${\sim}10^{9}$ impl/s on every family, spread
-      only $1.41\times$, while the \emph{sample-rate} ratio moves ${\sim}2$ orders across the same
-      rows. It is a property of the GPU, not the instance.
-      \rem{CMSGen's column is its own \texttt{--statsevery} counters.}
-    \end{column}
-    \begin{column}{0.52\textwidth}
-      \keyw{\textbf{The two are linked exactly:}}
-      \; $\text{samples/s ratio}=\dfrac{\text{impl/s ratio}}{\text{impl/sample ratio}}$
+    \begin{column}{0.44\textwidth}
+      \good{\textbf{The engine's rate is flat}} --- ${\sim}10^{9}$/s everywhere, spread only
+      $1.41\times$, while the \emph{sample} ratio moves ${\sim}2$ orders.
       \\[0.3em]
-      Within $1\%$ on $9/9$ families, \keyw{re-derived from raw rows} by
-      \texttt{verify\_artifact.py}. The engine buys a flat $197$--$631\times$;
-      \bad{rejection sampling spends part back} ($1.0\times$ ISCAS-85, $5.6\times$ seq,
-      \bad{$53.7\times$ EPFL}) --- we discard a conflicted trajectory, CMSGen backtracks.
+      \keyw{It is a property of the GPU, not the benchmark.}
+    \end{column}
+    \begin{column}{0.54\textwidth}
+      \centering
+      $\text{samples/s ratio}=\dfrac{\text{impl/s ratio}}{\text{impl/sample ratio}}$
+      \\[0.4em]
+      \raggedright\small
+      Exact on $9/9$ families. The engine buys $197$--$631\times$;
+      \bad{rejection spends part back} --- $1.0\times$ on ISCAS-85, $5.6\times$ on sequential,
+      \bad{$53.7\times$ on EPFL}.
     \end{column}
   \end{columns}
+  \vspace{0.3em}
   \centering
-  \rem{EPFL has the largest penalty \emph{and} the only instance we could not sample
-  (\texttt{bar}) --- one mechanism, read twice.}
+  \rem{We discard a conflicted trajectory; CMSGen backtracks and keeps the partial work. EPFL pays
+  the most --- and is the one family with an instance we could not sample at all.}
 \end{frame}
 
-% == 16 ==================================================================
+% == 15 ================================================================
+\begin{frame}{Who else puts SAT sampling on a GPU?}
+  \begin{center}
+  \begin{tikzpicture}[font=\scriptsize]
+    \node[bxr,text width=3.5cm,minimum height=1.5cm] (d) at (0,0)
+      {\textbf{DEMOTIC}\\ \scriptsize ASP-DAC'25};
+    \node[bxr,text width=3.5cm,minimum height=1.5cm] (r) at (4.3,0)
+      {\textbf{Recurrent-CircuitSAT}\\ \scriptsize MLCAD'25};
+    \node[bxr,text width=3.5cm,minimum height=1.5cm] (h) at (8.6,0)
+      {\textbf{HTS}\\ \scriptsize arXiv 2502.08673};
+    \node[font=\scriptsize,gpapgray,text width=3.5cm,align=center,anchor=north] at (0,-0.95)
+      {ISCAS-85, their own\\ output pins};
+    \node[font=\scriptsize,gpapgray,text width=3.5cm,align=center,anchor=north] at (4.3,-0.95)
+      {closest to our domain:\\ sequential circuits};
+    \node[font=\scriptsize,gpapgray,text width=3.5cm,align=center,anchor=north] at (8.6,-0.95)
+      {CNF, hybrid tree search};
+  \end{tikzpicture}
+  \end{center}
+  \vspace{0.4em}
+  \begin{columns}[T]
+    \begin{column}{0.48\textwidth}
+      \bad{\textbf{They all do the same thing}}: relax the circuit to a \emph{continuous}
+      function and follow the gradient towards a solution.
+      \\[0.4em]
+      \small
+      Fast, and GPU-native --- but a gradient lands \emph{near} a solution, so the output must be
+      rounded and repaired, and \bad{may not satisfy the formula}.
+    \end{column}
+    \begin{column}{0.48\textwidth}
+      \good{\textbf{\GPAP{} is discrete throughout}}: every trajectory is real propagation, so
+      \good{every emitted row is a model by construction} --- nothing to verify, nothing to repair.
+      \\[0.4em]
+      \rem{We compare on \emph{their} metric: unique solutions per second of their own reported
+      runtime.}
+    \end{column}
+  \end{columns}
+\end{frame}
+
+% == 16 ================================================================
 \begin{frame}{Versus the GPU gradient samplers}
   \centering
   \small
-  \begin{tabular}{@{}llrrrrr@{}}
+  \begin{tabular}{@{}llrr@{}}
     \toprule
-    rival & protocol & GPAP $/$ rival & wins & R$=$0 & G$=$0 & failed \\
+    rival & pins used & GPAP $/$ rival & GPAP wins \\
     \midrule
-    DEMOTIC \rem{(ASP-DAC'25)} & \emph{their} ISCAS-85 pins & $2.5\times$ & 19/20 & 0 & 0 & 0 \\
-    DEMOTIC                    & our \keyw{rare} pins       & $2{,}427\times$ & 16/16 & 0 & 0 & 0 \\
-    Recurrent \rem{(MLCAD'25)} & \emph{their} target table  & $4.4\times$ & 6/6 & 0 & 0 & 3 \\
-    Recurrent                  & our \keyw{rare} pins       & \good{$635\times$} & 5/6 & 1 & 0 & 3 \\
-    HTS \rem{(arXiv 2502.08673)} & our CNFs, both encoders  & $1{,}584\times$ & 13/14 & 2 & \bad{1} & 3 \\
+    DEMOTIC   & \emph{their} ISCAS-85 pins & $2.5\times$        & 19/20 \\
+    DEMOTIC   & our \keyw{rare} pins       & $2{,}427\times$    & 16/16 \\
+    Recurrent & \emph{their} target table  & $4.4\times$        & 6/6   \\
+    Recurrent & our \keyw{rare} pins       & \good{$635\times$} & 5/6   \\
+    HTS       & our CNFs                   & $1{,}584\times$    & 13/14 \\
     \bottomrule
   \end{tabular}
-  \\[0.7em]
+  \\[1.0em]
   \begin{columns}[T]
-    \begin{column}{0.48\textwidth}
+    \begin{column}{0.52\textwidth}
+      \keyw{\textbf{The protocol matters more than the rival.}}
+      \\[0.4em]
       \small
-      \keyw{\textbf{The protocol matters more than the rival.}} Recurrent-CircuitSAT --- the
-      closest rival to our domain --- reads $4.4\times$ on \emph{their} pins and $635\times$ on
-      ours. \bad{A $140$-fold swing}, same sampler, same GPU, same day: only target rarity
-      changed.
-      \rem{Their pins are rejection-easy \emph{by construction}, so winning there is not a
-      sampling result --- which is why \texttt{-{}-target rare} exists.}
+      Recurrent-CircuitSAT reads \textbf{$4.4\times$} on \emph{their} pins and
+      \textbf{$635\times$} on ours --- \bad{a $140$-fold swing}, same sampler, same GPU, same day.
+      Only the target changed.
     \end{column}
-    \begin{column}{0.48\textwidth}
-      \rem{Same card, \emph{their} metric (uniques $/$ their \texttt{model\_runtime}, which
-      excludes model build while ours includes construction). \keyw{failed} $=$ timeout or no
-      gradient path: reported, \textbf{never folded in as a zero}. \keyw{R$=$0} rival emitted
-      nothing (our win); \bad{G$=$0} \emph{we} emitted nothing (our loss); \emph{neither} counts
-      as neither --- \bad{correcting DEMOTIC-miter 18/18 and HTS 14/15}.}
-      \\[0.2em]
-      \small
-      \bad{Honest losses}: \texttt{75-10}, \texttt{prod-20}, the ``service'' family ---
-      jointly-constrained residuals needing clause \emph{learning}.
+    \begin{column}{0.44\textwidth}
+      \good{\textbf{Their pins are easy by construction}}, so a win there is not a sampling
+      result.
+      \\[0.4em]
+      \bad{Honest losses}: the ``service'' family --- jointly-constrained instances that need
+      clause \emph{learning}.
     \end{column}
   \end{columns}
+  \vspace{0.4em}
+  \centering
+  \rem{7 rival runs failed (timeout / no gradient path): reported, never counted as zeros.
+  Cells where \emph{we} emitted nothing are counted as losses.}
 \end{frame}
 
-% == 17 ==================================================================
+% == 17 ================================================================
 \begin{frame}{Does that verdict survive a different GPU?}
   \centering
   \small
@@ -626,31 +650,75 @@
     HTS       & our CNFs, both encoders & ---             & $2{,}042\times$ & \good{10/10} \\
     \bottomrule
   \end{tabular}
-  \\[0.9em]
+  \\[1.0em]
   \begin{columns}[T]
-    \begin{column}{0.47\textwidth}
-      \good{\textbf{What transfers: the verdict.}} Win counts are \emph{identical} on both cards
-      instance by instance --- the ranking is a property of the method, not the hardware.
-      \rem{Both sides on the \emph{same} card, \emph{their} metric (uniques $/$ their
-      \texttt{model\_runtime}, which excludes model build; ours includes construction).}
+    \begin{column}{0.48\textwidth}
+      \good{\textbf{What transfers: the verdict.}}
+      \\[0.4em]
+      \small
+      Win counts are \emph{identical} on both cards, instance by instance --- because both sides
+      share the GPU.
     \end{column}
-    \begin{column}{0.5\textwidth}
-      \bad{\textbf{What does not: the ratio magnitude.}} At rare pins the rival often scores
-      ${\approx}0$, so the ratio is a near-zero denominator --- and the rival gets \emph{one} run
-      where GPAP gets a 3-seed median.
-      \rem{Their batch sizes were identical across the two cards, so the movement is run
-      variance, not the GPU. Read those rows as orders of magnitude, never as a constant.}
+    \begin{column}{0.48\textwidth}
+      \bad{\textbf{What does not: the magnitude.}}
+      \\[0.4em]
+      \small
+      At rare pins the rival scores ${\approx}0$, so the ratio has a near-zero denominator.
+      \keyw{Read these as orders of magnitude, never as constants.}
     \end{column}
   \end{columns}
-  \vspace{0.3em}
+  \vspace{0.5em}
   \centering
-  \rem{Geomeans cover the instances \emph{both} cards scored ($10/8/3/10$). \bad{Honest}:
-  \texttt{c1355} loses on both ($0.5\times$); at a rare \texttt{b11} pin \emph{neither} sampler
-  finds anything; 7 rival failures printed, never folded in as zeros.
-  \keyw{CMSGen absent by design} --- a CPU baseline needs cluster hardware.}
+  \rem{\bad{Honest}: \texttt{c1355} loses on both cards; at a rare \texttt{b11} pin \emph{neither}
+  sampler finds anything.}
 \end{frame}
 
-% == 18 ==================================================================
+% == 18 ================================================================
+\begin{frame}{What ``uniform'' means --- and why a sampler lives or dies by it}
+  \begin{center}
+  \begin{tikzpicture}[font=\scriptsize]
+    % --- the solution space
+    \node[font=\small,anchor=south] at (2.6,2.6) {all solutions of the formula};
+    \foreach \i/\j in {0/0, 1/0, 2/0, 3/0, 0/1, 1/1, 2/1, 3/1, 0/2, 1/2, 2/2, 3/2} {
+      \draw[fill=black!6] (\i*0.62,\j*0.62) rectangle (\i*0.62+0.5,\j*0.62+0.5);
+    }
+    \node[font=\tiny,gpapgray,anchor=north] at (1.3,-0.15) {each square $=$ one model};
+
+    % --- uniform
+    \node[font=\small,gpapgreen,anchor=south] at (6.4,2.6) {\good{\textbf{uniform}}};
+    \foreach \i/\j in {0/0, 1/0, 2/0, 3/0, 0/1, 1/1, 2/1, 3/1, 0/2, 1/2, 2/2, 3/2} {
+      \draw[fill=gpapgreen!45] (5.1+\i*0.62,\j*0.62) rectangle (5.1+\i*0.62+0.5,\j*0.62+0.5);
+    }
+    \node[font=\tiny,gpapgray,anchor=north,text width=3.0cm,align=center] at (6.4,-0.15)
+      {every model equally likely};
+
+    % --- skewed
+    \node[font=\small,gpapred,anchor=south] at (11.5,2.6) {\bad{\textbf{skewed}}};
+    \foreach \i/\j/\o in {0/0/80, 1/0/55, 2/0/10, 3/0/5, 0/1/70, 1/1/40, 2/1/8, 3/1/4,
+                          0/2/60, 1/2/30, 2/2/6, 3/2/3} {
+      \draw[fill=gpapred!\o] (10.2+\i*0.62,\j*0.62) rectangle (10.2+\i*0.62+0.5,\j*0.62+0.5);
+    }
+    \node[font=\tiny,gpapgray,anchor=north,text width=3.4cm,align=center] at (11.5,-0.15)
+      {a fast sampler that keeps\\ returning the same corner};
+  \end{tikzpicture}
+  \end{center}
+  \vspace{0.5em}
+  \begin{columns}[T]
+    \begin{column}{0.5\textwidth}
+      \keyw{\textbf{Why it matters}}: sampling is used to \emph{estimate} things --- coverage,
+      failure probability, test stimuli. A skewed sampler answers those questions \bad{wrongly},
+      no matter how fast it is.
+    \end{column}
+    \begin{column}{0.46\textwidth}
+      \good{\textbf{Soundness $\neq$ uniformity.}} Every row we emit \emph{is} a model --- that is
+      free for us. Being drawn with the \emph{right probability} is a separate claim, and it has to
+      be measured.
+      \rem{Standard tool: Barbarik. Ours: an exact oracle (next slide).}
+    \end{column}
+  \end{columns}
+\end{frame}
+
+% == 19 ================================================================
 \begin{frame}{Uniformity: measured against an exact oracle}
   \begin{columns}[T]
     \begin{column}{0.5\textwidth}
@@ -699,7 +767,7 @@
   \end{columns}
 \end{frame}
 
-% == 19 ==================================================================
+% == 20 ================================================================
 \begin{frame}{The uncomfortable one: our own bandit optimizes the wrong thing}
   \begin{center}
   \resizebox{0.86\textwidth}{!}{%
@@ -749,7 +817,7 @@
   $|\text{support}|$.}
 \end{frame}
 
-% == 20 ==================================================================
+% == 21 ================================================================
 \begin{frame}{Status, and what is open}
   \begin{columns}[T]
     \begin{column}{0.4\textwidth}
@@ -785,7 +853,7 @@
   \end{columns}
 \end{frame}
 
-% == 21 ==================================================================
+% == 22 ================================================================
 \begin{frame}{Turning this into a paper}
   \begin{center}
   \begin{tikzpicture}[font=\small]
@@ -808,8 +876,12 @@
   decision on the bandit/uniformity trade.
 \end{frame}
 
-% == 22 ==================================================================
+% == 23 ================================================================
 \appendix
+
+% Frames moved out of the main line 2026-08-06 (engine feature list; the 4080-laptop headline).
+\input{backup_slides}
+
 \begin{frame}{Backup: numbers on hand}
   \footnotesize
   \begin{columns}[T]
