@@ -3,16 +3,24 @@
 `gpap_overview.tex` — the project told as the paper we are about to write. **The engine is the
 result; the applications prove it is useful** — that ordering is deliberate and drives the whole
 deck: NobleCount (FMCAD'26) → the GPU engine (~10⁹ propagations/s, ~300× a CPU core) → sampling as
-the application → uniformity → status. 29 pages: 22 main frames, then backup.
+the application → uniformity. **26 pages: 22 talk slides, then 4 generated result tables.**
 
 Three primer frames exist because the audience is not assumed to know the tooling: **GPU
 SMs/warps/occupancy** (before the architecture frame, since the whole scalar-vs-WAVE design is an
 occupancy argument), **the GPU rival samplers** (before the head-to-head), and **what "uniform"
 means** (before the two uniformity frames).
 
-`backup_slides.tex` — frames moved out of the main line so the narrative is not interrupted: the
-engine feature list (too technical) and the 4080-laptop headline (superseded by the L4 sweep).
-`\input` from the appendix.
+`backup_slides.tex` — **a separate deck**, compiled on its own (7 pages), not `\input` anywhere.
+It holds what an advisor may ask about but the talk should not carry: the engine feature list, the
+two-machine (4080 vs L4) table with the CPU-dependence analysis, the two reporting corrections we
+made to our own headline, the status/roadmap, the cross-GPU rival check, and the loose numbers.
+
+`gpap_style.tex` — the preamble both decks `\input`, so colours, macros and theme cannot drift
+apart.
+
+```bash
+pdflatex backup_slides.tex && pdflatex backup_slides.tex
+```
 
 Visual-first: the architecture is carried by TikZ figures (the NobleCount count+key idea, the
 packed clause word with its self-detecting `atomic_add`, one-assignment-per-warp with the
@@ -29,7 +37,7 @@ Dependencies are deliberately minimal so it also compiles on Overleaf as-is: bas
 (Boadilla theme), `booktabs`, `xcolor`, `tikz` (`positioning`, `arrows.meta`). No `metropolis`, no
 external images — every figure is TikZ.
 
-Builds clean (29 pages). Build artifacts (`.aux`, `.log`, `.nav`, `.snm`, `.out`, `.toc`, …) are
+Builds clean: **26 pages** (22 talk slides, then 4 generated result tables). Build artifacts (`.aux`, `.log`, `.nav`, `.snm`, `.out`, `.toc`, …) are
 gitignored under `docs/slides/`; the `.pdf` is kept.
 
 ## Where the numbers come from — and why they cannot drift

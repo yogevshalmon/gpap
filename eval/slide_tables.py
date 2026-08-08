@@ -156,7 +156,55 @@ def main():
     a(r"}")
     a(r"\end{frame}")
     a("")
-    # ---------------------------------------------------------------- frame 2: vs rivals
+    # ------------------------------------------------- frame 2: the engine, isolated
+    # Placed BEFORE the rival frame: it explains where the sampling ratios in frame 1
+    # come from, so the reader meets the mechanism before the next comparison.
+    prop = {s: prop_rates(args.cmsgen, s) for s, _, _ in CMS_STAGES}
+    if any(prop.values()):
+        a(r"\begin{frame}{Appendix: the engine, isolated from the sampler}")
+        a(r"  \centering \scriptsize")
+        a(r"  \begin{tabular}{@{}llrrrrrr@{}}")
+        a(r"    \toprule")
+        a(r"    & & & \multicolumn{2}{c}{implications$/$s} & "
+          r"\multicolumn{2}{c}{implications$/$sample} & \textbf{sampling} \\")
+        a(r"    \cmidrule(lr){4-5}\cmidrule(lr){6-7}\cmidrule(lr){8-8}")
+        a(r"    family & targets & $n$ & GPAP & CMSGen & GPAP & CMSGen "
+          r"& \textbf{GPAP$/$CMSGen} \\")
+        a(r"    \midrule")
+        for stem, label, tgt in CMS_STAGES:
+            v = prop.get(stem)
+            if not v:
+                continue
+            tgtx = r"\keyw{rare}" if tgt == "rare" else tgt
+            # The published sampling ratio, taken from the SAME source as the first appendix
+            # frame — so the two tables cannot disagree. Read across the row: a flat engine
+            # advantage, divided by how much propagation each sample wastes, gives this column.
+            cv = cms.get(stem)
+            net = fmt(cv["gm"]) if cv and cv.get("gm") else "---"
+            a(f"    {label} & {tgtx} & {v['n']} & "
+              f"${v['gpap'] / 1e9:.2f}\\!\\times\\!10^{{9}}$ & "
+              f"${v['cms'] / 1e6:.2f}\\!\\times\\!10^{{6}}$ & "
+              f"{v['gper']:,.0f} & {v['cper']:,.0f} & \\textbf{{{net}}} \\\\")
+        a(r"    \bottomrule")
+        a(r"  \end{tabular}")
+        a(r"  \\[0.7em]")
+        # Quote the spread over families carrying at least three instances — the same set
+        # eval/paper_tables.py and the main deck use. Including the n=1/n=2 HWMCC rows widens it
+        # to 1.49x, and a deck that prints two different numbers for one claim is exactly the
+        # failure this generator exists to prevent.
+        rates = [v["gpap"] for v in prop.values() if v and v["n"] >= 3]
+        spread = max(rates) / min(rates)
+        a(r"  \rem{GPAP's rate is from the packed-word kernel; CMSGen's from \emph{its own}"
+          r"  counters (\texttt{--statsevery}). \good{GPAP holds ${\sim}10^{9}$ implications$/$s"
+          r"  on every family} --- spread only $" + f"{spread:.2f}" + r"\times$ --- while the"
+          r"  sample-rate ratio spans ${\sim}2$ orders of magnitude. The two are linked exactly:"
+          r"  \keyw{samples$/$s ratio $=$ (impl$/$s ratio) $/$ (impl$/$sample ratio)} --- read"
+          r"  each row left to right and the last column is what comes out. So the variation is"
+          r"  \keyw{rejection cost}, not the propagator: we discard a conflicted trajectory,"
+          r"  CMSGen backtracks and keeps the partial work.}")
+        a(r"\end{frame}")
+        a("")
+    # ---------------------------------------------------------------- frame 3: vs rivals
     a(r"\begin{frame}{Appendix: every GPU rival measured on the L4}")
     a(r"  \centering \scriptsize")
     a(r"  \begin{tabular}{@{}llrrrrrr@{}}")
@@ -180,42 +228,7 @@ def main():
       r"  neither has a finite ratio, both are counted.}")
     a(r"\end{frame}")
     a("")
-    # ---------------------------------------------------------------- frame: the engine itself
-    prop = {s: prop_rates(args.cmsgen, s) for s, _, _ in CMS_STAGES}
-    if any(prop.values()):
-        a(r"\begin{frame}{Appendix: the engine, isolated from the sampler}")
-        a(r"  \centering \scriptsize")
-        a(r"  \begin{tabular}{@{}llrrrrr@{}}")
-        a(r"    \toprule")
-        a(r"    & & & \multicolumn{2}{c}{implications$/$s} & "
-          r"\multicolumn{2}{c}{implications$/$sample} \\")
-        a(r"    \cmidrule(lr){4-5}\cmidrule(lr){6-7}")
-        a(r"    family & targets & $n$ & GPAP & CMSGen & GPAP & CMSGen \\")
-        a(r"    \midrule")
-        for stem, label, tgt in CMS_STAGES:
-            v = prop.get(stem)
-            if not v:
-                continue
-            tgtx = r"\keyw{rare}" if tgt == "rare" else tgt
-            a(f"    {label} & {tgtx} & {v['n']} & "
-              f"${v['gpap'] / 1e9:.2f}\\!\\times\\!10^{{9}}$ & "
-              f"${v['cms'] / 1e6:.2f}\\!\\times\\!10^{{6}}$ & "
-              f"{v['gper']:,.0f} & {v['cper']:,.0f} \\\\")
-        a(r"    \bottomrule")
-        a(r"  \end{tabular}")
-        a(r"  \\[0.7em]")
-        rates = [v["gpap"] for v in prop.values() if v]
-        spread = max(rates) / min(rates)
-        a(r"  \rem{GPAP's rate is from the packed-word kernel; CMSGen's from \emph{its own}"
-          r"  counters (\texttt{--statsevery}). \good{GPAP holds ${\sim}10^{9}$ implications$/$s"
-          r"  on every family} --- spread only $" + f"{spread:.2f}" + r"\times$ --- while the"
-          r"  sample-rate ratio spans ${\sim}2$ orders of magnitude. The two are linked exactly:"
-          r"  \keyw{samples$/$s ratio $=$ (impl$/$s ratio) $/$ (impl$/$sample ratio)}, so the"
-          r"  variation is \keyw{rejection cost}, not the propagator. We discard a conflicted"
-          r"  trajectory; CMSGen backtracks and keeps the partial work.}")
-        a(r"\end{frame}")
-        a("")
-    # ---------------------------------------------------------------- frame 3: uniformity
+    # ---------------------------------------------------------------- frame 4: uniformity
     uni = json.load(open(args.uniformity)) if args.uniformity and os.path.isfile(args.uniformity) \
         else None
     if uni:

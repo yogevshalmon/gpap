@@ -1,11 +1,24 @@
 % ---------------------------------------------------------------------------
-%  Backup frames for gpap_overview.tex — detail that would slow the main talk
-%  but that an advisor may well ask about. \input from the appendix.
+%  GPAP — BACKUP slides. A deck of its own: detail an advisor may ask about,
+%  deliberately kept out of the talk so the main narrative runs engine ->
+%  application -> evidence without interruption.
 %
-%  These were main-deck frames until 2026-08-06; moved here so the narrative
-%  runs engine -> application -> evidence without a feature list or a
-%  superseded single-machine result interrupting it.
+%  Compile:  pdflatex backup_slides.tex   (twice)
+%  Shares gpap_style.tex with the main deck, so colours and macros cannot drift.
 % ---------------------------------------------------------------------------
+\input{gpap_style}
+
+\title[GPAP backup]{\GPAP{} --- backup slides}
+\subtitle{detail behind the main deck}
+\author[Y. Shalmon]{Yogev Shalmon}
+\institute[Technion]{Technion --- Faculty of Data and Decision Sciences}
+\date{\today}
+
+\begin{document}
+
+\begin{frame}[plain]
+  \titlepage
+\end{frame}
 
 % --- was frame 8: the engine feature list (too technical for the main line) ---
 \begin{frame}{Backup: the engine, in features}
@@ -38,31 +51,172 @@
   1-byte clause state, clause renumbering and multi-warp tiles all measured out.}
 \end{frame}
 
-% --- was frame 13: the single-machine (4080 laptop) headline ---
-\begin{frame}{Backup: the same suite on the 4080 laptop}
+% --- was frame 13/14: the 4080-laptop column, and the CPU-dependence analysis ---
+\begin{frame}{Backup: the same suite on two machines --- and why the ratio moved}
   \centering
   \small
-  \begin{tabular}{@{}llrl@{}}
+  \begin{tabular}{@{}llrrr@{}}
     \toprule
-    family & targets & GPAP $/$ CMSGen & wins \\
+    family & targets & 4080 laptop & \textbf{Colab L4} & wins (L4) \\
     \midrule
-    ITC'99 $+$ ISCAS-89 sequential, $T{=}25$ & \keyw{rare} & \good{$36.5\times$} & 17/18 \\
-    ITC'99 $+$ ISCAS-89 sequential, $T{=}25$ & random & $105.8\times$ & 18/18 \\
-    ISCAS-85 combinational & \keyw{rare} & $538\times$ & 10/10 \\
-    HWMCC'17 (curated), $T{=}25$ & \keyw{rare} & $156\times$ & 7/7 \\
-    EPFL combinational & \keyw{rare} & $6.4\times$ & 13/17 \\
-    Sketch / \texttt{sk\_} projected CNFs & --- & $46.2\times$ & 27/29 \\
+    ITC'99 $+$ ISCAS-89 seq, $T{=}25$ & \keyw{rare} & $36.5\times$ & $39.1\times$ & 17/18 \\
+    ISCAS-85 combinational            & \keyw{rare} & $538\times$  & $615\times$  & 10/10 \\
+    HWMCC'17, $T{=}25$                & \keyw{rare} & $156\times$  & $196\times$  & 7/7 \\
+    EPFL combinational                & \keyw{rare} & $6.4\times$  & $9.4\times$  & 13/17 \\
+    Sketch / \texttt{sk\_} CNFs       & ---         & $46.2\times$ & $98.9\times$ & 27/29 \\
     \bottomrule
   \end{tabular}
   \\[1.0em]
-  \rem{RTX 4080 laptop (\texttt{i7-13800H}) vs.\ single-core patched CMSGen; per instance at its
-  best encoder. Superseded by the L4 sweep in the main deck --- kept because it is the machine the
-  engine was developed on.
-  \\ \bad{Corrected 2026-08-04/05}, by one rule: \keyw{a cell that measures the instance instead of
-  the sampler does not belong in a geomean}. (i)~vacuous output pins
-  (\texttt{b02/b05/b07/s526} are constant at $T{=}25$, so pinning them is a tautology): including
-  them read $47.7\times$, an inflation of up to $1.9\times$ falling almost entirely on the rare
-  column. (ii)~instances that sample with \keyw{zero decisions and zero implications} --- the
-  support is free after propagation, so no search happens, and the best-encoder rule \emph{prefers}
-  them because they carry the highest ratio: EPFL read $12.7\times$, \texttt{sk\_} $48.5\times$.}
+  \begin{columns}[T]
+    \begin{column}{0.48\textwidth}
+      \bad{\textbf{Every ratio is higher on the L4 --- and none of it is \GPAP{}.}}
+      \\[0.3em]
+      \small
+      Paired on identical cells: \GPAP{} $0.96\times$ (same engine, slightly slower card) while
+      \keyw{CMSGen runs at $0.41\times$} --- a Xeon @ 2.2\,GHz against an \texttt{i7-13800H}.
+      \rem{CMSGen's own propagation \emph{and} decision counters independently both give
+      $0.413\times$.}
+    \end{column}
+    \begin{column}{0.48\textwidth}
+      \good{\textbf{Hence the rule: never quote a ratio without the CPU.}}
+      \\[0.3em]
+      \small
+      CMSGen is single-core, so the number is as much a property of the host as of the sampler.
+      Otherwise a reviewer reads $98.9\times$ and correctly calls it a rigged baseline.
+      \rem{The same caution applies in advance to the Technion cluster runs.}
+    \end{column}
+  \end{columns}
 \end{frame}
+
+% --- the two reporting corrections, kept for the record ---
+\begin{frame}{Backup: two corrections we made to our own headline}
+  \begin{block}{One rule}
+    \centering
+    \keyw{A cell that measures the \emph{instance} instead of the \emph{sampler} does not belong
+    in a geomean.}
+  \end{block}
+  \vspace{0.4em}
+  \small
+  \textbf{(i) Vacuous output pins.} \texttt{b02/b05/b07/s526} have constant outputs at $T{=}25$, so
+  pinning them is a tautology and \emph{any} sampler scores ${\sim}100\%$. Including them read
+  \bad{$47.7\times$} on the sequential-rare column instead of \good{$36.5\times$} --- an inflation
+  of up to $1.9\times$, falling almost entirely on the column we tell people to quote.
+  \\[0.6em]
+  \textbf{(ii) Instances that need no search at all.} A few cells emit samples with \keyw{zero
+  decisions and zero implications}: after propagation the support is unconstrained, so ``sampling''
+  is a random-bit readout at $240$M/s. Worse, picking the best encoder per instance
+  \emph{prefers} them, because they carry the family's highest ratio. Including them read EPFL
+  \bad{$12.7\times$} instead of \good{$6.4\times$}, and \texttt{sk\_} \bad{$48.5\times$} instead of
+  \good{$46.2\times$}.
+  \\[0.6em]
+  \rem{Both are now enforced in the table generator and re-checked by a verifier, so they cannot
+  come back. The same generator produces the paper tables and these slides.}
+\end{frame}
+
+% --- was the main-deck status frame; the roadmap detail belongs off the main line ---
+\begin{frame}{Backup: status, and what is open}
+  \begin{columns}[T]
+    \begin{column}{0.4\textwidth}
+      \good{\textbf{Done}}
+      \begin{itemize}\small
+        \item engine: packed kernels, scalar $+$ WAVE, \texttt{libgpap}, three language faces
+        \item sampler: pipeline, portfolios, mining, ELS, GPU projection
+        \item front-ends: \texttt{.bench}, AIGER, ABC, simulation
+        \item evaluation: resumable sweep, 3-seed medians, fair CMSGen, 3 GPU rivals
+        \item uniformity: 3-tier readout, Barbarik, exact-oracle fuzzing
+      \end{itemize}
+    \end{column}
+    \begin{column}{0.29\textwidth}
+      \textbf{Open --- build}
+      \begin{itemize}\small
+        \item \keyw{uniformity-aware config choice} --- the one item that changes what a user gets
+        \item per-instance encoder auto-pick
+        \item state arena (${\sim}1.2\times$)
+        \item ROCm port \rem{(no kernel work)}
+        \item re-test the other applications
+      \end{itemize}
+    \end{column}
+    \begin{column}{0.29\textwidth}
+      \textbf{Open --- measure}
+      \begin{itemize}\small
+        \item \keyw{A100 rerun} --- every number is $K$-bound on a 12\,GB card
+        \item multi-core CMSGen, QuickSampler
+        \item break-even simulation throughput
+        \item Barbarik $\times 10$ / ScalBarbarik
+        \item one single-session ablation
+      \end{itemize}
+    \end{column}
+  \end{columns}
+\end{frame}
+
+% --- was a main-deck frame: the cross-GPU rival check ---
+\begin{frame}{Backup: does the rival verdict survive a different GPU?}
+  \centering
+  \small
+  \begin{tabular}{@{}llrrc@{}}
+    \toprule
+    rival & protocol & \multicolumn{2}{c}{GPAP $/$ rival (geomean)} & GPAP wins \\
+    \cmidrule(lr){3-4}
+     & & 4080 laptop & \textbf{L4} & on L4 \\
+    \midrule
+    DEMOTIC   & their ISCAS-85 pins     & $2.9\times$     & $2.5\times$     & \good{19/20} \\
+    DEMOTIC   & our \keyw{rare} pins    & $7{,}704\times$ & $2{,}427\times$ & \good{16/16} \\
+    Recurrent & our \keyw{rare} pins    & $599\times$     & $422\times$     & \good{3/3} \\
+    HTS       & our CNFs, both encoders & ---             & $2{,}042\times$ & \good{10/10} \\
+    \bottomrule
+  \end{tabular}
+  \\[1.0em]
+  \begin{columns}[T]
+    \begin{column}{0.48\textwidth}
+      \good{\textbf{What transfers: the verdict.}}
+      \\[0.3em]
+      Win counts are \emph{identical} on both cards.
+    \end{column}
+    \begin{column}{0.48\textwidth}
+      \bad{\textbf{What does not: the magnitude.}}
+      \\[0.3em]
+      \keyw{Read these as orders of magnitude.}
+    \end{column}
+  \end{columns}
+  \vspace{0.5em}
+  \centering
+  \rem{At rare pins the rival scores ${\approx}0$, so the ratio has a near-zero denominator.
+  \bad{Honest}: \texttt{c1355} loses on both cards.}
+\end{frame}
+
+\begin{frame}{Backup: numbers on hand}
+  \footnotesize
+  \begin{columns}[T]
+    \begin{column}{0.48\textwidth}
+      \textbf{Engine}
+      \begin{itemize}
+        \item vs pre-WAVE: b14 $5.7\times$, b12 $2.8\times$, b04 $1.8\times$, b03 $1.5\times$
+        \item rates: b03 631k, b06 945k, b04 81k, b12 50k, b14 4.0k attempts/s
+        \item C++ port: $1.013\times$ geomean, identical model sets
+        \item portability: 75/1273 CUDA lines, 18 driver calls, 29/29 specializations cross-compile
+      \end{itemize}
+      \textbf{Encoder}
+      \begin{itemize}
+        \item ABC shrink $2.2$--$7.8\times$ clauses; at rare targets bimodal (unlocks b14, collapses b13)
+        \item \texttt{fast} vs \texttt{full}: b15 encode $99$\,s $\rightarrow$ ${\le}4$\,s
+      \end{itemize}
+    \end{column}
+    \begin{column}{0.48\textwidth}
+      \textbf{Uniformity}
+      \begin{itemize}
+        \item 600 instances, 10{,}800 runs, 0 unsound; controls 0/600 FP, 600/600 power
+        \item $B\ge|\text{sup}|$: 24/24 ok, TV 0.0392 (theory floor 0.0399)
+        \item circuits 0.040 vs CMSGen 0.087; CNF 0.441 vs 0.272
+        \item \texttt{soft}: Reject 5/5 in 156--936 samples, TV median 0.694
+      \end{itemize}
+      \textbf{Baselines / method}
+      \begin{itemize}
+        \item CMSGen emission $= 5.3\times$ its wall (373\,MB on 27.sk)
+        \item rare-target amplification $500$--$500{,}000\times$
+        \item SM clock 615--1710\,MHz while $>$90\% busy; draw noise $\pm40\%$
+      \end{itemize}
+    \end{column}
+  \end{columns}
+\end{frame}
+
+\end{document}

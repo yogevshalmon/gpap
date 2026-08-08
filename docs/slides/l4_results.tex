@@ -30,6 +30,33 @@
 }
 \end{frame}
 
+\begin{frame}{Appendix: the engine, isolated from the sampler}
+  \centering \scriptsize
+  \begin{tabular}{@{}llrrrrrr@{}}
+    \toprule
+    & & & \multicolumn{2}{c}{implications$/$s} & \multicolumn{2}{c}{implications$/$sample} & \textbf{sampling} \\
+    \cmidrule(lr){4-5}\cmidrule(lr){6-7}\cmidrule(lr){8-8}
+    family & targets & $n$ & GPAP & CMSGen & GPAP & CMSGen & \textbf{GPAP$/$CMSGen} \\
+    \midrule
+    ITC'99 $+$ ISCAS-89 seq, $T{=}25$ & \keyw{rare} & 13 & $1.14\!\times\!10^{9}$ & $5.20\!\times\!10^{6}$ & 30,538 & 5,422 & \textbf{$39.1$$\times$} \\
+    ITC'99 $+$ ISCAS-89 seq, $T{=}50$ & \keyw{rare} & 10 & $1.07\!\times\!10^{9}$ & $5.29\!\times\!10^{6}$ & 166,856 & 11,553 & \textbf{$14.0$$\times$} \\
+    ITC'99 $+$ ISCAS-89 seq, $T{=}25$ & random & 13 & $1.10\!\times\!10^{9}$ & $4.47\!\times\!10^{6}$ & 7,254 & 5,405 & \textbf{$183.3$$\times$} \\
+    ITC'99 $+$ ISCAS-89 seq, $T{=}50$ & random & 9 & $1.25\!\times\!10^{9}$ & $5.38\!\times\!10^{6}$ & 14,062 & 8,867 & \textbf{$147.0$$\times$} \\
+    ISCAS-85 combinational & \keyw{rare} & 9 & $1.05\!\times\!10^{9}$ & $1.67\!\times\!10^{6}$ & 517 & 507 & \textbf{$615.4$$\times$} \\
+    ISCAS-85 combinational & random & 9 & $1.05\!\times\!10^{9}$ & $1.66\!\times\!10^{6}$ & 530 & 535 & \textbf{$636.1$$\times$} \\
+    HWMCC'17, $T{=}25$ & \keyw{rare} & 2 & $1.05\!\times\!10^{9}$ & $4.58\!\times\!10^{6}$ & 12,615 & 10,737 & \textbf{$195.6$$\times$} \\
+    HWMCC'17, $T{=}50$ & \keyw{rare} & 1 & $0.87\!\times\!10^{9}$ & $1.87\!\times\!10^{6}$ & 2,953 & 2,677 & \textbf{$421.5$$\times$} \\
+    HWMCC'17, $T{=}25$ & random & 2 & $1.10\!\times\!10^{9}$ & $3.43\!\times\!10^{6}$ & 3,522 & 2,910 & \textbf{$263.8$$\times$} \\
+    HWMCC'17, $T{=}50$ & random & 1 & $0.84\!\times\!10^{9}$ & $1.89\!\times\!10^{6}$ & 2,253 & 2,643 & \textbf{$520.6$$\times$} \\
+    EPFL combinational & \keyw{rare} & 12 & $1.08\!\times\!10^{9}$ & $2.14\!\times\!10^{6}$ & 12,139 & 226 & \textbf{$9.4$$\times$} \\
+    EPFL combinational & random & 13 & $0.89\!\times\!10^{9}$ & $4.53\!\times\!10^{6}$ & 15,138 & 630 & \textbf{$8.2$$\times$} \\
+    Sketch / \texttt{sk\_} projected CNFs & --- & 27 & $1.00\!\times\!10^{9}$ & $4.23\!\times\!10^{6}$ & 851 & 355 & \textbf{$98.9$$\times$} \\
+    \bottomrule
+  \end{tabular}
+  \\[0.7em]
+  \rem{GPAP's rate is from the packed-word kernel; CMSGen's from \emph{its own}  counters (\texttt{--statsevery}). \good{GPAP holds ${\sim}10^{9}$ implications$/$s  on every family} --- spread only $1.41\times$ --- while the  sample-rate ratio spans ${\sim}2$ orders of magnitude. The two are linked exactly:  \keyw{samples$/$s ratio $=$ (impl$/$s ratio) $/$ (impl$/$sample ratio)} --- read  each row left to right and the last column is what comes out. So the variation is  \keyw{rejection cost}, not the propagator: we discard a conflicted trajectory,  CMSGen backtracks and keeps the partial work.}
+\end{frame}
+
 \begin{frame}{Appendix: every GPU rival measured on the L4}
   \centering \scriptsize
   \begin{tabular}{@{}llrrrrrr@{}}
@@ -45,33 +72,6 @@
   \end{tabular}
   \\[0.7em]
   \rem{Their metric: unique solutions $/$ their \texttt{model\_runtime}, which excludes  their model build while ours includes construction. \keyw{failed} = timeout or  no gradient path; those rows are reported, never folded in as a zero.  \keyw{R$=$0} the rival emitted nothing, \bad{G$=$0} \emph{we} emitted nothing ---  neither has a finite ratio, both are counted.}
-\end{frame}
-
-\begin{frame}{Appendix: the engine, isolated from the sampler}
-  \centering \scriptsize
-  \begin{tabular}{@{}llrrrrr@{}}
-    \toprule
-    & & & \multicolumn{2}{c}{implications$/$s} & \multicolumn{2}{c}{implications$/$sample} \\
-    \cmidrule(lr){4-5}\cmidrule(lr){6-7}
-    family & targets & $n$ & GPAP & CMSGen & GPAP & CMSGen \\
-    \midrule
-    ITC'99 $+$ ISCAS-89 seq, $T{=}25$ & \keyw{rare} & 13 & $1.14\!\times\!10^{9}$ & $5.20\!\times\!10^{6}$ & 30,538 & 5,422 \\
-    ITC'99 $+$ ISCAS-89 seq, $T{=}50$ & \keyw{rare} & 10 & $1.07\!\times\!10^{9}$ & $5.29\!\times\!10^{6}$ & 166,856 & 11,553 \\
-    ITC'99 $+$ ISCAS-89 seq, $T{=}25$ & random & 13 & $1.10\!\times\!10^{9}$ & $4.47\!\times\!10^{6}$ & 7,254 & 5,405 \\
-    ITC'99 $+$ ISCAS-89 seq, $T{=}50$ & random & 9 & $1.25\!\times\!10^{9}$ & $5.38\!\times\!10^{6}$ & 14,062 & 8,867 \\
-    ISCAS-85 combinational & \keyw{rare} & 9 & $1.05\!\times\!10^{9}$ & $1.67\!\times\!10^{6}$ & 517 & 507 \\
-    ISCAS-85 combinational & random & 9 & $1.05\!\times\!10^{9}$ & $1.66\!\times\!10^{6}$ & 530 & 535 \\
-    HWMCC'17, $T{=}25$ & \keyw{rare} & 2 & $1.05\!\times\!10^{9}$ & $4.58\!\times\!10^{6}$ & 12,615 & 10,737 \\
-    HWMCC'17, $T{=}50$ & \keyw{rare} & 1 & $0.87\!\times\!10^{9}$ & $1.87\!\times\!10^{6}$ & 2,953 & 2,677 \\
-    HWMCC'17, $T{=}25$ & random & 2 & $1.10\!\times\!10^{9}$ & $3.43\!\times\!10^{6}$ & 3,522 & 2,910 \\
-    HWMCC'17, $T{=}50$ & random & 1 & $0.84\!\times\!10^{9}$ & $1.89\!\times\!10^{6}$ & 2,253 & 2,643 \\
-    EPFL combinational & \keyw{rare} & 12 & $1.08\!\times\!10^{9}$ & $2.14\!\times\!10^{6}$ & 12,139 & 226 \\
-    EPFL combinational & random & 13 & $0.89\!\times\!10^{9}$ & $4.53\!\times\!10^{6}$ & 15,138 & 630 \\
-    Sketch / \texttt{sk\_} projected CNFs & --- & 27 & $1.00\!\times\!10^{9}$ & $4.23\!\times\!10^{6}$ & 851 & 355 \\
-    \bottomrule
-  \end{tabular}
-  \\[0.7em]
-  \rem{GPAP's rate is from the packed-word kernel; CMSGen's from \emph{its own}  counters (\texttt{--statsevery}). \good{GPAP holds ${\sim}10^{9}$ implications$/$s  on every family} --- spread only $1.49\times$ --- while the  sample-rate ratio spans ${\sim}2$ orders of magnitude. The two are linked exactly:  \keyw{samples$/$s ratio $=$ (impl$/$s ratio) $/$ (impl$/$sample ratio)}, so the  variation is \keyw{rejection cost}, not the propagator. We discard a conflicted  trajectory; CMSGen backtracks and keeps the partial work.}
 \end{frame}
 
 \begin{frame}{Appendix: uniformity against an exact oracle}
