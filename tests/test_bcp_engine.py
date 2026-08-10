@@ -9,12 +9,12 @@ import torch
 
 from gpap.engine.formula import CnfFormula, ext_lit_to_lit_index
 from gpap.engine.bcp_engine import BCPEngine, make_assumption_tensor
-from gpap.engine.kernels import kernel_available
+from gpap.engine import core_available
 
 from tests.reference_bcp import ref_bcp, assigned_set
 
 TEST_DATA_DIR = os.path.join(os.path.dirname(__file__), "test_data")
-AVAIL = torch.cuda.is_available() and kernel_available()
+AVAIL = torch.cuda.is_available() and core_available()
 pytestmark = pytest.mark.skipif(not AVAIL, reason="requires CUDA + a working triton")
 DEV = torch.device("cuda") if torch.cuda.is_available() else torch.device("cpu")
 

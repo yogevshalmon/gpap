@@ -65,7 +65,7 @@ from gpap.engine.calibrate import (
     gpu_mem_available,
     resolve_k_cap,
 )
-from gpap.engine.kernels import kernel_available
+from gpap.engine._triton import kernel_available
 
 __all__ = [
     "CnfFormula", "BCPEngine", "make_assumption_tensor", "core_available",

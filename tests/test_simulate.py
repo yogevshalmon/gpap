@@ -15,7 +15,7 @@ from gpap.circuits.simulate import (_run_aig, _run_bench, _topo_ands, _topo_gate
 
 try:
     import torch as _torch
-    from gpap.engine.kernels import kernel_available as _ka
+    from gpap.engine import core_available as _ka
     _KERNEL = _torch.cuda.is_available() and _ka()
 except Exception:  # noqa: BLE001
     _KERNEL = False

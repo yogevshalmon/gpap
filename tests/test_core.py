@@ -20,16 +20,14 @@ import torch
 
 from gpap.engine import _core
 from gpap.engine.formula import CnfFormula
-from gpap.engine.kernels import kernel_available
 
 from tests.reference_bcp import assigned_set, ref_bcp
 
 CUDA = torch.cuda.is_available()
-AVAIL = CUDA and kernel_available()
 HAVE_CORE = _core.available()
 pytestmark = [
     pytest.mark.gpu,
-    pytest.mark.skipif(not AVAIL, reason="requires CUDA + a working triton"),
+    pytest.mark.skipif(not CUDA, reason="requires CUDA"),
     pytest.mark.skipif(not HAVE_CORE, reason="libgpap not built (see cpp/README.md)"),
 ]
 DEV = torch.device("cuda") if CUDA else torch.device("cpu")

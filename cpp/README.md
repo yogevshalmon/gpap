@@ -2,7 +2,7 @@
 
 The K-parallel packed BCP engine (`docs/ENGINE.md`) built as a shared library with a C ABI, so
 it can be linked from C++ as well as driven from Python. The GPU kernels are **not rewritten**:
-[`gpap/engine/kernels.py`](../gpap/engine/kernels.py) stays the single source of truth and is
+[`kernels/bcp.py`](kernels/bcp.py) stays the single source of truth and is
 compiled ahead of time into cubins that are embedded in the library (verified bit-identical, at
 the SASS level, to what the Triton JIT produces).
 
@@ -135,6 +135,11 @@ Full C example: [`examples/demo.c`](examples/demo.c). The two entry points are t
 Python API exposes — batched assumption checking (`gpap_engine_apply`) and fused trajectory
 sampling (`gpap_engine_trajectory`) — plus selections and readout. Every readout hands back a
 small host buffer; a `(K, M)` or `(K, N)` transient never crosses the bus.
+
+**Getting answers out — [`SELECTION_API.md`](SELECTION_API.md).** `pair_mask` / `select_complete` /
+`selection_rows` / `var_bits` are the least obvious part of this ABI, and that document explains
+them from the problem they solve, with a worked 6-row example. Read it before driving `gpap::Engine`
+directly; `gpap::Sampler` handles all of it for you.
 
 What tier 1 deliberately does *not* do is the Python pipeline's per-instance work: the adaptive
 config portfolio, entailed-clause mining, preprocessing, uniformity readout and the circuit

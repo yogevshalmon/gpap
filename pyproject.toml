@@ -48,7 +48,7 @@ gpap = ["lib/libgpap.so*"]
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 markers = [
-    "gpu: requires CUDA + a working triton (skipped off-CUDA)",
+    "gpu: requires CUDA + a built libgpap (skipped without either)",
     "slow: slow deep-unroll case (c25)",
 ]
 

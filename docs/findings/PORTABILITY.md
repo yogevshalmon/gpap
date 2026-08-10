@@ -36,7 +36,7 @@ calibrator's arithmetic, selections, slicing and all the orchestration are plain
 
 ## 2. What is actually coupled to NVIDIA in the *kernels* — nothing obvious
 
-MEASURED: `gpap/engine/kernels.py` and `cpp/kernels/helpers.py` contain **zero** occurrences of
+MEASURED: `cpp/kernels/bcp.py` and `cpp/kernels/helpers.py` contain **zero** occurrences of
 `shfl`, `ballot`, `__syncwarp`, `inline_asm` or `tl.extern`. The Triton surface used is small
 and entirely standard:
 

@@ -138,7 +138,7 @@ K= 31,500  K*M/2^31=0.99  succ=0.2652        K= 49,152  ratio=1.55  succ=0.2652
 
 It is machine- **and** K-dependent: the L4 at K=27,760 gives 0.530 while the A100 at K=28,000 gives
 0.265. **Soundness is unaffected** (`gpu_sound=True` throughout) — we get half as many models, not
-wrong ones. Start at `gpap/engine/kernels.py`.
+wrong ones. Start at `cpp/kernels/bcp.py`.
 
 ---
 

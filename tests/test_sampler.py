@@ -18,8 +18,8 @@ from gpap.sampling.sampler import GPUSampler, simplify_cnf, simplify_cnf_els
 
 CUDA = torch.cuda.is_available()
 try:
-    from gpap.engine.kernels import kernel_available
-    KERNEL = CUDA and kernel_available()
+    from gpap.engine import core_available
+    KERNEL = CUDA and core_available()
 except Exception:  # noqa: BLE001
     KERNEL = False
 needs_gpu = pytest.mark.skipif(not KERNEL, reason="engine is CUDA+triton-only")

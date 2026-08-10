@@ -31,7 +31,8 @@ host-side setup and the (budget-capped) miner.
 
 ## 2. The kernels do not need rewriting
 
-Triton AOT-compiles `gpap/engine/kernels.py` **unmodified** into a cubin plus a plain-C loader
+Triton AOT-compiles the kernel sources (`cpp/kernels/`, then at `gpap/engine/kernels.py`)
+**unmodified** into a cubin plus a plain-C loader
 that needs only the CUDA driver API. Proven end to end before any porting work started: a 36 KB
 binary, linking `libcuda.so.1` alone, no Python/torch/nvcc, reproducing the engine's results.
 On real instances with the same K/order/seed it produced **identical model counts**

@@ -2,7 +2,7 @@
 
 The engine is a **K-parallel packed BCP primitive**: it runs Boolean Constraint Propagation over
 `K` *independent* assumption sets at once, entirely on the GPU, with **no clause scanning ever**.
-This document is the map of [`kernels.py`](../gpap/engine/kernels.py) (the two Triton kernels) and
+This document is the map of [`cpp/kernels/bcp.py`](../cpp/kernels/bcp.py) (the two Triton kernels) and
 [`bcp_engine.py`](../gpap/engine/bcp_engine.py) (state + launch plumbing), reflecting the
 2026-07 kernel work (SUM word, WAVE propagate, warp-wide decision scan, assignment bitmap).
 

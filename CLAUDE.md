@@ -6,7 +6,7 @@ lives in [`docs/`](docs/) — keep this file short and current.
 
 **The engine is a C++ library, [`libgpap`](cpp/)** (since 2026-07-28) — ONE implementation that
 Python (`gpap.engine`, via ctypes) and C++ consumers (`#include <gpap/gpap.hpp>`) share. The GPU
-kernels are still written in Triton: [`gpap/engine/kernels.py`](gpap/engine/kernels.py) is the
+kernels are still written in Triton: [`cpp/kernels/bcp.py`](cpp/kernels/bcp.py) is the
 single source of truth, AOT-compiled into the library by `cpp/tools/build_kernels.py` (cubins
 verified BIT-IDENTICAL at SASS level to the JIT ones). Build: `scripts/build_core.sh` — needs
 cmake + a C++17 compiler + the NVIDIA driver + triton at build time; **no CUDA toolkit, no nvcc**.
@@ -40,6 +40,7 @@ cpp/                       # THE ENGINE CORE — libgpap (C ABI + header-only C+
   src/engine.cpp           # state ownership (cuMemAlloc), reset/flush cache, both entry points
   src/readout.cpp          # selections, on-device soundness, bit gathers, assignment rows
   src/calibrate.cpp        # K sizing, VRAM model  |  src/runtime.cpp: cubin registry + launches
+  kernels/bcp.py           # THE 2 BCP kernels (fixpoint + trajectory, SHIFT=16|8, scalar/WAVE)
   kernels/helpers.py       # support kernels (Triton, so the toolchain stays nvcc-free)
   tools/build_kernels.py   # AOT: kernels.py + helpers.py -> embedded cubins (29 specializations)
   examples/                # sample.cpp + assumptions.cpp (tier 1) + demo.c (raw C ABI)
@@ -48,7 +49,7 @@ gpap/
     _core.py               # ctypes binding to libgpap (private)
     formula.py             # CnfFormula: facade over the core's builder (numpy fallback off-GPU)
     bcp_engine.py          # BCPEngine: marshalling + torch-friendly accessors over the core
-    kernels.py             # the 2 Triton kernels (fixpoint + trajectory, SHIFT=16|8) + scalar/WAVE
+    _triton.py             # `kernel_available()`: can this host REBUILD kernels? (gpap info only)
     calibrate.py           # K sizing, VRAM model, gpu_mem_available
     checker.py             # AssumptionChecker: the batched-assumptions API face
   sampling/                # THE FLAGSHIP

@@ -15,13 +15,13 @@ circuits/simulate/metrics tests).
 import pytest
 import torch
 
-from gpap.engine import BCPEngine, CnfFormula, kernel_available
+from gpap.engine import BCPEngine, CnfFormula, core_available
 from gpap.sampling.sampler import GPUSampler, _satisfies
 
 from tests.reference_bcp import ref_bcp, assigned_set
 
 CUDA = torch.cuda.is_available()
-KERNEL = CUDA and kernel_available()
+KERNEL = CUDA and core_available()
 pytestmark = pytest.mark.skipif(not KERNEL, reason="requires CUDA + a working triton")
 
 DEV = torch.device("cuda") if CUDA else torch.device("cpu")

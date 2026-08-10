@@ -265,7 +265,7 @@ def _cmd_info(args):
     except Exception as e:  # noqa: BLE001
         print(f"engine core: unavailable ({e})")
     try:
-        from gpap.engine.kernels import kernel_available
+        from gpap.engine._triton import kernel_available
         print(f"triton (kernel source / JIT reference): "
               f"{'available' if kernel_available() else 'unavailable'}")
     except Exception as e:  # noqa: BLE001

@@ -6,7 +6,7 @@ compiled into the library by cpp/tools/build_kernels.py. They replace what the r
 engine expressed as torch ops (`copy_(expand(...))`, `any_free`, `var_true_bits`,
 `_bits_to_bytes`, `sat_rows(...) > 0`, `_nops.sum()`).
 
-Conventions shared with gpap/engine/kernels.py:
+Conventions shared with cpp/kernels/bcp.py:
   * assignment BITMAP: bit l of (K, NW) int32 words = literal l TRUE; l and l^1 share a word.
   * packed clause word: low SHIFT bits = sat_count, high bits = modular literal sum.
   * one program owns one row wherever a row is the unit of work.

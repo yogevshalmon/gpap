@@ -221,7 +221,7 @@ Instead of a clause matrix, GPAP keeps:
 3. **The sum trick**: when `sat_count == 1`, the surviving literal's index **is** `lit_sum`. No
    scan, no gather — pure arithmetic. The kernels pack both counters into ONE 32-bit word, which
    makes the whole clause update a single `atomic_add` whose return value *is* the conflict/unit
-   detection; see [`gpap/engine/kernels.py`](gpap/engine/kernels.py) and [docs/ENGINE.md](docs/ENGINE.md).
+   detection; see [`cpp/kernels/bcp.py`](cpp/kernels/bcp.py) and [docs/ENGINE.md](docs/ENGINE.md).
 
 Literal indexing (2N scheme): `+v → 2(v-1)`, `-v → 2(v-1)+1`, negation `l ^ 1`.
 

@@ -18,7 +18,7 @@ from gpap.sampling.metrics import (chi2_sf, enumerate_projections, format_unifor
 
 try:
     import torch as _torch
-    from gpap.engine.kernels import kernel_available as _ka
+    from gpap.engine import core_available as _ka
     _KERNEL = _torch.cuda.is_available() and _ka()
 except Exception:  # noqa: BLE001
     _KERNEL = False
