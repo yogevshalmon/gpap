@@ -51,6 +51,3 @@ class TestAssumptionChecker:
         assert results['sat_count'].shape == (2, 3)
         assert results['assignment'].shape == (2, 6)
 
-
-if __name__ == "__main__":
-    pytest.main([__file__, "-v"])

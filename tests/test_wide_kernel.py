@@ -105,6 +105,3 @@ def test_wide_defers_small_and_unsat():
     assert smp2.engine.shift == 16
     assert out2["n_models"] > 0 and out2["all_valid"]
 
-
-if __name__ == "__main__":
-    pytest.main([__file__, "-v"])

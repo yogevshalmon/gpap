@@ -290,7 +290,7 @@ def run_circuits(device: torch.device, *, cmsgen_bin: str | None, n_time: int, n
         with depth). Any (instance, T) whose CNF exceeds `max_clauses` is SKIPPED (keeps ≤100k clauses).
       * ISCAS-85 COMBINATIONAL (c*.bench, no DFFs) — DEMOTIC (arXiv 2502.08086): T=1, pin ONE output
         (pinning all over-constrains to a tiny solution set), sample the primary inputs.
-    Each `.bench` in `circuit_dir` is realised by scripts/bench_to_cnf; `c ind` = primary inputs.
+    Each `.bench` in `circuit_dir` is realised by gpap.circuits.bench; `c ind` = primary inputs.
     `configs` = the sampler portfolio (default CIRCUIT_PORTFOLIO with soft-lookahead for tight circuits).
 
     Resumable: `skip_keys` = a set of (inst, T) already done (skipped); `on_row(row)` is called after

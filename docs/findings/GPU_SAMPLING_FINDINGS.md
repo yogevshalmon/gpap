@@ -254,7 +254,7 @@ by setting B=8 (now the default in `scripts/sample_benchmark.py`). The A100's la
 
 Focus shifted to the circuit benchmarks the differentiable GPU samplers use (DEMOTIC / High-Throughput
 SAT Sampling / Recurrent CircuitSAT Sampling, arXiv 2502.08086 / 2502.08673 / 2502.21226). Pipeline in
-`scripts/bench_to_cnf.py`: parse a gate-level `.bench`, unroll `T` cycles (flip-flop output at `t` shares
+`gpap/circuits/bench.py` (CLI: `gpap circuit2cnf`): parse a gate-level `.bench`, unroll `T` cycles (flip-flop output at `t` shares
 its D-input's var at `t-1`; reset state 0), Tseitin to CNF, pin the final-cycle outputs to a simulated
 reachable target, sample the primary inputs (the `c ind` support).
 

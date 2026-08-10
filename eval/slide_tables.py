@@ -17,7 +17,6 @@ with the paper is worse than a deck with no numbers on it.
 """
 import argparse
 import json
-import math
 import os
 import sys
 
@@ -49,11 +48,6 @@ RIVAL_STAGES = [
     ("recurrent_rare", "rcs", r"Recurrent", r"our \keyw{rare} pins"),
     ("hts", "hts", r"HTS", r"our CNFs (both encoders)"),
 ]
-
-
-def gm(xs):
-    xs = [x for x in xs if x and x > 0 and math.isfinite(x)]
-    return math.exp(sum(math.log(x) for x in xs) / len(xs)) if xs else None
 
 
 def fmt(x, suffix=r"$\times$"):

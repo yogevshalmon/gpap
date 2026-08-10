@@ -15,11 +15,6 @@ REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 BENCH_DIR = os.path.join(REPO_ROOT, "benchmarks", "circuits", "bench")
 
 
-def pytest_configure(config):
-    config.addinivalue_line("markers", "gpu: requires CUDA + a working triton (skipped off-CUDA)")
-    config.addinivalue_line("markers", "slow: slow deep-unroll case (c25)")
-
-
 # Sequential circuits × unroll depths (kept small for CI) + a deep-cascade c25 (slow), plus two
 # combinational ISCAS-85 circuits pinned to one output (the DEMOTIC-style samplable setup).
 _SEQ = ["b03", "b06", "b10", "s386", "s526"]

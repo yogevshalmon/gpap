@@ -91,12 +91,6 @@ def _short(n):
              .replace(".sk", "").split("-c")[0][:22])
 
 
-def _xlabels(ax, names):
-    ax.set_xticks(range(len(names)))
-    ax.set_xticklabels([_short(n) for n in names], rotation=45, ha="right", fontsize=7.5,
-                       color=INK2)
-
-
 def _dumbbell(plt, names, a_vals, b_vals, a_label, b_label, a_color, b_color, *,
               xlabel, title, subtitle=None, path=None, floor=1e-1):
     """The paired-magnitude form: one row per instance, a thin connector between the two

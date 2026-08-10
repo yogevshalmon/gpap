@@ -21,16 +21,14 @@ Exit code is non-zero only if a DETERMINISTIC field disagrees — that is the re
 """
 import argparse
 import json
-import math
 import os
 import sys
 
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+from eval.paper_tables import gm                                    # noqa: E402
+
+
 SUCC_TOL = 0.05           # absolute; same seed + same config should be far tighter than this
-
-
-def gm(xs):
-    xs = [x for x in xs if x and x > 0 and math.isfinite(x)]
-    return math.exp(sum(math.log(x) for x in xs) / len(xs)) if xs else None
 
 
 def cells(path):

@@ -1,6 +1,5 @@
 import os
 import torch
-import pytest
 
 from gpap.engine.formula import CnfFormula
 from gpap.engine.formula import OccurrenceList, ext_lit_to_lit_index, lit_index_negation
@@ -97,6 +96,3 @@ class TestCnfFormula:
         # clause 1: ~x1(1) = 1
         assert formula.init_lit_sum.tolist() == [0, 1]
 
-
-if __name__ == "__main__":
-    pytest.main([__file__, "-v"])

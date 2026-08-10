@@ -241,6 +241,3 @@ def test_make_assumption_tensor_shapes():
     assert t[1].tolist() == [5, -1]
     assert make_assumption_tensor([[], []], DEV).shape == (2, 0)
 
-
-if __name__ == "__main__":
-    pytest.main([__file__, "-v"])

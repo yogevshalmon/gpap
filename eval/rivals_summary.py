@@ -18,8 +18,12 @@ gradient path) are counted and printed, never silently folded in as a zero.
 """
 import argparse
 import json
-import math
 import os
+import sys
+
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+from eval.paper_tables import gm                                    # noqa: E402
+
 
 # stem -> (key in the row holding the rival's numbers, human label)
 STAGES = {
@@ -29,11 +33,6 @@ STAGES = {
     "recurrent_rare": ("rcs", "Recurrent-CircuitSAT — our rare pins"),
     "hts": ("hts", "HTS — our CNFs"),
 }
-
-
-def gm(xs):
-    xs = [x for x in xs if x and x > 0 and math.isfinite(x)]
-    return math.exp(sum(math.log(x) for x in xs) / len(xs)) if xs else None
 
 
 def load_rows(d, stem):

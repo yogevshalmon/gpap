@@ -79,9 +79,10 @@ eval/                      # the experiment layer: run_full_eval.sh (staged/resu
                            #   cannot drift) + soft_price_tables.py (safe-vs-soft paired sweeps)
                            #   + verify_artifact.py (publishability gate) + make_artifact.sh
                            #   RAW DATA LIVES OUTSIDE THE REPO: $GPAP_RESULTS (../gpap-results)
-scripts/                   # shims (sample_benchmark -> gpap.benchmark), bench_to_cnf,
-                           #   build_abc.sh, build_cmsgen.sh + cmsgen_gpap_eval.patch,
-                           #   external_solver.py (PySAT utility, kept for future use)
+scripts/                   # build_core.sh (libgpap), build_abc.sh, build_cmsgen.sh +
+                           #   cmsgen_gpap_eval.patch, fetch_benchmarks.sh, perf_ab_trees.py
+                           #   (two-checkout throughput A/B), sample_benchmark.py (shim ->
+                           #   gpap.benchmark, kept for eval/'s cmsgen_sample import)
 docs/findings/             # INSIGHTS.md (settled results index) + *_FINDINGS.md deep dives
 tests/                     # pytest; circuit CNFs GENERATED from benchmarks/circuits/bench/ at test time
 archive/                   # concluded experiments (not maintained; see archive/README.md)

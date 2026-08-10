@@ -1,4 +1,0 @@
-torch
-python-sat
-tqdm
-pytest

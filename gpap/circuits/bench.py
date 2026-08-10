@@ -16,18 +16,14 @@ Pipeline:
   emit   : DIMACS with a `c ind` header listing the primary-input variables across all cycles
            (the independent support GPAP/CMSGen sample over).
 
-Usage:
+Usage (the CLI drives this module; it also handles AIGER and the ABC encoder):
   # single instance
-  python scripts/bench_to_cnf.py --bench s386.bench --cycles 25 --out s386-c25.cnf --seed 1
-  # whole folder of .bench files -> folder of .cnf files (named <stem>-c<cycles>.cnf)
-  python scripts/bench_to_cnf.py --bench benches/ --cycles 25 --out cnf_out/ --seed 1
+  gpap circuit2cnf s386.bench s386-c25.cnf --cycles 25 --seed 1
+  # whole folder of circuits -> folder of .cnf files (named <stem>-c<cycles>.cnf)
+  gpap circuit2cnf benches/ cnf_out/ --cycles 25 --seed 1
 """
-import argparse
-import glob
-import os
 import random
 import re
-import sys
 
 _GATE_RE = re.compile(r"^\s*([\w.\[\]]+)\s*=\s*([A-Za-z]+)\s*\(([^)]*)\)")
 _IO_RE = re.compile(r"^\s*(INPUT|OUTPUT)\s*\(\s*([\w.\[\]]+)\s*\)")
@@ -319,41 +315,3 @@ def convert_one(bench_path, out_path, cycles, seed, pin_outputs=None, encoder="t
     return b
 
 
-def main():
-    ap = argparse.ArgumentParser()
-    ap.add_argument("--bench", required=True,
-                     help="a single .bench file OR a folder containing .bench files (processed "
-                          "recursively).")
-    ap.add_argument("--cycles", type=int, default=25)
-    ap.add_argument("--out", required=True,
-                     help="output .cnf path (single file) or output folder (when --bench is a "
-                          "folder). Each instance is written as <stem>-c<cycles>.cnf.")
-    ap.add_argument("--seed", type=int, default=1)
-    ap.add_argument("--pin-outputs", type=int, default=None,
-                     help="constrain only this many final-cycle outputs (default: all). Use a small "
-                          "value (e.g. 1) for combinational circuits with many outputs, where pinning "
-                          "all of them over-constrains to a tiny solution set.")
-    args = ap.parse_args()
-
-    if os.path.isdir(args.bench):
-        bench_files = sorted(glob.glob(os.path.join(args.bench, "**", "*.bench"), recursive=True))
-        if not bench_files:
-            sys.exit(f"no .bench files found under {args.bench}")
-        os.makedirs(args.out, exist_ok=True)
-        n_ok = 0
-        for bench_path in bench_files:
-            stem = os.path.splitext(os.path.basename(bench_path))[0]
-            out_path = os.path.join(args.out, f"{stem}-c{args.cycles}.cnf")
-            try:
-                convert_one(bench_path, out_path, args.cycles, args.seed,
-                            pin_outputs=args.pin_outputs)
-                n_ok += 1
-            except Exception as e:                        # keep going on a bad instance
-                print(f"{bench_path}: SKIPPED ({type(e).__name__}: {e})", file=sys.stderr)
-        print(f"\nconverted {n_ok}/{len(bench_files)} instances -> {args.out}")
-    else:
-        convert_one(args.bench, args.out, args.cycles, args.seed, pin_outputs=args.pin_outputs)
-
-
-if __name__ == "__main__":
-    main()
