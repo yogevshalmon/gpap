@@ -15,7 +15,7 @@ from tests.reference_bcp import ref_bcp, assigned_set
 
 TEST_DATA_DIR = os.path.join(os.path.dirname(__file__), "test_data")
 AVAIL = torch.cuda.is_available() and core_available()
-pytestmark = pytest.mark.skipif(not AVAIL, reason="requires CUDA + a working triton")
+pytestmark = pytest.mark.skipif(not AVAIL, reason="requires CUDA + a built libgpap")
 DEV = torch.device("cuda") if torch.cuda.is_available() else torch.device("cpu")
 
 

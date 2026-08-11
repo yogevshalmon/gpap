@@ -6,7 +6,7 @@ from gpap.engine.bcp_engine import BCPEngine, make_assumption_tensor
 
 class AssumptionChecker:
     """High-level API for checking multiple assumption sets against a CNF formula.
-    Requires CUDA + triton (the engine is kernel-only).
+    Requires CUDA + a built libgpap (there is no CPU execution path).
 
     Usage:
         checker = AssumptionChecker("formula.cnf")

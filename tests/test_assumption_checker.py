@@ -8,7 +8,7 @@ from gpap.engine import core_available
 
 TEST_DATA_DIR = os.path.join(os.path.dirname(__file__), "test_data")
 AVAIL = torch.cuda.is_available() and core_available()
-pytestmark = pytest.mark.skipif(not AVAIL, reason="requires CUDA + a working triton")
+pytestmark = pytest.mark.skipif(not AVAIL, reason="requires CUDA + a built libgpap")
 
 
 class TestAssumptionChecker:

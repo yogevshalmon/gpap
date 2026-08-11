@@ -28,6 +28,19 @@ KernelCache::~KernelCache() {
     for (CUmodule m : modules_) cuModuleUnload(m);
 }
 
+/* Compute capability of the current context's device as major*10+minor, or 0 if unavailable. */
+static int current_device_cc() {
+    CUdevice dev = 0;
+    if (cuCtxGetDevice(&dev) != CUDA_SUCCESS) return 0;
+    int major = 0, minor = 0;
+    if (cuDeviceGetAttribute(&major, CU_DEVICE_ATTRIBUTE_COMPUTE_CAPABILITY_MAJOR, dev) !=
+            CUDA_SUCCESS ||
+        cuDeviceGetAttribute(&minor, CU_DEVICE_ATTRIBUTE_COMPUTE_CAPABILITY_MINOR, dev) !=
+            CUDA_SUCCESS)
+        return 0;
+    return major * 10 + minor;
+}
+
 gpap_status KernelCache::get(const std::string &key, Kernel *out) {
     auto it = cache_.find(key);
     if (it != cache_.end()) {
@@ -37,6 +50,20 @@ gpap_status KernelCache::get(const std::string &key, Kernel *out) {
     for (int32_t i = 0; i < gpap_kernel_count; ++i) {
         const gpap_kernel_desc &d = gpap_kernel_table[i];
         if (key != d.key) continue;
+        /* The cubins are architecture-specific and triton emits NO ptx fallback, so a mismatch
+         * has no JIT safety net. Check before loading: cuModuleLoadData's own failure is an
+         * opaque CUDA_ERROR_NO_BINARY_FOR_GPU that says nothing about how to fix it.
+         * Binary compatibility runs forward within a major version only: a cubin built for
+         * sm_X.Y loads on sm_X.Z for Z >= Y, and nowhere else. */
+        const int cc = current_device_cc();
+        if (cc && (cc / 10 != d.arch / 10 || cc < d.arch)) {
+            set_error("kernels were compiled for sm_%d but this GPU is sm_%d. Rebuild with:\n"
+                      "    python cpp/tools/build_kernels.py --arch %d\n"
+                      "    cmake --build build -j\n"
+                      "(or just scripts/build_core.sh on the target machine)",
+                      d.arch, cc, cc);
+            return GPAP_ERR_KERNEL;
+        }
         CUmodule mod = nullptr;
         GPAP_CU(cuModuleLoadData(&mod, d.cubin));
         Kernel k;

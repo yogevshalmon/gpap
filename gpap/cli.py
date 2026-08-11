@@ -29,9 +29,13 @@ def _cmd_sample(args):
     from gpap.sampling.metrics import format_uniformity
     from gpap.sampling.pipeline import sample_file, describe_portfolio, portfolio as _portfolio
 
+    from gpap.engine import core_available
     if not torch.cuda.is_available():
-        raise SystemExit("gpap sample requires CUDA + triton (the engine is packed-kernel-"
-                         "only; there is no CPU path). See `gpap info`.")
+        raise SystemExit("gpap sample requires a CUDA GPU — there is no CPU execution path. "
+                         "See `gpap info`.")
+    if not core_available():
+        raise SystemExit("the engine core (libgpap) is not built. Run scripts/build_core.sh, "
+                         "then `gpap info` to confirm.")
     device = torch.device(args.device) if args.device else torch.device("cuda")
     path = args.input
     tmp = None
@@ -266,10 +270,11 @@ def _cmd_info(args):
         print(f"engine core: unavailable ({e})")
     try:
         from gpap.engine._triton import kernel_available
-        print(f"triton (kernel source / JIT reference): "
-              f"{'available' if kernel_available() else 'unavailable'}")
+        ok = kernel_available()
+        print(f"triton (BUILD only — needed to REBUILD kernels, not to run them): "
+              f"{'available' if ok else 'unavailable'}")
     except Exception as e:  # noqa: BLE001
-        print(f"triton (kernel source / JIT reference): import failed ({e})")
+        print(f"triton (BUILD only): import failed ({e})")
     _print_abc_status()
     # Power-limit / clock warning (the measured 40 W-vs-80 W + battery-clock gotchas). Before any
     # headline benchmark, confirm the card isn't power-capped or downclocked — ratios in one state

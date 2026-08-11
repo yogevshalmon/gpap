@@ -29,7 +29,10 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
-cuda = ["triton>=3.0"]        # the fused trajectory kernels (ships with torch on Linux/Colab)
+# Triton compiles the GPU kernels AHEAD OF TIME into libgpap (scripts/build_core.sh); the
+# shipped library links libcuda alone, so nothing here is needed to RUN the engine. It ships
+# with torch on Linux/Colab, so this extra is usually already satisfied.
+build = ["triton>=3.0"]       # rebuilding cpp/kernels/*.py into cubins
 eval = ["matplotlib>=3.7"]    # eval/ plots
 dev = ["pytest>=7.4", "ruff>=0.4"]
 

@@ -22,7 +22,7 @@ from tests.reference_bcp import ref_bcp, assigned_set
 
 CUDA = torch.cuda.is_available()
 KERNEL = CUDA and core_available()
-pytestmark = pytest.mark.skipif(not KERNEL, reason="requires CUDA + a working triton")
+pytestmark = pytest.mark.skipif(not KERNEL, reason="requires CUDA + a built libgpap")
 
 DEV = torch.device("cuda") if CUDA else torch.device("cpu")
 gpu = pytest.mark.gpu

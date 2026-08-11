@@ -21,7 +21,7 @@ assumption sets at once** (PyTorch + fused Triton kernels), and a flagship appli
 ## Install
 
 ```bash
-pip install -e ".[cuda]"     # python side (torch + triton; triton ships with torch on Linux/Colab)
+pip install -e ".[build]"    # python side + triton (triton ships with torch on Linux/Colab)
 scripts/build_core.sh        # the engine core: libgpap.so  (cmake + gcc; NO CUDA toolkit needed)
 pip install -e ".[dev]"      # + pytest, ruff  (for tests/lint)
 ```
@@ -30,6 +30,11 @@ The engine itself is a C++ library, [`libgpap`](cpp/) — the same one C++ consu
 (see [cpp/README.md](cpp/README.md)). `scripts/build_core.sh` compiles the Triton kernels ahead of
 time into it and builds it; it needs a C++17 compiler, cmake, the NVIDIA driver and (at build time
 only) triton — **no CUDA toolkit and no nvcc**. `gpap info` reports whether it is there.
+
+At RUN time `libgpap.so` links **`libcuda.so.1` alone** — no triton, no CUDA toolkit, no Python.
+The cubins inside it are built for one GPU architecture, so moving the library to a different
+card generation means re-running `scripts/build_core.sh` there (the loader says so by name if
+you forget).
 
 A GPU is required: there is no CPU execution path.
 
