@@ -4,8 +4,8 @@ This package is the PYTHON FACE of the engine. The engine itself is the C++ libr
 (see cpp/), which C++ consumers link directly; `_core.py` binds its C ABI with ctypes, and
 `CnfFormula` / `BCPEngine` are thin facades over it. One implementation, two faces.
 
-PACKED STATE: propagation runs in Triton kernels (kernels.py — the kernel SOURCE, compiled
-ahead of time into the library) over a packed int32 clause state — low SHIFT bits = sat_count
+PACKED STATE: propagation runs in Triton kernels (cpp/kernels/bcp.py — the kernel SOURCE,
+compiled ahead of time into the library) over a packed int32 clause state — low SHIFT bits = sat_count
 (non-falsified literals), high bits = SUM of the surviving literal indices mod the field width
 (every removal exact mod 2^F, so at sat_count==1 the field IS the forced literal; the sum form
 makes the update a single atomic_add in the warp-parallel WAVE kernel).
@@ -59,18 +59,16 @@ from gpap.engine.bcp_engine import (
     packed_envelope,
 )
 from gpap.engine.checker import AssumptionChecker
-from gpap.engine.calibrate import (
-    compute_k_safe,
-    default_k_cap,
-    gpu_mem_available,
-    resolve_k_cap,
-)
 from gpap.engine._triton import kernel_available
 
+# The GPU memory model (compute_k_safe / gpu_mem_available / default_k_cap / resolve_k_cap) is
+# DELIBERATELY not re-exported here. Batch sizing is the engine's job, not the caller's: every
+# entry point sizes itself to the card, so a user never has to name K. It stays fully available
+# for benchmarking and for anyone who wants to override the sizing —
+# `from gpap.engine.calibrate import compute_k_safe` — just not on the front page.
 __all__ = [
     "CnfFormula", "BCPEngine", "make_assumption_tensor", "core_available",
-    "AssumptionChecker", "compute_k_safe", "gpu_mem_available", "kernel_available",
-    "default_k_cap", "resolve_k_cap",
+    "AssumptionChecker", "kernel_available",
     "packed_envelope", "clauses_envelope",
     "ext_lit_to_lit_index", "lit_index_to_ext_lit", "lit_index_negation",
 ]

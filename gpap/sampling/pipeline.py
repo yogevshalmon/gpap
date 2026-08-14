@@ -16,9 +16,10 @@ import time
 from enum import Enum
 from typing import NamedTuple
 
+import numpy as np
 import torch
 
-from gpap.engine import resolve_k_cap
+from gpap.engine.calibrate import resolve_k_cap
 from gpap.sampling.sampler import GPUSampler, parse_independent_support
 
 class VarOrder(int, Enum):
@@ -426,7 +427,12 @@ def sample_clauses(nv, clauses, support, device, *, simplify=True, els=False, n_
     # efficient GPU projection (only the (n, S) bit matrix crosses to host, not full N-var models).
     # Off the timing path (samples/s already measured). Kept BEFORE the coverage run's K-lowering so
     # it runs at full throughput K.
-    samples = cols = None
+    # Always WELL-SHAPED: with out_cap=0, or when nothing was found (UNSAT, 0%-success), this is
+    # a (0, S) matrix over the same columns rather than None, so a caller can index it
+    # unconditionally. `projection_cols` is the shape alone — the per-column plan is only built
+    # when there are rows to fill.
+    cols = [v + 1 for v in smp.projection_cols()]
+    samples = np.zeros((0, len(cols)), dtype=np.uint8)
     phases["output"] = 0.0
     if out_cap:
         _to = time.perf_counter()

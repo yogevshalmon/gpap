@@ -190,9 +190,17 @@ void gpap_counters_reset(gpap_engine *e);
 int64_t gpap_mem_available(int device, double fraction);
 /* One-time device bytes for the formula structures (occ CSR + per-clause arrays). */
 int64_t gpap_formula_mem_bytes(int32_t M, int32_t N, int64_t total_lits);
+/* Device bytes ONE row of engine state costs — the per-K term of the analytic model. Exported so
+ * a caller that allocates something else per row (a decision matrix, say) can budget for both
+ * against one model instead of guessing. */
+int64_t gpap_per_batch_mem_bytes(int32_t M, int32_t N, int32_t max_clause_len, int64_t total_lits);
 /* Largest K fitting `bytes` for a formula shape (the conservative analytic model). */
 int32_t gpap_compute_k_safe(int32_t M, int32_t N, int64_t bytes, int32_t cap,
                             int32_t max_clause_len, int64_t total_lits);
+/* Batch cap sized to THIS device's total VRAM — what a caller who does not want to think about
+ * K should pass as `cap` above. Falls back to the reference card's cap if the device cannot be
+ * queried, so it always returns a usable number. */
+int32_t gpap_default_k_cap(int device);
 /* Resident-warp count of the device — the wave/scalar dispatch threshold is a multiple of it. */
 int32_t gpap_resident_warps(int device);
 

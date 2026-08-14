@@ -82,6 +82,29 @@ def test_resolve_passes_explicit_values_through_untouched():
     assert resolve_k_cap("auto", dev) == default_k_cap(dev)
 
 
+def test_gpusampler_defaults_to_auto():
+    """`k_cap` defaults to "auto" so a direct GPUSampler user gets the same batch the pipeline
+    would give them. It used to default to a hardcoded 16,384 — ~1/3 of the batch on this card,
+    and wrong on EVERY card, since it does not scale with VRAM at all."""
+    import inspect
+
+    from gpap.sampling.sampler import GPUSampler
+    assert inspect.signature(GPUSampler.__init__).parameters["k_cap"].default == "auto"
+
+
+@pytest.mark.gpu
+def test_core_and_python_caps_agree():
+    """ONE rule, two implementations (calibrate.py and cpp/src/calibrate.cpp). They are asserted
+    equal here rather than assumed equal — a C++ consumer and a Python consumer sizing the same
+    formula differently on the same card is exactly the bug this cap exists to prevent."""
+    if not torch.cuda.is_available():
+        pytest.skip("needs CUDA")
+    from gpap.engine import _core
+    if not _core.available():
+        pytest.skip("needs a built libgpap")
+    assert _core.default_k_cap(0) == default_k_cap(torch.device("cuda"))
+
+
 @pytest.mark.gpu
 def test_auto_is_at_least_the_reference_cap_on_this_gpu():
     if not torch.cuda.is_available():

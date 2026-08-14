@@ -44,26 +44,35 @@ A GPU is required: there is no CPU execution path.
 import gpap
 
 # Sample a DIMACS CNF (support read from `c ind` header lines if present)
-models, info = gpap.sample("formula.cnf", n=50_000, seed=5, device="cuda", n_cov=5_000)
+samples, info = gpap.sample("formula.cnf", n=50_000, seed=5, device="cuda")
+samples.shape                 # (50000, S) uint8 — one column per support variable
+info["cols"]                  # the DIMACS variable each column stands for
 print(info["samples_per_s"], info["success_rate"], info["gpu_sound"])
 
 # Sample a sequential circuit: unroll T cycles, pin outputs to a reachable pattern, sample inputs
-models, info = gpap.sample_circuit("b10.bench", cycles=25, n=50_000)
+samples, info = gpap.sample_circuit("b10.bench", cycles=25, n=50_000)
+info["wire_map"]              # column variable -> "input@cycle"
 
 # In-memory clauses
-models, info = gpap.sample_clauses(nv=3, clauses=[[1, 2], [-1, 3], [-2, -3]], n=1_000,
-                                   support=[0, 1, 2], device="cuda", n_cov=1_000)
+samples, info = gpap.sample_clauses(3, [[1, 2], [-1, 3], [-2, -3]], n=1_000, support=[0, 1, 2])
 
 # The engine as a primitive — batched assumption checking (the reusable core):
 from gpap.engine import AssumptionChecker
 checker = AssumptionChecker("formula.cnf")
-r = checker.check_assumptions([[1, -2, 3], [-1, 2, -3]])   # K sets at once
-print(r["conflict"])          # (K,) bool
+r = checker.check_assumptions([[1, -2, 3], [-1, 2, -3]])   # any number of sets, chunked for you
+print(r["conflict"])          # (n,) bool
 ```
 
+Nothing above mentions a batch size: every entry point sizes itself to the GPU and the formula.
+
+`samples` is a numpy `(rows, S)` uint8 bit matrix of support projections — projected on the GPU,
+so only those bits cross the bus, and collected OFF the timing path so `samples_per_s` is
+unaffected. Rows are capped by `max_samples` (default 100,000) and every one is a guaranteed-valid
+projection. Pass `full_models=True` for the historical `list[list[int]]` of full DIMACS models
+instead (via the coverage pass — more informative, considerably more expensive).
+
 `info` is a rich dict: throughput (`samples_per_s` steady-state, `sps_e2e_total` incl. setup),
-`success_rate`, per-phase timings, mining stats, and soundness flags. `models` come from the
-optional coverage pass (`n_cov > 0`); the timed run itself collects nothing (throughput only).
+`success_rate`, per-phase timings, mining stats, and soundness flags.
 
 ## Quickstart — CLI
 

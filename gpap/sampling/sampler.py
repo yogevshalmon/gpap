@@ -40,7 +40,7 @@ import torch
 
 from gpap.engine.formula import CnfFormula
 from gpap.engine.bcp_engine import BCPEngine
-from gpap.engine.calibrate import compute_k_safe, gpu_mem_available
+from gpap.engine.calibrate import compute_k_safe, gpu_mem_available, resolve_k_cap
 
 
 class GPUSampler:
@@ -51,11 +51,24 @@ class GPUSampler:
         formula: CnfFormula,
         device: torch.device,
         *,
-        k_cap: int | None = 16384,
+        k_cap: "int | str | None" = "auto",
         seed: int | None = None,
     ):
+        """`k_cap` bounds the per-chunk batch. THREE values, and the default is the useful one:
+
+            "auto"  (default) size the cap to THIS GPU's VRAM (calibrate.default_k_cap) — what a
+                    user who never wants to think about K should get, and what the pipeline and
+                    the CLI have always passed. Exactly the historical 49,152 at or below the
+                    reference card, larger on a bigger one.
+            int     that cap, verbatim — what a cross-GPU A/B needs, since "auto" differs per card.
+            None    no cap: the analytic memory model alone decides.
+
+        The default used to be a hardcoded 16,384, which is neither of the three: it pinned a
+        direct GPUSampler user to ~1/3 of the batch the same formula gets through the pipeline,
+        on every GPU. No in-repo caller relied on it (all of them pass k_cap explicitly)."""
         self.formula = formula
         self.device = device
+        self.k_cap = k_cap = resolve_k_cap(k_cap, device)   # resolved once; None = uncapped
         self.N = formula.num_vars
         self.M = formula.num_clauses
         # The engine core (the ONLY execution path — raises off-CUDA / without libgpap;
@@ -237,7 +250,7 @@ class GPUSampler:
         if els:
             res = simplify_cnf_els(nv, clauses, support)
             if res is None:
-                return cls._unsat_sampler(device, **kw)
+                return cls._unsat_sampler(device, nv, support, **kw)
             nv2, cl2, sup2, recon = res
             formula = CnfFormula(device)
             formula.init_formula(nv2, cl2)
@@ -247,7 +260,7 @@ class GPUSampler:
             return smp
         res = simplify_cnf(nv, clauses, support)
         if res is None:                                  # UNSAT after unit propagation
-            return cls._unsat_sampler(device, **kw)
+            return cls._unsat_sampler(device, nv, support, **kw)
         nv2, cl2, sup2, old_of_new, forced, free_support = res
         formula = CnfFormula(device)
         formula.init_formula(nv2, cl2)
@@ -259,12 +272,20 @@ class GPUSampler:
         return smp
 
     @classmethod
-    def _unsat_sampler(cls, device: torch.device, **kw) -> "GPUSampler":
+    def _unsat_sampler(cls, device: torch.device, orig_nv: int = 1,
+                       orig_support: list | None = None, **kw) -> "GPUSampler":
+        """Stand-in sampler for a formula simplify proved UNSAT: emits nothing, forever.
+
+        It still records the ORIGINAL shape (nv + support). No row will ever be projected, but a
+        caller asking for bit output needs the COLUMN LIST to hand back a well-formed (0, S)
+        matrix — without it `_build_projection_plan` had no `orig_nv` to read and `gpap sample
+        unsat.cnf --out f.bits` died with a KeyError instead of writing an empty file."""
         formula = CnfFormula(device)
         formula.init_formula(1, [[1], [-1]])
         smp = cls(formula, device, **kw)
         smp.support = []
-        smp._recon = {"unsat": True}
+        smp._recon = {"unsat": True, "orig_nv": orig_nv,
+                      "orig_support": sorted(orig_support) if orig_support else []}
         return smp
 
     def _sync(self):
@@ -469,6 +490,20 @@ class GPUSampler:
 
     # --------------------------------------------------- efficient bit-projection output
 
+    def projection_cols(self) -> list[int]:
+        """The 0-based ORIGINAL variables each output column stands for — the SHAPE of this
+        sampler's output, without building the plan that fills it. Split out so a caller that
+        collected nothing can still report a correctly-shaped (0, S) result: the plan itself is a
+        per-column Python pass (~0.2 us/column) and there is no reason to pay it for zero rows."""
+        r = self._recon
+        if r is not None and r.get("orig_support"):
+            return list(r["orig_support"])                                 # 0-based support vars
+        if r is not None:
+            return list(range(r["orig_nv"]))                               # full model
+        if self.support:
+            return list(self.support)
+        return list(range(self.N))
+
     def _build_projection_plan(self) -> dict:
         """Precompute a per-output-column plan so a chunk's support projection is a GPU gather +
         constant fill + random fill — NO Python per-row reconstruct (the measured delivery
@@ -484,14 +519,7 @@ class GPUSampler:
         if getattr(self, "_proj_plan", None) is not None:
             return self._proj_plan
         r = self._recon
-        if r is not None and r.get("orig_support"):
-            cols = list(r["orig_support"])                                 # 0-based support vars
-        elif r is not None:
-            cols = list(range(r["orig_nv"]))                              # full model
-        elif self.support:
-            cols = list(self.support)
-        else:
-            cols = list(range(self.N))
+        cols = self.projection_cols()
         S = len(cols)
         gcol, flip, const, rgroup = [-1] * S, [0] * S, [0] * S, [-1] * S
         groups: dict = {}
@@ -499,7 +527,10 @@ class GPUSampler:
         def _group(key):
             return groups.setdefault(key, len(groups))
 
-        if r is None:                                          # sampler decided ORIGINAL vars
+        if r is not None and r.get("unsat"):
+            pass                                               # no row will ever be projected;
+            # the plan carries only the SHAPE, so an UNSAT formula yields a (0, S) matrix.
+        elif r is None:                                        # sampler decided ORIGINAL vars
             for i, v0 in enumerate(cols):
                 gcol[i] = v0                                   # compacted == original
         elif r.get("els"):

@@ -16,15 +16,37 @@
 namespace {
 constexpr double kAvgLitsPerClause = 4.0;
 constexpr int64_t kWddmReserveBytes = 800000000ll;   /* WDDM/WSL2 driver overhead */
+
+/* The VRAM-proportional batch cap (port of calibrate.py's K_CAP_REF / K_CAP_VRAM_REF — ONE rule,
+ * two implementations, deliberately not a third copy in gpap.hpp). kKCapRef is the historical
+ * hardcoded cap and kKCapVramRef the TOTAL VRAM of the box it was validated on (RTX 4080 Laptop),
+ * so the reference card gets back exactly 49,152 and every smaller card is floored there — no
+ * existing measurement moves — while a larger card may use the memory it has.
+ *
+ * TOTAL VRAM, never free: a free-memory cap made K jitter run-to-run on an idle box (49,526 vs
+ * 49,671 in one session) and a sweep whose batch depends on what else is resident is not a
+ * measurement. And it is a CAP, not a K — the analytic bound below still decides what fits. */
+constexpr int32_t kKCapRef = 49152;
+constexpr int64_t kKCapVramRef = 12878086144ll;
 }  // namespace
+
+extern "C" int32_t gpap_default_k_cap(int device) {
+    CUdevice dev;
+    size_t total = 0;
+    if (cuInit(0) != CUDA_SUCCESS) return kKCapRef;
+    if (cuDeviceGet(&dev, device) != CUDA_SUCCESS) return kKCapRef;
+    if (cuDeviceTotalMem(&total, dev) != CUDA_SUCCESS || total == 0) return kKCapRef;
+    const int64_t k = (int64_t)((double)kKCapRef * (double)total / (double)kKCapVramRef);
+    return (int32_t)std::max<int64_t>(kKCapRef, k);
+}
 
 extern "C" int64_t gpap_formula_mem_bytes(int32_t M, int32_t N, int64_t total_lits) {
     if (total_lits <= 0) total_lits = (int64_t)(kAvgLitsPerClause * M);
     return 8ll * M + 16ll * N + 8ll * total_lits;
 }
 
-static int64_t per_batch_mem_bytes(int32_t M, int32_t N, int32_t max_clause_size,
-                                   int64_t total_lits) {
+extern "C" int64_t gpap_per_batch_mem_bytes(int32_t M, int32_t N, int32_t max_clause_size,
+                                            int64_t total_lits) {
     if (total_lits <= 0) total_lits = (int64_t)(kAvgLitsPerClause * M);
     const int64_t sat_b = max_clause_size <= 127 ? 1 : (max_clause_size <= 32767 ? 2 : 4);
     const int64_t stat = (sat_b + 4) * M + 2ll * N;
@@ -51,7 +73,7 @@ extern "C" int64_t gpap_mem_available(int device, double fraction) {
 extern "C" int32_t gpap_compute_k_safe(int32_t M, int32_t N, int64_t bytes, int32_t cap,
                                        int32_t max_clause_len, int64_t total_lits) {
     if (bytes <= 0) return 1;
-    const int64_t pb = per_batch_mem_bytes(M, N, max_clause_len, total_lits);
+    const int64_t pb = gpap_per_batch_mem_bytes(M, N, max_clause_len, total_lits);
     int64_t k = bytes / pb;
     if (cap > 0) k = std::min<int64_t>(k, cap);
     return (int32_t)std::max<int64_t>(1, k);

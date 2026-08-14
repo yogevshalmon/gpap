@@ -344,6 +344,9 @@ inline std::int32_t compute_k_safe(std::int32_t M, std::int32_t N, std::int64_t 
     return gpap_compute_k_safe(M, N, bytes, cap, max_clause_len, total_lits);
 }
 
+/** Batch cap sized to this device's total VRAM — the `cap` above, chosen for you. */
+inline std::int32_t default_k_cap(int device = 0) { return gpap_default_k_cap(device); }
+
 inline std::string version() { return gpap_version(); }
 
 /** Can this engine run that formula at all? The packed clause word has two field splits (16|16
@@ -388,8 +391,12 @@ struct SampleOptions {
     bool auto_retry = true;
     /** Trajectories per chunk. 0 = size it to the free VRAM (recommended). */
     std::int32_t k = 0;
-    /** Upper bound on the auto-sized K. */
-    std::int32_t k_cap = 49152;
+    /** Upper bound on the auto-sized K. **0 (default) = size the cap to this GPU's total VRAM**
+     *  (`gpap_default_k_cap`); a positive value is that cap verbatim — what a cross-GPU A/B needs,
+     *  since the auto value differs per card; negative means no cap at all, leaving the analytic
+     *  memory model as the only bound. This used to default to a hardcoded 49,152, which handed
+     *  an 80 GB A100 the 12 GB laptop's batch. */
+    std::int32_t k_cap = 0;
     /** Verify on the device that emitted rows really satisfy every clause. Costs ~nothing;
      *  turning it off is only for measuring the kernel in isolation. */
     bool verify = true;
@@ -608,13 +615,16 @@ class Sampler {
     static std::int32_t auto_k(const gpap_formula_info &info, const SampleOptions &o) {
         const std::int64_t M = info.num_clauses, N = info.num_vars;
         const std::int64_t free_bytes = gpap_mem_available(o.device, 0.75);
-        std::int32_t K = gpap_compute_k_safe(info.num_clauses, info.num_vars, free_bytes, o.k_cap,
+        /* SampleOptions::k_cap: 0 = auto (this GPU's VRAM), >0 = verbatim, <0 = uncapped.
+         * gpap_compute_k_safe reads cap<=0 as "no cap", which is what the negative case wants. */
+        const std::int32_t cap = o.k_cap == 0 ? gpap_default_k_cap(o.device) : o.k_cap;
+        std::int32_t K = gpap_compute_k_safe(info.num_clauses, info.num_vars, free_bytes, cap,
                                              info.max_clause_len, info.total_lits);
         K = std::max(1, K);
         if (M <= 0) return K;
         const std::int64_t sat_b =
             info.max_clause_len <= 127 ? 1 : (info.max_clause_len <= 32767 ? 2 : 4);
-        const std::int64_t fused_cap = std::max<std::int64_t>(262144, o.k_cap);
+        const std::int64_t fused_cap = std::max<std::int64_t>(262144, cap);
         const std::int64_t fused_pb = 4 * M + 300 + 10 * N;
         const std::int64_t eng_hold = ((sat_b + 4) * M + 2 * N) * K;
         const std::int64_t budget = std::max<std::int64_t>(0, std::int64_t(0.6 * double(free_bytes - eng_hold)));
@@ -724,11 +734,18 @@ class AssumptionChecker {
     explicit AssumptionChecker(Formula formula, int device = 0)
         : formula_(std::move(formula)), engine_(formula_, options(device)) {
         n_vars_ = formula_.num_vars();
+        device_ = device;
     }
 
     /** Propagate every set to a fixpoint. `sets` hold DIMACS literals (+v / -v).
-     *  `with_assignments` materializes the full per-row assignment (K x 2N bytes) so that
-     *  `value()` and `literals()` work; drop it when only the conflict flags matter. */
+     *
+     *  ANY NUMBER of sets: they are split into GPU-sized chunks internally and the results come
+     *  back in input order, so how many launches it took is not observable. `chunk_size()` says
+     *  what one launch holds if you want to know, but nothing here requires you to.
+     *
+     *  `with_assignments` materializes the full per-row assignment (n x 2N bytes) so that
+     *  `value()` and `literals()` work; drop it when only the conflict flags matter — it is the
+     *  term that makes a large call expensive, and chunking cannot shrink it. */
     CheckResults check(const std::vector<std::vector<std::int32_t>> &sets,
                        bool with_assignments = true) {
         CheckResults r;
@@ -738,32 +755,62 @@ class AssumptionChecker {
 
         std::size_t L = 0;
         for (const auto &s : sets) L = std::max(L, s.size());
-        // Padded (K, L) matrix of INTERNAL literal indices: +v -> 2(v-1), -v -> 2(v-1)+1.
-        std::vector<std::int64_t> decisions(sets.size() * std::max<std::size_t>(L, 1), -1);
-        for (std::size_t k = 0; k < sets.size(); ++k)
-            for (std::size_t j = 0; j < sets[k].size(); ++j) {
-                const std::int32_t lit = sets[k][j];
-                if (lit == 0 || std::abs(lit) > n_vars_)
-                    throw Error(GPAP_ERR_ARG, "assumption literal out of range");
-                decisions[k * L + j] = 2 * (std::abs(lit) - 1) + (lit < 0 ? 1 : 0);
+        L = std::max<std::size_t>(L, 1);
+
+        const std::size_t n = sets.size();
+        const std::size_t row_lits = 2 * static_cast<std::size_t>(n_vars_);
+        r.conflict_.assign(n, 0);
+        r.propagated_.assign(n, 0);
+        if (with_assignments) r.assign_.assign(n * row_lits, 0);
+
+        const std::size_t step = static_cast<std::size_t>(chunk_size(n, L));
+        std::vector<std::int64_t> decisions;
+        for (std::size_t a = 0; a < n; a += step) {
+            const std::size_t b = std::min(a + step, n);
+            const std::int32_t K = static_cast<std::int32_t>(b - a);
+            // Padded (K, L) matrix of INTERNAL literal indices: +v -> 2(v-1), -v -> 2(v-1)+1.
+            decisions.assign((b - a) * L, -1);
+            for (std::size_t k = a; k < b; ++k)
+                for (std::size_t j = 0; j < sets[k].size(); ++j) {
+                    const std::int32_t lit = sets[k][j];
+                    if (lit == 0 || std::abs(lit) > n_vars_)
+                        throw Error(GPAP_ERR_ARG, "assumption literal out of range");
+                    decisions[(k - a) * L + j] = 2 * (std::abs(lit) - 1) + (lit < 0 ? 1 : 0);
+                }
+
+            engine_.reset(K);          /* the LAST chunk is short: reset to its own size */
+            engine_.apply(decisions, static_cast<std::int32_t>(L));
+
+            auto fl = engine_.flags();
+            std::copy_n(fl.second.begin(), b - a, r.conflict_.begin() + a);
+            const std::vector<std::int32_t> prop = engine_.num_propagated();
+            std::copy_n(prop.begin(), b - a, r.propagated_.begin() + a);
+            if (with_assignments) {
+                std::vector<std::int32_t> rows(static_cast<std::size_t>(K));
+                std::iota(rows.begin(), rows.end(), 0);
+                engine_.selection_set(/*slot=*/2, rows);
+                const std::vector<std::int8_t> rowsa = engine_.assignment_rows(K, /*slot=*/2);
+                std::copy_n(rowsa.begin(), (b - a) * row_lits, r.assign_.begin() + a * row_lits);
             }
-
-        const std::int32_t K = static_cast<std::int32_t>(sets.size());
-        engine_.reset(K);
-        engine_.apply(decisions, static_cast<std::int32_t>(std::max<std::size_t>(L, 1)));
-
-        auto fl = engine_.flags();
-        r.conflict_ = std::move(fl.second);
-        r.conflict_.resize(sets.size());
-        r.propagated_ = engine_.num_propagated();
-        r.propagated_.resize(sets.size());
-        if (with_assignments) {
-            std::vector<std::int32_t> rows(static_cast<size_t>(K));
-            std::iota(rows.begin(), rows.end(), 0);
-            engine_.selection_set(/*slot=*/2, rows);
-            r.assign_ = engine_.assignment_rows(K, /*slot=*/2);
         }
         return r;
+    }
+
+    /** Assumption sets one launch holds. The engine's own per-row state (the conservative,
+     *  kill-switch-validated model) plus the (K, L) int64 decision matrix this entry point
+     *  allocates and the sampler's path does not — 8 bytes per literal slot per row, which on a
+     *  small formula with long assumption sets is the dominant term. Capped like the sampler is,
+     *  and never larger than the input. */
+    std::size_t chunk_size(std::size_t n_sets, std::size_t max_lits) const {
+        const gpap_formula_info i = formula_.info();
+        const std::int64_t free_bytes = gpap_mem_available(device_, 0.75);
+        const std::int64_t per_row =
+            gpap_per_batch_mem_bytes(i.num_clauses, i.num_vars, i.max_clause_len, i.total_lits) +
+            8ll * static_cast<std::int64_t>(std::max<std::size_t>(max_lits, 1));
+        std::int64_t k = free_bytes / std::max<std::int64_t>(per_row, 1);
+        k = std::min<std::int64_t>(k, gpap_default_k_cap(device_));
+        k = std::max<std::int64_t>(k, 1);
+        return std::min<std::size_t>(static_cast<std::size_t>(k), n_sets);
     }
 
     Engine &engine() noexcept { return engine_; }
@@ -778,6 +825,7 @@ class AssumptionChecker {
     Formula formula_;
     Engine engine_;
     std::int32_t n_vars_ = 0;
+    int device_ = 0;
 };
 
 }  // namespace gpap

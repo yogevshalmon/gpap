@@ -76,15 +76,21 @@ the first few chunks, it flips the in-kernel risk polarity once before giving up
 `batch=1` return nothing there while the risk polarity succeeds at 3%. It is one retry, not a
 search; the Python pipeline runs a proper adaptive portfolio over the same knobs.
 
-The other entry point — testing many assumption sets in ONE launch, which is the primitive the
+The other entry point — testing many assumption sets in one launch, which is the primitive the
 whole engine exists for:
 
 ```cpp
 gpap::AssumptionChecker checker("formula.cnf");
-auto r = checker.check({{1, -2, 3}, {-1, 2}});       // K sets, propagated independently
+auto r = checker.check(sets);                        // ANY number of sets, propagated independently
 r.conflict(1);                                       // did set 1 falsify a clause?
 r.value(0, 5);                                       // True / False / Free for x5 under set 0
 ```
+
+`sets` may be as long as you like: the checker sizes each launch to the free VRAM and the
+formula's shape, and results come back in **input order**, so how many launches it took is not
+observable (`chunk_size()` tells you if you care). Pass `with_assignments=false` when only the
+conflict flags matter — the per-row assignment is `n x 2N` bytes and is the term that makes a
+large call expensive; chunking cannot shrink what you asked to be returned.
 
 Examples: [`examples/sample.cpp`](examples/sample.cpp),
 [`examples/assumptions.cpp`](examples/assumptions.cpp).

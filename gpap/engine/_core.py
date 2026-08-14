@@ -152,6 +152,7 @@ def _declare(lib: ctypes.CDLL) -> None:
         ("gpap_counters_get", [c_void_p, POINTER(Counters)], c_int),
         ("gpap_formula_mem_bytes", [c_int32, c_int32, c_int64], c_int64),
         ("gpap_compute_k_safe", [c_int32, c_int32, c_int64, c_int32, c_int32, c_int64], c_int32),
+        ("gpap_default_k_cap", [c_int], c_int32),
         ("gpap_last_error", [], c_char_p),
         ("gpap_version", [], c_char_p),
     ]
@@ -193,6 +194,13 @@ def compute_k_safe(M: int, N: int, gpu_mem_bytes: float, cap: "int | None" = 655
         b -= int(lib.gpap_formula_mem_bytes(M, N, int(total_lits or 0)))
     return int(lib.gpap_compute_k_safe(M, N, b, int(cap or 0), max_clause_size,
                                        int(total_lits or 0)))
+
+
+def default_k_cap(device: int = 0) -> int:
+    """The core's VRAM-proportional batch cap for `device` — the same rule (and the same two
+    constants) that `gpap.engine.calibrate.default_k_cap` applies from Python. Bound here so the
+    two faces can be asserted equal rather than assumed equal (tests/test_k_cap.py)."""
+    return int(load().gpap_default_k_cap(int(device)))
 
 
 def packed_envelope(num_vars: int, max_clause_len: int) -> "tuple[int | None, str]":
