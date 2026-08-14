@@ -43,7 +43,9 @@ cpp/                       # THE ENGINE CORE — libgpap (C ABI + header-only C+
   kernels/bcp.py           # THE 2 BCP kernels (fixpoint + trajectory, SHIFT=16|8, scalar/WAVE)
   kernels/helpers.py       # support kernels (Triton, so the toolchain stays nvcc-free)
   tools/build_kernels.py   # AOT: kernels.py + helpers.py -> embedded cubins (29 specializations)
-  examples/                # sample.cpp + assumptions.cpp (tier 1) + demo.c (raw C ABI)
+  examples/                # sample.cpp + assumptions.cpp (tier 1) + c_api.c (raw C ABI)
+examples/                  # RUNNABLE examples, both faces: sample_solutions.py +
+                           #   check_assumptions.py (python) + a README pointing at cpp/examples/
 gpap/
   engine/                  # THE PYTHON FACE of the core (app-agnostic, reusable)
     _core.py               # ctypes binding to libgpap (private)
@@ -162,7 +164,13 @@ kernels are the only path — the oracle is `tests/reference_bcp.py`).
   bitwise pass on device, never a (K,N) mask — and `var_bits`' direct bit gather; `assignment`
   / `assignment_rows` materialize int8 rows only off the hot path. Strided bit-unpack
   slice-writes cost 16× sector RMW amplification, measured).
-- **Kernel variant auto-dispatch** (same state, pure launch flag; gate-validated bit-identical):
+- **Kernel variant auto-dispatch lives in the ENGINE** (`calibrate.dispatch_mode`, applied by
+  `BCPEngine.plan_for` on every `reset(K)` — `mode="auto"` is the default, mirroring
+  `gpap::Engine::plan_for`). Every consumer gets it, not just the one that asks: before
+  2026-08-14 only GPUSampler dispatched, so the batched-assumption path always ran scalar
+  (measured 1.05-1.15x left on the table). GPUSampler still PINS the mode to K_fused via
+  `set_mode` so its small resets (warmup, short final chunk) cannot switch kernel mid-
+  measurement. Same state, pure launch flag; gate-validated bit-identical:
   warp-wide **WAVE** propagate (≤W trail lits at once, occ segments flattened, the packed-word
   `atomic_add` return value resolving cross-literal clause races) when calibrated K_fused <
   30× resident warps (retuned post-bitmap: wave b03@49k 1.41×, scalar only holds the huge-K/

@@ -60,7 +60,7 @@ fi
 
 echo
 echo "libgpap: $BUILD/libgpap.so"
-echo "try it:  $BUILD/gpap_demo             # C, the raw ABI"
+echo "try it:  $BUILD/gpap_c_api            # C, the raw ABI"
 echo "         $BUILD/gpap_sample f.cnf     # C++, gpap::Sampler"
 echo "         $BUILD/gpap_assumptions      # C++, gpap::AssumptionChecker"
 echo "         $PYTHON -c 'from gpap.engine import core_available; print(core_available())'"

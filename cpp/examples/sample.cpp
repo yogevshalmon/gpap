@@ -3,7 +3,8 @@
 //   ./gpap_sample formula.cnf [n_solutions] [seed] [out.txt]
 //
 // Everything that makes GPAP fast — the batch size, the propagate kernel, the decision order,
-// the chunk loop — is chosen by gpap::Sampler. Build via the top CMakeLists, or against an
+// the chunk loop — is chosen by gpap::Sampler. There is no K to pick and no tuning to do; the
+// only argument most callers set is the seed. Build via the top CMakeLists, or against an
 // installed libgpap:
 //
 //   g++ -std=c++17 sample.cpp -lgpap -o gpap_sample
@@ -22,16 +23,27 @@ int main(int argc, char **argv) {
 
     try {
         gpap::SampleOptions opts;
-        opts.seed = argc > 3 ? std::atoll(argv[3]) : 20260728;
+        opts.seed = argc > 3 ? std::atoll(argv[3]) : 5;
         // Keep only what we are going to look at: 10 to print, or everything if writing a file.
+        // Solutions are found on the GPU either way; this caps what is copied back to the host.
         opts.max_keep = out_path ? static_cast<std::size_t>(want) : 10;
+        // Other things worth knowing about, all optional:
+        //   opts.variables   = {1, 2, 3};   // report only these DIMACS variables (projection).
+        //                                   // Defaults to the file's `c ind` independent support
+        //                                   // if it declares one, else every variable.
+        //   opts.time_limit_s = 30.0;       // give up after 30s even if `want` is not met
+        //   opts.batch        = 1;          // decide 1 variable per round instead of 8: slower
+        //                                   // per chunk, but propagation does more of the work,
+        //                                   // which wins on tightly constrained formulas
+        //   opts.k            = 65536;      // pin the batch size; 0 (default) sizes it to VRAM
 
         gpap::Sampler sampler(argv[1], opts);
-        std::printf("%s: %d vars, %d clauses — K=%d rows/chunk, %s propagate, "
-                    "%d variables decided first\n",
+        // What it chose for you, for the record — none of this had to be supplied.
+        std::printf("%s: %d vars, %d clauses — %d rows/chunk, %s propagate, "
+                    "%d variables decided first, %zu reported\n",
                     argv[1], sampler.formula().num_vars(), sampler.formula().num_clauses(),
                     sampler.k(), sampler.mode() == gpap::Mode::Wave ? "wave" : "scalar",
-                    sampler.num_support());
+                    sampler.num_support(), sampler.variables().size());
 
         const gpap::Solutions sols = sampler.sample(want);
 

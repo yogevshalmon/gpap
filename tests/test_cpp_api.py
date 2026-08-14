@@ -152,17 +152,31 @@ def test_cpp_sampler_is_deterministic(circuit_cnfs, tmp_path):
 
 
 def test_cpp_assumption_checker():
-    """The demo formula's three assumption sets, checked against the reference BCP."""
+    """The example's tutorial sets, checked against the reference BCP.
+
+    This gates the EXAMPLE as well as the library: it is what a new user reads first, so its
+    printed answers have to be right, not merely plausible. Each non-conflicted row is printed
+    as `xN=T` / `xN=F` / `xN=free`, which must match the reference fixpoint exactly — `free`
+    included, since "BCP did not determine this" is the claim the example makes about it."""
     _need(ASSUME_BIN)
     r = subprocess.run([str(ASSUME_BIN)], capture_output=True, text=True, timeout=120)
     assert r.returncode == 0, r.stderr
     clauses = [[1, 2], [-1, 3], [-2, -3]]
     lines = [ln for ln in r.stdout.splitlines() if "->" in ln]
-    assert len(lines) == 3, r.stdout
-    for line, assumption in zip(lines, ([1], [-1, -2], [2, 3])):
+    assumptions = ([1], [-1, -2], [2, 3], [])
+    assert len(lines) == len(assumptions), r.stdout
+    for line, assumption in zip(lines, assumptions):
         conflict, assigned = ref_bcp(clauses, [lit_idx(x) for x in assumption])
         assert ("CONFLICT" in line) == conflict, f"{assumption}: {line}"
-        if not conflict:
-            got = {int(t) for t in line.split(")")[-1].split()}
-            want = {(l // 2 + 1) if l % 2 == 0 else -(l // 2 + 1) for l in assigned}
-            assert got == want, f"{assumption}: {got} != {want}"
+        if conflict:
+            continue
+        got = set()
+        for token in line.split(":")[-1].split():          # e.g. "x1=T", "x3=free"
+            name, _, value = token.partition("=")
+            var = int(name[1:])
+            if value in ("T", "F"):
+                got.add(var if value == "T" else -var)
+            else:
+                assert value == "free", f"{assumption}: unexpected value in {token!r}"
+        want = {(lit // 2 + 1) if lit % 2 == 0 else -(lit // 2 + 1) for lit in assigned}
+        assert got == want, f"{assumption}: {got} != {want}"

@@ -29,10 +29,10 @@ Requirements are deliberately thin — **no CUDA toolkit and no nvcc**:
 ```bash
 scripts/build_core.sh                    # both steps below, with diagnostics
 # ...which is just:
-python cpp/tools/build_kernels.py        # kernels.py + helpers.py -> src/generated/*.c
+python cpp/tools/build_kernels.py        # kernels/{bcp,helpers}.py -> src/generated/*.c
 cmake -S cpp -B build && cmake --build build -j
 
-./build/gpap_demo                        # assumption checking on the canonical demo formula
+./build/gpap_c_api                       # both entry points, plain C
 ./build/gpap_sample formula.cnf 16384    # sample solutions (C++ wrapper)
 ```
 
@@ -93,7 +93,8 @@ conflict flags matter — the per-row assignment is `n x 2N` bytes and is the te
 large call expensive; chunking cannot shrink what you asked to be returned.
 
 Examples: [`examples/sample.cpp`](examples/sample.cpp),
-[`examples/assumptions.cpp`](examples/assumptions.cpp).
+[`examples/assumptions.cpp`](examples/assumptions.cpp) — see [`../examples/`](../examples/)
+for the Python ones and how to run all of them.
 
 ### Tier 2 — driving the engine yourself
 
@@ -137,7 +138,7 @@ gpap_select_complete(e, mask, /*slot=*/0, &models);
 gpap_check_sound(e, 0, 4096, &unsound);            /* must be 0 */
 ```
 
-Full C example: [`examples/demo.c`](examples/demo.c). The two entry points are the same ones the
+Full C example: [`examples/c_api.c`](examples/c_api.c). The two entry points are the same ones the
 Python API exposes — batched assumption checking (`gpap_engine_apply`) and fused trajectory
 sampling (`gpap_engine_trajectory`) — plus selections and readout. Every readout hands back a
 small host buffer; a `(K, M)` or `(K, N)` transient never crosses the bus.
@@ -155,8 +156,10 @@ straightforward sampling loop over it.
 ## Using it from Python
 
 `gpap.engine._core` binds the same ABI with `ctypes` (no extension module to build, no
-interpreter/ABI coupling). The library is found via `$GPAP_LIB`, then `gpap/lib/libgpap.so`,
-then `<repo>/build/libgpap.so`.
+interpreter/ABI coupling). The library is found via `$GPAP_LIB`, then `<repo>/build/libgpap.so`,
+then `gpap/lib/libgpap.so` (the copy installed alongside the package). The build tree comes
+first on purpose: in a development checkout it is the fresh one, and a stale installed copy
+would otherwise silently shadow a rebuild.
 
 ```python
 from gpap.engine import _core
@@ -183,7 +186,7 @@ kernels/helpers.py       support kernels (Triton, so the toolchain stays nvcc-fr
 tools/build_kernels.py   the AOT compiler
 tools/make_libcuda_stub.py  link-only libcuda stub, so CI can build without a driver
                             (`--print` lists every driver call the core makes: 18)
-examples/demo.c          standalone C consumer (raw ABI)
+examples/c_api.c         standalone C consumer (raw ABI) — the header's reference
 examples/sample.cpp      solution sampling from C++ (gpap::Sampler)
 examples/assumptions.cpp batched assumption checking from C++ (gpap::AssumptionChecker)
 ```

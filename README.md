@@ -219,8 +219,21 @@ target_link_libraries(my_solver PRIVATE gpap::gpap)
 ```
 
 Runtime dependencies: `libcuda` only. Working examples in [`cpp/examples/`](cpp/examples/)
-(`sample.cpp`, `assumptions.cpp`, and `demo.c` for the raw C ABI); details in
+(`sample.cpp`, `assumptions.cpp`, and `c_api.c` for the raw C ABI); details in
 [cpp/README.md](cpp/README.md).
+
+## Examples
+
+Runnable programs for both faces, Python and C/C++ — see [`examples/`](examples/):
+
+```bash
+python examples/sample_solutions.py       # gpap.sample(): what comes back and what it means
+python examples/check_assumptions.py      # AssumptionChecker: a hand-checkable walkthrough,
+                                          #   then 200,000 assumption sets filtered in bulk
+./build/gpap_sample formula.cnf           # the same two, from C++ (gpap::Sampler)
+./build/gpap_assumptions                  # ...and gpap::AssumptionChecker
+./build/gpap_c_api                        # plain C, the raw ABI
+```
 
 ## The core idea (no clause scanning)
 

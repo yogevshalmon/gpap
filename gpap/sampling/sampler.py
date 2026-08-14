@@ -40,7 +40,12 @@ import torch
 
 from gpap.engine.formula import CnfFormula
 from gpap.engine.bcp_engine import BCPEngine
-from gpap.engine.calibrate import compute_k_safe, gpu_mem_available, resolve_k_cap
+from gpap.engine.calibrate import (
+    compute_k_safe,
+    dispatch_mode,
+    gpu_mem_available,
+    resolve_k_cap,
+)
 
 
 class GPUSampler:
@@ -123,18 +128,14 @@ class GPUSampler:
             self.K_fused = max(self.K, min(budget // fused_pb, fused_cap))
         else:
             self.K_fused = self.K
-        # Kernel-variant auto-dispatch on the CALIBRATED K (a pure launch flag, gate-validated
-        # bit-identical): below memory saturation each row's serial trail leaves requests-in-
-        # flight on the table, and the warp-wide WAVE propagate multiplies them. Crossover
-        # RETUNED 2026-07-14 after the assignment-BITMAP change removed wave's WxW dedup tax:
-        # wave now wins well past saturation (b03 K=49k = 17.7x resident: wave 1.41x, was
-        # 0.9x pre-bitmap) and scalar only holds the huge-K/tiny-M extreme (b06 K=129k = 46x
-        # resident: scalar 1.13x, interleaved A/Bs) — boundary set mid-gap at ~30x resident
-        # warps (83k here, device-derived so it transfers to bigger GPUs). GPAP_KERNEL forces.
+        # PIN the propagate kernel to the batch the chunks will actually run (K_fused), rather
+        # than letting the engine re-dispatch per reset(). The two agree on every full chunk, but
+        # the sampler also issues small resets — the warmup's pinned 1024, a short final chunk —
+        # and those must not silently switch kernel mid-run: `engine.mode` is recorded as row
+        # provenance and a measurement whose kernel changes underneath it is not a measurement.
+        # The RULE itself lives in engine.calibrate.dispatch_mode; this only chooses its input.
         if os.environ.get("GPAP_KERNEL") is None and device.type == "cuda":
-            props = torch.cuda.get_device_properties(device)
-            resident = props.multi_processor_count * (props.max_threads_per_multi_processor // 32)
-            self.engine.set_mode("wave" if self.K_fused < 30 * resident else "scalar")
+            self.engine.set_mode(dispatch_mode(self.K_fused, device))
 
     # ---------------------------------------------------------------- THE batch size
     # Read `batch_size`; set it with pin_batch()/pinned_batch(). K and K_fused below it are the

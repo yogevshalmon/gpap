@@ -26,6 +26,7 @@ import numpy as np
 import torch
 
 from gpap.engine import _core
+from gpap.engine.calibrate import dispatch_mode
 from gpap.engine.formula import CnfFormula
 
 # ---------------------------------------------------------------------- packed envelopes
@@ -97,12 +98,19 @@ class BCPEngine:
 
     def __init__(self, formula: CnfFormula, *, force_wide: bool = False,
                  mode: "str | None" = None):
-        """`mode`: "scalar" (default) = the serial-trail kernels, "wave" = the warp-wide
-        wavefront propagate — same state, same fixpoints (confluence), different propagation
-        order. Env override: GPAP_KERNEL=scalar|wave."""
-        self._mode = mode or os.environ.get("GPAP_KERNEL", "scalar")
-        if self._mode not in ("scalar", "wave"):
-            raise ValueError(f"unknown kernel mode {self._mode!r} (scalar|wave)")
+        """`mode`: "auto" (default) picks the propagate kernel from the batch size on every
+        `reset(K)` — see `plan_for`. "scalar" = the serial-trail kernels, "wave" = the warp-wide
+        wavefront propagate; naming either PINS it. Same state, same fixpoints (confluence),
+        different propagation order. Env override: GPAP_KERNEL=scalar|wave pins it too.
+
+        Auto is the default so that every consumer of the engine gets the dispatch, not just the
+        one that remembered to ask: the rule lives in `calibrate.dispatch_mode` and this is the
+        only place it is applied. (It mirrors `gpap::Engine::plan_for` in the C++ face, which has
+        worked this way since the core port.)"""
+        self._mode = mode or os.environ.get("GPAP_KERNEL") or "auto"
+        if self._mode not in ("scalar", "wave", "auto"):
+            raise ValueError(f"unknown kernel mode {self._mode!r} (scalar|wave|auto)")
+        self._auto_mode = self._mode == "auto"
         # `force_wide` pins the 8|24 split on a formula that would otherwise take 16|16 — the
         # A/B hook that lets the wide kernel be exercised on small, fast formulas.
         self._formula = formula
@@ -110,7 +118,8 @@ class BCPEngine:
         if self._device.type != "cuda":
             raise RuntimeError("BCPEngine requires CUDA (the engine is GPU-only; there is no "
                                "CPU path). Check `gpap info`.")
-        self._core = _core.Engine(formula.core, device=self._device.index or 0, mode=self._mode,
+        self._core = _core.Engine(formula.core, device=self._device.index or 0,
+                                  mode="scalar" if self._auto_mode else self._mode,
                                   force_shift=8 if force_wide else 0)
         self._K = 0
         self._counter_base = (0, 0, 0, 0)
@@ -118,12 +127,28 @@ class BCPEngine:
     # ------------------------------------------------------------------ configuration
 
     def set_mode(self, mode: str) -> None:
-        """Switch the propagate kernel variant ("scalar" | "wave"). Both share the SAME state
-        and reach the SAME fixpoints (confluence — gate-validated bit-identical), so this is a
-        pure launch-flag change, safe at any point. Wave wins where K is below warp saturation;
-        GPUSampler auto-dispatches on the calibrated K."""
+        """PIN the propagate kernel variant ("scalar" | "wave"), disabling auto-dispatch.
+
+        Both share the SAME state and reach the SAME fixpoints (confluence — gate-validated
+        bit-identical), so this is a pure launch-flag change, safe at any point. Pin one when the
+        run is a MEASUREMENT and the kernel must not be a free variable; otherwise leave the
+        engine on "auto" and let `plan_for` choose."""
         self._core.set_mode(mode)
         self._mode = mode
+        self._auto_mode = False
+
+    def plan_for(self, K: int) -> str:
+        """Resolve the propagate kernel for a chunk of K rows; returns the mode in force.
+
+        A no-op if the mode was pinned (constructor argument, `set_mode`, or `GPAP_KERNEL`).
+        Called by `reset`, so every consumer of the engine gets the dispatch for free — an
+        application should not have to know that the choice exists."""
+        if self._auto_mode:
+            want = dispatch_mode(int(K), self._device)
+            if want != self._core.mode:
+                self._core.set_mode(want)
+            self._mode = want
+        return self._mode
 
     @property
     def mode(self) -> str:
@@ -153,7 +178,9 @@ class BCPEngine:
     # ------------------------------------------------------------------ entry points
 
     def reset(self, K: int) -> None:
-        """Reset K rows to the cached post-units-flush state (allocations reused when K matches)."""
+        """Reset K rows to the cached post-units-flush state (allocations reused when K matches),
+        and resolve the propagate kernel for that batch if the mode is "auto"."""
+        self.plan_for(K)
         self._core.reset(K)
         self._K = int(K)
 

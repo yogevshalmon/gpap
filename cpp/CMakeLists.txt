@@ -6,7 +6,7 @@
 # If no toolkit is installed we fall back to the `cuda.h` bundled inside the triton wheel.
 #
 #   cmake -S cpp -B build && cmake --build build -j
-#   ./build/gpap_demo
+#   ./build/gpap_c_api
 cmake_minimum_required(VERSION 3.18)
 project(gpap VERSION 0.1.0 LANGUAGES C CXX)
 
@@ -81,8 +81,8 @@ target_compile_options(gpap PRIVATE -Wall -Wextra -Wno-unused-parameter)
 set_target_properties(gpap PROPERTIES VERSION ${PROJECT_VERSION} SOVERSION 0)
 
 # ---------------------------------------------------------------- examples
-add_executable(gpap_demo examples/demo.c)                    # plain C, the raw ABI
-target_link_libraries(gpap_demo PRIVATE gpap)
+add_executable(gpap_c_api examples/c_api.c)                   # plain C, the raw ABI
+target_link_libraries(gpap_c_api PRIVATE gpap)
 
 add_executable(gpap_sample examples/sample.cpp)              # C++, gpap::Sampler
 target_link_libraries(gpap_sample PRIVATE gpap)

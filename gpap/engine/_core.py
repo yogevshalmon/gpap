@@ -6,7 +6,7 @@ no interpreter/ABI coupling (one `.so` serves every Python), and no extra build 
 Call overhead is ~1-5 us against a 50-150 ms sampling chunk — measured irrelevant.
 
 Library lookup order:
-    $GPAP_LIB (explicit path)  ->  gpap/lib/libgpap.so (installed wheel)  ->  <repo>/build/
+    $GPAP_LIB (explicit path)  ->  <repo>/build/  ->  gpap/lib/libgpap.so (installed wheel)
 Build it with:
     python cpp/tools/build_kernels.py && cmake -S cpp -B build && cmake --build build -j
 """

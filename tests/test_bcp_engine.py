@@ -188,3 +188,78 @@ class TestBCPEngine:
         with pytest.raises(ValueError):
             BCPEngine(f)
 
+
+
+class TestKernelDispatch:
+    """The propagate kernel is the engine's choice, not the application's.
+
+    Scalar and wave share the same state and reach the same fixpoints (BCP is confluent), so
+    which one runs can never change an answer — only speed. That is exactly why it belongs to
+    the engine: every consumer should get the dispatch, not just the one that remembered to ask.
+    Before this, `BCPEngine` defaulted to scalar forever and only `GPUSampler` dispatched, so
+    the batched-assumption path — the engine's headline primitive — never used wave at all.
+    """
+
+    @staticmethod
+    def _engine(mode=None, nv=6):
+        f = CnfFormula(torch.device("cuda"))
+        f.init_formula(nv, [[1, 2], [-1, 3], [-2, -3], [4, 5], [-4, 6], [-5, -6]])
+        return BCPEngine(f, mode=mode)
+
+    def test_auto_is_the_default(self, monkeypatch):
+        monkeypatch.delenv("GPAP_KERNEL", raising=False)
+        eng = self._engine()
+        eng.reset(64)                                  # tiny batch -> wave's regime
+        assert eng.mode == "wave"
+
+    def test_auto_follows_the_batch(self, monkeypatch):
+        """The rule is a function of batch vs resident warps, so a big enough reset flips it."""
+        from gpap.engine.calibrate import WAVE_RESIDENT_MULTIPLE, dispatch_mode, resident_warps
+        monkeypatch.delenv("GPAP_KERNEL", raising=False)
+        dev = torch.device("cuda")
+        resident = resident_warps(dev)
+        assert resident > 0
+        big = WAVE_RESIDENT_MULTIPLE * resident + 1
+        assert dispatch_mode(64, dev) == "wave" and dispatch_mode(big, dev) == "scalar"
+        eng = self._engine()
+        eng.reset(64)
+        assert eng.mode == "wave"
+        eng.reset(big)
+        assert eng.mode == "scalar", "auto must re-dispatch when the batch changes"
+
+    @pytest.mark.parametrize("pinned", ["scalar", "wave"])
+    def test_explicit_mode_is_never_overridden(self, pinned, monkeypatch):
+        """A MEASUREMENT pins the kernel, and reset() must not quietly change it back."""
+        monkeypatch.delenv("GPAP_KERNEL", raising=False)
+        eng = self._engine(mode=pinned)
+        for k in (64, 200_000):
+            eng.reset(k)
+            assert eng.mode == pinned
+
+    def test_set_mode_disables_auto(self, monkeypatch):
+        monkeypatch.delenv("GPAP_KERNEL", raising=False)
+        eng = self._engine()
+        eng.reset(64)
+        eng.set_mode("scalar")
+        eng.reset(64)                                  # would be wave under auto
+        assert eng.mode == "scalar"
+
+    def test_env_var_pins(self, monkeypatch):
+        monkeypatch.setenv("GPAP_KERNEL", "scalar")
+        eng = self._engine()
+        eng.reset(64)
+        assert eng.mode == "scalar"
+
+    def test_both_kernels_agree(self, monkeypatch):
+        """The property that licenses dispatching at all: same decisions, same fixpoint."""
+        monkeypatch.delenv("GPAP_KERNEL", raising=False)
+        dec = make_assumption_tensor([[ext_lit_to_lit_index(1)],
+                                      [ext_lit_to_lit_index(-1)],
+                                      [ext_lit_to_lit_index(4)]], torch.device("cuda"))
+        out = {}
+        for mode in ("scalar", "wave"):
+            eng = self._engine(mode=mode)
+            eng.reset(3)
+            eng.apply_and_propagate(dec)
+            out[mode] = (eng.conflict.tolist(), eng.assignment.tolist())
+        assert out["scalar"] == out["wave"]

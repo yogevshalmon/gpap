@@ -1,4 +1,21 @@
-"""GPU memory budget utilities: free-memory query and K (batch size) computation."""
+"""How big a batch, and which propagate kernel — the engine's sizing policy, in ONE place.
+
+Nothing above this module should re-derive "how many rows fit on this GPU". Every consumer
+(`BCPEngine`, `AssumptionChecker`, `GPUSampler`, and the C++ `Sampler` through the mirrored
+`cpp/src/calibrate.cpp`) asks here, so a new application gets the same answer without copying
+the reasoning — and so a correction lands once.
+
+Three questions, three answers:
+
+  * `compute_k_safe` — how many rows of engine state fit in a memory budget (the conservative,
+    kill-switch-validated analytic model; see per_batch_mem_bytes for why it stays conservative).
+  * `default_k_cap` / `resolve_k_cap` — the ceiling, sized to the card so a bigger GPU is
+    allowed to use it. `"auto"` is what every entry point defaults to.
+  * `dispatch_mode` — scalar or wave propagate for a given batch, from the device's occupancy.
+
+A caller who does not care about any of it should never have to name a number: that is the
+contract these three exist to keep.
+"""
 import torch
 
 # Estimate of average literals per clause, used for formula_bytes sizing.
@@ -105,6 +122,35 @@ def resolve_k_cap(k_cap: int | str | None, device: torch.device) -> int | None:
     resolved once at the pipeline/CLI boundary where the device is known.
     """
     return default_k_cap(device) if k_cap == "auto" else k_cap
+
+
+# ------------------------------------------------------------------ propagate-kernel dispatch
+# Below memory saturation each row's serial trail leaves requests-in-flight on the table, and the
+# warp-wide WAVE propagate multiplies them. The crossover was RETUNED 2026-07-14 after the
+# assignment-BITMAP change removed wave's WxW dedup tax: wave now wins well past saturation
+# (b03 at K=49k = 17.7x resident warps: wave 1.41x, was 0.9x pre-bitmap) and scalar only holds the
+# huge-K/tiny-M extreme (b06 at K=129k = 46x resident: scalar 1.13x, interleaved A/Bs) — so the
+# boundary sits mid-gap at ~30x resident warps. Derived from the DEVICE, so it transfers to bigger
+# GPUs rather than encoding this laptop.
+#
+# Both variants share the same state and reach the same fixpoints (BCP is confluent), so this is a
+# pure launch-flag choice that can be made per chunk and never changes an answer — it is
+# gate-validated bit-identical. `GPAP_KERNEL=scalar|wave` forces one.
+WAVE_RESIDENT_MULTIPLE = 30
+
+
+def resident_warps(device: torch.device) -> int:
+    """Warps this GPU can keep resident at once — SMs x (max threads per SM / 32)."""
+    if device.type != "cuda":
+        return 0
+    p = torch.cuda.get_device_properties(device)
+    return p.multi_processor_count * (p.max_threads_per_multi_processor // 32)
+
+
+def dispatch_mode(batch: int, device: torch.device) -> str:
+    """"wave" or "scalar" for a chunk of `batch` rows — the measured occupancy rule above."""
+    resident = resident_warps(device)
+    return "wave" if resident and batch < WAVE_RESIDENT_MULTIPLE * resident else "scalar"
 
 
 def compute_k_safe(
