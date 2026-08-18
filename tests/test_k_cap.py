@@ -131,9 +131,13 @@ def test_auto_is_stable_across_calls():
 
 
 # ---------------------------------------------------------------- the batch-size API
-# K and K_fused are two memory models; `batch_size` is the one number that says what runs, and
-# `pin_batch` the one way to bound it. These gate that contract, because getting it wrong is not
-# a wrong number — it is 28 GB of host RAM (see tests/test_circuits.py::_collecting_sampler).
+# `batch_size` is the one number that says what a chunk runs, and `pin_batch` the one way to
+# bound it. These gate that contract, because getting it wrong is not a wrong number — it is
+# 28 GB of host RAM (see tests/test_circuits.py::_collecting_sampler).
+#
+# There used to be TWO models here (K plus a K_fused "boost"), and the boost existed only to
+# recover headroom a 1.57x-over per-row model was wasting. The model is now the engine's exact
+# allocation list (cpp/src/calibrate.cpp), so there is one number and nothing to boost.
 
 def _tiny_sampler(k_cap):
     import torch as _t
@@ -143,32 +147,11 @@ def _tiny_sampler(k_cap):
 
 
 @pytest.mark.gpu
-def test_batch_size_follows_the_boost_state():
+def test_batch_size_is_the_calibrated_k():
     if not torch.cuda.is_available():
         pytest.skip("needs CUDA")
     smp = _tiny_sampler(1024)
-    assert smp.batch_size == smp.K_fused, "at construction the fused boost applies"
-    smp.K = smp.K // 2                       # below the construction value -> boost off
-    assert not smp._boosted
-    assert smp.batch_size == smp.K
-
-
-@pytest.mark.gpu
-def test_pin_batch_bounds_the_batch_even_when_the_boost_is_on():
-    """THE regression. `K_fused = K` / `K = min(K, n)` only bound the batch when they happened to
-    drop K below its construction value; at n >= K the boost stayed on and the chunk ran orders of
-    magnitude wider than asked. pin_batch must hold in both states."""
-    if not torch.cuda.is_available():
-        pytest.skip("needs CUDA")
-    smp = _tiny_sampler(1024)
-    boosted = smp.batch_size
-    assert boosted > smp.K, "precondition: this formula is small enough to be boosted"
-    # the OLD idiom, at n == K: does not bound anything
-    smp.K = min(smp.K, smp.K)
-    assert smp.batch_size == boosted, "sanity: assigning K at its own value leaves the boost on"
-    # the new one does
-    assert smp.pin_batch(smp.K) == smp.K
-    assert smp.batch_size == smp.K
+    assert smp.batch_size == smp.K == 1024, "the cap binds on a tiny formula"
 
 
 @pytest.mark.gpu
@@ -182,14 +165,41 @@ def test_pin_batch_is_exact_and_idempotent(n):
 
 
 @pytest.mark.gpu
-def test_pinned_batch_restores_both_models():
+def test_pinned_batch_restores():
     if not torch.cuda.is_available():
         pytest.skip("needs CUDA")
     smp = _tiny_sampler(1024)
-    before = (smp.K, smp.K_fused, smp.batch_size)
+    before = (smp.K, smp.batch_size)
     with smp.pinned_batch(16):
         assert smp.batch_size == 16
-    assert (smp.K, smp.K_fused, smp.batch_size) == before
+    assert (smp.K, smp.batch_size) == before
+
+
+@pytest.mark.gpu
+def test_row_bytes_matches_the_engine_allocation_list():
+    """The model IS the allocation list, so state it here too: if ensure_state() gains a buffer
+    and calibrate.cpp does not, this fails rather than silently over-committing the GPU."""
+    if not torch.cuda.is_available():
+        pytest.skip("needs CUDA")
+    from gpap.engine.calibrate import row_bytes, trail_cap
+    for M, N in [(2215, 1494), (14505, 5701), (201437, 77151)]:
+        want = (4 * M                              # packed clause word
+                + 4 * ((2 * N + 31) // 32)         # assignment bitmap
+                + 4 * trail_cap(N, 8)              # trail
+                + 2 + 16 + 3)                      # flags + counters + selection masks
+        assert row_bytes(M, N) == want, (M, N)
+
+
+@pytest.mark.gpu
+def test_trail_cap_ignores_the_assumption_width():
+    """REGRESSION: the trail used to be sized by the width of whatever was last applied, and it
+    only ever grew — so a formula with many unit clauses permanently inflated every later chunk
+    (10.sk_1_46: 1,121 units => trail_cap 2,623 instead of 1,566, +27% per-row for nothing)."""
+    if not torch.cuda.is_available():
+        pytest.skip("needs CUDA")
+    from gpap.engine.calibrate import trail_cap
+    assert trail_cap(1494, 8) == trail_cap(1494, 64) == 1494 + 64 + 8
+    assert trail_cap(1494, 5000) == 1494 + 5000 + 8, "an explicit big B is still honoured"
 
 
 @pytest.mark.gpu

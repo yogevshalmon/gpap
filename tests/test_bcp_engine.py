@@ -212,16 +212,32 @@ class TestKernelDispatch:
         eng.reset(64)                                  # tiny batch -> wave's regime
         assert eng.mode == "wave"
 
-    def test_auto_follows_the_batch(self, monkeypatch):
-        """The rule is a function of batch vs resident warps, so a big enough reset flips it."""
-        from gpap.engine.calibrate import WAVE_RESIDENT_MULTIPLE, dispatch_mode, resident_warps
+    def test_auto_dispatches_on_the_clause_count(self, monkeypatch):
+        """The deciding variable is M, not the batch.
+
+        REGRESSION, and the reason this test is specific about which variable it is: the rule used
+        to read `batch < 30 * resident_warps`, which only ever worked as a PROXY for M (K ~
+        budget/4M, so a small formula gets a huge batch). When the batch-sizing collapse made K
+        1.4-2.5x larger, mid-size formulas landed on the batch CAP, where the proxy is a constant
+        and classified every one of them "scalar" — measured 0.615-0.727x on the rows that flipped.
+        A mid-size formula at a huge batch must come back "wave"."""
+        from gpap.engine.calibrate import dispatch_mode, resident_warps
         monkeypatch.delenv("GPAP_KERNEL", raising=False)
         dev = torch.device("cuda")
         resident = resident_warps(dev)
         assert resident > 0
-        big = WAVE_RESIDENT_MULTIPLE * resident + 1
-        assert dispatch_mode(64, dev) == "wave" and dispatch_mode(big, dev) == "scalar"
-        eng = self._engine()
+        huge = 262_144                                   # the batch cap: where the proxy died
+        assert dispatch_mode(50_000, huge, dev) == "wave", "big M at a huge batch must be wave"
+        assert dispatch_mode(6, huge, dev) == "scalar", "a 6-clause row cannot fill a warp"
+        assert dispatch_mode(6, 64, dev) == "wave", "...unless the batch cannot fill the device"
+
+    def test_auto_re_dispatches_per_reset(self, monkeypatch):
+        """Auto is applied on every reset, so changing the batch can still change the kernel on a
+        formula small enough for the batch term to bind."""
+        from gpap.engine.calibrate import resident_warps
+        monkeypatch.delenv("GPAP_KERNEL", raising=False)
+        big = resident_warps(torch.device("cuda")) + 1     # past what scalar can hold in flight
+        eng = self._engine()                                # M = 6
         eng.reset(64)
         assert eng.mode == "wave"
         eng.reset(big)

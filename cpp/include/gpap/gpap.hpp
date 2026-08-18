@@ -169,13 +169,13 @@ class Engine {
         device_ = opts.device;
     }
     Engine(Engine &&o) noexcept
-        : h_(o.h_), want_(o.want_), device_(o.device_), resident_(o.resident_) {
+        : h_(o.h_), want_(o.want_), device_(o.device_) {
         o.h_ = nullptr;
     }
     Engine &operator=(Engine &&o) noexcept {
         if (this != &o) {
             reset_handle();
-            h_ = o.h_; want_ = o.want_; device_ = o.device_; resident_ = o.resident_;
+            h_ = o.h_; want_ = o.want_; device_ = o.device_;
             o.h_ = nullptr;
         }
         return *this;
@@ -199,15 +199,15 @@ class Engine {
     bool flush_conflict() const { return gpap_engine_flush_conflict(h_) != 0; }
 
     // ---------------------------------------------------------------- entry points
-    /** Under Mode::Auto, choose the propagate variant for a batch size of `K`: WAVE below ~30x
-     *  the device's resident warps (each row's serial trail leaves memory requests on the table
-     *  there), SCALAR above. `reset` calls this itself; call it directly only to make `mode()`
-     *  truthful before the first reset. A no-op when a mode was pinned. */
+    /** Under Mode::Auto, choose the propagate variant for a batch of `K` rows: WAVE once the
+     *  formula has enough clauses for a warp to have work to spread (and for a batch too small to
+     *  fill the device either way), SCALAR on very small formulas at large batches. The rule and
+     *  its calibration live in gpap_dispatch_wave. `reset` calls this itself; call it directly only
+     *  to make `mode()` truthful before the first reset. A no-op when a mode was pinned. */
     void plan_for(std::int32_t K) {
         if (want_ != Mode::Auto) return;
-        if (resident_ < 0) resident_ = gpap_resident_warps(device_);       /* queried once */
-        const gpap_mode m =
-            (resident_ > 0 && K < 30 * resident_) ? GPAP_MODE_WAVE : GPAP_MODE_SCALAR;
+        const gpap_mode m = gpap_dispatch_wave(num_clauses(), K, device_) ? GPAP_MODE_WAVE
+                                                                         : GPAP_MODE_SCALAR;
         if (m != gpap_engine_mode(h_))
             check(gpap_engine_set_mode(h_, m), "gpap_engine_set_mode");
     }
@@ -329,7 +329,6 @@ class Engine {
     gpap_engine *h_ = nullptr;
     Mode want_ = Mode::Auto;
     int device_ = 0;
-    std::int32_t resident_ = -1;      /* device resident warps, queried on first Auto reset */
 };
 
 /** Bytes available for new allocations on `device` (free VRAM minus a driver reserve). */
@@ -337,11 +336,15 @@ inline std::int64_t mem_available(int device = 0, double fraction = 0.75) {
     return gpap_mem_available(device, fraction);
 }
 
-/** Largest K fitting `bytes` for a formula shape (the conservative analytic model). */
+/** Largest K fitting `bytes` for a formula shape. See cpp/src/calibrate.cpp for the model. */
 inline std::int32_t compute_k_safe(std::int32_t M, std::int32_t N, std::int64_t bytes,
-                                   std::int32_t cap, std::int32_t max_clause_len,
-                                   std::int64_t total_lits) {
-    return gpap_compute_k_safe(M, N, bytes, cap, max_clause_len, total_lits);
+                                   std::int32_t cap, std::int32_t decisions_per_round = 8) {
+    return gpap_compute_k_safe(M, N, bytes, cap, decisions_per_round);
+}
+
+/** Device bytes one row of engine state costs (the exact allocation list). */
+inline std::int64_t row_bytes(std::int32_t M, std::int32_t N, std::int32_t trail_cap = 0) {
+    return gpap_row_bytes(M, N, trail_cap);
 }
 
 /** Batch cap sized to this device's total VRAM — the `cap` above, chosen for you. */
@@ -592,6 +595,11 @@ class Sampler {
   private:
     /** Chunks to run before concluding that a formula yields nothing at all. */
     static constexpr std::int64_t kGraceChunks = 4;
+    /** Share of free VRAM a batch may occupy. The row model is exact (see calibrate.cpp), so
+     *  this is the ONLY headroom in the sizing path — it covers readout transients and whatever
+     *  else shares the device. It used to be one of three stacked factors (0.75 x 0.60 against a
+     *  1.57x-inflated model = 0.29 of free memory actually used). */
+    static constexpr double kMemFraction = 0.80;
 
     static Options engine_options(const SampleOptions &o) {
         Options e;
@@ -613,23 +621,11 @@ class Sampler {
      *  per-variable allowance). This hardware spills to host RAM rather than failing, so the
      *  model deliberately over-reserves — an optimistic K silently halves throughput. */
     static std::int32_t auto_k(const gpap_formula_info &info, const SampleOptions &o) {
-        const std::int64_t M = info.num_clauses, N = info.num_vars;
-        const std::int64_t free_bytes = gpap_mem_available(o.device, 0.75);
         /* SampleOptions::k_cap: 0 = auto (this GPU's VRAM), >0 = verbatim, <0 = uncapped.
          * gpap_compute_k_safe reads cap<=0 as "no cap", which is what the negative case wants. */
         const std::int32_t cap = o.k_cap == 0 ? gpap_default_k_cap(o.device) : o.k_cap;
-        std::int32_t K = gpap_compute_k_safe(info.num_clauses, info.num_vars, free_bytes, cap,
-                                             info.max_clause_len, info.total_lits);
-        K = std::max(1, K);
-        if (M <= 0) return K;
-        const std::int64_t sat_b =
-            info.max_clause_len <= 127 ? 1 : (info.max_clause_len <= 32767 ? 2 : 4);
-        const std::int64_t fused_cap = std::max<std::int64_t>(262144, cap);
-        const std::int64_t fused_pb = 4 * M + 300 + 10 * N;
-        const std::int64_t eng_hold = ((sat_b + 4) * M + 2 * N) * K;
-        const std::int64_t budget = std::max<std::int64_t>(0, std::int64_t(0.6 * double(free_bytes - eng_hold)));
-        const std::int64_t boosted = std::min<std::int64_t>(budget / std::max<std::int64_t>(fused_pb, 1), fused_cap);
-        return static_cast<std::int32_t>(std::max<std::int64_t>(K, boosted));
+        const std::int64_t free_bytes = gpap_mem_available(o.device, kMemFraction);
+        return gpap_compute_k_safe(info.num_clauses, info.num_vars, free_bytes, cap, o.batch);
     }
 
     /** One chunk: reshuffle within each phase, run K trajectories, count the models. */
@@ -803,9 +799,9 @@ class AssumptionChecker {
      *  and never larger than the input. */
     std::size_t chunk_size(std::size_t n_sets, std::size_t max_lits) const {
         const gpap_formula_info i = formula_.info();
-        const std::int64_t free_bytes = gpap_mem_available(device_, 0.75);
+        const std::int64_t free_bytes = gpap_mem_available(device_, 0.80);
         const std::int64_t per_row =
-            gpap_per_batch_mem_bytes(i.num_clauses, i.num_vars, i.max_clause_len, i.total_lits) +
+            gpap_row_bytes(i.num_clauses, i.num_vars, 0) +
             8ll * static_cast<std::int64_t>(std::max<std::size_t>(max_lits, 1));
         std::int64_t k = free_bytes / std::max<std::int64_t>(per_row, 1);
         k = std::min<std::int64_t>(k, gpap_default_k_cap(device_));

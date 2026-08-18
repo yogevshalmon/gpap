@@ -150,9 +150,13 @@ def _declare(lib: ctypes.CDLL) -> None:
         ("gpap_num_propagated", [c_void_p, _I32P], c_int),
         ("gpap_sat_rows", [c_void_p, _I32P, c_int32, _I32P], c_int),
         ("gpap_counters_get", [c_void_p, POINTER(Counters)], c_int),
-        ("gpap_formula_mem_bytes", [c_int32, c_int32, c_int64], c_int64),
-        ("gpap_compute_k_safe", [c_int32, c_int32, c_int64, c_int32, c_int32, c_int64], c_int32),
+        ("gpap_trail_cap", [c_int32, c_int32], c_int32),
+        ("gpap_row_bytes", [c_int32, c_int32, c_int32], c_int64),
+        ("gpap_compute_k_safe", [c_int32, c_int32, c_int64, c_int32, c_int32], c_int32),
         ("gpap_default_k_cap", [c_int], c_int32),
+        ("gpap_mem_available", [c_int, ctypes.c_double], c_int64),
+        ("gpap_resident_warps", [c_int], c_int32),
+        ("gpap_dispatch_wave", [c_int32, c_int32, c_int], c_int32),
         ("gpap_last_error", [], c_char_p),
         ("gpap_version", [], c_char_p),
     ]
@@ -183,17 +187,37 @@ def version() -> str:
     return load().gpap_version().decode()
 
 
-def compute_k_safe(M: int, N: int, gpu_mem_bytes: float, cap: "int | None" = 65536,
-                   max_clause_size: int = 127, total_lits: "int | None" = None,
-                   deduct_formula: bool = True) -> int:
-    """Largest K fitting `gpu_mem_bytes` — the same conservative analytic model as the retired
-    Python calibrator (see cpp/src/calibrate.cpp for why it is kept conservative)."""
-    lib = load()
-    b = int(gpu_mem_bytes)
-    if deduct_formula:
-        b -= int(lib.gpap_formula_mem_bytes(M, N, int(total_lits or 0)))
-    return int(lib.gpap_compute_k_safe(M, N, b, int(cap or 0), max_clause_size,
-                                       int(total_lits or 0)))
+def trail_cap(num_vars: int, decisions_per_round: int = 8) -> int:
+    """Trail slots one row can need — bounded by the VARIABLE count (see gpap.h)."""
+    return int(load().gpap_trail_cap(int(num_vars), int(decisions_per_round)))
+
+
+def row_bytes(M: int, N: int, trail_cap_: int = 0) -> int:
+    """Device bytes ONE row of engine state costs — the exact allocation list."""
+    return int(load().gpap_row_bytes(int(M), int(N), int(trail_cap_)))
+
+
+def compute_k_safe(M: int, N: int, gpu_mem_bytes: float, cap: "int | None" = None,
+                   decisions_per_round: int = 8) -> int:
+    """Largest K fitting `gpu_mem_bytes`. THE sizing call — the model lives in
+    cpp/src/calibrate.cpp and this is a binding, not a second implementation."""
+    return int(load().gpap_compute_k_safe(int(M), int(N), int(gpu_mem_bytes),
+                                          int(cap or 0), int(decisions_per_round)))
+
+
+def mem_available(device: int = 0, fraction: float = 0.80) -> int:
+    """Bytes available for new allocations (free VRAM minus a driver reserve, times fraction)."""
+    return int(load().gpap_mem_available(int(device), float(fraction)))
+
+
+def resident_warps(device: int = 0) -> int:
+    return int(load().gpap_resident_warps(int(device)))
+
+
+def dispatch_wave(num_clauses: int, batch: int, device: int = 0) -> bool:
+    """THE wave/scalar dispatch rule, from the core — see cpp/src/calibrate.cpp for why the
+    deciding variable is the clause count and not the batch size."""
+    return bool(load().gpap_dispatch_wave(int(num_clauses), int(batch), int(device)))
 
 
 def default_k_cap(device: int = 0) -> int:

@@ -22,7 +22,7 @@ arm is scored by its best rep.
 separate VRAM-proportional-cap change (whose effect is a different question, already answered).
 
 Cells deliberately span all three code paths the refactor touched:
-  * sk_ CNFs        - small M, the fused BOOST is on  (batch_size == K_fused)
+  * sk_ CNFs        - small M, where the VRAM-proportional cap binds
   * circuit unrolls - large M, boost inactive         (batch_size == K)
   * an --n-cov cell - the COVERAGE path, where `smp.K = min(...)` became `pin_batch(...)`
 """
@@ -92,7 +92,7 @@ def main():
                     got.setdefault(key, {}).setdefault(arm, []).append(r.get("gpap_sps") or 0.0)
                     e = r.get("engine") or {}
                     meta.setdefault(key, {})[arm] = dict(
-                        models=r.get("n_models"), K=e.get("K"), Kf=e.get("K_fused"),
+                        models=r.get("n_models"), K=e.get("K"),
                         batch=e.get("batch"), mode=e.get("mode"),
                         distinct=r.get("n_distinct"))
                 print(f"  ran {cell:<9} {arm:<5} rep{rep}")

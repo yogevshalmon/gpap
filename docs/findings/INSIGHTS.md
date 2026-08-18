@@ -9,6 +9,46 @@ Do **not** re-litigate these without new evidence (a new GPU class or a new regi
 
 ## Engine & memory model
 
+**The wave/scalar dispatch keys off M (clause count), NOT the batch — and the batch-only rule it
+replaced was a PROXY that a K change silently invalidated (2026-08-18).** The rule was
+`batch < 30 x resident_warps`. That only ever worked because K ~ budget/(4M), so "huge batch" and
+"small M" were the same rows; it read like an occupancy statement and was really a statement about
+per-row work. When the batch-sizing collapse made K 1.4-2.5x larger, mid-size formulas landed ON
+the 262,144 batch cap, where `batch` is a CONSTANT and carries no information about M — so every
+one of them was classified "scalar". **Measured cost: base-vs-new A/B on ABC-encoded circuits,
+fixed wall, interleaved best-of-2 — 0.914x overall on the 4080, decomposing into 0.727x on the 4
+rows whose kernel flipped and 0.993x on the 11 that kept theirs; on an L4, 0.963x with the 2 flipped
+rows at 0.615x/0.698x.** The flips were predicted exactly by the threshold on both cards (58 SMs x
+48 warps x 30 = 83,520), which is what identified the mechanism. CONTROL that separates sizing from
+dispatch: with the kernel PINNED, the larger K is neutral — L4 head/base 1.0065x scalar-pinned and
+1.0133x wave-pinned, implications/s 1.0048x and 1.0023x with 16/16 rows inside +-4.4%. CALIBRATION
+(forced-kernel A/B at FIXED K, 25 instances, 4080 + L4, three families: ABC circuit unrolls, sk_
+CNFs, tiny circuits; taken AT the batch cap so batch is constant and M is the only variable):
+M=32 0.772, M=483 0.918, M=1,982 0.960, M=2,098 1.041, M=2,215 1.092, M=2,882 1.407, M=6,260 1.270,
+M=14,012 1.572, and 1.27-1.66 for every larger M out to M=107,065. Whole-set geomean wave/scalar
+**1.39x (4080) / 1.46x (L4)** — i.e. wherever the old rule fired on a mid-size formula it was
+leaving ~1.4x on the table, and the historical "scalar wins at huge K" reading was really "scalar
+wins at tiny M" (b02-c25, M=32, is a genuine 1.30x scalar win). New rule, ONE definition in
+`gpap_dispatch_wave` (cpp/src/calibrate.cpp): wave when `M >= 2048`, or when
+`batch <= resident_warps` (the regime M cannot speak for — measured 1.037x at batch 1,024 on M=483
+against 0.918x at the cap). Reproduces the faster kernel on 28/28 measured cells. Same A/B after
+the fix: **1.044x overall, worst row 0.938, with 3 scalar->wave promotions worth 1.28x.** LESSON:
+a heuristic whose input is derived from another model is coupled to it — changing K now requires a
+dispatch re-check, and that is stated at both ends.
+
+**Wave and scalar differ on the implication COUNTER because of CONFLICTED rows, not a tally bug
+(2026-08-18, correcting an earlier note).** The previous explanation — "wave tallies some pre-dedup
+pushes" — is wrong: wave's trail push is deduplicated by the `atomic_or` return
+(`keep = fm & ((oldw_v & bit_v) == 0)`), which is also what makes `trail_cap = N + slack` sound.
+The real mechanism is that a row which CONFLICTS stops as soon as some clause empties, and which
+clause gets there first depends on propagation order, so its partial state is unspecified — while a
+row that SURVIVES has one fixpoint by confluence. Measured over 5,000 assumption sets, batch 5,000
+vs batch 97: 809 of 3,282 conflicted rows differ in `num_propagated`, **0 of 1,718 surviving rows
+differ in any field**, and `conflict` matches on all 5,000. This is observable through the public
+API (chunk count feeds dispatch), so it is documented on `AssumptionChecker.check_assumptions` and
+gated by the chunking test, which previously "passed" only because the old rule happened to give
+both batch sizes the same kernel.
+
 **The engine became a C++ library (libgpap) shared by Python and C++; performance is a TIE
 (2026-07-28).** The kernels were NOT rewritten — Triton AOT-compiles `kernels.py` unmodified,
 and the AOT cubin is bit-identical to the JIT one at SASS level (55,008 B, REG:80, clean
@@ -131,7 +171,9 @@ REQUIRED — padding pairs read free), and projection gathers var bits directly
 serial scan now hits L1 (b06 row = 760B) and the warp screen + take-atomics LOSE in scalar
 (b06 0.82x, b03 0.91x) while still +12-19% at wave K. (3) Wave's large-K penalty was the
 dedup tax: b03@K=49k flipped to wave 1.41x ⇒ dispatch threshold retuned 6x→30x resident
-warps (scalar only holds b06@129k=46x, 1.13x). num_warps>1 (W=64/128 spread over real warps)
+warps (scalar only holds b06@129k=46x, 1.13x). ⚠️ SUPERSEDED 2026-08-18 — that threshold was a
+proxy for the CLAUSE COUNT and the "scalar wins at huge K" reading was really "scalar wins at tiny
+M"; see the dispatch entry at the top of this section. num_warps>1 (W=64/128 spread over real warps)
 is NEGATIVE 2-5x — cross-warp reduction sync per wave step dominates; W=32/1-warp stays.
 FINAL straight-protocol (auto dispatch): b03 631k(wave) / b04 81k / b06 945k(scalar) /
 b12 50k / b14 4.0k att/s = 1.4-1.5x over pre-bitmap same-session, and vs the pre-wave
@@ -403,7 +445,7 @@ plausibility-filtered to ≥ best/20 (run noise is ~1.9×, 20× behind is dead, 
 UCB-style exploration bonuses FAILED acceptance (diverting budget from a dominant winner costs
 0.52× on small budgets) — plain decaying-ε-greedy stays.
 
-**Entailed-clause mining (miner.py) is the lose-set killer.** L1 backbone units are the #1 lever
+**Entailed-clause mining (gpap/mining.py) is the lose-set killer.** L1 backbone units are the #1 lever
 (sk geomean vs CMSGen 4.65×→27.3×; massive-backbone instances collapse to N~100 formulas);
 5 s budget captures the full benefit; the pre-mining "stuck" gate is a FALLACY (pre-mining
 success is low almost everywhere BECAUSE mining lifts it — gate must be POST-L1, two-stage);

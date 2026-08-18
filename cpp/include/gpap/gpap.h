@@ -186,23 +186,41 @@ typedef struct {
 gpap_status gpap_counters_get(gpap_engine *e, gpap_counters *out);
 void gpap_counters_reset(gpap_engine *e);
 
+/* ------------------------------------------------------------------ batch sizing
+ * THE one implementation of "how big a batch fits" — see cpp/src/calibrate.cpp. Consumers in
+ * any language call these rather than re-deriving the arithmetic; two copies of a memory model
+ * drift silently, and the symptom is a spill (this hardware degrades to host RAM instead of
+ * failing), not an error.
+ *
+ * There is deliberately no formula-bytes helper: gpap_mem_available() already reports memory
+ * that is free AFTER the formula was uploaded, so deducting it again double-counts. */
+
 /* Bytes available for new allocations (free VRAM minus a driver reserve, times `fraction`). */
 int64_t gpap_mem_available(int device, double fraction);
-/* One-time device bytes for the formula structures (occ CSR + per-clause arrays). */
-int64_t gpap_formula_mem_bytes(int32_t M, int32_t N, int64_t total_lits);
-/* Device bytes ONE row of engine state costs — the per-K term of the analytic model. Exported so
- * a caller that allocates something else per row (a decision matrix, say) can budget for both
- * against one model instead of guessing. */
-int64_t gpap_per_batch_mem_bytes(int32_t M, int32_t N, int32_t max_clause_len, int64_t total_lits);
-/* Largest K fitting `bytes` for a formula shape (the conservative analytic model). */
+/* Trail slots one row can need. Bounded by the VARIABLE count, not by how many literals are
+ * assumed or decided: every trail push is deduplicated against the assignment bitmap, so a
+ * variable contributes at most one entry before the row conflicts. */
+int32_t gpap_trail_cap(int32_t num_vars, int32_t decisions_per_round);
+/* Device bytes ONE row of engine state costs — the exact allocation list, not an estimate.
+ * Exported so a caller that allocates something else per row (a decision matrix, say) can
+ * budget for both against one model. Pass trail_cap <= 0 for the default. */
+int64_t gpap_row_bytes(int32_t M, int32_t N, int32_t trail_cap);
+/* Largest K fitting `bytes` for a formula shape. `cap` <= 0 means uncapped. */
 int32_t gpap_compute_k_safe(int32_t M, int32_t N, int64_t bytes, int32_t cap,
-                            int32_t max_clause_len, int64_t total_lits);
+                            int32_t decisions_per_round);
 /* Batch cap sized to THIS device's total VRAM — what a caller who does not want to think about
  * K should pass as `cap` above. Falls back to the reference card's cap if the device cannot be
  * queried, so it always returns a usable number. */
 int32_t gpap_default_k_cap(int device);
-/* Resident-warp count of the device — the wave/scalar dispatch threshold is a multiple of it. */
+/* Resident-warp count of the device (SMs x warps per SM) — the ceiling on rows a SCALAR launch can
+ * have in flight at once, and so the small-batch term of the dispatch rule below. */
 int32_t gpap_resident_warps(int device);
+/* Which propagate kernel a chunk of `batch` rows of an M-clause formula should run: 1 = WAVE
+ * (warp-wide), 0 = SCALAR (serial trail). THE dispatch rule, defined once — gpap::Engine::plan_for
+ * and Python's calibrate.dispatch_mode both call this. Keys off M, not batch: see the calibration
+ * table and the proxy-collapse history in cpp/src/calibrate.cpp. Confluence makes the choice a pure
+ * launch flag, so it can only change speed, never an answer. */
+int32_t gpap_dispatch_wave(int32_t num_clauses, int32_t batch, int device);
 
 const char *gpap_last_error(void);
 const char *gpap_version(void);

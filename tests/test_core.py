@@ -90,17 +90,15 @@ def test_dimacs_parse_matches_the_reference_parser(tmp_path):
 
 
 def test_k_calibration_matches():
-    """The K model exists in both faces (C++ for library users, Python for the sampler). It is
-    15 lines of arithmetic that was validated under the nvidia-smi kill-switch — this test is
-    what keeps the two copies from drifting apart."""
+    """The sizing model has ONE implementation (cpp/src/calibrate.cpp); Python binds it. This
+    asserts the binding actually reaches it rather than reintroducing a second copy — which is
+    what this test used to be gating, back when the arithmetic was written out twice."""
     from gpap.engine.calibrate import compute_k_safe as py_k
-    for M, N, total in [(4407, 1701, 11000), (109432, 42051, 250000), (201437, 77151, 500000)]:
+    for M, N in [(4407, 1701), (109432, 42051), (201437, 77151)]:
         for budget in (1 << 30, 6 << 30):
             for cap in (0, 16384):
-                assert _core.compute_k_safe(M, N, budget, cap or None, 6, total,
-                                            deduct_formula=False) == \
-                    py_k(M, N, budget, cap=cap or None, max_clause_size=6, total_lits=total,
-                         deduct_formula=False)
+                assert _core.compute_k_safe(M, N, budget, cap or None, 8) == \
+                    py_k(M, N, budget, cap=cap or None, decisions_per_round=8)
 
 
 def test_envelope_matches():
