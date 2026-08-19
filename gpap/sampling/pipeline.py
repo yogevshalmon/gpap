@@ -11,7 +11,7 @@ measured). The headline `samples_per_s` is the best-measured config's steady-sta
 (`best_rate_sps`); `sps_e2e_total` is the honest end-to-end rate including construction,
 simplification and mining (what a CMSGen comparison must charge).
 """
-import sys
+import logging
 import time
 from enum import Enum
 from typing import NamedTuple
@@ -20,7 +20,28 @@ import numpy as np
 import torch
 
 from gpap.engine.calibrate import resolve_k_cap
+from gpap.mining import mine_entailed
+
 from gpap.sampling.sampler import GPUSampler, parse_independent_support
+
+log = logging.getLogger(__name__)
+
+
+def _support_literals(support):
+    """Support variables (0-based) -> the DIMACS literals mining combines: both polarities of
+    each. `mine_entailed`'s pool is literals, so that a caller can ask about one side only."""
+    return None if not support else [s for v in support for s in (v + 1, -(v + 1))]
+
+
+# Mining budget and per-width candidate ceilings, as the pipeline uses them. Width 1 (the
+# backbone) always runs; the wide widths are gated on their candidate COUNT, which is known
+# before any GPU work and is what actually predicts their cost.
+MINE_SECONDS = 5.0
+#: Stage 1 — only the wide widths that are cheap for this support size.
+STAGE1_MAX_TUPLES = {2: 80_000, 3: 40_000}
+#: Stage 2 — forced wide widths for an instance that is still stuck after the units are in.
+STAGE2_MAX_TUPLES = 2_000_000
+
 
 class VarOrder(int, Enum):
     """Which unassigned variable each decision picks.
@@ -300,31 +321,24 @@ def sample_clauses(nv, clauses, support, device, *, simplify=True, els=False, n_
         _tw = time.perf_counter()
         w = _warmup(smp)
         phases["warmup"] = time.perf_counter() - _tw
-        # Entailed-clause mining (learned clauses are ENTAILED — the model set is exactly
-        # unchanged; measured: service family 0.02-0.7x -> 1.1-6.7x vs CMSGen, circuit backbone
-        # instances 1.2-16x). Mining is nearly self-gating (see gpap/sampling/miner.py): the L1
-        # backbone sweep costs 0.1-0.5s when there is nothing to learn, and the expensive L2/L3
-        # support-tuple tiers only run when L1 found units — so mine on every non-tiny formula
-        # (M >= 3000; below that the whole timed run is ~instant and even 0.3s of probing would
-        # dominate the e2e wall). The warmup success rate (< mine_gate = truly stuck) FORCES the
-        # full L2/L3 tiers even without L1 yield — the original service-family behaviour.
+        # Entailed-clause mining (gpap.mining, an application of the engine's tuple-probe
+        # primitive). Every learned clause is ENTAILED, so the model set is exactly unchanged and
+        # this can only make propagation stronger. Mine on every non-tiny formula (M >= 3000;
+        # below that the timed run is ~instant and even 0.3s of probing would dominate the e2e
+        # wall). Effect on sampling: docs/findings/MINING_FINDINGS.md.
         if mine in ("auto", True) and smp.M >= 3000:   # True = forced (bypasses provenance gate)
             try:
-                from gpap.sampling.miner import mine_entailed
-                # Two-stage mining. Stage 1: L1 backbone units ALWAYS (cheap fixpoint, THE
-                # measured circuit win) + the L2/L3 tiers that are CHEAP for this support size
-                # (pairs="auto", see the miner docstring — b09's 4 ternaries are 1.4x for 0.7s,
-                # s386's 18 binaries 1.48x for ~2s; wide-support tiers never paid). Stage 2
-                # (full tiers — the service-family lever) only if the instance is still stuck
-                # AFTER the units are in: pre-mining success is low almost everywhere because
-                # mining is exactly what lifts it (b03 T=25: best config 4.5% before its 1007
-                # units, 99% after), so gating the tiers on the PRE-mining rate burned the full
-                # L2/L3 budget suite-wide (77.6s of the c25 set's 99s overhead).
+                # Two stages. Stage 1 mines the backbone (width 1, always — the cheap fixpoint
+                # and the dominant win) plus the wider widths that are AFFORDABLE for this
+                # support size. Stage 2 forces the wide widths, and only if the instance is
+                # still stuck AFTER the units are in: pre-mining success is low almost
+                # everywhere because mining is exactly what lifts it, so gating the wide widths
+                # on the PRE-mining rate burned the budget suite-wide.
                 _tm = time.perf_counter()
-                mi = mine_entailed(nv, clauses, support, device, pairs="auto",
-                                   pairs_min_units=0)
+                mi = mine_entailed(nv, clauses, device, pool=_support_literals(support),
+                                   max_tuples=STAGE1_MAX_TUPLES)
                 phases["mine"] = time.perf_counter() - _tm
-                learned = mi["learned"]
+                learned = list(mi.clauses)
                 stuck = w["best_success"] < mine_gate
                 if learned:
                     # Rebuild on the augmented formula. No trailing re-warmup needed: kernels
@@ -340,23 +354,25 @@ def sample_clauses(nv, clauses, support, device, *, simplify=True, els=False, n_
                     phases["recheck"] = time.perf_counter() - _tm
                 if stuck:
                     _tm = time.perf_counter()
-                    mi2 = mine_entailed(nv, clauses + learned, support, device,
-                                        pairs=True, pairs_min_units=0,
-                                        max_seconds=max(1.0, 5.0 - mi["seconds"]))
+                    mi2 = mine_entailed(nv, clauses + learned, device, pool=_support_literals(support),
+                                        max_tuples=STAGE2_MAX_TUPLES,
+                                        seconds=max(1.0, MINE_SECONDS - mi.seconds))
                     phases["mine"] += time.perf_counter() - _tm
-                    if mi2["learned"]:
-                        learned = learned + mi2["learned"]
+                    if mi2.clauses:
+                        learned = learned + list(mi2.clauses)
                         _tm = time.perf_counter()
                         smp = GPUSampler.from_clauses(
                             nv, clauses + learned, device, simplify=simplify,
                             els=els, support=support, k_cap=k_cap, seed=seed)
                         phases["rebuild"] = (phases.get("rebuild", 0.0)
                                              + time.perf_counter() - _tm)
-                    for k2 in ("n_units", "n_binary", "n_ternary", "seconds"):
-                        mi[k2] += mi2[k2]
-                mine_info = {k2: mi[k2] for k2 in ("n_units", "n_binary", "n_ternary", "seconds")}
+                    for width, n in mi2.by_width.items():
+                        mi.by_width[width] = mi.by_width.get(width, 0) + n
+                    mi.seconds += mi2.seconds
+                mine_info = {"n_units": mi.by_width.get(1, 0), "n_binary": mi.by_width.get(2, 0),
+                             "n_ternary": mi.by_width.get(3, 0), "seconds": mi.seconds}
             except RuntimeError as e:   # mining is an optimization — never let it kill the run
-                print(f"   [mine] skipped after error: {e}", file=sys.stderr)
+                log.warning("mining skipped after a device error: %s", e)
     t0 = time.perf_counter()
     # A big-K GPU meets n_time in the bandit cold-start (1 chunk/config), so the headline rates would
     # rest on a single noisy chunk (measured: best_rate_sps ±1.9x run-to-run). min_measure_chunks makes
@@ -389,10 +405,10 @@ def sample_clauses(nv, clauses, support, device, *, simplify=True, els=False, n_
                    # k_cap is the RESOLVED ceiling (auto -> VRAM-proportional). Without it a
                    # cross-GPU row is unreadable: a small K could mean "this GPU is small" or
                    # "the cap bound it", and those are different results.
-                   # `batch` is what actually ran; K/K_fused are the two memory models behind it
+                   # `batch` is what actually ran; `K` is the calibrated value behind it
                    # (see GPUSampler.batch_size) and are kept for provenance.
                    "batch": smp.batch_size,
-                   "K": smp.K, "K_fused": smp.K_fused, "k_cap": k_cap,
+                   "K": smp.K, "k_cap": k_cap,
                    "N_eff": smp.N, "M_eff": smp.M,
                    "core": _core_provenance(),
                    "max_clause_len": smp.formula.max_clause_len if smp.M else 0}

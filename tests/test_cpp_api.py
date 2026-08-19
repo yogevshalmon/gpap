@@ -1,4 +1,5 @@
-"""End-to-end validation of the C++ tier-1 API (`gpap::Sampler`, `gpap::AssumptionChecker`).
+"""End-to-end validation of the C++ tier-1 API (`gpap::Sampler`, `gpap::AssumptionChecker`,
+`gpap::Prober`).
 
 The C++ side is deliberately thin — a sampling loop over the engine — so the comprehensive
 checking lives here: run the built example binaries and verify their output against the
@@ -18,6 +19,7 @@ from tests.reference_bcp import lit_idx, ref_bcp
 REPO = Path(__file__).resolve().parent.parent
 SAMPLE_BIN = REPO / "build" / "gpap_sample"
 ASSUME_BIN = REPO / "build" / "gpap_assumptions"
+PROBE_BIN = REPO / "build" / "gpap_probe"
 
 pytestmark = pytest.mark.gpu
 
@@ -180,3 +182,57 @@ def test_cpp_assumption_checker():
                 assert value == "free", f"{assumption}: unexpected value in {token!r}"
         want = {(lit // 2 + 1) if lit % 2 == 0 else -(lit // 2 + 1) for lit in assigned}
         assert got == want, f"{assumption}: {got} != {want}"
+
+
+# ------------------------------------------------------------------ gpap::Prober
+
+def _probe(cnf: Path, width: int):
+    _need(PROBE_BIN)
+    r = subprocess.run([str(PROBE_BIN), str(cnf), str(width)],
+                       capture_output=True, text=True, timeout=300)
+    assert r.returncode == 0, f"gpap_probe failed:\n{r.stdout}\n{r.stderr}"
+    return r.stdout
+
+
+def test_probe_finds_the_same_failed_literals_as_python(tmp_path):
+    """The C++ face and the Python face are two skins on ONE core sweep, so they must agree on
+    the clause SET — not merely on how many were found."""
+    pytest.importorskip("torch")
+    import torch
+    if not torch.cuda.is_available():
+        pytest.skip("needs CUDA")
+    from gpap.engine import core_available
+    if not core_available():
+        pytest.skip("needs a built libgpap")
+    from gpap.mining import mine_entailed
+
+    # x1 -> x2 and x1 -> ~x2, so assuming x1 conflicts: (~x1) is entailed. Same for x4 via x5.
+    clauses = [[-1, 2], [-1, -2], [3, 4], [-4, 5], [-4, -5], [6, 7]]
+    cnf = tmp_path / "f.cnf"
+    cnf.write_text("p cnf 7 %d\n" % len(clauses)
+                   + "".join(" ".join(map(str, c)) + " 0\n" for c in clauses))
+
+    out = _probe(cnf, 1)
+    cpp_units = {int(line.split("(")[1].split(")")[0])
+                 for line in out.splitlines() if "entailed: (" in line}
+    res = mine_entailed(7, clauses, torch.device("cuda"), widths=(1,), seconds=30.0)
+    py_units = {c[0] for c in res.clauses if len(c) == 1}
+    # (-1) and (-4) are the planted ones; (3) falls out too, because assuming -3 forces 4 through
+    # (3|4), and 4 forces both 5 and -5. All three are reachable in a SINGLE width-1 sweep, so
+    # this compares the two faces and not Python's extra fixpoint iteration.
+    assert cpp_units == py_units == {-1, 3, -4}, (cpp_units, py_units)
+    assert "exhaustive" in out, "a complete width-1 sweep must report itself as a proof"
+
+
+def test_probe_refuses_an_impossible_width_instead_of_trying(tmp_path):
+    """REGRESSION: the ceiling has to be checked against an EXACT count computed without
+    generating anything. Enumerating first and measuring afterwards OOM-killed the process — at
+    width 3 over a few thousand free literals the enumeration is ~1e11 tuples."""
+    nv = 400
+    clauses = [[i, -(i + 1)] for i in range(1, nv)]
+    cnf = tmp_path / "wide.cnf"
+    cnf.write_text("p cnf %d %d\n" % (nv, len(clauses))
+                   + "".join(" ".join(map(str, c)) + " 0\n" for c in clauses))
+    out = _probe(cnf, 3)
+    assert "candidate tuples" in out
+    assert "refused" in out, out

@@ -178,56 +178,11 @@ def test_kernel_counters():
     assert eng.launches >= 1
 
 
-def test_miner_entailed_and_model_preserving():
-    """Every clause mine_entailed() learns must be ENTAILED (formula ∧ ¬clause UNSAT), and the
-    augmented formula must have EXACTLY the original model set."""
-    from pysat.solvers import Minisat22
-    from gpap.sampling.miner import mine_entailed
-
-    def models(cls_):
-        out = set()
-        with Minisat22(bootstrap_with=cls_) as s:
-            for m in s.enum_models():
-                out.add(tuple(m))
-        return out
-
-    def check(nv, clauses, support):
-        res = mine_entailed(nv, clauses, support, DEV)
-        for cl in res["learned"]:
-            with Minisat22(bootstrap_with=clauses) as s:
-                assert not s.solve(assumptions=[-l for l in cl]), \
-                    f"mined clause {cl} is NOT entailed"
-        if res["learned"]:
-            assert models(clauses) == models(clauses + res["learned"])
-        return res
-
-    # planted: (1|2),(1|-2) => backbone unit (1), NOT flush-implied (no unit clauses exist);
-    # (-1,-3,-4),(−1,−3,4) => assuming {3} (with 1 forced) conflicts => unit (-3);
-    # support pair: (-5|-6) is entailed via x7: (-5,-6,7),(-5,-6,-7)
-    clauses = [[1, 2], [1, -2], [-1, -3, -4], [-1, -3, 4],
-               [-5, -6, 7], [-5, -6, -7], [5, 6, 8], [2, 8, -5]]
-    res = check(8, clauses, [4, 5])                       # support = vars 5,6 (0-based 4,5)
-    assert res["n_units"] >= 2, res                        # backbone (1) and (-3) at least
-    all_mined = {tuple(sorted(c)) for c in res["learned"]}
-    assert (-6, -5) in all_mined or (-5,) in all_mined or (-6,) in all_mined, all_mined
-
-    # random sweep: whatever is mined must be entailed + model-preserving
-    rng = random.Random(7)
-    for _ in range(10):
-        nv = rng.randint(6, 14)
-        clauses = _random_cnf(rng, nv, rng.randint(2 * nv, 5 * nv))
-        with Minisat22(bootstrap_with=clauses) as s:
-            if not s.solve():
-                continue                                   # UNSAT input: mining may derive it; skip
-        check(nv, clauses, list(range(min(nv, 6))))
-
-
 def test_bandit_mix_with_k_fused_boost_sound():
-    """Alternating configs at a BOOSTED K_fused vs the base K in ONE run: the state groups
-    must never corrupt each other (reset() re-allocates on any K change)."""
+    """Alternating configs in ONE run: the per-config state groups must never corrupt each
+    other (reset() re-allocates on any K change)."""
     clauses = [[3], [1, 2, -3], [-1, 4], [-2, -4], [3, -4, 5]]
     smp = GPUSampler.from_clauses(5, clauses, DEV, k_cap=64, seed=9)
-    smp.K_fused = 128                                   # force fused chunks to a DIFFERENT K
     out = smp.sample(10 ** 9, configs=[(True, 1, False), (True, 2, "soft")],
                      max_chunks=9, collect=True, verify_clauses=clauses)
     assert out["all_valid"] and out["gpu_sound"] and out["n_models"] > 0

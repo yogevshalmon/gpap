@@ -10,7 +10,7 @@ import torch
 
 from gpap.engine.formula import CnfFormula, ext_assumptions
 from gpap.engine.bcp_engine import BCPEngine
-from gpap.engine.calibrate import default_k_cap, gpu_mem_available, per_batch_mem_bytes
+from gpap.engine.calibrate import default_k_cap, gpu_mem_available, row_bytes
 
 
 def _flatten(assumptions: ext_assumptions, num_vars: int):
@@ -93,8 +93,8 @@ class AssumptionChecker:
 
         Two terms, and the second is the one the shared analytic model does NOT cover:
 
-          * `per_batch_mem_bytes` — the engine's own per-row device state (the conservative,
-            kill-switch-validated model shared with the sampler);
+          * `row_bytes` — the engine's own per-row device state (the exact allocation list,
+            shared with every other sizing call in the library);
           * `8 * max_lits` — the (K, L) int64 decision tensor, which is device memory this entry
             point allocates and the sampler's path never does. At 200 literals per set that is
             1.6 kB/row, comparable to the engine state itself on a small formula.
@@ -104,10 +104,8 @@ class AssumptionChecker:
         is, and never larger than the input. This box SPILLS to host RAM rather than failing, so
         an over-large chunk shows up as a silent ~10x slowdown, not an error — hence the
         conservative model."""
-        dev_per_row = per_batch_mem_bytes(
-            self._formula.num_clauses, self._formula.num_vars,
-            self._formula.max_clause_len or 127,
-            self._formula.total_lits or None) + 8 * max(max_lits, 1)
+        dev_per_row = (row_bytes(self._formula.num_clauses, self._formula.num_vars)
+                       + 8 * max(max_lits, 1))
         k = min(int(gpu_mem_available(self._device) // dev_per_row),
                 default_k_cap(self._device))
         return max(1, min(k, n_sets))
@@ -127,6 +125,16 @@ class AssumptionChecker:
             'assignment'      (n, 2N) int8  — 1 where that literal is TRUE   [assignments=True]
             'sat_count'       (n, M) int32  — surviving literals per clause  [sat_count=True]
 
+        WHICH FIELDS ARE SPECIFIED. `conflict` is exact for every set. For a set that does NOT
+        conflict, so is everything else: BCP fixpoints are confluent, so the surviving row has ONE
+        answer no matter how the propagation was ordered. For a set that DOES conflict, propagation
+        stopped as soon as some clause emptied — and which clause got there first depends on the
+        order — so `num_propagated`, `assignment` and `sat_count` on those rows are a snapshot of
+        where BCP happened to stop, not a defined value. They can differ between two runs of the
+        same call if anything moves the propagation order, including the number of chunks the call
+        was split into (chunk size feeds the wave/scalar dispatch). Do not compare them across runs;
+        `conflict` is the answer a conflicted row has.
+
         Raises ValueError on a literal outside 1..N / -1..-N (including 0) — see `_flatten`.
         """
         n = len(assumptions)
@@ -136,9 +144,9 @@ class AssumptionChecker:
         # chunking invisible: row i of every array is set i, whatever launch produced it.
         # Allocating them BEFORE sizing the chunks also means `chunk_size`'s free-memory read
         # already excludes them — the two budgets cannot double-count.
-        row_bytes = (2 * nv if assignments else 0) + (4 * M if sat_count else 0)
-        if n and row_bytes:
-            self._check_result_fits(n, row_bytes, assignments, sat_count)
+        result_bytes = (2 * nv if assignments else 0) + (4 * M if sat_count else 0)
+        if n and result_bytes:
+            self._check_result_fits(n, result_bytes, assignments, sat_count)
         out = {"conflict": torch.zeros(n, dtype=torch.bool, device=dev),
                "num_propagated": torch.zeros(n, dtype=torch.int32, device=dev)}
         if assignments:

@@ -11,6 +11,7 @@ by sample / bench / circuit2cnf; --mine auto|on|off by sample / bench.
 Library code uses `logging`; user-facing output lives here (this is the print layer).
 """
 import argparse
+import contextlib
 import os
 import sys
 
@@ -21,6 +22,37 @@ def _k_cap_arg(v):
     """--k-cap accepts 'auto' or an int. Deliberately duplicated in gpap/benchmark.py rather
     than shared: this module stays import-light (no torch at parser-build time)."""
     return v if v == "auto" else int(v)
+
+
+def _ensure_cnf(args):
+    """(cnf_path, temp_path_or_None, encode_seconds_or_None) for a CNF **or** circuit input.
+
+    A circuit is unrolled to a temporary CNF first; the conversion embeds the wire map as
+    `c wire ...` and the encoder provenance as `c encoder ...`, so downstream output can name each
+    column by its circuit wire and the pipeline can skip work the encoder already did. Shared by
+    every subcommand that takes an instance, so the circuit flags mean one thing.
+    """
+    path = args.input
+    if not path.endswith(CIRCUIT_EXTS):
+        return path, None, None
+    import tempfile
+    import time as _time
+    tmp = tempfile.NamedTemporaryFile(suffix=".cnf", delete=False).name
+    t0 = _time.perf_counter()
+    if path.endswith(".bench"):
+        from gpap.circuits.bench import convert_one
+        convert_one(path, tmp, args.cycles, args.seed, pin_outputs=args.pin_outputs,
+                    encoder=args.encoder, abc_path=args.abc, abc_opt=args.abc_opt,
+                    target_mode=args.target)
+    else:
+        from gpap.circuits.aig2cnf import convert_aig_one
+        convert_aig_one(path, tmp, args.cycles, args.seed, pin_outputs=args.pin_outputs,
+                        encoder=args.encoder, abc_path=args.abc, abc_opt=args.abc_opt,
+                        target_mode=args.target)
+    encode_s = _time.perf_counter() - t0
+    print(f"  encoded in {encode_s:.1f}s [{args.encoder}"
+          f"{'/' + args.abc_opt if args.encoder != 'tseitin' else ''}]")
+    return tmp, tmp, encode_s
 
 
 def _cmd_sample(args):
@@ -37,31 +69,7 @@ def _cmd_sample(args):
         raise SystemExit("the engine core (libgpap) is not built. Run scripts/build_core.sh, "
                          "then `gpap info` to confirm.")
     device = torch.device(args.device) if args.device else torch.device("cuda")
-    path = args.input
-    tmp = None
-    encode_s = None
-    if path.endswith(CIRCUIT_EXTS):
-        # unroll to a temporary CNF first (the conversion embeds the wire map as `c wire ...` and
-        # the encoder provenance as `c encoder ...`, so sample output can name each column by its
-        # circuit wire and the pipeline can skip work the encoder already did).
-        import tempfile
-        import time as _time
-        tmp = tempfile.NamedTemporaryFile(suffix=".cnf", delete=False).name
-        _t0 = _time.perf_counter()
-        if path.endswith(".bench"):
-            from gpap.circuits.bench import convert_one
-            convert_one(path, tmp, args.cycles, args.seed, pin_outputs=args.pin_outputs,
-                        encoder=args.encoder, abc_path=args.abc, abc_opt=args.abc_opt,
-                        target_mode=args.target)
-        else:
-            from gpap.circuits.aig2cnf import convert_aig_one
-            convert_aig_one(path, tmp, args.cycles, args.seed, pin_outputs=args.pin_outputs,
-                            encoder=args.encoder, abc_path=args.abc, abc_opt=args.abc_opt,
-                            target_mode=args.target)
-        encode_s = _time.perf_counter() - _t0
-        print(f"  encoded in {encode_s:.1f}s [{args.encoder}"
-              f"{'/' + args.abc_opt if args.encoder != 'tseitin' else ''}]")
-        path = tmp
+    path, tmp, encode_s = _ensure_cnf(args)
     portfolio = _portfolio(args.portfolio, allow_soft=args.allow_soft)
     if args.allow_soft:
         print("  [warn] --allow-soft: the soft risk-polarity config is in the portfolio. It\n"
@@ -158,6 +166,174 @@ def _cmd_sample(args):
         print(f"  wrote stats -> {args.stats}")
     if tmp:
         os.unlink(tmp)
+
+
+def _parse_pool(spec, cnf_path, num_vars):
+    """Resolve --pool into DIMACS literals, or None for "every free literal".
+
+    Three shapes, because the useful pool depends on what you know about the instance:
+      'all'      -> None: sweep everything propagation left undetermined (the default)
+      'support'  -> the formula's declared independent support (`c ind` lines) — for a circuit
+                    CNF that is the primary inputs, where the interesting joint constraints are
+      explicit  -> "1,-2,7" or "@file" with whitespace/comma-separated literals
+    A variable is expanded to BOTH polarities; a signed literal is taken as given, which is how
+    you ask about one side only.
+    """
+    if spec in (None, "all"):
+        return None
+    if spec == "support":
+        from gpap.sampling.pipeline import parse_independent_support
+        sup = parse_independent_support(cnf_path)
+        if not sup:
+            raise SystemExit(f"--pool support: {cnf_path} declares no `c ind` support. "
+                             f"Use --pool all, or name the literals explicitly.")
+        return [s for v in sup for s in (v + 1, -(v + 1))]
+    text = spec
+    if spec.startswith("@"):
+        with open(spec[1:]) as fh:
+            text = fh.read()
+    lits = []
+    for tok in text.replace(",", " ").split():
+        try:
+            v = int(tok)
+        except ValueError:
+            raise SystemExit(f"--pool: {tok!r} is not an integer literal") from None
+        if v == 0 or abs(v) > num_vars:
+            raise SystemExit(f"--pool: literal {v} out of range for a {num_vars}-variable formula")
+        lits.append(v)
+    if not lits:
+        raise SystemExit("--pool: no literals given")
+    return lits
+
+
+def total_probed_hint(res) -> int:
+    """Tuples probed across every width — the sweep's own work unit."""
+    return sum(res.probed.values())
+
+
+def _cmd_mine(args):
+    """Prove clauses the formula already entails, by propagating every k-subset of a literal set.
+
+    Assuming a set of literals and reaching a conflict PROVES the formula entails the negation of
+    that set — a clause. So this finds every entailed clause of each requested width that BCP
+    alone can see, and adding them leaves the model set EXACTLY unchanged while making later
+    propagation stronger.
+    """
+    import json
+    import torch
+
+    from gpap.engine import core_available
+    from gpap.mining import mine_entailed
+    if not torch.cuda.is_available():
+        raise SystemExit("gpap mine requires a CUDA GPU — there is no CPU execution path. "
+                         "See `gpap info`.")
+    if not core_available():
+        raise SystemExit("the engine core (libgpap) is not built. Run scripts/build_core.sh, "
+                         "then `gpap info` to confirm.")
+    from pysat.formula import CNF
+
+    device = torch.device(args.device) if args.device else torch.device("cuda")
+    path, tmp, encode_s = _ensure_cnf(args)
+    try:
+        cnf = CNF(from_file=path)
+        pool = _parse_pool(args.pool, path, cnf.nv)
+        widths = sorted(set(args.width))
+        print(f"{os.path.basename(args.input)}: N={cnf.nv} M={len(cnf.clauses)} "
+              f"pool={args.pool}{'' if pool is None else f' ({len(pool)} literals)'} "
+              f"widths={widths}")
+
+        # What each width WOULD cost, before spending the budget on it: the candidate count is
+        # exact and needs no GPU work, and at width 3 over a wide pool it is the difference
+        # between a 2-second sweep and one that cannot be run at all.
+        # These are UPPER BOUNDS. Width 1 runs first and its proven units narrow the formula, so a
+        # later width sees fewer free literals and its real count is smaller than printed here.
+        from gpap.engine.probe import LiteralProbe
+        probe = LiteralProbe(cnf.nv, cnf.clauses, device)
+        for w in widths:
+            n = probe.count(pool if w > 1 else None, w)
+            over = "" if n <= args.max_tuples else f"  > --max-tuples {args.max_tuples:,}"
+            print(f"  width {w}: up to {n:,} candidates{over}")
+        del probe
+        torch.cuda.empty_cache()
+
+        res = mine_entailed(cnf.nv, cnf.clauses, device,
+                            pool=pool,
+                            widths=tuple(widths), seconds=args.seconds,
+                            max_tuples=args.max_tuples)
+        print(f"  mined {res.summary()}")
+        if res.seconds:
+            print(f"  engine: {res.implications:,} implications "
+                  f"({res.implications_per_s / 1e9:.2f}G/s), "
+                  f"{total_probed_hint(res):,} tuples probed "
+                  f"({total_probed_hint(res) / res.seconds:,.0f}/s)")
+        for w in widths:
+            cand, done = res.candidates.get(w, 0), res.probed.get(w, 0)
+            cover = f"{100.0 * done / cand:.3g}%" if cand else "-"
+            mark = ("exhaustive — nothing of this width escaped" if res.exhausted.get(w)
+                    else res.skipped.get(w, "incomplete"))
+            print(f"    width {w}: {res.by_width.get(w, 0):,} clause(s)   "
+                  f"probed {done:,}/{cand:,} ({cover})   [{mark}]")
+        if not res.clauses:
+            done, cand = sum(res.probed.values()), sum(res.candidates.values())
+            if cand and done < cand:
+                # The distinction that matters and that the old output erased: an empty result
+                # from a partial sweep says nothing about the formula.
+                print(f"  (nothing found in the {done:,} candidates probed — that is "
+                      f"{100.0 * done / cand:.3g}% of the space, so this is NOT evidence that "
+                      f"nothing is entailed. Raise --max-tuples/--seconds, or narrow --pool.)")
+            else:
+                print("  (nothing entailed was found, and the search WAS exhaustive — the "
+                      "formula's propagation is already tight at these widths)")
+
+        if args.out:
+            # The STRENGTHENED formula: original + mined. Sound by construction — every mined
+            # clause is entailed, so the model set is unchanged.
+            out = CNF()
+            out.extend(cnf.clauses)
+            out.extend(res.clauses)
+            out.to_file(args.out)
+            print(f"  wrote {args.out} ({len(cnf.clauses):,} original + {len(res.clauses):,} "
+                  f"mined clauses)")
+        if args.out_mined:
+            CNF(from_clauses=res.clauses).to_file(args.out_mined)
+            print(f"  wrote {args.out_mined} ({len(res.clauses):,} mined clauses only)")
+        if args.stats:
+            # Report WHAT WAS DONE, not only what was found. An empty `clauses` with no coverage
+            # numbers is unreadable: it cannot distinguish "this formula entails nothing of this
+            # width" from "we probed 0.0008% of the space and ran out of budget".
+            total_cand = sum(res.candidates.values())
+            total_probed = sum(res.probed.values())
+            info = {"input": args.input, "nv": cnf.nv, "n_clauses": len(cnf.clauses),
+                    "pool": args.pool,
+                    "pool_size": (2 * cnf.nv if pool is None else len(pool)),
+                    "pool_note": ("all free literals (resolved per width)" if pool is None
+                                  else "explicit"),
+                    "widths": widths, "seconds": res.seconds, "encode_s": encode_s,
+                    "max_tuples": args.max_tuples, "seconds_budget": args.seconds,
+                    "n_mined": len(res.clauses),
+                    "candidates_total": total_cand, "probed_total": total_probed,
+                    "coverage": (total_probed / total_cand) if total_cand else None,
+                    "probes_per_s": (total_probed / res.seconds) if res.seconds else None,
+                    # The HARDWARE-work metric. clauses/s and probes/s both depend on the
+                    # instance (how many clauses it entails, how fast a tuple conflicts);
+                    # implications/s is what the engine actually did, so it is the number to
+                    # compare across instances, GPUs and engine changes.
+                    "implications": res.implications,
+                    "implications_per_s": res.implications_per_s,
+                    "complete": all(res.exhausted.get(w, False) for w in widths),
+                    "by_width": {str(k): v for k, v in sorted(res.by_width.items())},
+                    "candidates": {str(k): v for k, v in sorted(res.candidates.items())},
+                    "probed": {str(k): v for k, v in sorted(res.probed.items())},
+                    "exhausted": {str(k): bool(v) for k, v in sorted(res.exhausted.items())},
+                    "skipped": {str(k): str(v) for k, v in sorted(res.skipped.items())},
+                    "clauses": res.clauses}
+            with open(args.stats, "w") as fh:
+                json.dump(info, fh, indent=1)
+            print(f"  wrote {args.stats}")
+    finally:
+        if tmp:
+            with contextlib.suppress(OSError):
+                os.unlink(tmp)
 
 
 def _cmd_bench(args):
@@ -302,7 +478,8 @@ def _cmd_info(args):
 
 
 def _add_encoder_args(sp):
-    """Circuit-encoder flags, shared by `sample` (circuit input) and `circuit2cnf`."""
+    """Circuit-encoder flags, shared by every subcommand that accepts a circuit input
+    (`sample`, `mine`, `circuit2cnf`) so the conversion means one thing everywhere."""
     sp.add_argument("--encoder", choices=["tseitin", "abc", "auto"], default="tseitin",
                     help="circuit->CNF encoder: 'tseitin' (native, default) | 'abc' (unroll + "
                          "dc2/fraig via berkeley-abc, 2-8x fewer clauses, same solution space; "
@@ -376,6 +553,47 @@ def main(argv=None):
                    help="cap on solutions written to --out (default 100k; raise for a full dump)")
     s.add_argument("--stats", default=None, help="write the run's info/stats JSON here")
     s.set_defaults(func=_cmd_sample)
+
+    m = sub.add_parser("mine", help="prove clauses the formula already entails (BCP-visible)",
+                       description="Probe every k-subset of a literal set: assuming a set and "
+                                   "propagating to a CONFLICT proves the formula entails the "
+                                   "negation of that set — a clause. Every clause found is "
+                                   "entailed, so adding them leaves the solution set exactly "
+                                   "unchanged and only makes later propagation stronger.")
+    m.add_argument("input", help="a DIMACS .cnf, or a .bench/.aig/.aag circuit (converted first)")
+    m.add_argument("--width", type=int, nargs="+", default=[1, 2],
+                   help="tuple sizes to sweep (default: 1 2). Width 1 = failed literals, i.e. the "
+                        "BCP-visible backbone, and it is iterated to a fixpoint; width 2 = binary "
+                        "clauses; and so on. Cost grows as C(pool, width) — check the candidate "
+                        "counts this prints before asking for 3")
+    m.add_argument("--pool", default="all",
+                   help="which literals to combine: 'all' (default — every literal propagation "
+                        "left undetermined) | 'support' (the declared `c ind` independent "
+                        "support; for a circuit that is the primary inputs) | an explicit list "
+                        "like '1,-2,7' or '@lits.txt'. A bare variable expands to both "
+                        "polarities. Width 1 always sweeps every free literal — the backbone is "
+                        "cheap and is the dominant win")
+    m.add_argument("--seconds", type=float, default=10.0,
+                   help="wall-clock budget across all widths (default 10; 0 = unbounded)")
+    m.add_argument("--max-tuples", type=int, default=200_000,
+                   help="WORK BUDGET per width: how many candidate tuples to probe (default "
+                        "200k). A width with more candidates than this probes the first "
+                        "--max-tuples of them and is reported as not exhaustive — the clauses it "
+                        "finds are still entailed. Cost is the PROBE, not the enumeration: "
+                        "probing n tuples initializes n x M clause words")
+    m.add_argument("--out", default=None,
+                   help="write the STRENGTHENED CNF here (original + mined clauses)")
+    m.add_argument("--out-mined", default=None, help="write ONLY the mined clauses here")
+    m.add_argument("--stats", default=None,
+                   help="write the mining report JSON here (includes every mined clause)")
+    m.add_argument("--device", default=None)
+    m.add_argument("--seed", type=int, default=5, help="(circuit input) unroll/target seed")
+    m.add_argument("--cycles", type=int, default=25,
+                   help="(circuit input) unroll depth")
+    m.add_argument("--pin-outputs", type=int, default=None,
+                   help="(circuit input) outputs to pin")
+    _add_encoder_args(m)
+    m.set_defaults(func=_cmd_mine)
 
     b = sub.add_parser("bench", help="benchmark a glob of instances (vs CMSGen if given)")
     b.add_argument("glob", help="DIMACS .cnf and/or circuits (.bench/.aig/.aag, converted first)")

@@ -67,7 +67,7 @@ inline void check(gpap_status st, const char *what) {
 
 /** Propagate kernel variant. `Auto` picks per batch size — leave it alone unless benchmarking.
  *  Both variants are bit-identical in their results; only the speed differs. */
-enum class Mode { Auto = -1, Scalar = GPAP_MODE_SCALAR, Wave = GPAP_MODE_WAVE };
+enum class Mode { Auto = GPAP_MODE_AUTO, Scalar = GPAP_MODE_SCALAR, Wave = GPAP_MODE_WAVE };
 
 /** Engine construction options; every default is the sensible one.
  *  NOTE: `mode` defaults to Auto here, where the raw C ABI defaults to scalar — C++ callers get
@@ -83,8 +83,8 @@ struct Options {
     gpap_engine_options raw() const {
         gpap_engine_options o;
         o.device = device;
-        /* Auto is resolved by Engine::reset once K is known; start from the C default. */
-        o.mode = mode == Mode::Wave ? GPAP_MODE_WAVE : GPAP_MODE_SCALAR;
+        /* Auto goes THROUGH to the core, which re-resolves it on every reset(K). */
+        o.mode = static_cast<gpap_mode>(mode);
         o.force_shift = force_shift;
         o.vscan = vscan;
         return o;
@@ -163,19 +163,19 @@ class Formula {
 /** The K-parallel packed BCP engine. Not thread-safe: use one engine per thread. */
 class Engine {
   public:
-    explicit Engine(const Formula &f, const Options &opts = {}) : want_(opts.mode) {
+    explicit Engine(const Formula &f, const Options &opts = {}) {
         const gpap_engine_options raw = opts.raw();
         check(gpap_engine_create(f.handle(), &raw, &h_), "gpap_engine_create");
         device_ = opts.device;
     }
     Engine(Engine &&o) noexcept
-        : h_(o.h_), want_(o.want_), device_(o.device_) {
+        : h_(o.h_), device_(o.device_) {
         o.h_ = nullptr;
     }
     Engine &operator=(Engine &&o) noexcept {
         if (this != &o) {
             reset_handle();
-            h_ = o.h_; want_ = o.want_; device_ = o.device_;
+            h_ = o.h_; device_ = o.device_;
             o.h_ = nullptr;
         }
         return *this;
@@ -185,11 +185,9 @@ class Engine {
     ~Engine() { reset_handle(); }
 
     // ---------------------------------------------------------------- configuration
-    /** Pin the propagate variant, disabling the Mode::Auto dispatch. */
+    /** Pin the propagate variant, or hand the choice back with Mode::Auto. */
     void set_mode(Mode m) {
-        want_ = m;
-        if (m != Mode::Auto)
-            check(gpap_engine_set_mode(h_, static_cast<gpap_mode>(m)), "gpap_engine_set_mode");
+        check(gpap_engine_set_mode(h_, static_cast<gpap_mode>(m)), "gpap_engine_set_mode");
     }
     Mode mode() const { return static_cast<Mode>(gpap_engine_mode(h_)); }
     std::int32_t shift() const { return gpap_engine_shift(h_); }
@@ -199,24 +197,15 @@ class Engine {
     bool flush_conflict() const { return gpap_engine_flush_conflict(h_) != 0; }
 
     // ---------------------------------------------------------------- entry points
-    /** Under Mode::Auto, choose the propagate variant for a batch of `K` rows: WAVE once the
-     *  formula has enough clauses for a warp to have work to spread (and for a batch too small to
-     *  fill the device either way), SCALAR on very small formulas at large batches. The rule and
-     *  its calibration live in gpap_dispatch_wave. `reset` calls this itself; call it directly only
-     *  to make `mode()` truthful before the first reset. A no-op when a mode was pinned. */
-    void plan_for(std::int32_t K) {
-        if (want_ != Mode::Auto) return;
-        const gpap_mode m = gpap_dispatch_wave(num_clauses(), K, device_) ? GPAP_MODE_WAVE
-                                                                         : GPAP_MODE_SCALAR;
-        if (m != gpap_engine_mode(h_))
-            check(gpap_engine_set_mode(h_, m), "gpap_engine_set_mode");
-    }
+    /** Make `mode()` truthful for a batch of `K` rows before the first reset. Nothing else needs
+     *  it: gpap_engine_reset resolves Mode::Auto itself, for every consumer of the ABI rather than
+     *  for the wrappers that remember to ask. This USED to be where the rule was applied, and a
+     *  core-side consumer (gpap_probe_combinations) duly ran SCALAR forever. A no-op when a mode
+     *  was pinned; the rule and its calibration live in gpap_dispatch_wave. */
+    void plan_for(std::int32_t K) { check(gpap_engine_reset(h_, K), "gpap_engine_reset"); }
 
     /** Restore K rows to the cached post-units-flush state (and resolve Mode::Auto for that K). */
-    void reset(std::int32_t K) {
-        plan_for(K);
-        check(gpap_engine_reset(h_, K), "gpap_engine_reset");
-    }
+    void reset(std::int32_t K) { check(gpap_engine_reset(h_, K), "gpap_engine_reset"); }
 
     /** Entry point 1: K x L internal literal indices (-1 = padding), BCP to fixpoint. */
     void apply(const std::vector<std::int64_t> &decisions, std::int32_t L) {
@@ -327,7 +316,6 @@ class Engine {
         h_ = nullptr;
     }
     gpap_engine *h_ = nullptr;
-    Mode want_ = Mode::Auto;
     int device_ = 0;
 };
 

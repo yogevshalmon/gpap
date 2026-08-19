@@ -120,7 +120,8 @@ struct gpap_engine {
     int32_t K = 0, trail_cap = 0;
     int64_t total_lits = 0;
     int32_t max_clause_len = 0;
-    gpap_mode mode = GPAP_MODE_SCALAR;
+    gpap_mode mode = GPAP_MODE_SCALAR;   /* always RESOLVED: scalar or wave, never auto */
+    int auto_mode = 0;                   /* 1 = re-resolve `mode` on every reset(K) */
     int vscan = 1;
     int has_empty_clause = 0;
     int flush_conflict = 0;

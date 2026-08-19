@@ -1,9 +1,13 @@
 """GPAP's flagship application: GPU-parallel SAT solution sampling (CircuitSAT + projected).
 
-`GPUSampler` runs K randomized BCP-completions per chunk (CMSGen's algorithm, massively
-parallel); every emitted model is guaranteed valid. `pipeline` is the full end-to-end flow
-(parse → simplify → warmup → entailed-clause mining → contract-timed run) that the CLI,
-the benchmark script and the Colab driver all share.
+`GPUSampler` runs K randomized BCP-completions per chunk; every emitted model is guaranteed
+valid, because it is read off a completed propagation rather than repaired into one. `pipeline`
+is the end-to-end flow the CLI, the benchmark driver and the Colab driver all share:
+
+    parse -> simplify -> warmup -> entailed-clause mining (gpap.mining) -> contract-timed run
+
+Mining is a separate application, not a sampling detail — the pipeline just happens to be a
+consumer of it.
 """
 from gpap.sampling.sampler import GPUSampler, parse_independent_support
 from gpap.sampling.output import write_samples

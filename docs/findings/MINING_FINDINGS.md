@@ -56,10 +56,10 @@ useful** — the result buffer holds 8,451x more than anyone wants, and every on
 the bus before being discarded.
 
 The engine already knows, and for free: **a conflict reached with ZERO implications was caused by
-a clause the formula already has.** No implication means the assumption literals alone (plus what
-the formula's units had already falsified) emptied that clause, so the clause the tuple would
-prove is implied by one already present. The kernel's existing implication counter IS the test —
-no extra pass, no clause identity needed. `gpap_probe_options::skip_subsumed`.
+a clause that was already empty but for the assumed literals.** No implication means the assumption
+literals alone emptied that clause, so the clause the tuple would prove is subsumed by that
+clause's RESIDUE. The kernel's existing implication counter IS the test — no extra pass, no clause
+identity needed. `gpap_probe_options::skip_subsumed`.
 
 MEASURED, same instance and width:
 
@@ -75,11 +75,40 @@ order-dependent cases where propagation derived some implication before reaching
 So the engine filter is the cheap bulk pass and `keep()`'s subset test is the exact remainder;
 neither replaces the other, and mining's OUTPUT is identical with the filter on or off (gated).
 
+### CORRECTION (2026-08-19): "a clause the formula already has" was wrong, and it leaked
+
+The claim above — as first written, "0 false positives against exact subsumption" — was measured
+against the INPUT clauses on a formula where it happened to hold. It does not hold in general, and
+the counterexample is the normal case rather than a corner: **mining folds every proven unit into
+the flush cache** (`assume`), so a sweep propagates on top of an assignment. An input `(a | b | c)`
+whose `c` the baseline falsified is a BINARY constraint during the sweep; assuming `(~a, ~b)`
+empties it with zero implications, and the clause proved, `(a | b)`, is subsumed by no input clause
+at all. Measured on b03-c25 at widths (1,2): **17 such clauses**, every one of them entailed and
+none of them subsumed by anything in the input.
+
+Dropping them is still right — the caller takes the mined units too, so unit propagation derives
+`(a | b)` from `(a | b | c)` anyway — but the HOST-side test has to be against the same reduced
+formula, or it disagrees with the engine and lets them through.
+
+**And it was observable**, which is how it was caught. The implication counter is order-dependent
+on conflicted rows (documented for the two kernels: wave can derive an implication in the same
+warp-wide step that empties the clause), so scalar and wave drop different subsets. With the
+host test against raw input clauses, b03-c25 mined **3,096 clauses under scalar and 3,113 under
+wave** — the same command answering differently depending on a launch flag, which is exactly what
+turning on the probe path's kernel dispatch would have started doing silently.
+
+**Fix**: `mining._Subsumption` holds the formula REDUCED by the current baseline (vectorised — a
+per-clause Python loop is ~0.5s on a 219k-clause unroll, larger than the sweep it protects), and
+is rebuilt whenever the baseline moves. Mining's output is then kernel-INVARIANT (verified
+scalar vs wave, identical clause-set hashes on b03-c25, b09-c25, s386-c25, b12-c50) and equals the
+old scalar answer. Gated by `test_mining_is_kernel_invariant` and
+`test_drops_only_what_the_baseline_makes_redundant`.
+
 **`keep()` is not deduplication.** Mining cannot produce the same clause twice — candidates within
 a width are distinct combinations, different widths give different lengths, and width 1's fixpoint
 folds each proven unit into the flush, removing that variable from the pool before the next round.
-The `clause in known` test is the |C|-sized case of SUBSUMPTION against clauses the formula already
-holds (original + everything mined so far), which is why it cannot be dropped.
+The subset test is the |C|-sized case of SUBSUMPTION against the clauses the formula already holds
+(reduced by the baseline, plus everything mined so far), which is why it cannot be dropped.
 
 **Generation is NOT the bottleneck** (measured, because it looked like one): the core's paged
 sweep runs 4M tuples in 6.40s against 6.73s for probing the same tuples pre-materialized — i.e.
@@ -91,6 +120,95 @@ would be ~9 PB. There is nothing to win by parallelizing or GPU-ifying the enume
 **Pool semantics are DIMACS literals**, not variables — so a caller can ask about one polarity
 only. `gpap mine --pool` takes `all`, `support`, or an explicit list.
 
+
+## The RESET is the bottleneck, not the propagate (2026-08-19)
+
+Measured by stepping one probe chunk through its phases with a device sync between each
+(`reset` = the state broadcast, `apply` = BCP to fixpoint, then the flag/counter readout), wave
+kernel, RTX 4080 Laptop:
+
+| instance | M | rows/chunk | reset | apply | readout | reset share |
+|---|---|---|---|---|---|---|
+| b09-c25 | 15,327 | 99,064 | 27.9 ms | 27.4 ms | 0.7 ms | 50% |
+| b03-c25 | 14,505 | 104,409 | 22.6 ms | 9.2 ms | 0.6 ms | 70% |
+| b12-c50 | 218,857 | 6,988 | 25.1 ms | 4.5 ms | 0.4 ms | 84% |
+| 6s215rb0-c25 | 65,873 | 21,806 | 25.5 ms | 1.1 ms | 0.5 ms | **94%** |
+
+**The reset cost is a CONSTANT per chunk, ~26 ms, and it does not depend on the instance.** That
+is structural rather than coincidental: the batch is sized as `K ≈ 0.80·free / row_bytes` and
+`row_bytes ≈ 4M`, so `rows · 4M ≈ 0.80 · free VRAM` — every chunk broadcasts the whole memory
+budget, 5.5–5.8 GiB here, at ~200–250 GB/s. **Probing throughput is therefore bounded by
+`budget/(4M) / 26 ms` tuples per second no matter how fast BCP is**, and making the propagate
+kernel faster (as the dispatch fix does) only moves the remaining share.
+
+### What a chunk actually modifies
+
+A probe assigns the k assumed literals plus whatever propagates, and touches one clause word per
+occurrence of each. Measured over 20,000 rows, against the M words the broadcast writes:
+
+| instance | trail/row (k=2) | words touched | vs M | crossover (M / mean occ) |
+|---|---|---|---|---|
+| b03-c25 | 127 | 359 | 2.5% | 5,120 |
+| b09-c25 | 454 | 1,293 | 8.4% | 5,376 |
+| b12-c50 | 737 | 2,143 | 1.0% | 75,303 |
+| 6s215rb0-c25 | 6.6 | 16 | **0.02%** | 26,536 |
+
+So the broadcast restores 40x–4,000x more state than the chunk dirtied.
+
+### The design that follows: restore by TRAIL, not by broadcast
+
+Undoing the arithmetic (add back `1 + (neg << SHIFT)` per falsified occurrence) is exact — the
+packed word is an abelian group, so order does not matter and `atomic_add` handles the races the
+same way propagate does. But it needs to know exactly WHICH subtractions happened, and on a
+CONFLICTED row it cannot: both kernels break out mid-occurrence-list, and wave breaks mid-wave, so
+the stop position is a (literal, offset) pair the kernel does not record.
+
+**Rewriting the baseline value is strictly better than undoing it.** The set of clause words a row
+can have touched is exactly `∪ occ[l]` over the row's trail — and the trail is already recorded,
+with its length already in `nprops`. So:
+
+    for each row, for each trail literal l, for each c in occ[l]:  packed[row][c] = packed_flushed[c]
+
+- **No new kernel state.** `nprops` and the trail buffer already exist.
+- **Superset-safe.** It covers the partially-subtracted literal a conflicted row stopped inside,
+  so conflicted rows need no special case — which is what killed the undo variant.
+- **Idempotent**, so clauses shared between two trail literals are written twice harmlessly: plain
+  stores, no atomics, no dedup.
+- The assignment bitmap restores the same way (one word per trail literal); flags are a 2-byte fill.
+
+Preconditions, all checkable in the engine: the rows must be the ones the last `reset` sized (grow
+⇒ broadcast the new rows), the baseline must not have moved (`assume_units` / `recache_flush` ⇒
+broadcast), and **exactly one `apply` may have run since the reset** — the kernel rewrites the
+trail from index 0, so a second apply loses the first one's record. The probe path is exactly
+reset → apply → read.
+
+### Expected win, bounded by measurements already in hand
+
+`apply` walks the same occurrence lists as the restore would, and does strictly more (dependent
+fixpoint rounds, unit/conflict detection, atomics). So the measured `apply` is an UPPER bound on
+the restore, giving a floor on the win: **b03-c25 ≥1.7x, b12-c50 ≥3.3x, 6s215rb0-c25 ≥10.3x,
+b09-c25 ~1.0x.**
+
+⚠️ **REGIME-DEPENDENT, and the boundary is not the 1.0 you would guess.** The traffic ratio is
+`mean_trail · mean_occ / M`, but the restore's scattered 4-byte stores pull 32-byte sectors while
+the broadcast streams, so up to 8x amplification applies to one side only — treat the crossover as
+~1/8, not 1. Probing sits at 0.0002–0.084 (win); a SAMPLING trajectory assigns 28–56% of all
+variables and sits at **0.32–0.62** (loss). It must therefore be a decision the engine makes from
+the trail length, not an unconditional change to `gpap_engine_reset` — and any implementation has
+to be gated the way every K change is, since it alters what a chunk costs.
+
+### Alternatives weighed
+
+- **Smaller chunks**: no. Reset and apply both scale linearly in rows, so the ratio is invariant.
+- **Overlapping reset with apply on two streams**: bounded by ~1.3x even in theory, and both
+  phases are memory-bound so they contend. Strictly worse than not doing the work.
+- **Fusing the broadcast into the BCP kernel**: saves nothing. The state is K·M and cannot live in
+  cache; it has to reach DRAM either way.
+- **Copy-on-write row state** (a shared baseline plus a small per-row delta) is the asymptotically
+  right answer — it removes the K·M materialization entirely, and would also lift K, which is
+  currently `budget/4M` purely because of state nobody reads. In-repo prior art (`SparseBCPEngine`,
+  see INSIGHTS) measured up to 31x on exactly this low-touch regime. Much larger change; the
+  trail-restore gets most of it for a fraction of the risk.
 
 ## What it does
 

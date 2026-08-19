@@ -27,6 +27,45 @@ reading 0.0070 against a true 0.0089). CONSEQUENCE for methodology: never compar
 free-bandit run — pin `--portfolio`, or use `implications_per_s` (engine work, bandit-independent),
 or run long enough for the bandit to settle. At 90s the two builds are within 0.5% on every seed.
 
+**A DEFAULT BELONGS AT THE ABI, NOT IN THE CONVENIENT WRAPPER — the wave/scalar dispatch hole
+opened three times (2026-08-19).** `Mode::Auto` was a wrapper concept: `BCPEngine.plan_for` and
+`gpap::Engine::plan_for` each applied the rule before their own `reset`, and the C ABI had no way
+to say "auto" at all. Every consumer written against the ABI therefore ran SCALAR forever, and one
+was added each time somebody built a new entry point: GPUSampler-only until 2026-08-14 (batched
+assumptions left 1.05-1.15x), then `gpap_probe_combinations` from its port until now. **Measured
+loss on the sweep, interleaved best-of-3: b03-c25 (M=14.5k) 1.28x, 6s215rb0-c25 (M=66k) 1.67x,
+b09-c25 1.76x, b12-c50 (M=219k) 2.20x.** End-to-end on `gpap mine` it is 1.65x where the sweep
+dominates the wall and ~1.0x where formula construction does — worth stating, because the sweep
+number alone would oversell it. FIX: `GPAP_MODE_AUTO`, resolved inside `gpap_engine_reset`, which
+is the one function every entry point already passes through; both `plan_for`s degrade to pure
+queries. The tell that the placement was wrong all along: the CLAUDE.md entry for the 2026-08-14
+fix already said "every consumer gets it, not just the one that asks", and it was not true.
+
+**Turning that dispatch on EXPOSED an output that depended on the kernel — and the bug was in the
+subsumption test, not the kernel (2026-08-19).** The engine's `skip_subsumed` filter drops a
+conflict reached with zero implications, and that counter is order-dependent on conflicted rows
+(the entry below), so scalar and wave drop different subsets. The host-side test was supposed to
+catch the remainder exactly, but it tested subsumption against the INPUT clauses — while mining
+folds proven units into the flush cache, so the sweep runs against a REDUCED formula. An input
+`(a|b|c)` with `c` falsified by the baseline is a binary constraint during the sweep; assuming
+`(~a,~b)` empties it with zero implications and proves `(a|b)`, which no input clause subsumes.
+b03-c25: 17 such clauses, and the mined set came out **3,096 under scalar vs 3,113 under wave** —
+the same command answering differently depending on a launch flag. Fixing the reference to be the
+baseline-REDUCED formula makes the output kernel-invariant (verified on 4 instances by clause-set
+hash) and equal to the old scalar answer. LESSON: "sound" was measured against the wrong formula,
+on an instance whose baseline happened to be empty. A confluence argument covers the FIXPOINT; it
+does not cover anything computed from a conflicted row's partial state, and a filter reading the
+implication counter is exactly that.
+
+**The probe RESET dominates probe wall, and it is a constant per chunk (2026-08-19).** Phase-split
+measurements put the state broadcast at 50-94% of a probe chunk (`apply` gets 4-49%, readout <2%),
+and the broadcast is ~26 ms REGARDLESS of instance: `K ~ 0.80·free/4M` means `rows·4M` is always
+the memory budget, 5.5-5.8 GiB here. Meanwhile a probe chunk MODIFIES 0.02-8.4% of the state it
+restores. Full design for a trail-superset restore (rewrite the baseline into `∪ occ[l]` over the
+row's trail — superset-safe on conflicted rows, idempotent, no new kernel state) and its regime
+bound are in docs/findings/MINING_FINDINGS.md. It is regime-dependent: a sampling trajectory
+assigns 28-56% of variables and lands the wrong side of the crossover.
+
 **The wave/scalar dispatch keys off M (clause count), NOT the batch — and the batch-only rule it
 replaced was a PROXY that a K change silently invalidated (2026-08-18).** The rule was
 `batch < 30 x resident_warps`. That only ever worked because K ~ budget/(4M), so "huge batch" and

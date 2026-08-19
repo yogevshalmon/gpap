@@ -1,0 +1,532 @@
+"""The tuple-probe primitive (gpap.engine.probe) and entailed-clause mining (gpap.mining).
+
+The safety property that matters is ENTAILMENT: every clause mining returns must already follow
+from the formula, so adding it leaves the model set exactly unchanged. That is checked here the
+only way worth checking it — against an independent SAT solver, on the actual clauses, not by
+re-running our own propagation.
+"""
+import itertools as it
+import random
+
+import numpy as np
+import pytest
+import torch
+
+import gpap.engine.probe
+from gpap.engine import core_available
+from gpap.engine.probe import LiteralProbe, ProbeBudget
+from gpap.mining import _Subsumption, mine_entailed
+from tests.reference_combinations import combinations
+
+DEV = torch.device("cuda") if torch.cuda.is_available() else torch.device("cpu")
+AVAIL = torch.cuda.is_available() and core_available()
+pytestmark = pytest.mark.skipif(not AVAIL, reason="requires CUDA + a built libgpap")
+
+
+def _random_cnf(rng, nv, nc, kmax=3):
+    return [[rng.choice([-1, 1]) * v for v in rng.sample(range(1, nv + 1),
+                                                         rng.randint(2, min(kmax, nv)))]
+            for _ in range(nc)]
+
+
+# ------------------------------------------------------------------ the enumerator
+
+class TestCombinations:
+    """The REFERENCE enumerator (tests/reference_combinations.py), not shipping code.
+
+    It is here to pin the core's candidate order against an independent implementation — the same
+    role reference_bcp.py plays for the kernels. It used to live in `gpap.engine.probe` as a public
+    helper "for callers that filter candidates before probing"; that caller was measured at 65s to
+    drop 0 of 122M and deleted, leaving a second enumerator in the shipping face with nothing to
+    do but drift. Literals are DIMACS here, as everywhere else."""
+
+    def test_pairs_match_itertools(self):
+        import itertools
+        pool = [3, -3, 5, -5, 11, -11]
+        want = sorted(t for t in itertools.combinations(pool, 2) if abs(t[0]) != abs(t[1]))
+        got = sorted(map(tuple, combinations(pool, 2).tolist()))
+        assert got == want
+
+    def test_triples_match_itertools(self):
+        import itertools
+        pool = [3, -3, 5, -5, 11, -11, 16]
+        want = sorted(t for t in itertools.combinations(pool, 3) if len({abs(x) for x in t}) == 3)
+        got = sorted(map(tuple, combinations(pool, 3).tolist()))
+        assert got == want
+
+    def test_same_variable_pairs_are_dropped(self):
+        """A pool of literals holds both polarities, and (l, ~l) conflicts for reasons that have
+        nothing to do with the formula — probing it proves only the tautology (l | ~l)."""
+        got = combinations([1, -1, 2, -2], 2).tolist()
+        assert [1, -1] not in got and [2, -2] not in got
+        assert len(got) == 4                                   # the four cross-variable pairs
+        assert len(combinations([1, -1, 2, -2], 2, distinct_vars=False)) == 6
+
+    def test_size_one_is_the_pool(self):
+        assert combinations([7, -8, 9], 1).reshape(-1).tolist() == [7, -8, 9]
+
+    def test_pool_smaller_than_size(self):
+        assert combinations([3], 2).shape == (0, 2)
+
+    def test_max_tuples_truncates(self):
+        assert combinations(list(range(1, 21)), 2, max_tuples=5).shape == (5, 2)
+
+    def test_rejects_zero_size(self):
+        with pytest.raises(ValueError, match="size"):
+            combinations([1, 2], 0)
+
+
+# ------------------------------------------------------------------ the primitive
+
+class TestLiteralProbe:
+    #  (x1 v x2) ^ (~x1 v x3) ^ (~x2 v ~x3)
+    CLAUSES = [[1, 2], [-1, 3], [-2, -3]]
+
+    def test_failed_literal(self):
+        """x1 implies x2 and ~x2 => assuming x1 conflicts, so ~x1 is entailed."""
+        p = LiteralProbe(2, [[-1, 2], [-1, -2]], DEV)
+        r = p.probe(size=1)
+        assert r.conflicting.tolist() == [[1]]
+        assert r.exhausted
+
+    def test_exhausted_is_a_proof_of_absence(self):
+        p = LiteralProbe(3, self.CLAUSES, DEV)
+        r = p.probe(size=1)
+        assert len(r) == 0
+        assert r.exhausted, "no failed literal exists, and we looked at every one"
+
+    def test_pool_defaults_to_every_free_literal(self):
+        """`pool=None` is the "all the lits" case, and must equal passing them explicitly."""
+        p = LiteralProbe(3, self.CLAUSES, DEV)
+        assert p.probe(size=2).total == p.probe(p.free_literals(), size=2).total
+
+    def test_count_matches_the_sweep_without_generating_it(self):
+        """The ceiling is checked against count(), so count() must be the number a sweep probes.
+        REGRESSION: the ceiling used to be compared against an already-materialized enumeration,
+        which cannot protect against the case it exists for — at width 3 over a real circuit's
+        free literals that array is ~1e11 tuples and the process was OOM-killed reaching it."""
+        p = LiteralProbe(3, self.CLAUSES, DEV)
+        for k in (1, 2, 3):
+            assert p.count(size=k) == p.probe(size=k).total
+
+    def test_count_saturates_instead_of_wrapping(self):
+        """A wrapped count would compare BELOW a ceiling and let through the very sweep the
+        ceiling exists to refuse."""
+        p = LiteralProbe(400, [[1, 2], [-1, 3]], DEV)
+        assert p.count(size=3) > 10**7
+
+    def test_max_tuples_is_a_work_budget(self):
+        """`max_tuples` says how many candidates to PROBE — it does not cancel the sweep. Every
+        conflict found is a genuine entailed clause whatever went unprobed, so partial results
+        beat no results; only `exhausted` is lost, and it says so."""
+        p = LiteralProbe(3, self.CLAUSES, DEV)
+        r = p.probe(size=2, budget=ProbeBudget(max_tuples=2))
+        assert r.probed == 2 and r.total == 12
+        assert not r.exhausted and r.stopped == "max_tuples"
+
+    def test_refuse_over_max_is_opt_in(self):
+        """...but a caller who only wants an answer it can call a PROOF can ask for nothing
+        instead of a prefix."""
+        p = LiteralProbe(3, self.CLAUSES, DEV)
+        r = p.probe(size=2, budget=ProbeBudget(max_tuples=2, refuse_over_max=True))
+        assert r.probed == 0 and r.total == 12 and r.stopped == "max_tuples"
+
+    def test_free_literals_excludes_settled_variables(self):
+        """A formula's own units settle variables at construction; probing them is wasted."""
+        p = LiteralProbe(3, self.CLAUSES + [[1]], DEV)
+        free = set(p.free_literals().tolist())
+        assert 1 not in free and -1 not in free, "x1 is fixed by the unit clause"
+        assert not p.is_free(1)
+
+    def test_assume_narrows_without_rebuilding(self):
+        p = LiteralProbe(3, self.CLAUSES, DEV)
+        assert p.is_free(1)
+        p.assume([1])                                   # assert x1
+        assert not p.is_free(1), "x1 must be settled after being assumed"
+        assert set(p.free_literals().tolist()).isdisjoint({1, -1})
+
+    def test_unsat_formula_probes_nothing(self):
+        p = LiteralProbe(1, [[1], [-1]], DEV)
+        assert p.unsat
+        r = p.probe(size=1)
+        assert r.probed == 0 and r.stopped == "unsat"
+
+    def test_chunked_matches_single_launch(self):
+        """A sweep split across launches must give exactly the same answer. The chunk size is the
+        core's business, so it is set explicitly here rather than monkeypatched."""
+        rng = random.Random(3)
+        clauses = _random_cnf(rng, 12, 40)
+        p = LiteralProbe(12, clauses, DEV)
+        tuples = combinations(p.free_literals(), 2)
+        one = p.probe_tuples(tuples)
+        many = p.engine.probe_tuples(tuples, batch=7)     # force many launches
+        with many:
+            got = many.conflicts()
+        assert np.array_equal(np.sort(one.conflicting, axis=0), np.sort(got, axis=0))
+
+    def test_rejects_out_of_range_literals(self):
+        """An index past the row's bitmap makes the kernel write into a LATER ROW's words, so one
+        bad tuple would silently corrupt a different tuple's answer."""
+        p = LiteralProbe(3, self.CLAUSES, DEV)
+        with pytest.raises(RuntimeError, match="out of range"):
+            p.probe([99], size=1)
+        with pytest.raises(RuntimeError, match="out of range"):
+            p.probe_tuples([[1, 99]])
+
+
+# ------------------------------------------------------------------ the application
+
+class TestMining:
+    @staticmethod
+    def _models(clauses):
+        from pysat.solvers import Minisat22
+        with Minisat22(bootstrap_with=clauses) as s:
+            return {tuple(m) for m in s.enum_models()}
+
+    def _check_entailed(self, nv, clauses, pool=None, **kw):
+        """Every mined clause must be entailed, and the augmented formula must have exactly the
+        original models — verified with an independent SAT solver."""
+        from pysat.solvers import Minisat22
+        res = mine_entailed(nv, clauses, DEV, pool=pool, **kw)
+        for cl in res.clauses:
+            with Minisat22(bootstrap_with=clauses) as s:
+                assert not s.solve(assumptions=[-lit for lit in cl]), \
+                    f"mined clause {cl} is NOT entailed"
+        if res.clauses:
+            assert self._models(clauses) == self._models(clauses + res.clauses)
+        return res
+
+    def test_planted_backbone_and_pair(self):
+        # (1|2),(1|-2) => backbone unit (1), not flush-implied (there are no unit clauses);
+        # (-1,-3,-4),(-1,-3,4) => assuming x3 (with x1 forced) conflicts => unit (-3);
+        # (-5|-6) is entailed via x7: (-5,-6,7),(-5,-6,-7)
+        clauses = [[1, 2], [1, -2], [-1, -3, -4], [-1, -3, 4],
+                   [-5, -6, 7], [-5, -6, -7], [5, 6, 8], [2, 8, -5]]
+        # `pool` is DIMACS LITERALS, so both polarities of x5 and x6 are named explicitly. That
+        # is the point of the literal API: a caller can ask about one side only by naming one.
+        res = self._check_entailed(8, clauses, pool=[5, -5, 6, -6])
+        assert res.by_width.get(1, 0) >= 2, res.by_width      # units (1) and (-3) at least
+        mined = {tuple(sorted(c)) for c in res.clauses}
+        assert (-6, -5) in mined or (-5,) in mined or (-6,) in mined, mined
+
+    def test_pool_polarity_is_honoured(self):
+        """Naming ONE polarity probes only that side — the reason the pool is literals and not
+        variables. (5, 6) proves (-5 | -6); (-5, -6) is a different question entirely."""
+        clauses = [[-5, -6, 7], [-5, -6, -7], [5, 6, 8], [2, 8, -5]]
+        both = self._check_entailed(8, clauses, pool=[5, -5, 6, -6], widths=(2,))
+        one = self._check_entailed(8, clauses, pool=[5, 6], widths=(2,))
+        assert (-6, -5) in {tuple(sorted(c)) for c in both.clauses}
+        assert len(one.clauses) <= len(both.clauses), "one polarity cannot prove more"
+
+    def test_random_formulas_stay_model_preserving(self):
+        from pysat.solvers import Minisat22
+        rng = random.Random(7)
+        for _ in range(10):
+            nv = rng.randint(6, 14)
+            clauses = _random_cnf(rng, nv, rng.randint(2 * nv, 5 * nv))
+            with Minisat22(bootstrap_with=clauses) as s:
+                if not s.solve():
+                    continue                                  # UNSAT input: mining may derive it
+            self._check_entailed(nv, clauses, pool=list(range(min(nv, 6))))
+
+    def test_widths_are_selectable(self):
+        clauses = [[1, 2], [1, -2], [-1, -3, -4], [-1, -3, 4]]
+        only_units = mine_entailed(4, clauses, DEV, widths=(1,))
+        assert set(only_units.by_width) == {1}
+        assert all(len(c) == 1 for c in only_units.clauses)
+
+    def test_max_tuples_skips_rather_than_truncates(self):
+        """A truncated width would prove nothing about what it did not reach, so a width over
+        its ceiling is skipped outright and SAYS so."""
+        clauses = [[1, 2], [-1, 3], [-2, -3], [4, 5], [-4, 6], [-5, -6]]
+        res = mine_entailed(6, clauses, DEV, widths=(1, 2), max_tuples={2: 1})
+        assert 2 in res.skipped and "candidates" in res.skipped[2]
+        assert res.exhausted.get(2) is False
+
+    def test_wide_widths_gated_on_unit_yield(self):
+        clauses = [[1, 2], [-1, 3], [-2, -3]]              # no failed literals at width 1
+        res = mine_entailed(3, clauses, DEV, min_units_for_wide=1)
+        assert res.by_width.get(1, 0) == 0
+        assert res.skipped.get(2) == "too few units at width 1"
+
+    def test_unsat_formula_is_reported_not_mined(self):
+        res = mine_entailed(1, [[1], [-1]], DEV)
+        assert res.clauses == []
+        assert all("unsat" in v for v in res.skipped.values())
+
+    def test_result_summary_is_readable(self):
+        res = mine_entailed(4, [[1, 2], [1, -2]], DEV)
+        assert "width 1" in res.summary() and "s" in res.summary()
+
+
+# ------------------------------------------------------------------ the CLI
+
+class TestMineCLI:
+    """`gpap mine` — the face a user actually reaches for. Run as a subprocess, because what is
+    being checked is the command's contract (flags, exit status, files it writes), not a Python
+    call."""
+
+    @staticmethod
+    def _run(*argv, cwd=None):
+        import subprocess
+        import sys
+        r = subprocess.run([sys.executable, "-m", "gpap.cli", "mine", *map(str, argv)],
+                           capture_output=True, text=True, timeout=600, cwd=cwd)
+        assert r.returncode == 0, f"gpap mine failed:\n{r.stdout}\n{r.stderr}"
+        return r.stdout
+
+    @staticmethod
+    def _cnf(tmp_path, nv, clauses, name="f.cnf", ind=None):
+        p = tmp_path / name
+        head = f"p cnf {nv} {len(clauses)}\n"
+        if ind:
+            head += "c ind " + " ".join(map(str, ind)) + " 0\n"
+        p.write_text(head + "".join(" ".join(map(str, c)) + " 0\n" for c in clauses))
+        return p
+
+    def test_mines_and_writes_a_strengthened_formula(self, tmp_path):
+        clauses = [[-1, 2], [-1, -2], [3, 4], [6, 7]]
+        cnf = self._cnf(tmp_path, 7, clauses)
+        out = tmp_path / "strong.cnf"
+        stats = tmp_path / "mine.json"
+        txt = self._run(cnf, "--width", "1", "--out", out, "--stats", stats)
+        assert "exhaustive" in txt
+        assert out.exists() and stats.exists()
+
+        import json
+        info = json.loads(stats.read_text())
+        assert info["by_width"]["1"] >= 1 and info["clauses"]
+        # the strengthened file is the original plus what was proven, and every proven clause is
+        # ENTAILED — so the two formulas have the same models. Checked, not asserted.
+        from pysat.solvers import Minisat22
+        for cl in info["clauses"]:
+            with Minisat22(bootstrap_with=clauses) as s:
+                assert not s.solve(assumptions=[-lit for lit in cl]), cl
+
+    def test_pool_support_uses_the_c_ind_lines(self, tmp_path):
+        cnf = self._cnf(tmp_path, 7, [[-1, 2], [-1, -2], [3, 4], [6, 7]], ind=[1, 3, 6])
+        txt = self._run(cnf, "--width", "2", "--pool", "support")
+        assert "pool=support (6 literals)" in txt, txt    # 3 variables, both polarities
+
+    def test_pool_rejects_nonsense_instead_of_guessing(self, tmp_path):
+        import subprocess
+        import sys
+        cnf = self._cnf(tmp_path, 7, [[1, 2]])
+        for bad in ("99", "abc"):
+            r = subprocess.run([sys.executable, "-m", "gpap.cli", "mine", str(cnf),
+                                "--pool", bad], capture_output=True, text=True, timeout=300)
+            assert r.returncode != 0, f"--pool {bad} should have been refused"
+
+    def test_huge_width_probes_its_budget_and_reports_coverage(self, tmp_path):
+        """An enormous width must still DO the work asked for. It reports how much of the space
+        it covered, so "nothing entailed here" is distinguishable from "we barely started" —
+        and it never materializes the enumeration (which OOM-killed the process)."""
+        nv = 300
+        cnf = self._cnf(tmp_path, nv, [[i, -(i + 1)] for i in range(1, nv)])
+        txt = self._run(cnf, "--width", "3", "--max-tuples", "1000", "--seconds", "20")
+        assert "probed 1,000 of" in txt, txt
+        assert "NOT searched exhaustively" in txt, txt
+
+
+class TestProbeDispatch:
+    """The probe path must get the kernel dispatch, like every other consumer of the engine.
+
+    REGRESSION. `LiteralProbe` pinned "scalar" when the sweep was ported to the core, because the
+    dispatch lived in the two WRAPPERS (BCPEngine.plan_for / gpap::Engine::plan_for) and the sweep
+    calls the C ABI directly. That is the same hole the batched-assumption path had until
+    2026-08-14, and it cost 1.28x (b03-c25, M=14.5k) to 2.20x (b12-c50, M=219k) on the sweep. The
+    fix was to resolve GPAP_MODE_AUTO inside gpap_engine_reset — one place every entry point
+    passes through — so this test is about WHERE the rule lives, not about which kernel wins."""
+
+    def test_probe_dispatches_by_clause_count(self, monkeypatch):
+        monkeypatch.delenv("GPAP_KERNEL", raising=False)
+        # M = 6: too few clauses for a warp to have work, so the small-batch term decides
+        small = LiteralProbe(6, [[1, 2], [-1, 3], [-2, -3], [4, 5], [-4, 6], [-5, -6]], DEV)
+        small.probe(size=1)
+        assert small.engine.mode in ("scalar", "wave")
+        # M >= 2048: the rule says wave unconditionally, and the sweep must actually run it
+        rng = random.Random(3)
+        big = [[rng.choice([1, -1]) * rng.randint(1, 400) for _ in range(3)] for _ in range(2500)]
+        probe = LiteralProbe(400, big, DEV)
+        probe.probe(size=1)
+        assert probe.engine.mode == "wave", "M >= 2048 must dispatch wave inside the sweep"
+
+    @pytest.mark.parametrize("pinned", ["scalar", "wave"])
+    def test_an_explicit_mode_is_honoured(self, pinned, monkeypatch):
+        """A measurement pins the kernel; the per-reset dispatch must not take it back."""
+        monkeypatch.delenv("GPAP_KERNEL", raising=False)
+        rng = random.Random(4)
+        big = [[rng.choice([1, -1]) * rng.randint(1, 400) for _ in range(3)] for _ in range(2500)]
+        p = LiteralProbe(400, big, DEV, mode=pinned)
+        p.probe(size=1)
+        assert p.engine.mode == pinned
+
+    def test_env_var_pins(self, monkeypatch):
+        monkeypatch.setenv("GPAP_KERNEL", "scalar")
+        rng = random.Random(5)
+        big = [[rng.choice([1, -1]) * rng.randint(1, 400) for _ in range(3)] for _ in range(2500)]
+        p = LiteralProbe(400, big, DEV)
+        p.probe(size=1)
+        assert p.engine.mode == "scalar"
+
+
+class TestSubsumption:
+    """REGRESSION: mining must not emit clauses that a shorter known clause already implies.
+
+    They are sound (still entailed) but useless, and they make the formula bigger — which slows
+    every later propagation, the exact opposite of why anyone mines. Checking only for an EXACT
+    duplicate let 1,504 of them through on b03-c25 (1,511 ternaries where 7 are useful)."""
+
+    def test_subsumed_clauses_are_not_emitted(self):
+        # (-1 | -2) is given. Any triple containing it -- (-1 | -2 | x) -- is implied by it.
+        clauses = [[-1, -2], [1, 3], [2, 3], [-3, 4], [-3, -4], [5, 6], [-5, 6], [5, -6]]
+        res = mine_entailed(8, clauses, DEV, widths=(1, 2, 3), seconds=30.0)
+        known = {tuple(sorted(c)) for c in clauses}
+        for cl in res.clauses:
+            t = tuple(sorted(cl))
+            for r in range(1, len(t)):
+                import itertools as it
+                for sub in it.combinations(t, r):
+                    assert sub not in known, f"{cl} is subsumed by the known clause {list(sub)}"
+                    assert sub not in {tuple(sorted(c)) for c in res.clauses}, \
+                        f"{cl} is subsumed by another MINED clause {list(sub)}"
+
+    def test_coverage_is_reported_so_empty_is_readable(self):
+        """`0 clauses` from an exhaustive sweep and `0 clauses` from 0.0002% of one mean opposite
+        things. The result must let a caller tell them apart."""
+        nv = 400
+        clauses = [[i, -(i + 1)] for i in range(1, nv)]
+        partial = mine_entailed(nv, clauses, DEV, widths=(3,), seconds=5.0, max_tuples=500)
+        assert partial.candidates[3] > partial.probed[3] > 0
+        assert not partial.exhausted[3]
+        assert "probed" in partial.summary()
+
+        full = mine_entailed(4, [[1, 2], [-1, 3]], DEV, widths=(2,), seconds=5.0)
+        assert full.exhausted[2] and full.probed[2] == full.candidates[2]
+
+
+class TestEngineSideSubsumption:
+    """`skip_subsumed`: a conflict BCP reached with ZERO implications was caused by a clause that
+    was ALREADY EMPTY but for the assumed literals — so the clause it would prove is subsumed by
+    that clause's residue under the engine's baseline assignment.
+
+    Note "under the baseline", not "by an input clause": mining folds proven units into the flush
+    cache, so an input (a | b | c) whose `c` the baseline falsified acts as a binary constraint,
+    and the filter drops a clause no INPUT clause subsumes (17 of them on b03-c25). Sound for the
+    intended use — a consumer takes the mined units too, and then derives it by propagation — but
+    the host-side test has to be against the same reduced formula, which is what `_Subsumption`
+    rebuilds. It is deliberately incomplete (a conflict that derived an implication first is kept),
+    and that incompleteness is ORDER-dependent, hence kernel-dependent: see
+    `test_mining_is_kernel_invariant`. Measured on b03-c25 at width 3: 59,160 conflicts, 7 useful;
+    this removes 57,625 inside the engine, so the result buffer is 18 KiB instead of 693 KiB."""
+
+    CLAUSES = [[-1, -2], [3, 4], [-3, 5], [-3, -5], [6, 7]]
+
+    def test_never_drops_a_clause_that_is_not_already_implied(self):
+        p = LiteralProbe(7, self.CLAUSES, DEV)
+        lits = p.free_literals()
+        loose = {tuple(sorted(-int(x) for x in row))
+                 for row in p.probe(lits, 2).conflicting}
+        tight = {tuple(sorted(-int(x) for x in row))
+                 for row in p.probe(lits, 2, budget=ProbeBudget(skip_subsumed=True)).conflicting}
+        assert tight <= loose, "the filter may only REMOVE conflicts"
+        # the reference is the formula REDUCED by the baseline, which is what the filter can see
+        sub = _Subsumption(2)
+        sub.rebuild(self.CLAUSES, 7, p.assigned_literals())
+        for cl in loose - tight:
+            assert sub.subsumes(cl), f"{cl} was dropped but nothing known subsumes it"
+
+    def test_drops_only_what_the_baseline_makes_redundant(self):
+        """The exact statement of the filter's soundness, on a formula where the baseline MATTERS.
+
+        (-1 | -2 | -3) with 3 forced FALSE by the flush is a binary constraint during the sweep, so
+        assuming (1, 2) empties it with zero implications. The mined (-1 | -2) is entailed and no
+        input clause subsumes it — only the input clause's RESIDUE does."""
+        clauses = [[-3], [-1, -2, 3], [4, 5], [-4, 5], [4, -5]]
+        p = LiteralProbe(5, clauses, DEV)
+        assert -3 in p.assigned_literals().tolist(), "the flush must have settled 3"
+        lits = p.free_literals()
+        loose = {tuple(sorted(-int(x) for x in row)) for row in p.probe(lits, 2).conflicting}
+        tight = {tuple(sorted(-int(x) for x in row))
+                 for row in p.probe(lits, 2, budget=ProbeBudget(skip_subsumed=True)).conflicting}
+        dropped = loose - tight
+        assert (-2, -1) in dropped, "the residue-caused conflict is exactly what the filter is for"
+        raw = {tuple(sorted(c)) for c in clauses}
+        assert not any(sub in raw for r in (1, 2) for sub in it.combinations((-2, -1), r)), \
+            "and no INPUT clause subsumes it, which is why the host test uses the residues"
+        sub = _Subsumption(2)
+        sub.rebuild(clauses, 5, p.assigned_literals())
+        assert sub.subsumes((-2, -1)), "the RESIDUE of (-1 | -2 | 3) does"
+
+    def test_mining_is_kernel_invariant(self):
+        """What mining RETURNS must not depend on which propagate kernel ran.
+
+        It nearly did: the engine filter reads the implication counter, which is order-dependent on
+        conflicted rows, so wave and scalar drop different subsets. Before the host test was made
+        residue-based, that leaked all the way out — b03-c25 emitted 3,096 clauses under scalar and
+        3,113 under wave, i.e. `gpap mine` answered differently depending on a launch flag."""
+        clauses = [[-4], [-1, -2, 4], [-1, -3, 4], [5, 6], [-5, 6], [5, -6], [2, 3], [1, 7]]
+        out = {}
+        for mode in ("scalar", "wave"):
+            orig = LiteralProbe.__init__
+            try:
+                gpap.engine.probe.LiteralProbe.__init__ = (
+                    lambda self, nv, cl, dev=None, _o=orig, _m=mode, **kw: _o(self, nv, cl, dev,
+                                                                              mode=_m))
+                res = mine_entailed(7, clauses, DEV, widths=(1, 2), seconds=30.0)
+            finally:
+                gpap.engine.probe.LiteralProbe.__init__ = orig
+            out[mode] = sorted(map(sorted, res.clauses))
+        assert out["scalar"] == out["wave"]
+
+    def test_reports_what_it_dropped(self):
+        """Silently discarding results would be worse than keeping them — the count is reported."""
+        p = LiteralProbe(7, self.CLAUSES, DEV)
+        r = p.probe(p.free_literals(), 2, budget=ProbeBudget(skip_subsumed=True))
+        assert r.subsumed >= 0
+        plain = p.probe(p.free_literals(), 2)
+        assert len(plain) == len(r) + r.subsumed, "reported + dropped must account for every conflict"
+
+    def test_mining_output_is_unchanged_by_it(self):
+        """It is a transport optimization: the host filter is exact, so what mining RETURNS must
+        not depend on how much the engine pre-filtered."""
+        clauses = [[-1, -2], [1, 3], [2, 3], [-3, 4], [-3, -4], [5, 6], [-5, 6], [5, -6]]
+        a = mine_entailed(8, clauses, DEV, widths=(1, 2, 3), seconds=30.0)
+        b = mine_entailed(8, clauses, DEV, widths=(1, 2, 3), seconds=30.0)
+        assert sorted(map(sorted, a.clauses)) == sorted(map(sorted, b.clauses))
+
+
+class TestMiningWorkMetrics:
+    """Mining reports what the ENGINE did, not only what it found.
+
+    clauses/s and probes/s both depend on the instance (how many clauses it entails, how quickly a
+    tuple conflicts). Implications/s is hardware work, so it is the number that compares across
+    instances, GPUs and engine changes — the same reason the sampler reports it."""
+
+    def test_implications_are_counted_and_rated(self):
+        clauses = [[1, 2], [-1, 3], [-2, -3], [3, 4], [-4, 5], [-4, -5], [6, 7], [-6, 7]]
+        res = mine_entailed(8, clauses, DEV, widths=(1, 2), seconds=30.0)
+        assert res.implications > 0, "a real sweep derives implications"
+        assert res.implications_per_s > 0
+        assert "implications/s" in res.summary()
+
+    def test_implications_survive_the_probe_rebuild(self):
+        """The probe is REBUILT between widths when a wide tier proves something, which resets the
+        engine's counters — they must be banked first or the total silently loses a width."""
+        clauses = [[1, 2], [1, -2], [-1, -3, -4], [-1, -3, 4],
+                   [-5, -6, 7], [-5, -6, -7], [5, 6, 8], [2, 8, -5]]
+        one = mine_entailed(8, clauses, DEV, widths=(1,), seconds=30.0)
+        three = mine_entailed(8, clauses, DEV, widths=(1, 2, 3), seconds=30.0)
+        assert three.implications > one.implications, \
+            "mining more widths must not report FEWER implications"
+
+    def test_width_one_skips_the_vacuous_subsumption_check(self):
+        """A width-1 unit cannot be subsumed: it came from probing ~u, which was probed only
+        because it was free, so u was not already a unit. Skipping the check must not change the
+        output — this pins the invariant, since the fast path assumes it."""
+        clauses = [[-1, 2], [-1, -2], [3, 4], [-4, 5], [-4, -5], [6, 7]]
+        res = mine_entailed(7, clauses, DEV, widths=(1,), seconds=30.0)
+        formula_units = {c[0] for c in clauses if len(c) == 1}
+        mined = {c[0] for c in res.clauses if len(c) == 1}
+        assert not (formula_units & mined), "a mined unit can never be one the formula had"
+        assert len(mined) == len(res.clauses), "width 1 yields units only"

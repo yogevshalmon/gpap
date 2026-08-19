@@ -104,9 +104,10 @@ class BCPEngine:
         different propagation order. Env override: GPAP_KERNEL=scalar|wave pins it too.
 
         Auto is the default so that every consumer of the engine gets the dispatch, not just the
-        one that remembered to ask: the rule lives in `calibrate.dispatch_mode` and this is the
-        only place it is applied. (It mirrors `gpap::Engine::plan_for` in the C++ face, which has
-        worked this way since the core port.)"""
+        one that remembered to ask — and it is RESOLVED IN THE CORE, on every `gpap_engine_reset`,
+        so that promise covers consumers this class knows nothing about (the C++ face, the probe
+        sweep in cpp/src/probe.cpp). This module only carries the "auto" word and the GPAP_KERNEL
+        env override, which have no C counterpart."""
         self._mode = mode or os.environ.get("GPAP_KERNEL") or "auto"
         if self._mode not in ("scalar", "wave", "auto"):
             raise ValueError(f"unknown kernel mode {self._mode!r} (scalar|wave|auto)")
@@ -118,8 +119,7 @@ class BCPEngine:
         if self._device.type != "cuda":
             raise RuntimeError("BCPEngine requires CUDA (the engine is GPU-only; there is no "
                                "CPU path). Check `gpap info`.")
-        self._core = _core.Engine(formula.core, device=self._device.index or 0,
-                                  mode="scalar" if self._auto_mode else self._mode,
+        self._core = _core.Engine(formula.core, device=self._device.index or 0, mode=self._mode,
                                   force_shift=8 if force_wide else 0)
         self._K = 0
         self._counter_base = (0, 0, 0, 0)
@@ -138,17 +138,13 @@ class BCPEngine:
         self._auto_mode = False
 
     def plan_for(self, K: int) -> str:
-        """Resolve the propagate kernel for a chunk of K rows; returns the mode in force.
+        """The propagate kernel a chunk of K rows will run. PURE — `reset(K)` is what applies it.
 
-        A no-op if the mode was pinned (constructor argument, `set_mode`, or `GPAP_KERNEL`).
-        Called by `reset`, so every consumer of the engine gets the dispatch for free — an
-        application should not have to know that the choice exists."""
+        Kept because a caller sizing a chunk may want to know the kernel before committing to it;
+        it returns the pinned mode verbatim when one is pinned."""
         if self._auto_mode:
-            want = dispatch_mode(int(K), self._device)
-            if want != self._core.mode:
-                self._core.set_mode(want)
-            self._mode = want
-        return self._mode
+            return dispatch_mode(self.num_clauses, int(K), self._device)
+        return self._core.mode
 
     @property
     def mode(self) -> str:
@@ -179,8 +175,8 @@ class BCPEngine:
 
     def reset(self, K: int) -> None:
         """Reset K rows to the cached post-units-flush state (allocations reused when K matches),
-        and resolve the propagate kernel for that batch if the mode is "auto"."""
-        self.plan_for(K)
+        and resolve the propagate kernel for that batch if the mode is "auto" (done by the core,
+        which is what makes the dispatch reach every consumer of the ABI and not just this one)."""
         self._core.reset(K)
         self._K = int(K)
 
@@ -225,7 +221,7 @@ class BCPEngine:
 
     def recache_flush(self) -> None:
         """Re-cache the flush state from row 0 of the CURRENT state — the incremental-units
-        hook (miner): reset(1) + apply_and_propagate(new_units) + recache_flush() folds
+        hook (LiteralProbe.assume): reset(1) + apply_and_propagate(new_units) + recache_flush() folds
         entailed units into the cached flush without rebuilding the formula."""
         self._core.recache_flush()
 

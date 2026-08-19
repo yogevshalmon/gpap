@@ -30,8 +30,14 @@ Applications consume the engine ONLY through these:
                                                  #   ONE kernel launch to fixpoint
        eng.conflict / eng.assignment             # (K,) bool / (K,2N) int8
 
-   `AssumptionChecker` is the one-call convenience face. The miner's incremental flow is
-   reset(1) + apply_and_propagate(units) + recache_flush().
+   Two one-call faces sit over this, and which you want depends on where the sets come from:
+
+     AssumptionChecker  — "propagate THESE sets", any number of them, chunked internally.
+     LiteralProbe       — "propagate every k-SUBSET of this literal pool, within this budget",
+                          which is the shape of failed-literal detection, entailed-clause
+                          mining (gpap.mining), backbone extraction and lookahead scoring.
+                          It also owns the incremental flow, `assume()` =
+                          reset(1) + apply_and_propagate(units) + recache_flush().
 
 2. **Fused trajectory sampling** — the WHOLE randomized decide+propagate loop in one launch
    per chunk (one Triton program per trajectory, sequential trail, no atomics):
@@ -59,6 +65,7 @@ from gpap.engine.bcp_engine import (
     packed_envelope,
 )
 from gpap.engine.checker import AssumptionChecker
+from gpap.engine.probe import LiteralProbe, ProbeBudget, ProbeResult
 from gpap.engine._triton import kernel_available
 
 # The GPU memory model (compute_k_safe / gpu_mem_available / default_k_cap / resolve_k_cap) is
@@ -68,7 +75,8 @@ from gpap.engine._triton import kernel_available
 # `from gpap.engine.calibrate import compute_k_safe` — just not on the front page.
 __all__ = [
     "CnfFormula", "BCPEngine", "make_assumption_tensor", "core_available",
-    "AssumptionChecker", "kernel_available",
+    "AssumptionChecker", "LiteralProbe", "ProbeBudget", "ProbeResult",
+    "kernel_available",
     "packed_envelope", "clauses_envelope",
     "ext_lit_to_lit_index", "lit_index_to_ext_lit", "lit_index_negation",
 ]

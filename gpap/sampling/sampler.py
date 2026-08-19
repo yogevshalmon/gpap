@@ -47,6 +47,11 @@ from gpap.engine.calibrate import (
     resolve_k_cap,
 )
 
+# Decision batch the trail is sized for. The trail cap is num_vars + max(B, 64) + 8, so any B
+# at or below the floor costs the same; sizing with the floor makes K independent of the
+# portfolio's B, which a measurement wants.
+SOUND_B_FLOOR = 64
+
 
 class GPUSampler:
     """Batched GPU sampler: K parallel randomized BCP-completions per chunk."""
@@ -90,127 +95,61 @@ class GPUSampler:
         self._pyrng = _random.Random(seed)
         self.support: list[int] | None = None   # 0-based independent-support vars (from `c ind`)
         self._recon: dict | None = None          # set when built with simplify=True (see _from_simplified)
-        # K auto-sized to the GPU (see _calibrate_k): K = min(analytic, cap) — the analytic
-        # model matches the packed engine's real footprint (retuned 2026-07-13, kill-switch
-        # validated; the PyTorch-era 70M+40N floor that used to bind is gone with that path).
-        free_bytes = gpu_mem_available(device)
-        analytic = compute_k_safe(
-            self.M, self.N, free_bytes, cap=k_cap,
-            max_clause_size=self._max_cls, total_lits=self._total_lits or None,
-            deduct_formula=False,
-        )
-        self.K = self._calibrate_k(free_bytes, k_cap, analytic)
+        # THE batch size, from the engine's own memory model (gpap.engine.calibrate ->
+        # cpp/src/calibrate.cpp). One number, one model: `row_bytes` is the exact allocation list
+        # of what a chunk reserves, so there is nothing left to "boost".
+        #
+        # There used to be TWO models here — a conservative `K` plus a `K_fused` boost that
+        # recovered the headroom the conservative one wasted. Both are gone because the reason
+        # for them is: the old per-row model charged for a separate sat array, a byte-per-literal
+        # assignment and PyTorch-era scatter temporaries that no longer exist, while omitting the
+        # trail, which made it 1.57x over. The boost was a correction factor for a wrong model.
+        self.K = compute_k_safe(self.M, self.N, gpu_mem_available(device), cap=k_cap,
+                                decisions_per_round=SOUND_B_FLOOR)
         self._K_init = self.K
-        # FUSED-config K boost: a fused-trajectory chunk never builds the (K,N) per-round decision
-        # masks — its true footprint is just the engine state + the trail + a few (K,N) bool readout
-        # temps: ≈ (sat_bytes+4)·M + 10·N per batch. That is far below the v1 heuristic, so fused
-        # chunks can run a much larger K (throughput ∝ K). Applied per-chunk in sample() ONLY for
-        # fused configs and only while K is at its construction value (a lowered K — e.g. the
-        # coverage run — is honoured). Hard cap 262,144; validated under the nvidia-smi kill-switch.
-        if self.M > 0:
-            sat_b = 1 if self._max_cls <= 127 else (2 if self._max_cls <= 32767 else 4)
-            # Hard ceiling on the fused-K boost. 262,144 was kill-switch-validated on the 12 GB 4080;
-            # on a big-VRAM GPU (A100 80 GB) the caller's VRAM-proportional k_cap is larger, so let it
-            # raise the ceiling — the memory-safe `budget // fused_pb` below still bounds the actual K.
-            # No-op on the 4080 (its k_cap < 262,144); unlocks A100 fused headroom for the K-scaling story.
-            fused_cap = max(262_144, k_cap or 0)
-            # Per-batch fused footprint: ONE (K,M) int32 packed clause word + ~10N of assignment,
-            # trail and readout temps (no per-round decision masks — everything is in-kernel).
-            # The assignment itself is a BITMAP now (N/4 bytes, was 2N) — the 10N budget is kept
-            # UNCHANGED as conservative headroom; shrinking it = a K change = kill-switch re-run.
-            fused_pb = 4 * self.M + 300 + 10 * self.N
-            # eng_hold: kept UNCONDITIONALLY as headroom although no base-K sat/lsum exists any
-            # more — it was ACCIDENTALLY covering the fixed 4096×M soundness-check temporary, and
-            # skipping it spilled b05-c50 under the nvidia-smi kill-switch. If the ~9% K is ever
-            # wanted back, it must go with an explicit 4096·M reservation + kill-switch re-run.
-            eng_hold = ((sat_b + 4) * self.M + 2 * self.N) * self.K
-            budget = max(0, int(0.6 * (free_bytes - eng_hold)))
-            self.K_fused = max(self.K, min(budget // fused_pb, fused_cap))
-        else:
-            self.K_fused = self.K
-        # PIN the propagate kernel to the batch the chunks will actually run (K_fused), rather
-        # than letting the engine re-dispatch per reset(). The two agree on every full chunk, but
-        # the sampler also issues small resets — the warmup's pinned 1024, a short final chunk —
-        # and those must not silently switch kernel mid-run: `engine.mode` is recorded as row
-        # provenance and a measurement whose kernel changes underneath it is not a measurement.
-        # The RULE itself lives in engine.calibrate.dispatch_mode; this only chooses its input.
+        # PIN the propagate kernel to the batch the chunks will actually run, rather than letting
+        # the engine re-dispatch per reset(). The two agree on every full chunk, but the sampler
+        # also issues small resets — the warmup's pinned 1024, a short final chunk — and those
+        # must not silently switch kernel mid-run: `engine.mode` is recorded as row provenance and
+        # a measurement whose kernel changes underneath it is not a measurement. The RULE lives in
+        # engine.calibrate.dispatch_mode; this only chooses its input.
         if os.environ.get("GPAP_KERNEL") is None and device.type == "cuda":
-            self.engine.set_mode(dispatch_mode(self.K_fused, device))
+            self.engine.set_mode(dispatch_mode(self.M, self.K, device))
 
     # ---------------------------------------------------------------- THE batch size
-    # Read `batch_size`; set it with pin_batch()/pinned_batch(). K and K_fused below it are the
-    # two MEMORY MODELS that produce that number, not two batch sizes to choose between:
-    #
-    #   K        rows that fit under `compute_k_safe`'s analytic model. That model was calibrated
-    #            on the DELETED PyTorch path, whose per-round (K,N) scatter temporaries dominated
-    #            its peak, so it over-reserves badly. Kept unchanged on purpose: every K it has
-    #            produced was validated spill-safe under the nvidia-smi kill-switch with exactly
-    #            these numbers, and this box degrades to host RAM instead of erroring, so an
-    #            optimistic model silently halves throughput instead of failing loudly.
-    #   K_fused  rows that fit given what a fused chunk ACTUALLY costs (no (K,N) decide masks —
-    #            everything stays in-kernel). Every chunk is fused, so this is the real batch.
-    #
-    # K survives for three reasons: it floors K_fused, it sizes the `eng_hold` deduction, and
-    # dropping it below its construction value is the switch that turns the boost off (that is
-    # what `_boosted` reads). Callers should not poke either attribute directly.
+    # Read `batch_size`; set it with pin_batch() / pinned_batch(). `K` is the calibrated value
+    # and `batch_size` is what the next chunk runs — they differ only while a pin is in force.
     @property
     def batch_size(self) -> int:
         """Trajectories the next chunk will run — the number that sets throughput."""
-        return self.K_fused if self._boosted else self.K
-
-    @property
-    def _boosted(self) -> bool:
-        """Whether fused chunks may use K_fused: true while K is at its construction value."""
-        return self.K >= self._K_init
+        return self.K
 
     def pin_batch(self, n: int) -> int:
         """Force every chunk to EXACTLY `n` rows, and return it.
 
-        Setting both models equal makes the boost a no-op, so this is the only way to state a
-        batch size that holds regardless of how K compares to its construction value. Use it
-        whenever a bound is required rather than merely intended — above all when rows are
-        reconstructed to host RAM, where an unbounded fused chunk is tens of GB (that is exactly
-        how tests/test_circuits.py reached 28 GB asking for 1000 models).
+        Use it whenever a bound is REQUIRED rather than merely intended — above all when rows are
+        reconstructed to host RAM, where an unbounded chunk is tens of GB (that is exactly how
+        tests/test_circuits.py once reached 28 GB asking for 1000 models).
 
-        Pinning ABOVE the calibrated value is allowed and is how the no-change gate fixes K
-        across builds, but it overrides the memory model — this box then spills to host RAM
-        rather than erroring, so size it yourself (docs/BENCHMARKING.md §2, kill-switch).
-        """
-        self.K = self.K_fused = max(1, int(n))
-        return self.batch_size
+        Pinning ABOVE the calibrated value is allowed and is how the no-change gate fixes K across
+        builds, but it overrides the memory model — this box then spills to host RAM rather than
+        erroring, so size it yourself (docs/BENCHMARKING.md §2, kill-switch)."""
+        self.K = max(1, int(n))
+        return self.K
 
     @contextlib.contextmanager
     def pinned_batch(self, n: int):
-        """`pin_batch(n)` for the duration of the block, restoring both models afterwards."""
-        k, k_fused = self.K, self.K_fused
+        """`pin_batch(n)` for the duration of the block, restoring the calibrated value after."""
+        k = self.K
         self.pin_batch(n)
         try:
             yield self
         finally:
-            self.K, self.K_fused = k, k_fused
+            self.K = k
 
     # Byte cap for one (rows, M) int32 soundness-check slice (see sample()); bounds the
     # transient regardless of M so the K budget needs no silent headroom for it.
     _SOUND_SLICE_BYTES = 256e6
-
-    def _calibrate_k(self, free_bytes: int, k_cap: int | None, analytic_k: int) -> int:
-        """Size K to the spill-safe VRAM budget: K = min(analytic, cap).
-
-        RETUNED 2026-07-13 (kill-switch validated): the old extra floor 4×0.7·free/(70M+40N)
-        modeled the DELETED PyTorch path's scatter temporaries and bound K everywhere at ~1/3
-        of what the packed engine actually fits (measured real engine bytes/row = 4M+2N; the
-        roofline showed exactly those instances MLP-starved). The analytic model
-        (compute_k_safe ≈ (sat_b+4)M + 2N + 8N-class temps) matches the packed engine's true
-        footprint incl. the (K,N) readout masks, so it IS the floor now. The 4096×M soundness
-        transient that the old headroom accidentally covered is gone (sat_rows is read in
-        bounded slices — see _SOUND_SLICE_BYTES).
-
-        A runtime memory probe was tried and abandoned (2026-07-01): with expandable_segments
-        the peak-reserved read at construction is systematically ~1.6× below production and the
-        peak varies with the RNG draw → probes under-measure → spill. Do not resurrect it.
-        CPU / M==0: analytic only (no CUDA budget to exploit)."""
-        cap = k_cap if k_cap else analytic_k
-        return max(1, min(analytic_k, cap))
 
     @classmethod
     def from_cnf_file(cls, path: str, device: torch.device, *, simplify: bool = False,
@@ -705,12 +644,9 @@ class GPUSampler:
                                  "path; use False or 'soft'")
             return (c[0], max(1, c[1]), "soft" if la in ("soft", "fsoft") else False)
         plan = [_norm(c) for c in configs] if configs else [_norm((random_var, B, lookahead))]
-        # NOTE: the packed K_fused keeps the conservative eng_hold deduction (__init__) even
-        # though no base-K engine state exists any more — that headroom covers the fixed 4096×M
-        # soundness-check temporary (~3.3 GB on b05-c50's M=201k); skipping it SPILLED the big
-        # c50 wide instances under the kill-switch (11.7 GB on the 12 GB 4080). If the ~9% is
-        # ever wanted back, it must go with an explicit 4096·M reservation + kill-switch re-run.
-        K = self.K
+        # The 4096-row soundness check reads sat_count in bounded slices (_SOUND_SLICE_BYTES),
+        # so it needs no reservation in the batch budget.
+        K = self.batch_size
         # More than one config => the bandit picks per chunk. Exactly one => nothing to pick, and
         # per-config timing is skipped (that is the pinned-algorithm measurement mode).
         adaptive = configs is not None and len(plan) > 1
@@ -766,9 +702,7 @@ class GPUSampler:
                           if adaptive else plan[0]]
             for cfg in chunk_cfgs:
                 rv_c, B_c, la_c = cfg
-                # Every chunk is fused, so the boosted batch applies; with the boost off (a lowered
-                # or pinned K) the chunk runs exactly K rows.
-                K_c = self.batch_size if self._boosted else K
+                K_c = self.batch_size
                 if adaptive:
                     self._sync()
                     # read BEFORE t_cfg so the (synced) counter reads aren't charged to wall

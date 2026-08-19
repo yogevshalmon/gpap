@@ -39,7 +39,10 @@ cpp/                       # THE ENGINE CORE — libgpap (C ABI + header-only C+
   src/formula.cpp          # DIMACS tokenizer + CSR occ + packed init (THE builder; python defers)
   src/engine.cpp           # state ownership (cuMemAlloc), reset/flush cache, both entry points
   src/readout.cpp          # selections, on-device soundness, bit gathers, assignment rows
-  src/calibrate.cpp        # K sizing, VRAM model  |  src/runtime.cpp: cubin registry + launches
+  src/calibrate.cpp        # K sizing, VRAM model + THE wave/scalar dispatch rule
+  src/probe.cpp            # combinatorial probing: every k-subset of a literal set, paged +
+                           #   budgeted (enumeration/chunking/ceiling all live HERE, not per-face)
+  src/runtime.cpp          # cubin registry + launches
   kernels/bcp.py           # THE 2 BCP kernels (fixpoint + trajectory, SHIFT=16|8, scalar/WAVE)
   kernels/helpers.py       # support kernels (Triton, so the toolchain stays nvcc-free)
   tools/build_kernels.py   # AOT: kernels.py + helpers.py -> embedded cubins (29 specializations)
@@ -47,6 +50,10 @@ cpp/                       # THE ENGINE CORE — libgpap (C ABI + header-only C+
 examples/                  # RUNNABLE examples, both faces: sample_solutions.py +
                            #   check_assumptions.py (python) + a README pointing at cpp/examples/
 gpap/
+  mining.py                # entailed-clause mining — the STRATEGY (widths, fixpoint,
+                           #   subsumption vs the BASELINE-REDUCED formula, `_Subsumption`)
+                           #   over the core's probe primitive; `gpap mine` fronts it
+                           #   (docs/findings/MINING_FINDINGS.md)
   engine/                  # THE PYTHON FACE of the core (app-agnostic, reusable)
     _core.py               # ctypes binding to libgpap (private)
     formula.py             # CnfFormula: facade over the core's builder (numpy fallback off-GPU)
@@ -54,12 +61,13 @@ gpap/
     _triton.py             # `kernel_available()`: can this host REBUILD kernels? (gpap info only)
     calibrate.py           # K sizing, VRAM model, gpu_mem_available
     checker.py             # AssumptionChecker: the batched-assumptions API face
+    probe.py               # LiteralProbe: a thin DIMACS face over the core's probe ABI (the
+                           #   sweep itself is cpp/src/probe.cpp) — mining/backbone/lookahead
   sampling/                # THE FLAGSHIP
     sampler.py             # GPUSampler (trajectories, bandit, soft-stop) — engine consumer only
     pipeline.py            # sample_file / sample_clauses: the full e2e flow + the portfolios
                            #   (VarOrder/Lookahead enums + SamplingConfig NamedTuple, so a config
                            #   documents itself; `portfolio(name, allow_soft=)` is the accessor)
-    miner.py               # entailed-clause mining (the lose-set killer)
     preprocess.py          # unit_closure / equivalent_literal_substitution (ELS) primitives
     metrics.py             # distinct/two-wise + UNIFORMITY (exact chi2/TV or collision l2_ratio)
     output.py              # compact sample writers (bits / npy / dimacs) — GPU bit-projection out
@@ -94,8 +102,42 @@ archive/                   # concluded experiments (not maintained; see archive/
 ## Engine contract — two entry points (see `gpap/engine/__init__.py`)
 
 1. **Batched assumption checking**: `reset(K)` + `apply_and_propagate(K×L decisions) → conflict /
-   assignment` (one fixpoint launch). `AssumptionChecker` is the one-call face; the miner's
-   incremental flow is `reset(1) + apply_and_propagate(units) + recache_flush()`.
+   assignment` (one fixpoint launch). TWO one-call faces over it: `AssumptionChecker` ("check
+   THESE sets") and `LiteralProbe` ("check every k-subset of this literal pool, within this
+   budget" — `engine/probe.py`, the primitive behind mining). `LiteralProbe.assume()` is the
+   incremental-units flow, `reset(1) + apply_and_propagate(units) + recache_flush()`.
+   **The sweep lives in the CORE** (`gpap_probe_combinations` / `gpap_probe_tuples`, tier-1
+   `gpap::Prober`): enumeration order, chunk sizing and the budget are defined once, so the Python
+   and C++ faces probe the same candidates in the same order. Literals are DIMACS on both.
+   **`max_tuples` is a WORK BUDGET**: a width with more candidates probes that many and reports
+   `exhausted=False` — the clauses found are entailed regardless, so partial results are kept
+   (`refuse_over_max` opts into the all-or-nothing behaviour). It is checked against
+   `gpap_probe_count` BEFORE anything is generated; it used to be compared against an
+   already-materialized enumeration, which cannot protect against the case it exists for — at
+   width 3 over a circuit's free literals that array is ~1e11 tuples (~2 TB) and the process was
+   OOM-killed reaching the comparison. ⚠️ **The cost is the PROBE, not the enumeration**: probing
+   n tuples initializes n·M clause words (~1.2 GiB broadcast per chunk), so generation is free
+   beside it — measured, a paged sweep of 4M tuples beats probing the same 4M pre-materialized.
+   Do not "optimize" the enumerator. ⚠️ **THE RESET IS THE BOTTLENECK, not the propagate**: the
+   broadcast writes rows·M words while a probe MODIFIES 0.02–2.5% of them, and since K ≈
+   budget/4M the broadcast is ~0.80·free VRAM *per chunk whatever the instance* — a fixed ~26 ms
+   on the 4080, 41–94% of probe wall (b09 41%, b03 70%, b12 84%, 6s215rb0 94%). See
+   docs/findings/MINING_FINDINGS.md for the delta-restore design and its regime bound.
+   ⚠️ **Subsumed conflicts are the overwhelming majority and are dropped
+   IN THE ENGINE** (`skip_subsumed`): a conflict reached with ZERO implications was caused by a
+   clause that was already empty but for the assumed literals, so the kernel's implication
+   counter IS the test — free. b03-c25 width 3: 59,160 conflicts, 7 useful; the filter removes
+   57,625 in-engine (693→18 KiB of result buffer). ⚠️ It is "already implied" **relative to the
+   engine's BASELINE, not to the input formula** — mining folds proven units into the flush, so an
+   input (a|b|c) whose `c` the baseline falsified is a binary constraint during the sweep and the
+   filter drops a clause no input clause subsumes (17 of them on b03-c25). Sound for the intended
+   use (the consumer takes the mined units too, and derives it by propagation), which is why
+   mining's host-side test is against the RESIDUES (`mining._Subsumption`) and not the raw
+   clauses. It is also INCOMPLETE and order- hence KERNEL-dependent (wave can derive an
+   implication in the same warp-wide step that empties the clause): with the raw-clause test,
+   b03-c25 emitted 3,096 clauses under scalar and 3,113 under wave. The residue test restores
+   kernel-invariance — gated by `test_mining_is_kernel_invariant`. That test is SUBSUMPTION, not
+   deduplication: mining cannot emit the same clause twice.
 2. **Fused trajectory sampling**: `reset(K)` + `run_trajectory(order, n_support, B, seed,
    soft=…)` — the whole randomized decide+propagate loop in one launch.
 
@@ -142,20 +184,39 @@ kernels are the only path — the oracle is `tests/reference_bcp.py`).
   its success (0.530→0.265) somewhere between K=20k and K=28k, machine- AND K-dependent, sound
   throughout; int32 `K*M` overflow was tested by K-ladder and FALSIFIED. See docs/EVAL_RUNBOOK.md.
 - **Read `smp.batch_size`, set it with `smp.pin_batch(n)` / `with smp.pinned_batch(n):`**
-  (2026-08-03). K and K_fused are two MEMORY MODELS, not two batch sizes to choose between:
-  `batch_size` = `K_fused if K >= K_init else K` is the single number that says what a chunk
-  runs, and it is in every row as `engine.batch`. Poking the attributes directly was the bug
-  factory — `K_fused = K` and `K = min(K, n)` only bound the batch when they happened to drop K
-  BELOW its construction value, so at `n >= K` the boost stayed on and the chunk ran orders of
-  magnitude wider than asked. That cost 28 GB of host RAM in one test, left the same hole in the
-  pipeline's coverage run, and made the colab K-sweep mismeasure its own x-axis. `pin_batch`
-  states a bound that holds in both states. Gated by tests/test_k_cap.py; the refactor was
-  no-change-gated (identical model counts AND identical K/K_fused on 4 sk_ instances).
-- **`K_fused`** (every chunk is fused now): a boosted per-chunk K. The `eng_hold` deduction stays
-  UNCONDITIONAL — skipping it spilled b05-c50 under the kill-switch (the headroom covers the fixed
-  4096×M soundness temp). Don't re-try without an explicit 4096·M reservation + kill-switch
-  re-validation. `compute_k_safe`'s analytic model is knowingly conservative (calibrated on the
-  retired PyTorch path) — retuning it = K change = kill-switch re-validation.
+  (2026-08-03). `batch_size == K` now (there is ONE model, below) and it is in every row as
+  `engine.batch`. Poke the attributes directly and you get the old bug factory back: when there
+  were TWO numbers, `K_fused = K` and `K = min(K, n)` only bound the batch when they happened to
+  drop K BELOW its construction value, so at `n >= K` the boost stayed on and the chunk ran orders
+  of magnitude wider than asked — 28 GB of host RAM in one test, the same hole in the pipeline's
+  coverage run, and a colab K-sweep that mismeasured its own x-axis. `pin_batch` states a bound
+  that holds regardless. Gated by tests/test_k_cap.py.
+- **ONE batch model** (2026-08-18): `K` is `compute_k_safe`, which binds `gpap_row_bytes` — the
+  engine's EXACT per-chunk allocation list (4M packed + 4·ceil(2N/32) bitmap + 4·trail_cap +
+  flags/counters/masks), verified against measured VRAM at 1.00x and by a least-squares fit
+  (4.00·M + 4.25·N + 285). `K_fused` and its 0.6 budget are GONE: the boost only ever existed to
+  undo a per-row model that was 1.57x over (it charged a phantom sat array, a byte-per-literal
+  assignment and deleted PyTorch scatter temporaries, while omitting the trail). ⚠️ **`trail_cap`
+  used to be sized by the width of the last apply and only ever grew**, so the construction units
+  flush inflated it permanently — 10.sk_1_46 (1,121 units) ran at 2,623 instead of 1,566, +27%
+  per-row forever. It is bounded by the VARIABLE count (every trail push is bitmap-deduped), see
+  the proof at `cpp/src/engine.cpp::trail_cap_for`. Net: K is 1.4-2.5x larger; kill-switch 81% of
+  VRAM, sound in both kernels. ⚠️ wave and scalar agree exactly on MODELS and DECISIONS but the
+  IMPLICATION counter differs ~0.6% — gate on models, not counters. **The cause is CONFLICTED rows,
+  not a tally bug** (checked 2026-08-18; the earlier "wave tallies pre-dedup pushes" note was
+  wrong — wave's trail push IS deduped, `keep = fm & ((oldw_v & bit_v) == 0)`). A surviving row has
+  ONE fixpoint (confluence) so all of its fields match; a row that conflicts stopped as soon as
+  some clause emptied, and WHICH clause got there first depends on propagation order. Measured on
+  5,000 assumption sets: 809/3,282 conflicted rows differ in `num_propagated`, **0/1,718 surviving
+  rows differ in anything**, and `conflict` matches on all 5,000. Documented on
+  `AssumptionChecker.check_assumptions`, since chunk count can change the kernel and so a caller
+  can observe it.
+- **(retired) `K_fused` + `eng_hold`**: a boosted per-chunk K plus a headroom deduction, both
+  DELETED 2026-08-18 along with the 1.57×-over model they existed to compensate for. The one thing
+  to carry forward: the 4096×M soundness transient is real, and it is now covered by reading it in
+  ≤256 MB slices rather than by a reservation. Any retune of `compute_k_safe` is a K change and so
+  needs kill-switch re-validation — AND a dispatch re-check, since the batch feeds
+  `gpap_dispatch_wave`'s small-batch term (that coupling is what the 2026-08-18 regression was).
 - **Assignment BITMAP** (2026-07-14): assignment = bit l of (K, ⌈2N/32⌉) int32 words (l/~l
   share a word) — 8× smaller than byte-per-literal (small-2N rows go L1-resident), and in
   WAVE a forced-literal push is ONE `tl.atomic_or` whose RETURN deduplicates (old bit l) and
@@ -164,18 +225,38 @@ kernels are the only path — the oracle is `tests/reference_bcp.py`).
   bitwise pass on device, never a (K,N) mask — and `var_bits`' direct bit gather; `assignment`
   / `assignment_rows` materialize int8 rows only off the hot path. Strided bit-unpack
   slice-writes cost 16× sector RMW amplification, measured).
-- **Kernel variant auto-dispatch lives in the ENGINE** (`calibrate.dispatch_mode`, applied by
-  `BCPEngine.plan_for` on every `reset(K)` — `mode="auto"` is the default, mirroring
-  `gpap::Engine::plan_for`). Every consumer gets it, not just the one that asks: before
-  2026-08-14 only GPUSampler dispatched, so the batched-assumption path always ran scalar
-  (measured 1.05-1.15x left on the table). GPUSampler still PINS the mode to K_fused via
-  `set_mode` so its small resets (warmup, short final chunk) cannot switch kernel mid-
-  measurement. Same state, pure launch flag; gate-validated bit-identical:
-  warp-wide **WAVE** propagate (≤W trail lits at once, occ segments flattened, the packed-word
-  `atomic_add` return value resolving cross-literal clause races) when calibrated K_fused <
-  30× resident warps (retuned post-bitmap: wave b03@49k 1.41×, scalar only holds the huge-K/
-  tiny-M extreme b06@129k); scalar serial-trail propagate beyond. Session total vs the
-  pre-wave baseline: b14 5.7×, b12 2.8×, b04 1.8×, b03 1.5×. `GPAP_KERNEL=scalar|wave`
+- **Kernel variant auto-dispatch lives in the CORE** — `GPAP_MODE_AUTO`, resolved inside
+  `gpap_engine_reset` (2026-08-19). Every consumer gets it, not just the one that asks, and that
+  now includes consumers written against the C ABI. ⚠️ **This is the THIRD time the same hole
+  opened**: the rule used to be applied by the two WRAPPERS (`BCPEngine.plan_for`,
+  `gpap::Engine::plan_for`), so before 2026-08-14 only GPUSampler dispatched (batched assumptions
+  ran scalar, 1.05-1.15x left on the table) and then `gpap_probe_combinations` — which calls the
+  ABI directly — ran scalar from its port until 2026-08-19 (measured 1.28x on b03-c25 M=14.5k,
+  1.67x on 6s215rb0 M=66k, 1.76x on b09-c25, **2.20x on b12-c50 M=219k**; 1.65x end-to-end on
+  `gpap mine` where the sweep dominates, ~1.0x where it does not). Put a default WHERE THE ABI IS,
+  not where the convenient wrapper is. `plan_for` survives in both faces as a pure query.
+  GPUSampler still PINS the mode to the chunk batch via `set_mode` so its small resets (warmup,
+  short final chunk) cannot switch kernel mid-measurement. Same state, pure launch flag
+  (confluence ⇒ it can only change speed) — but note it is NOT observationally pure through the
+  `skip_subsumed` filter, which reads the order-dependent implication counter (see entry point 1
+  above).
+  **THE RULE IS `gpap_dispatch_wave(M, batch, device)` in `cpp/src/calibrate.cpp` — ONE definition,
+  and it keys off M, the CLAUSE COUNT, not the batch** (2026-08-18): warp-wide **WAVE** propagate
+  (≤W trail lits at once, occ segments flattened, the packed-word `atomic_add` return value
+  resolving cross-literal clause races) when `M ≥ 2048`, or when `batch ≤ resident_warps` (too few
+  rows for scalar to fill the card either way); scalar serial-trail propagate otherwise.
+  ⚠️ **It USED to read `batch < 30× resident_warps`, and that was a PROXY for M, not occupancy** —
+  K ≈ budget/(4M), so "huge batch" and "small M" were the same rows. The batch-sizing collapse
+  (K 1.4-2.5× larger) broke the proxy: mid-size formulas landed ON the batch cap, where `batch` is
+  a constant, so every one was classed "scalar". Measured cost, ABC circuits, fixed wall,
+  interleaved best-of-2: **0.727× on the 4 rows that flipped (4080), 0.615-0.698× on the L4's 2,
+  while the 11 rows that kept their kernel were 0.993×.** After the M-based rule the same A/B is
+  **1.044× overall (worst row 0.938), with 3 scalar→wave promotions worth 1.28×.** Calibration
+  (forced-kernel A/B at FIXED K, 25 instances, 4080+L4, ABC circuits + sk_ + tiny circuits, at the
+  batch cap so M is the only variable): M=32 0.772, M=483 0.918, M=1,982 0.960, M=2,098 1.041,
+  M=2,882 1.407, M=14,012 1.572, and 1.27-1.66 for every larger M out to M=107,065; whole-set
+  geomean wave/scalar 1.39× (4080) / 1.46× (L4). Do NOT reintroduce a batch-only rule.
+  Session total vs the pre-wave baseline: b14 5.7×, b12 2.8×, b04 1.8×, b03 1.5×. `GPAP_KERNEL=scalar|wave`
   forces; W via `GPAP_WAVE_W` (32 best; W>32 spreads over W/32 real warps via num_warps —
   measured 2-5× WORSE, cross-warp reduction sync dominates). The trajectory kernel's
   **decision scan** is warp-wide in WAVE only (bit-identical picks; +12-19% there; in scalar
@@ -198,6 +279,7 @@ pytest                                # full suite (gpu tests skip off-CUDA; slo
 
 gpap info                             # device / triton / power-limit warning
 gpap sample formula.cnf -n 50000 --out samples.out --stats run.json
+gpap mine formula.cnf --width 1 2 --pool all --seconds 10 --out stronger.cnf  # entailed clauses
 gpap sample b10.bench --cycles 25 -n 50000 --out stim.out    # .bench: columns = wire@cycle
 gpap sample b10.bench --cycles 25 --encoder abc              # ABC-encoded CNF (2-8x fewer clauses)
 gpap bench 'path/*.cnf' --cmsgen /path/to/cmsgen --n-cov 5000
@@ -232,7 +314,7 @@ CI/CO mapping is POSITIONAL (frame-major), name-verified when symbols exist.
 whole cross-frame win (b12's 12-14x NEEDS an equivalence sweep; dc2-only gets 1.4x) — `auto`
 runs `full` below ~50k estimated unrolled ANDs, `fast` (pre-unroll opt + cheap post) above.
 Encode wall is printed + in stats (`encode_s`) — it is NOT inside the pipeline's e2e rate.
-**Miner overlap**: dc2/fraig removes the backbone L1 mines (0-45 units on ABC CNFs vs 59-1007 on
+**Miner overlap**: dc2/fraig removes the backbone width-1 mining finds (0-45 units on ABC CNFs vs 59-1007 on
 Tseitin, for the same 5s budget) ⇒ `sample_file` auto-disables mining on `c encoder abc` CNFs
 (`--mine on` forces). **At `--target rare` the encoder is PER-INSTANCE** (2026-07-14, same
 engine, 3-seed): ABC wins 1.8-5.7× on most and unlocks b14 (0→24 models/s), but the rare-pin
@@ -295,7 +377,7 @@ gpap bench 'benchmarks/circuits/bench/seq/*.bench' --encoders tseitin abc:fast -
   (the Colab-disconnect story). Out-of-envelope formulas (`gpap.engine.packed_envelope`) and
   `--max-clauses/--max-vars` oversizes are skipped WITH the reason, never a raise.
 - **Engine provenance in every row** (`engine`: packed split 16|16 vs 8|24, wave/scalar propagate,
-  K/K_fused) + a `krn` column — the evidence a number came from the sum-trick kernel in-envelope.
+  K and the resolved cap) + a `krn` column — the evidence a number came from the sum-trick kernel in-envelope.
 - **CMSGen fairness**: build it with `scripts/build_cmsgen.sh` (upstream + the in-repo patch
   `scripts/cmsgen_gpap_eval.patch`). GPAP's timed run emits nothing, stock CMSGen writes every
   sample as a full N-var assignment — measured 8.2× of its wall on 27.sk_3_32 (0.42s vs 3.6s /
@@ -369,6 +451,6 @@ Cross-GPU K-scaling: `eval/colab_sampling_benchmark.py` + `notebooks/gpap_colab_
 
 - Circuit CNFs are GENERATED at test time from the committed `.bench` sources (no dependence on any
   user-local benchmark tree). `tests/conftest.py::circuit_cnfs` builds the matrix once per session.
-- The no-change gate for a pure refactor: fixed K, `K_fused` pinned to K, single config, seed 5 ⇒
+- The no-change gate for a pure refactor: fixed K (`--k-cap N` + `pin_batch`), one config, seed 5 ⇒
   bit-identical model counts (+ model-set hashes on small instances). Rates alone are draw-noisy on
   low-success instances (±40%) — see docs/BENCHMARKING.md §3.

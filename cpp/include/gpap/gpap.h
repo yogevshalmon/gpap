@@ -40,8 +40,13 @@ typedef enum {
 } gpap_status;
 
 typedef enum {
-    GPAP_MODE_SCALAR = 0,   /* serial-trail propagate (best at large K) */
-    GPAP_MODE_WAVE = 1      /* warp-wide wavefront propagate (best when K is small) */
+    GPAP_MODE_SCALAR = 0,   /* serial-trail propagate (best below ~2k clauses) */
+    GPAP_MODE_WAVE = 1,     /* warp-wide wavefront propagate (best above it) */
+    /* Let the engine choose, per reset(K), with gpap_dispatch_wave. INPUT ONLY: gpap_engine_mode
+     * always reports the RESOLVED kernel, never this. Auto is the right default for anything that
+     * is not deliberately A/B-ing the two kernels, and resolving it HERE rather than in a wrapper
+     * is what makes that true for every consumer -- see gpap_engine_reset. */
+    GPAP_MODE_AUTO = 2
 } gpap_mode;
 
 typedef struct gpap_formula gpap_formula;
@@ -88,7 +93,9 @@ gpap_status gpap_packed_envelope(int32_t num_vars, int32_t max_clause_len, int32
  * auto split) — every field is "0 means the sensible default". */
 typedef struct {
     int device;             /* CUDA device ordinal (0) */
-    gpap_mode mode;         /* GPAP_MODE_SCALAR; GPUSampler-style dispatch picks WAVE at low K */
+    gpap_mode mode;         /* GPAP_MODE_SCALAR (so `{0}` stays the historical default);
+                             * GPAP_MODE_AUTO to let every reset(K) pick -- what the C++ and
+                             * Python faces both pass unless a caller pins a kernel */
     int32_t force_shift;    /* 0 = pick the split from the formula shape; 8 or 16 to pin it
                              * (A/B testing the packed splits on a small formula) */
     int32_t vscan;          /* warp-wide decision scan in the wave kernel:
@@ -98,14 +105,21 @@ typedef struct {
 gpap_status gpap_engine_create(const gpap_formula *f, const gpap_engine_options *opts,
                                gpap_engine **out);
 void gpap_engine_free(gpap_engine *e);
+/* Pin a kernel, or pass GPAP_MODE_AUTO to hand the choice back to gpap_engine_reset. */
 gpap_status gpap_engine_set_mode(gpap_engine *e, gpap_mode mode);
+/* The RESOLVED kernel (never GPAP_MODE_AUTO) -- what the next launch will actually run. */
 gpap_mode gpap_engine_mode(const gpap_engine *e);
 int32_t gpap_engine_shift(const gpap_engine *e);
 int32_t gpap_engine_k(const gpap_engine *e);
 int32_t gpap_engine_num_vars(const gpap_engine *e);
 int32_t gpap_engine_num_clauses(const gpap_engine *e);
 
-/* Restore K rows to the cached post-units-flush state (allocations reused when K matches). */
+/* Restore K rows to the cached post-units-flush state (allocations reused when K matches).
+ * Also RESOLVES GPAP_MODE_AUTO for this K, which is why the choice lives here and not in a
+ * wrapper: every entry point resets, so every entry point dispatches. It used to be resolved by
+ * gpap::Engine::plan_for and BCPEngine.plan_for instead, and the predictable happened twice --
+ * a consumer that reset through the ABI ran SCALAR forever without anyone noticing (the batched
+ * assumption path until 2026-08-14, then gpap_probe_combinations, measured at 1.28-2.20x). */
 gpap_status gpap_engine_reset(gpap_engine *e, int32_t K);
 
 /* Entry point 1 — apply a (K, L) matrix of INTERNAL literal indices (-1 = padding) and BCP to

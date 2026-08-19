@@ -29,7 +29,7 @@ def flat_lit_arrays(clauses: list) -> tuple:
     """(lens, lit_idx, cls_idx) int64 numpy arrays for a clause list — the shared vectorised
     path for CSR-occ / clause-size / lit-xor construction. The per-literal Python loops this
     replaces cost seconds per call on 1M-clause circuit unrolls (and construction runs several
-    times per instance: sampler, miner prober, post-mining rebuild)."""
+    times per instance: sampler, mining probe, post-mining rebuild)."""
     M = len(clauses)
     lens = np.fromiter(map(len, clauses), dtype=np.int64, count=M)
     total = int(lens.sum()) if M else 0

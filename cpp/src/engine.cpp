@@ -175,7 +175,11 @@ extern "C" gpap_status gpap_engine_create(const gpap_formula *f, const gpap_engi
         e->total_lits = f->total_lits;
         e->max_clause_len = f->max_clause_len;
         e->has_empty_clause = f->has_empty_clause;
-        e->mode = o.mode;
+        /* AUTO is an INPUT value only: `mode` always holds a runnable kernel, and reset(K)
+         * re-resolves it while `auto_mode` is set. Starting at SCALAR is arbitrary and never
+         * observable -- reset() precedes every launch. */
+        e->auto_mode = (o.mode == GPAP_MODE_AUTO) ? 1 : 0;
+        e->mode = e->auto_mode ? GPAP_MODE_SCALAR : o.mode;
         /* 0 = default, 1 = on, -1 = off. The zero value MUST mean the default: a C caller
          * writing `gpap_engine_options o = {0}` would otherwise silently lose the warp-wide
          * decision scan (worth 12-19% on wave instances) while the header promises otherwise. */
@@ -225,7 +229,13 @@ extern "C" void gpap_engine_free(gpap_engine *e) {
 
 extern "C" gpap_status gpap_engine_set_mode(gpap_engine *e, gpap_mode mode) {
     if (!e) return GPAP_ERR_ARG;
-    e->mode = mode;
+    /* Pinning a kernel CLEARS auto, and asking for auto hands the choice back to reset(K). Both
+     * directions matter: the sampler pins its chunk's kernel so a short final reset cannot switch
+     * kernel mid-measurement, and a test that pinned one has to be able to give it up. */
+    e->auto_mode = (mode == GPAP_MODE_AUTO) ? 1 : 0;
+    if (!e->auto_mode) e->mode = mode;
+    else if (e->K > 0) e->mode = gpap_dispatch_wave(e->num_clauses, e->K, e->device_ordinal)
+                                     ? GPAP_MODE_WAVE : GPAP_MODE_SCALAR;
     return GPAP_OK;
 }
 
@@ -278,6 +288,11 @@ extern "C" gpap_status gpap_engine_reset(gpap_engine *e, int32_t K) {
     GPAP_TRY(use_ctx(e));
     GPAP_TRY(ensure_state(e, K, kDefaultBFloor));
     e->K = K;
+    /* Resolve the kernel for THIS K. Cheap (a constant compare unless M is small) and it is the
+     * one place every entry point passes through, which is the whole point of putting it here. */
+    if (e->auto_mode)
+        e->mode = gpap_dispatch_wave(e->num_clauses, K, e->device_ordinal) ? GPAP_MODE_WAVE
+                                                                           : GPAP_MODE_SCALAR;
     for (int i = 0; i < GPAP_SLOTS; ++i) { e->slots[i].rows_valid = false; e->slots[i].count = 0; }
     if (!e->flush_ready) return GPAP_OK;                 /* construction path: caller seeds */
     GPAP_TRY(broadcast_rows(e, e->packed, e->packed_flushed, e->num_clauses, K));

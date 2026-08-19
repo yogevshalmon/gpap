@@ -104,6 +104,27 @@ class EngineOptions(ctypes.Structure):
     _fields_ = [("device", c_int), ("mode", c_int), ("force_shift", c_int32), ("vscan", c_int32)]
 
 
+class ProbeOptions(ctypes.Structure):
+    """Mirror of `gpap_probe_options`. 0/negative means "no limit" everywhere except
+    `distinct_vars`, whose useful default is 1 (drop tuples sharing a variable). `max_tuples` is a
+    WORK BUDGET — the sweep probes that many rather than refusing (see `refuse_over_max`)."""
+    _fields_ = [("seconds", ctypes.c_double), ("max_tuples", c_int64), ("batch", c_int32),
+                ("distinct_vars", c_int32),
+                ("skip_subsumed", c_int32), ("refuse_over_max", c_int32)]
+
+
+class ProbeStats(ctypes.Structure):
+    """Mirror of `gpap_probe_stats`. `exhausted` is the field that turns a negative result into a
+    proof: it means every candidate was probed."""
+    _fields_ = [("total", c_int64), ("probed", c_int64), ("conflicts", c_int64),
+                ("subsumed", c_int64),
+                ("exhausted", c_int32), ("stop", c_int32), ("seconds", ctypes.c_double)]
+
+
+#: `gpap_probe_stop` — why a sweep ended.
+PROBE_STOP = {0: "", 1: "max_tuples", 2: "deadline", 3: "unsat"}
+
+
 class Counters(ctypes.Structure):
     _fields_ = [("ops", c_int64), ("props", c_int64), ("decs", c_int64), ("launches", c_int64)]
 
@@ -157,6 +178,16 @@ def _declare(lib: ctypes.CDLL) -> None:
         ("gpap_mem_available", [c_int, ctypes.c_double], c_int64),
         ("gpap_resident_warps", [c_int], c_int32),
         ("gpap_dispatch_wave", [c_int32, c_int32, c_int], c_int32),
+        ("gpap_probe_combinations",
+         [c_void_p, _I32P, c_int32, c_int32, POINTER(ProbeOptions), POINTER(c_void_p)], c_int),
+        ("gpap_probe_tuples",
+         [c_void_p, _I32P, c_int64, c_int32, POINTER(ProbeOptions), POINTER(c_void_p)], c_int),
+        ("gpap_probe_count", [c_void_p, _I32P, c_int32, c_int32, c_int32], c_int64),
+        ("gpap_probe_free", [c_void_p], None),
+        ("gpap_probe_stats_get", [c_void_p, POINTER(ProbeStats)], None),
+        ("gpap_probe_conflicts", [c_void_p, _I32P, c_int64], c_int),
+        ("gpap_free_literals", [c_void_p, _I32P, _I32P], c_int),
+        ("gpap_assume_units", [c_void_p, _I32P, c_int32], c_int),
         ("gpap_last_error", [], c_char_p),
         ("gpap_version", [], c_char_p),
     ]
@@ -225,6 +256,121 @@ def default_k_cap(device: int = 0) -> int:
     constants) that `gpap.engine.calibrate.default_k_cap` applies from Python. Bound here so the
     two faces can be asserted equal rather than assumed equal (tests/test_k_cap.py)."""
     return int(load().gpap_default_k_cap(int(device)))
+
+
+# ---------------------------------------------------------------------------- probing
+# The sweep itself (enumeration, chunking, budget) runs in the core; these only marshal. A
+# `ProbeSweep` owns a core handle, so it is a context manager — leaking one leaks its conflict
+# buffer until the process exits.
+
+
+class ProbeSweep:
+    """One sweep's result, straight from the core. Free it (or use `with`)."""
+
+    __slots__ = ("_h", "_k", "stats")
+
+    def __init__(self, handle, k: int):
+        self._h, self._k = handle, int(k)
+        self.stats = ProbeStats()
+        load().gpap_probe_stats_get(self._h, byref(self.stats))
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *exc):
+        self.free()
+        return False
+
+    def conflicts(self):
+        """(n, k) int32 of DIMACS literals: the tuples whose assumption drove BCP to a conflict."""
+        import numpy as np
+        n = int(self.stats.conflicts)
+        out = np.empty((n, self._k), dtype=np.int32)
+        if n:
+            check(load().gpap_probe_conflicts(self._h, out.ctypes.data_as(_I32P), n),
+                  "gpap_probe_conflicts")
+        return out
+
+    def free(self) -> None:
+        if getattr(self, "_h", None):
+            load().gpap_probe_free(self._h)
+            self._h = None
+
+    def __del__(self):
+        self.free()
+
+
+def _probe_options(seconds=None, max_tuples=None, batch=0, distinct_vars=True,
+                   skip_subsumed=False, refuse_over_max=False):
+    return ProbeOptions(float(seconds or 0.0), int(max_tuples or 0), int(batch or 0),
+                        1 if distinct_vars else 0, 1 if skip_subsumed else 0,
+                        1 if refuse_over_max else 0)
+
+
+def probe_combinations(engine, pool, k: int, **kw) -> ProbeSweep:
+    """Probe every k-subset of `pool` (DIMACS literals); `pool=None` means all free literals."""
+    import numpy as np
+    lib = load()
+    h = c_void_p()
+    if pool is None:
+        ptr, n = None, 0
+    else:
+        arr = np.ascontiguousarray(pool, dtype=np.int32).reshape(-1)
+        ptr, n = arr.ctypes.data_as(_I32P), int(arr.size)
+    check(lib.gpap_probe_combinations(engine, ptr, n, int(k), byref(_probe_options(**kw)),
+                                      byref(h)), "gpap_probe_combinations")
+    return ProbeSweep(h, k)
+
+
+def probe_count(engine, pool, k: int, distinct_vars: bool = True) -> int:
+    """Exact k-subset count of `pool` (None = all free literals), WITHOUT generating it.
+
+    The number to check a ceiling against before enumerating. One definition, in the core — a
+    second copy of this arithmetic in Python is exactly the drift the sizing collapse removed."""
+    import numpy as np
+    if pool is None:
+        ptr, n = None, 0
+    else:
+        arr = np.ascontiguousarray(pool, dtype=np.int32).reshape(-1)
+        ptr, n = arr.ctypes.data_as(_I32P), int(arr.size)
+    return int(load().gpap_probe_count(engine, ptr, n, int(k), 1 if distinct_vars else 0))
+
+
+def probe_tuples(engine, tuples, **kw) -> ProbeSweep:
+    """Probe an explicit (n, k) array of DIMACS literals."""
+    import numpy as np
+    arr = np.ascontiguousarray(tuples, dtype=np.int32)
+    if arr.ndim == 1:
+        arr = arr.reshape(-1, 1)
+    n, k = arr.shape
+    lib = load()
+    h = c_void_p()
+    check(lib.gpap_probe_tuples(engine, arr.ctypes.data_as(_I32P), int(n), int(k),
+                                byref(_probe_options(**kw)), byref(h)), "gpap_probe_tuples")
+    return ProbeSweep(h, k)
+
+
+def free_literals(engine):
+    """DIMACS literals the formula's unit flush left undetermined, ascending by variable."""
+    import numpy as np
+    lib = load()
+    n = c_int32(0)
+    check(lib.gpap_free_literals(engine, None, byref(n)), "gpap_free_literals")
+    out = np.empty(int(n.value), dtype=np.int32)
+    if n.value:
+        check(lib.gpap_free_literals(engine, out.ctypes.data_as(_I32P), byref(n)),
+              "gpap_free_literals")
+    return out
+
+
+def assume_units(engine, lits) -> None:
+    """Fold proven units into the cached flush state in place."""
+    import numpy as np
+    arr = np.ascontiguousarray(lits, dtype=np.int32).reshape(-1)
+    if arr.size == 0:
+        return
+    check(load().gpap_assume_units(engine, arr.ctypes.data_as(_I32P), int(arr.size)),
+          "gpap_assume_units")
 
 
 def packed_envelope(num_vars: int, max_clause_len: int) -> "tuple[int | None, str]":
@@ -321,15 +467,19 @@ class Engine:
     Mirrors gpap.engine.bcp_engine.BCPEngine, but every readout returns NUMPY (the state lives
     in library-owned device memory, not in torch tensors — that ownership is the point)."""
 
-    MODE_SCALAR, MODE_WAVE = 0, 1
+    MODE_SCALAR, MODE_WAVE, MODE_AUTO = 0, 1, 2
+    _MODES = {"scalar": MODE_SCALAR, "wave": MODE_WAVE, "auto": MODE_AUTO}
 
-    def __init__(self, formula: Formula, device: int = 0, mode: str = "scalar",
+    def __init__(self, formula: Formula, device: int = 0, mode: str = "auto",
                  force_shift: int = 0, vscan: int = 0):
+        """`mode="auto"` (the default) lets the CORE pick the kernel on every reset(K).
+
+        Pin "scalar"/"wave" only to A/B them: the two share the same state and reach the same
+        fixpoints, so the choice can change speed and nothing else."""
         lib = load()
         self._f = formula                       # keep the formula alive
         h = c_void_p()
-        opts = EngineOptions(device, self.MODE_WAVE if mode == "wave" else self.MODE_SCALAR,
-                             int(force_shift), int(vscan))
+        opts = EngineOptions(device, self._mode_code(mode), int(force_shift), int(vscan))
         check(lib.gpap_engine_create(formula.handle, byref(opts), byref(h)), "create engine")
         self._h = h
         self._K = 0
@@ -356,11 +506,16 @@ class Engine:
     def mode(self) -> str:
         return "wave" if load().gpap_engine_mode(self._h) == self.MODE_WAVE else "scalar"
 
+    @classmethod
+    def _mode_code(cls, mode: str) -> int:
+        try:
+            return cls._MODES[mode]
+        except KeyError:
+            raise ValueError(f"unknown kernel mode {mode!r} (scalar|wave|auto)") from None
+
     def set_mode(self, mode: str) -> None:
-        if mode not in ("scalar", "wave"):
-            raise ValueError(f"unknown kernel mode {mode!r} (scalar|wave)")
-        check(load().gpap_engine_set_mode(
-            self._h, self.MODE_WAVE if mode == "wave" else self.MODE_SCALAR), "set mode")
+        """Pin a kernel, or "auto" to hand the choice back to the core's per-reset dispatch."""
+        check(load().gpap_engine_set_mode(self._h, self._mode_code(mode)), "set mode")
 
     @property
     def flush_conflict(self) -> bool:
@@ -403,6 +558,32 @@ class Engine:
 
     def recache_flush(self) -> None:
         check(load().gpap_engine_recache_flush(self._h), "recache flush")
+
+    # -------------------------------------------------- probing (entry point 1b)
+    # The sweep runs in the CORE: enumeration, chunking and the budget all live in
+    # cpp/src/probe.cpp, so a Python caller and a C++ caller get the same candidate order, the
+    # same batch model and the same "exhausted" semantics. Nothing here re-derives any of it.
+
+    def probe_combinations(self, pool, k: int, **kw) -> ProbeSweep:
+        """Probe every k-subset of `pool` (DIMACS literals); `pool=None` = every free literal."""
+        return probe_combinations(self._h, pool, k, **kw)
+
+    def probe_tuples(self, tuples, **kw) -> ProbeSweep:
+        """Probe an explicit (n, k) array of DIMACS literals."""
+        return probe_tuples(self._h, tuples, **kw)
+
+    def probe_count(self, pool, k: int, distinct_vars: bool = True) -> int:
+        """Exact candidate count without generating anything — check ceilings against this."""
+        return probe_count(self._h, pool, k, distinct_vars)
+
+    def free_literals(self) -> np.ndarray:
+        """DIMACS literals the unit flush left undetermined — what is worth probing."""
+        return free_literals(self._h)
+
+    def assume_units(self, lits) -> None:
+        """Fold PROVEN units into the cached flush state in place (see the ABI note: this
+        assumes entailment rather than checking it)."""
+        assume_units(self._h, lits)
 
     # -------------------------------------------------- selections + readout
     def pair_mask(self, vars_=None) -> int:
