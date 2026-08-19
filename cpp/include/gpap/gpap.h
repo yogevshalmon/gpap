@@ -129,6 +129,110 @@ gpap_status gpap_engine_recache_flush(gpap_engine *e);
 int gpap_engine_flush_conflict(const gpap_engine *e);
 gpap_status gpap_engine_flushed_assignment(gpap_engine *e, int8_t *out_host); /* (2N,) */
 
+/* ------------------------------------------------------------------ probing
+ * Entry point 1 asks "do THESE assumption sets conflict". Probing asks the combinatorial form of
+ * the same question: "which k-subsets of this literal set conflict" — the primitive behind
+ * failed-literal detection, entailed-clause mining, backbone extraction and lookahead scoring.
+ *
+ * If assuming literals (a, b) drives BCP to a conflict then the formula entails (~a | ~b), so a
+ * sweep at width k yields every entailed clause of width k that BCP alone can see. This ABI
+ * returns the ASSUMPTIONS that conflicted, not their negations: the primitive stays honest and
+ * the application (mining) negates.
+ *
+ * Two things make a combinatorial sweep usable, and both live here rather than in each caller:
+ * a batch that fits the GPU, and a budget that stops it. C(P,k) grows fast enough that an
+ * unbounded sweep of triples over a wide pool is hours of work — and, if it were materialized
+ * first, terabytes of host memory. Candidates are therefore counted EXACTLY (a binomial, or an
+ * elementary-symmetric DP when distinct_vars filters same-variable tuples) and checked against
+ * the ceiling BEFORE anything is generated, then generated one chunk at a time. */
+
+/** One sweep's result: the conflicting tuples plus what the sweep cost. Free with
+ *  gpap_probe_free. */
+typedef struct gpap_probe gpap_probe;
+
+/** Why a sweep stopped. */
+typedef enum {
+    GPAP_PROBE_COMPLETE = 0,  /* the whole enumeration was probed */
+    GPAP_PROBE_CEILING  = 1,  /* candidates exceeded max_tuples */
+    GPAP_PROBE_DEADLINE = 2,  /* the wall-clock budget expired between chunks */
+    GPAP_PROBE_UNSAT    = 3   /* the formula's own units already conflict; nothing to probe */
+} gpap_probe_stop;
+
+/** When to stop. Every field is optional; 0 (or negative) means "no limit". */
+typedef struct {
+    double  seconds;       /* wall-clock budget, checked BETWEEN chunks (a chunk is atomic) */
+    int64_t max_tuples;    /* how many candidates to probe at most — checked against an EXACT
+                            * count before anything is generated. See refuse_over_max. */
+    int32_t batch;         /* tuples per launch; 0 = size it from free VRAM */
+    int32_t distinct_vars; /* 1 = drop tuples holding two literals of the SAME variable. Such a
+                            * tuple is a repeat or a direct contradiction, so it conflicts for
+                            * reasons that have nothing to do with the formula. Default for a
+                            * literal pool; pass 0 only if you want them. */
+    int32_t skip_subsumed; /* 1 = do not report a conflict that BCP reached WITHOUT deriving a
+                            * single implication. Zero implications means the assumption literals
+                            * alone (plus what the formula's own units already falsified) emptied
+                            * a clause that is ALREADY THERE — so the clause this tuple would
+                            * prove is implied by one the formula holds, and reporting it only
+                            * makes the formula bigger and later propagation slower.
+                            * SOUND but INCOMPLETE: it never drops a clause that is not already
+                            * implied (measured 0 false positives), yet it misses the cases where
+                            * propagation happened to derive an implication before reaching the
+                            * dead clause, which is launch-order dependent. Measured on b03-c25 at
+                            * width 3 over its support: 59,160 conflicts of which 59,153 are
+                            * redundant and 7 are useful; this drops 57,625 of them (97.4%) inside
+                            * the engine, so they never occupy the result buffer or cross the bus.
+                            * A caller that wants exactness still filters what survives. */
+    int32_t refuse_over_max; /* what `max_tuples` MEANS. 0 (default) = a WORK BUDGET: probe the
+                            * first max_tuples candidates and report `exhausted = 0`. Every
+                            * conflict found is still a genuine entailed clause — a truncated
+                            * sweep is SOUND, just not complete. 1 = refuse the sweep outright,
+                            * for a caller that only wants an answer it can call a proof. */
+} gpap_probe_options;
+
+/** What a sweep did. `exhausted` is the one that licenses a negative result: it means every
+ *  candidate was probed, so "no conflict of this width" is a PROOF, not an absence of evidence. */
+typedef struct {
+    int64_t total;      /* candidates the full enumeration has (after distinct_vars) */
+    int64_t probed;     /* candidates actually probed — a prefix of the enumeration */
+    int64_t conflicts;  /* how many of those conflicted AND were reported */
+    int64_t subsumed;   /* conflicts dropped by skip_subsumed (reached with 0 implications) */
+    int32_t exhausted;  /* 1 iff probed == total and nothing cut the sweep short */
+    int32_t stop;       /* gpap_probe_stop */
+    double  seconds;
+} gpap_probe_stats;
+
+/** Probe every `k`-subset of `pool` (DIMACS literals). `pool = NULL` means EVERY literal the
+ *  formula's own unit propagation left undetermined — "all the lits", the common case, and
+ *  cheaper than asking for them and passing them back. Pass NULL options for the defaults. */
+gpap_status gpap_probe_combinations(gpap_engine *e, const int32_t *pool, int32_t pool_n,
+                                    int32_t k, const gpap_probe_options *opts,
+                                    gpap_probe **out);
+/** Probe an explicit (n, k) row-major matrix of DIMACS literals — the escape hatch for callers
+ *  that build candidates themselves (filtered, weighted, or drawn from somewhere else). */
+gpap_status gpap_probe_tuples(gpap_engine *e, const int32_t *tuples, int64_t n, int32_t k,
+                              const gpap_probe_options *opts, gpap_probe **out);
+/** How many k-subsets `pool` has, EXACTLY, without generating any of them — the number to check
+ *  a ceiling against BEFORE enumerating. Saturates at INT64_MAX rather than wrapping, because a
+ *  wrapped count would compare BELOW a ceiling and let through the very sweep it should refuse.
+ *  `pool = NULL` counts over every free literal. Exported because a caller that filters candidates
+ *  itself (mining drops subsumed ones) must still be able to reject an impossible width without
+ *  materializing it. */
+int64_t gpap_probe_count(gpap_engine *e, const int32_t *pool, int32_t pool_n, int32_t k,
+                         int32_t distinct_vars);
+void gpap_probe_free(gpap_probe *p);
+void gpap_probe_stats_get(const gpap_probe *p, gpap_probe_stats *out);
+/** The conflicting tuples, (conflicts, k) row-major DIMACS literals. Writes
+ *  min(conflicts, capacity) TUPLES; `capacity` is in tuples, not ints. */
+gpap_status gpap_probe_conflicts(const gpap_probe *p, int32_t *out, int64_t capacity);
+
+/** DIMACS literals whose variable the formula's unit flush left undetermined — what is worth
+ *  probing at all. Pass out=NULL to query the count. */
+gpap_status gpap_free_literals(gpap_engine *e, int32_t *out, int32_t *count);
+/** Fold PROVEN units into the cached flush state in place, so later probes see a narrowed
+ *  formula without it being rebuilt. Sound only if the literals really are entailed — this does
+ *  not check, it assumes; that is the caller's proof to have. */
+gpap_status gpap_assume_units(gpap_engine *e, const int32_t *lits, int32_t n);
+
 /* ------------------------------------------------------------------ selections + readout */
 
 /* A pair mask marks the variables a completion test considers. `vars` are 0-based variable

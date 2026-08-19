@@ -67,6 +67,7 @@ add_library(gpap SHARED
   src/engine.cpp
   src/readout.cpp
   src/calibrate.cpp
+  src/probe.cpp
   ${GPAP_GENERATED})
 target_include_directories(gpap
   PUBLIC  $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
@@ -89,6 +90,9 @@ target_link_libraries(gpap_sample PRIVATE gpap)
 
 add_executable(gpap_assumptions examples/assumptions.cpp)    # C++, gpap::AssumptionChecker
 target_link_libraries(gpap_assumptions PRIVATE gpap)
+
+add_executable(gpap_probe examples/probe.cpp)                # C++, gpap::Prober
+target_link_libraries(gpap_probe PRIVATE gpap)
 
 # ---------------------------------------------------------------- install / find_package
 # Downstream projects then just:

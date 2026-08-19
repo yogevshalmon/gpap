@@ -824,6 +824,216 @@ class AssumptionChecker {
     int device_ = 0;
 };
 
+// ---------------------------------------------------------------------------- probing
+
+/** When a probe sweep should stop. Every field is optional; the first to bind wins. */
+struct ProbeBudget {
+    /** Wall-clock ceiling, checked BETWEEN chunks (a chunk is the smallest unit of GPU work). */
+    double seconds = 0.0;
+    /** How many candidates to probe at most, checked against an EXACT count before anything is
+     *  generated. A WORK BUDGET: the sweep probes this many and reports `exhausted() == false`.
+     *  Every conflict found is still a genuine entailed clause. */
+    std::int64_t max_tuples = 0;
+    /** Drop conflicts BCP reached without deriving a single implication: the assumption alone
+     *  emptied a clause the formula already has, so the clause this tuple would prove is already
+     *  implied. Sound (never drops a useful clause) but not complete. Measured on b03-c25 at
+     *  width 3: removes 57,625 of 59,153 redundant conflicts inside the engine, where only 7 of
+     *  59,160 were useful. */
+    bool skip_subsumed = false;
+    /** Refuse the sweep outright when it exceeds `max_tuples`, instead of probing that many.
+     *  For a caller that wants an exhaustive answer or none at all. */
+    bool refuse_over_max = false;
+    /** Tuples per launch; 0 sizes it from free VRAM with the library's one memory model. */
+    std::int32_t batch = 0;
+    /** Drop tuples holding two literals of the SAME variable — they conflict for reasons that
+     *  have nothing to do with the formula. */
+    bool distinct_vars = true;
+};
+
+/** One sweep's result: which assumption tuples conflicted, and what the sweep cost. */
+class Probe {
+  public:
+    Probe() = default;
+    Probe(const Probe &) = delete;
+    Probe &operator=(const Probe &) = delete;
+    Probe(Probe &&o) noexcept { swap(o); }
+    Probe &operator=(Probe &&o) noexcept { swap(o); return *this; }
+    ~Probe() { if (h_) gpap_probe_free(h_); }
+
+    /** Number of conflicting tuples. */
+    std::int64_t size() const { return stats_.conflicts; }
+    /** Tuple width. */
+    std::int32_t width() const { return k_; }
+    /** Conflicting tuple `i` as DIMACS literals — assuming these drove BCP to a conflict, so the
+     *  formula entails the negation of their conjunction. */
+    std::vector<std::int32_t> operator[](std::int64_t i) const {
+        const std::size_t off = static_cast<std::size_t>(i) * static_cast<std::size_t>(k_);
+        return {tuples_.begin() + static_cast<std::ptrdiff_t>(off),
+                tuples_.begin() + static_cast<std::ptrdiff_t>(off + static_cast<std::size_t>(k_))};
+    }
+    /** The CLAUSE tuple `i` proves: the negation of its literals. Mining is this, plus a
+     *  strategy for which pools and widths to sweep. */
+    std::vector<std::int32_t> clause(std::int64_t i) const {
+        std::vector<std::int32_t> c = (*this)[i];
+        for (auto &l : c) l = -l;
+        return c;
+    }
+
+    /** Candidates the full enumeration has. */
+    std::int64_t total() const { return stats_.total; }
+    /** Candidates actually probed — a prefix of the enumeration. */
+    std::int64_t probed() const { return stats_.probed; }
+    /** Conflicts dropped as already-implied (see ProbeBudget::skip_subsumed). */
+    std::int64_t subsumed() const { return stats_.subsumed; }
+    double seconds() const { return stats_.seconds; }
+    /** TRUE iff every candidate was probed. This is what makes a NEGATIVE result meaningful: an
+     *  exhausted sweep that found nothing PROVES no entailed clause of this width exists (that
+     *  BCP can see), where a sweep cut short by a budget proves nothing at all. */
+    bool exhausted() const { return stats_.exhausted != 0; }
+    /** Why it stopped. */
+    gpap_probe_stop stop() const { return static_cast<gpap_probe_stop>(stats_.stop); }
+
+  private:
+    friend class Prober;
+    void adopt(gpap_probe *h, std::int32_t k) {
+        if (h_) gpap_probe_free(h_);
+        h_ = h;
+        k_ = k;
+        gpap_probe_stats_get(h_, &stats_);
+        tuples_.assign(static_cast<std::size_t>(stats_.conflicts) * static_cast<std::size_t>(k_), 0);
+        if (stats_.conflicts > 0)
+            check(gpap_probe_conflicts(h_, tuples_.data(), stats_.conflicts),
+                  "gpap_probe_conflicts");
+    }
+    void swap(Probe &o) noexcept {
+        std::swap(h_, o.h_); std::swap(k_, o.k_);
+        std::swap(stats_, o.stats_); tuples_.swap(o.tuples_);
+    }
+    gpap_probe *h_ = nullptr;
+    std::int32_t k_ = 0;
+    gpap_probe_stats stats_{};
+    std::vector<std::int32_t> tuples_;
+};
+
+/** BCP-probes every k-subset of a literal set — the engine's core primitive in its combinatorial
+ *  shape.
+ *
+ *      gpap::Prober prober("formula.cnf");
+ *      auto failed = prober.probe(1);                  // failed literals (the BCP backbone)
+ *      for (std::int64_t i = 0; i < failed.size(); ++i)
+ *          use(failed.clause(i));                      // each is an entailed unit
+ *
+ *      gpap::ProbeBudget b; b.seconds = 5; b.max_tuples = 200000;
+ *      auto pairs = prober.probe(support_literals, 2, b);
+ *
+ *  `probe(k)` with no pool sweeps every literal the formula's own unit propagation left
+ *  undetermined — probing a settled literal tells you nothing. Literals are DIMACS throughout.
+ *
+ *  This is the PRIMITIVE, not a mining strategy: which widths to sweep, over which pool, whether
+ *  to fold proven units back in and re-sweep, and which candidates to skip as already-subsumed
+ *  are decisions an application makes. `gpap.mining` (Python) is one such application; a C++
+ *  consumer builds its own on top of `probe` and `assume`.
+ *
+ *  Not thread-safe (it owns an Engine): one Prober per thread. */
+class Prober {
+  public:
+    explicit Prober(const std::string &cnf_path, int device = 0)
+        : Prober(Formula::from_dimacs(cnf_path), device) {}
+
+    explicit Prober(Formula formula, int device = 0)
+        : formula_(std::move(formula)), engine_(formula_, options(device)) {}
+
+    /** True when the formula's own units already conflict — nothing is worth probing. */
+    bool unsat() const { return engine_.flush_conflict() || formula_.trivially_unsat(); }
+
+    /** DIMACS literals the unit flush left undetermined. */
+    std::vector<std::int32_t> free_literals() {
+        std::int32_t n = 0;
+        check(gpap_free_literals(engine_.handle(), nullptr, &n), "gpap_free_literals");
+        std::vector<std::int32_t> out(static_cast<std::size_t>(std::max(n, 0)));
+        if (n > 0) check(gpap_free_literals(engine_.handle(), out.data(), &n), "gpap_free_literals");
+        return out;
+    }
+
+    /** Probe every `k`-subset of every free literal. */
+    Probe probe(std::int32_t k, const ProbeBudget &budget = ProbeBudget()) {
+        return sweep(nullptr, 0, k, budget);
+    }
+    /** Probe every `k`-subset of `pool` (DIMACS literals). */
+    Probe probe(const std::vector<std::int32_t> &pool, std::int32_t k,
+                const ProbeBudget &budget = ProbeBudget()) {
+        return sweep(pool.data(), static_cast<std::int32_t>(pool.size()), k, budget);
+    }
+
+    /** Exact candidate count for a sweep, WITHOUT generating it — check a ceiling against this
+     *  rather than against a materialized enumeration, which for a wide pool at k=3 is terabytes.
+     *  Saturates at INT64_MAX instead of wrapping. */
+    std::int64_t count(const std::vector<std::int32_t> &pool, std::int32_t k,
+                       bool distinct_vars = true) {
+        return gpap_probe_count(engine_.handle(), pool.data(),
+                                static_cast<std::int32_t>(pool.size()), k, distinct_vars ? 1 : 0);
+    }
+    std::int64_t count(std::int32_t k, bool distinct_vars = true) {
+        return gpap_probe_count(engine_.handle(), nullptr, 0, k, distinct_vars ? 1 : 0);
+    }
+
+    /** Probe an explicit (n, k) row-major matrix of DIMACS literals — for a caller that builds
+     *  its own candidates (filtered, weighted, or from somewhere else entirely). */
+    Probe probe_tuples(const std::vector<std::int32_t> &tuples, std::int32_t k,
+                       const ProbeBudget &budget = ProbeBudget()) {
+        const gpap_probe_options o = to_options(budget);
+        gpap_probe *h = nullptr;
+        check(gpap_probe_tuples(engine_.handle(), tuples.data(),
+                                static_cast<std::int64_t>(tuples.size()) / std::max(k, 1), k, &o,
+                                &h), "gpap_probe_tuples");
+        Probe p;
+        p.adopt(h, k);
+        return p;
+    }
+
+    /** Fold PROVEN units into the cached flush state, so later sweeps see a narrowed formula
+     *  without it being rebuilt. Sound only if the literals really are entailed — probing at
+     *  k = 1 is one way to have earned that. */
+    void assume(const std::vector<std::int32_t> &units) {
+        if (units.empty()) return;
+        check(gpap_assume_units(engine_.handle(), units.data(),
+                                static_cast<std::int32_t>(units.size())), "gpap_assume_units");
+    }
+
+    const Formula &formula() const { return formula_; }
+    Engine &engine() { return engine_; }
+
+  private:
+    static Options options(int device) {
+        Options o;
+        o.device = device;
+        return o;
+    }
+    static gpap_probe_options to_options(const ProbeBudget &b) {
+        gpap_probe_options o{};
+        o.seconds = b.seconds;
+        o.max_tuples = b.max_tuples;
+        o.batch = b.batch;
+        o.distinct_vars = b.distinct_vars ? 1 : 0;
+        o.skip_subsumed = b.skip_subsumed ? 1 : 0;
+        o.refuse_over_max = b.refuse_over_max ? 1 : 0;
+        return o;
+    }
+    Probe sweep(const std::int32_t *pool, std::int32_t n, std::int32_t k,
+                const ProbeBudget &budget) {
+        const gpap_probe_options o = to_options(budget);
+        gpap_probe *h = nullptr;
+        check(gpap_probe_combinations(engine_.handle(), pool, n, k, &o, &h),
+              "gpap_probe_combinations");
+        Probe p;
+        p.adopt(h, k);
+        return p;
+    }
+
+    Formula formula_;
+    Engine engine_;
+};
+
 }  // namespace gpap
 
 #endif /* GPAP_HPP */

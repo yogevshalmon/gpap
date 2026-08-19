@@ -93,7 +93,8 @@ conflict flags matter — the per-row assignment is `n x 2N` bytes and is the te
 large call expensive; chunking cannot shrink what you asked to be returned.
 
 Examples: [`examples/sample.cpp`](examples/sample.cpp),
-[`examples/assumptions.cpp`](examples/assumptions.cpp) — see [`../examples/`](../examples/)
+[`examples/assumptions.cpp`](examples/assumptions.cpp),
+[`examples/probe.cpp`](examples/probe.cpp) — see [`../examples/`](../examples/)
 for the Python ones and how to run all of them.
 
 ### Tier 2 — driving the engine yourself
@@ -189,6 +190,7 @@ tools/make_libcuda_stub.py  link-only libcuda stub, so CI can build without a dr
 examples/c_api.c         standalone C consumer (raw ABI) — the header's reference
 examples/sample.cpp      solution sampling from C++ (gpap::Sampler)
 examples/assumptions.cpp batched assumption checking from C++ (gpap::AssumptionChecker)
+examples/probe.cpp       entailed-clause probing from C++ (gpap::Prober)
 ```
 
 The core's contract is gated by [`tests/test_core.py`](../tests/test_core.py) against two
