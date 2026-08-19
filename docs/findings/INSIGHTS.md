@@ -9,6 +9,24 @@ Do **not** re-litigate these without new evidence (a new GPU class or a new regi
 
 ## Engine & memory model
 
+**A single 30s sampling run cannot tell you which of two builds is faster, because the config
+BANDIT is a coin flip at that budget (2026-08-18).** Reported on hwmcc17 6s215rb0 c25 abc:fast,
+where main read 691 samples/s and the post-K-collapse branch 617 (0.893x) — both on the SAME kernel
+(wave), so not dispatch. The `config_breakdown` showed the arms had swapped: main committed to
+`rv=True,B=1` (143 chunks) and the branch to `rv=True,B=8` (86 chunks). PINNED measurement
+(`--portfolio b1` / `b8`, bandit off, interleaved best-of-2) settles it: **B=1 is the true winner at
+BOTH batch sizes** — base K=14,657: 704.6 vs 587.2 (1.200x); head K=24,073: **724.6** vs 596.1
+(1.216x). So at the correct config the larger K is a small WIN (1.028x), and the observed 0.893x was
+entirely the bandit committing to the wrong arm. MIS-PICK RATE, 8 seeds x 30s: **base 2/8, head
+1/8**; at 90s, **0/3 on both**. The tempting explanation — bigger K means fewer chunks (165 -> 93 in
+30s) means a smaller bandit sample means more mis-picks — was TESTED AND IS NOT SUPPORTED: main
+mis-picks at least as often, and at seed 7 both trees picked B=8. The bandit's policy is one
+cold-start chunk per config then epsilon ~ chunk^-0.5 (sampler.py), so a short budget can leave a
+losing arm measured on ~14 chunks (B=1 read 564.6 there against a true 724.6, with its success rate
+reading 0.0070 against a true 0.0089). CONSEQUENCE for methodology: never compare two builds on one
+free-bandit run — pin `--portfolio`, or use `implications_per_s` (engine work, bandit-independent),
+or run long enough for the bandit to settle. At 90s the two builds are within 0.5% on every seed.
+
 **The wave/scalar dispatch keys off M (clause count), NOT the batch — and the batch-only rule it
 replaced was a PROXY that a K change silently invalidated (2026-08-18).** The rule was
 `batch < 30 x resident_warps`. That only ever worked because K ~ budget/(4M), so "huge batch" and
