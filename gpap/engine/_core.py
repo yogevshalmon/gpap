@@ -109,15 +109,13 @@ class ProbeOptions(ctypes.Structure):
     `distinct_vars`, whose useful default is 1 (drop tuples sharing a variable). `max_tuples` is a
     WORK BUDGET — the sweep probes that many rather than refusing (see `refuse_over_max`)."""
     _fields_ = [("seconds", ctypes.c_double), ("max_tuples", c_int64), ("batch", c_int32),
-                ("distinct_vars", c_int32),
-                ("skip_subsumed", c_int32), ("refuse_over_max", c_int32)]
+                ("distinct_vars", c_int32), ("refuse_over_max", c_int32)]
 
 
 class ProbeStats(ctypes.Structure):
     """Mirror of `gpap_probe_stats`. `exhausted` is the field that turns a negative result into a
     proof: it means every candidate was probed."""
     _fields_ = [("total", c_int64), ("probed", c_int64), ("conflicts", c_int64),
-                ("subsumed", c_int64),
                 ("exhausted", c_int32), ("stop", c_int32), ("seconds", ctypes.c_double)]
 
 
@@ -301,10 +299,9 @@ class ProbeSweep:
 
 
 def _probe_options(seconds=None, max_tuples=None, batch=0, distinct_vars=True,
-                   skip_subsumed=False, refuse_over_max=False):
+                   refuse_over_max=False):
     return ProbeOptions(float(seconds or 0.0), int(max_tuples or 0), int(batch or 0),
-                        1 if distinct_vars else 0, 1 if skip_subsumed else 0,
-                        1 if refuse_over_max else 0)
+                        1 if distinct_vars else 0, 1 if refuse_over_max else 0)
 
 
 def probe_combinations(engine, pool, k: int, **kw) -> ProbeSweep:

@@ -9,9 +9,10 @@ Runnable programs for both faces of GPAP. They need CUDA and a built `libgpap`
 python examples/sample_solutions.py [formula.cnf]    # sample a CNF's solutions
 python examples/check_assumptions.py [formula.cnf]   # propagate many assumption sets at once
 python examples/mine_clauses.py [formula.cnf]        # prove clauses the formula already entails
+python examples/literal_implications.py [f.cnf]      # what each literal implies (HBR, ELS, backbone)
 ```
 
-Both default to `benchmarks/sampling/10.sk_1_46.cnf`, so they run with no arguments.
+All default to `benchmarks/sampling/10.sk_1_46.cnf`, so they run with no arguments.
 
 - [`sample_solutions.py`](sample_solutions.py) — `gpap.sample()`: what comes back, what the
   columns mean, and how to ask distribution questions of the result.
@@ -20,6 +21,9 @@ Both default to `benchmarks/sampling/10.sk_1_46.cnf`, so they run with no argume
 - [`mine_clauses.py`](mine_clauses.py) — `LiteralProbe` (the k-subset probe primitive) and
   `mine_entailed` (the strategy over it). `gpap mine` is the command-line front for the same
   thing.
+- [`literal_implications.py`](literal_implications.py) — `gpap.implications`: ONE width-1 sweep,
+  read three ways — failed literals (the backbone), hyper-binary resolvents, and equivalent
+  literals for SAT sweeping. The batched-probe shape that a CPU solver cannot afford exhaustively.
 
 ## C and C++
 

@@ -41,21 +41,42 @@ is the one function every entry point already passes through; both `plan_for`s d
 queries. The tell that the placement was wrong all along: the CLAUDE.md entry for the 2026-08-14
 fix already said "every consumer gets it, not just the one that asks", and it was not true.
 
-**Turning that dispatch on EXPOSED an output that depended on the kernel — and the bug was in the
-subsumption test, not the kernel (2026-08-19).** The engine's `skip_subsumed` filter drops a
-conflict reached with zero implications, and that counter is order-dependent on conflicted rows
-(the entry below), so scalar and wave drop different subsets. The host-side test was supposed to
-catch the remainder exactly, but it tested subsumption against the INPUT clauses — while mining
-folds proven units into the flush cache, so the sweep runs against a REDUCED formula. An input
-`(a|b|c)` with `c` falsified by the baseline is a binary constraint during the sweep; assuming
-`(~a,~b)` empties it with zero implications and proves `(a|b)`, which no input clause subsumes.
-b03-c25: 17 such clauses, and the mined set came out **3,096 under scalar vs 3,113 under wave** —
-the same command answering differently depending on a launch flag. Fixing the reference to be the
-baseline-REDUCED formula makes the output kernel-invariant (verified on 4 instances by clause-set
-hash) and equal to the old scalar answer. LESSON: "sound" was measured against the wrong formula,
-on an instance whose baseline happened to be empty. A confluence argument covers the FIXPOINT; it
-does not cover anything computed from a conflicted row's partial state, and a filter reading the
-implication counter is exactly that.
+**Turning that dispatch on EXPOSED an output that depended on the kernel — TWO bugs, both in the
+subsumption test, neither in the kernel (2026-08-19).** The engine's `skip_subsumed` filter dropped
+a conflict reached with zero implications, and that counter is order-dependent on conflicted rows
+(the entry below), so scalar and wave drop different subsets.
+
+(1) **The host-side backstop compared against the wrong formula.** It tested subsumption against
+the INPUT clauses — while mining folds proven units into the flush cache, so the sweep runs against
+a REDUCED one. An input `(a|b|c)` with `c` falsified by the baseline is a binary constraint during
+the sweep; assuming `(~a,~b)` empties it with zero implications and proves `(a|b)`, which no input
+clause subsumes. b03-c25: 17 such clauses, and the mined set came out **3,096 under scalar vs 3,113
+under wave** — the same command answering differently depending on a launch flag. Comparing against
+the baseline-REDUCED formula makes the output kernel-invariant (4 instances, clause-set hash) and
+equal to the old scalar answer.
+
+(2) **The in-engine test was a PROXY for the question, and it broke on the kernel we had just
+switched to.** The question a redundancy filter should ask is "did the assumptions ALONE empty a
+clause?"; `implications == 0` stands in for it, and **under wave it caught 0 of b03-c25's 28
+redundant conflicts**. The reason is that the two kernels witness the same event differently, and
+each is blind to the other's symptom. Clause `(-1|-2)`, tuple `(1,2)`: WAVE propagates both
+assumptions in one wavefront, hits both of the clause's entries in the same step, and sees the
+count reach ZERO. SCALAR propagates them one at a time, so after the first the clause has ONE
+literal left, reads as a unit forcing `-2`, and conflicts on that contradicting the assumed `2` —
+never observing the clause empty, but pushing nothing (a rejected push implies nothing), hence
+`implications == 0`. So the filter now asks both ways: 0/28 and 28/0 (wave/scalar) separately,
+28/28 together. ⚠️ **"The conflict came early" is NOT the question** — two clauses can each go unit
+under the assumptions and force opposite literals (`(-1|-2|3)`, `(-1|-2|-3)` under `(1,2)`), which
+conflicts just as early while proving `(-1|-2)` by RESOLUTION; a first cut tested that and threw
+away 28 genuine clauses. Fuzzed 300 random formulas x 2 kernels: 878 dropped, 0 unsound, 80
+conservative misses.
+
+LESSON, common to both: **"sound" had been measured against the wrong reference** — the input
+formula rather than the one the engine propagates, on an instance whose baseline happened to be
+empty. And a confluence argument covers the FIXPOINT; it covers nothing computed from a conflicted
+row's partial state, which is what any early-stopping filter reads. Where such a filter cannot be
+exact, make it CONSERVATIVE (a miss costs result buffer, never a clause) and put the exact test on
+the host.
 
 **The probe RESET dominates probe wall, and it is a constant per chunk (2026-08-19).** Phase-split
 measurements put the state broadcast at 50-94% of a probe chunk (`apply` gets 4-49%, readout <2%),
@@ -544,8 +565,17 @@ dc2/fraig structurally removes exactly the backbone the miner's L1 sweep harvest
 learned on Tseitin CNFs vs 0–45 on the same circuits' ABC CNFs, while still paying the full 5 s
 budget (b15: 4.8 s of a 9.4 s e2e wall for 45 units on 222k clauses; b10/b04 regressed 0.40×/
 0.86× e2e because the post-ABC success dip also tripped the stuck gate into stage-2 tiers). The
-CNF carries `c encoder abc` and `sample_file` defaults mining OFF there (`--mine on` forces).
-The miner stays THE lever for Tseitin circuit CNFs and plain projected CNFs (service family).
+CNF carries `c encoder abc` and `sample_file` defaulted mining OFF there.
+
+⚠️ **OVERTURNED 2026-08-19 — the unit COUNT was the wrong proxy, because it never measured the
+sampling rate.** Over 24 instances x 2 encoders, mining is worth MORE on ABC-encoded CNFs than on
+Tseitin ones (geomean **3.28x vs 2.05x**; s386-c25 14.3x, s832-c25 5.5x, b10-c25 4.0x): WHICH units
+are found matters more than how many. The provenance gate is deleted, and the size gate that hid
+the same instances a second way (`MINE_MIN_CLAUSES`, an inline 3000 on formulas ABC makes SMALL by
+construction) is down to 500. The b10/b04 regressions the gate was protecting against are now
+handled at the right level — by measuring, not by guessing from provenance: see "mined clauses are
+kept only if they PAY" in MINING_FINDINGS.md. LESSON: a proxy that is cheap to read is not a reason
+to gate on it; this one was gated on for six weeks and had the sign of the effect backwards.
 
 **Uniformity measurement: exact where enumerable, distribution-free skew detection elsewhere,
 Barbarik for certificates (2026-07-11).** The readout (`info["uniformity"]`, off the timing

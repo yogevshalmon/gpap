@@ -47,79 +47,118 @@ first "refuse over the ceiling" cut, returned nothing at all.
    a clause implied by a shorter one already present adds nothing and slows every later
    propagation. It is now checked against every subset.
 
-## Subsumed conflicts are filtered IN THE ENGINE (2026-08-19)
+## Redundancy: three notions, and we were filtering the wrong one (2026-08-19)
 
-**The redundant conflicts are the overwhelming majority, so filtering them on the host is too
-late.** At mining's real width-3 state on b03-c25 (original + the 1,015 clauses mined at widths
-1-2), a sweep over the support finds **59,160 conflicts of which 59,153 are subsumed and 7 are
-useful** — the result buffer holds 8,451x more than anyone wants, and every one of them crosses
-the bus before being discarded.
+A mined clause can be useless in two quite different ways, and until now only the first was tested:
 
-The engine already knows, and for free: **a conflict reached with ZERO implications was caused by
-a clause that was already empty but for the assumed literals.** No implication means the assumption
-literals alone emptied that clause, so the clause the tuple would prove is subsumed by that
-clause's RESIDUE. The kernel's existing implication counter IS the test — no extra pass, no clause
-identity needed. `gpap_probe_options::skip_subsumed`.
+| | test | removes (b03-c25, widths 1-3) |
+|---|---|---|
+| **subsumed** | some clause we already have is a SUBSET of it | 21 of 1,508 (1.4%) |
+| **derivable** | can propagation do ALL of the clause's forcing jobs? | 942 of 1,551 (61%) |
 
-MEASURED, same instance and width:
+They barely overlap — of the derivable clauses on b03-c25, **0** are subsumed — so the filter we
+had was catching a rounding error and missing the phenomenon.
 
-| | conflicts reported | dropped in-engine | result buffer | wall |
+This is not a new problem. Probing for binary clauses is **hyper-binary resolution**, and
+[Heule et al., *Revisiting Hyper Binary Resolution*](https://www.cs.cmu.edu/~mheule/publications/NHBR.pdf)
+states it plainly: "most HBR clauses are implied by the binary implication graph," and the
+recommendation is to keep only the non-transitive ones. CryptoMiniSat and Lingeling run
+**transitive reduction** during probing for exactly this reason.
+
+### A clause does k JOBS, and all of them have to be covered before it can go
+
+⚠️ **The obvious version of the derivable test is wrong, and it was wrong here first.** A clause
+`(l1|...|lk)` is not one constraint but k of them: when the other k-1 literals are false it forces
+the remaining one, and which job fires depends on the search. The first implementation dropped a
+clause as soon as **one** job was covered. It has to be **all** of them.
+
+The two are not close, because propagation is not contrapositive-complete. Base `(-1|5)`, `(-1|6)`,
+`(-5|-6|2)` propagates `1 => 2` (both 5 and 6 arrive, the ternary goes unit) but NOT `-2 => -1`:
+that step would have to conclude "not both 5 and 6", a disjunction, and unit propagation can only
+ever conclude a single literal. So `(-1|2)` has one live direction and one covered one.
+
+Measured, mined at widths 1-3 and judged against input + mined units:
+
+| instance | wide mined | one-job rule | all-jobs rule (shipped) | **live jobs the weak rule discards** |
 |---|---|---|---|---|
-| `skip_subsumed=0` | 59,160 | 0 | 693.3 KiB | 0.56s |
-| `skip_subsumed=1` | 1,535 | 57,625 | **18.0 KiB** | 0.36s |
+| b03-c25 | 1,551 | 1,479 (95.4%) | 942 (60.7%) | **537 (34.6%)** |
+| b09-c25 | 9,457 | 5,153 (54.5%) | 1,922 (20.3%) | **3,231 (34.2%)** |
+| s386-c25 | 50 | 50 (100%) | 50 (100%) | 0 |
 
-**SOUND but INCOMPLETE, and both halves matter.** Cross-tabulated against exact subsumption over
-all 59,160 conflicts: `impl==0` has **0 false positives** (it never drops one of the 7 useful
-clauses) and catches 57,625 of 59,153 redundant ones (97.4%). The 1,528 it misses are the
-order-dependent cases where propagation derived some implication before reaching the dead clause.
-So the engine filter is the cheap bulk pass and `keep()`'s subset test is the exact remainder;
-neither replaces the other, and mining's OUTPUT is identical with the filter on or off (gated).
+A THIRD of the mined wide clauses. **Never a soundness question** — every mined clause is entailed,
+so the model set is unchanged whatever is dropped — only propagation strength.
 
-### CORRECTION (2026-08-19): "a clause the formula already has" was wrong, and it leaked
+**Why the literature's rule does not transfer.** Transitive reduction runs on the binary implication
+graph, where a binary clause IS both of its edges, so the relation is symmetric by construction and
+one direction really does imply the other. Our reference is the PROPAGATION relation, which also
+carries implications squeezed out of long clauses going unit, and those are one-way. Getting the
+aggressive rule right means building the BIG, not reusing the propagation sweep — parked as future
+work below.
 
-The claim above — as first written, "0 false positives against exact subsumption" — was measured
-against the INPUT clauses on a formula where it happened to hold. It does not hold in general, and
-the counterexample is the normal case rather than a corner: **mining folds every proven unit into
-the flush cache** (`assume`), so a sweep propagates on top of an assignment. An input `(a | b | c)`
-whose `c` the baseline falsified is a BINARY constraint during the sweep; assuming `(~a, ~b)`
-empties it with zero implications, and the clause proved, `(a | b)`, is subsumed by no input clause
-at all. Measured on b03-c25 at widths (1,2): **17 such clauses**, every one of them entailed and
-none of them subsumed by anything in the input.
+### ...but DERIVABLE IS NOT USELESS, and that decided the default
 
-Dropping them is still right — the caller takes the mined units too, so unit propagation derives
-`(a | b)` from `(a | b | c)` anyway — but the HOST-side test has to be against the same reduced
-formula, or it disagrees with the engine and lets them through.
+A derivable clause adds nothing to what propagation can REACH — but it shortens how long the reach
+takes, and GPAP's sampler is propagation-bound. Ablation, pinned config, k-cap 20,000, seed 5,
+model counts bit-identical across repeats:
 
-**And it was observable**, which is how it was caught. The implication counter is order-dependent
-on conflicted rows (documented for the two kernels: wave can derive an implication in the same
-warp-wide step that empties the clause), so scalar and wave drop different subsets. With the
-host test against raw input clauses, b03-c25 mined **3,096 clauses under scalar and 3,113 under
-wave** — the same command answering differently depending on a launch flag, which is exactly what
-turning on the probe path's kernel dispatch would have started doing silently.
+| | no mining | width 1 only | + widths 2,3 |
+|---|---|---|---|
+| b03-c25 | 120k/s | 485k/s (4.05x) | 625k/s (**+29%**) |
+| s386-c25 | 91k/s | 119k/s (1.31x) | 170k/s (**+43%**) |
+| b09-c25 | 290k/s | 296k/s (1.02x) | 305k/s (+3%) |
 
-**Fix**: `mining._Subsumption` holds the formula REDUCED by the current baseline (vectorised — a
-per-clause Python loop is ~0.5s on a 219k-clause unroll, larger than the sweep it protects), and
-is rebuilt whenever the baseline moves. Mining's output is then kernel-INVARIANT (verified
-scalar vs wave, identical clause-set hashes on b03-c25, b09-c25, s386-c25, b12-c50) and equals the
-old scalar answer. Gated by `test_mining_is_kernel_invariant` and
-`test_drops_only_what_the_baseline_makes_redundant`.
+The wide tiers are mostly derivable and still worth 1.03-1.43x. So "logically redundant" and
+"useless" are different questions, and only a consumer knows which one it is asking.
 
-**`keep()` is not deduplication.** Mining cannot produce the same clause twice — candidates within
-a width are distinct combinations, different widths give different lengths, and width 1's fixpoint
-folds each proven unit into the flush, removing that variable from the pool before the next round.
-The subset test is the |C|-sized case of SUBSUMPTION against the clauses the formula already holds
-(reduced by the baseline, plus everything mined so far), which is why it cannot be dropped.
+**Shipped**: `mine_entailed(drop="none"|"subsumed"|"derivable")` / `gpap mine --drop`, defaulting to
+`subsumed` — the strongest filter is available but never the default, because for our own sampler
+it is a regression.
 
-**Generation is NOT the bottleneck** (measured, because it looked like one): the core's paged
-sweep runs 4M tuples in 6.40s against 6.73s for probing the same tuples pre-materialized — i.e.
-generation is free next to the probe, and numpy's 22M tuples/s "advantage" was generation-alone
-compared against generation+probe. The real cost is that probing n tuples initializes n x M clause
-words: each chunk's `reset` broadcasts ~1.2 GiB of packed state, and the full 122M x 18,930 sweep
-would be ~9 PB. There is nothing to win by parallelizing or GPU-ifying the enumerator.
+### The engine-side filter was deleted
 
-**Pool semantics are DIMACS literals**, not variables — so a caller can ask about one polarity
-only. `gpap mine --pool` takes `all`, `support`, or an explicit list.
+`skip_subsumed` dropped a conflict the assumed literals alone caused. Sound, and it survived a
+300-formula fuzz — but it was worth **0.0-0.3%** of the result buffer on every instance measured
+(re-measured after an earlier note claiming 97.4% failed to reproduce: b03-c25's support yields 198
+width-3 conflicts, not the 59,160 recorded). Against that it cost an int32 per row, a branch in the
+innermost loop of both propagate kernels, and a two-paragraph explanation of why the two kernels
+saw it differently. Removed 2026-08-19; mined sets bit-identical after (`770cbdc66db7` b03-c25,
+`a8a18d8c6357` b09-c25, `bf45d34cdb1a` s386-c25). Redundancy is a property of a CLAUSE against a
+FORMULA — it belongs where the formula is known, not in the sweep.
 
+## The closure is the primitive, not the k-subset sweep (2026-08-19)
+
+Probe a literal at width 1 and BCP gives two things: a conflict bit (a FAILED literal, i.e. a unit)
+and the CLOSURE — everything that literal implies. The closure is what three applications want:
+
+    failed literals     the conflict bit                              (the backbone; the lever)
+    hyper-binary        every `m` in closure(l) IS the clause (~l|m)
+    equivalent literals l == m exactly when each is in the other's closure
+
+`gpap/implications.py`. One launch, one row per literal — on a CPU each literal is a separate
+propagation, which is why solvers probe only roots of the binary implication graph.
+
+**This also explains the 96%.** A binary `(~a|~b)` found by probing the PAIR is the same clause
+width-1 hands you directly when `~b` is in closure(a) — at `P` cost instead of `C(P,2)`. The k-subset
+sweep's unique contribution is the residue that genuinely needs the pair (56 of 1,487 on b03-c25).
+
+**Equivalences: strictly stronger than what the sampler ships.** `sampler.py` builds ELS edges from
+BINARY CLAUSES only. Closure-based is a superset — verified 0 of 7,856 binary mutual pairs missing
+on b03-c25 — and finds equivalences that only exist through long clauses:
+
+| | binary clauses (today) | BCP closures | |
+|---|---|---|---|
+| b03-c25 | 1,964 vars | 2,598 vars | **1.32x** |
+| s386-c25 | 973 vars | 1,120 vars | 1.15x |
+| b09-c25 | 1,882 vars | 2,082 vars | 1.11x |
+
+~7 ms CPU against ~250-350 ms GPU, so it only pays when the width-1 sweep is running anyway — which
+for mining it always is. NOT yet wired into the sampler; that is a behaviour change needing its own
+gate. (An earlier note records 2.81x more equivalences than CaDiCaL's `decompose` — a different
+baseline; do not carry that number into this comparison.)
+
+⚠️ The closure is dense, `P x 2N` bits — 11 MB on b03-c25 but ~3.5 GB on a big HWMCC unroll — so
+`implications()` refuses a pool it cannot hold rather than reserving it. A chunked reducer form is
+the obvious extension.
 
 ## The RESET is the bottleneck, not the propagate (2026-08-19)
 
@@ -210,6 +249,11 @@ to be gated the way every K change is, since it alters what a chunk costs.
   see INSIGHTS) measured up to 31x on exactly this low-touch regime. Much larger change; the
   trail-restore gets most of it for a fraction of the risk.
 
+> **STATUS: designed, measured, NOT implemented (2026-08-20).** Parked as future work — the sampler
+> sits on the losing side of the crossover, so this only ever pays for probing/mining workloads,
+> and mining is now a bounded few seconds of a run. Reviving it means re-validating K the way every
+> K change is validated (kill-switch + dispatch re-check).
+
 ## What it does
 
 Assume a set of literals, propagate, and see whether BCP conflicts. If it does, the formula
@@ -290,11 +334,61 @@ Rebuilding the formula per width-1 iteration dominated wall on large instances: 
 seconds** on an unrolled circuit once `LiteralProbe.assume()` folded new units into the cached
 post-flush state instead of rebuilding the occurrence lists.
 
-## Interaction with the ABC encoder
+## Interaction with the ABC encoder — the gate was REMOVED (2026-08-19)
 
-`dc2`/`fraig` already removes the backbone that width 1 mines: **0–45 units on ABC-encoded CNFs
-vs 59–1007 on Tseitin ones** for the same 5 s budget. The sampling pipeline therefore disables
-mining automatically on CNFs carrying `c encoder abc` provenance (`--mine on` forces it).
+`dc2`/`fraig` really does remove most of the backbone width 1 mines: **0–45 units on ABC-encoded
+CNFs vs 59–1007 on Tseitin ones** for the same budget. From 2026-07-10 the pipeline read that as a
+reason to disable mining automatically on CNFs carrying `c encoder abc` provenance.
+
+**That was the wrong inference, and the unit COUNT was the wrong proxy — it never measured the
+sampling rate.** Measured over 24 instances x 2 encoders, mining is worth MORE on ABC-encoded CNFs
+than on Tseitin ones: **geomean 3.28x vs 2.05x** (s386-c25 14.3x, s832-c25 5.5x, b10-c25 4.0x).
+WHICH units are found matters more than how many. The gate is gone; `MINE_SECONDS` bounds the cost
+and the keep-if-it-helps guard below bounds the risk.
+
+A second gate went with it: `MINE_MIN_CLAUSES` was an inline **3000**, justified by "even 0.3 s of
+probing would dominate the e2e wall" — which is not what mining costs down there (0.01–0.04 s
+measured). Because ABC-encoded CNFs are SMALL by construction, that threshold excluded precisely
+the instances ABC produces. At **500** it is worth 2.68x on b03-c25/abc (M=2,087) and 1.65x on
+b09-c25/abc (M=2,882).
+
+## Mined clauses are kept only if they PAY (2026-08-20)
+
+Mining is sound but not free: every clause enlarges the formula, and the batch is sized as
+`K ~ budget/row_bytes` with `row_bytes ~ 4M`, so **a bigger M buys a smaller K**. On an instance
+that already completes trajectories there is no success left to win and the batch loss is all that
+happens — measured on b06-c25/abc, where 5 mined units cost **0.55x** end-to-end.
+
+Since `K x M` is roughly the memory budget however big the formula is, a chunk costs about the same
+wall before and after mining, and the thing that moves is **models per chunk = K x success**. Both
+terms are already in hand (the batch from the rebuilt sampler, the completion rate from the warmup
+the pipeline already runs), so the comparison costs no extra GPU work. If it does not beat the
+pre-mining sampler, the clauses are dropped and the original is rebuilt.
+
+⚠️ It is a PROXY, not a measurement: the warmup pins `K <= 1024`, so its success rate is read at a
+batch the timed run will not use, and holding chunk wall constant ignores that a longer trail costs
+more per row. The honest alternative is a second timed run, which costs more than the clauses are
+worth on exactly the instances where this fires. One deliberate asymmetry: when the un-mined
+sampler completes NOTHING in the warmup, the clauses are kept regardless — there is no baseline to
+be worse than, and mining is the only thing that has ever converted those (b12-c25/abc: 516 ->
+20,031 models).
+
+## FUTURE WORK — what is deliberately not built (2026-08-20)
+
+Mining is now a bounded few seconds of a sampling run, sound, and self-limiting. Everything below
+was investigated far enough to size it and then parked, so the shipping path stays simple.
+
+| | what | why parked |
+|---|---|---|
+| **Transitive reduction** | the real HBR filter, over the binary implication graph | needs the BIG as a separate structure; the propagation relation cannot answer it (see the k-JOBS section). Would make `implications.hyper_binary` usable as a preprocessor output rather than an analysis product |
+| **Aggressive `derivable`** | one covered direction is enough | same reason — correct only on a symmetric relation. Ours is conservative: 1.6-2.7x fewer clauses dropped, never unsound |
+| **Trail-superset restore** | kill the per-chunk state broadcast (41-94% of probe wall) | designed and bounded above; the SAMPLER sits on the losing side of the crossover, so it only pays for probing, which is now a few seconds |
+| **Chunked closure** | sweep a pool larger than VRAM instead of refusing it | nothing in the pipeline hits the limit; `implications` refuses loudly |
+| **Closure-based ELS** | strictly stronger equivalences than the sampler's binary-clause edges (1.11-1.32x more vars) | a behaviour change to the shipping sampler, so it needs its own uniformity gate |
+| **`hyper_binary` size guard** | the output is ~1000x the formula (b03-c25: 14M clauses vs M=14,505) | documented instead; it is an analysis product and nothing ships on it |
+
+The Python mining/probing path also has not had a line-by-line review since the C++ port — noted
+by the user, not yet done.
 
 ## Correctness
 

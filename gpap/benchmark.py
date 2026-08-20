@@ -304,9 +304,10 @@ def _build_argparser():
                          "budget. Pass an int to FIX the cap — what a cross-GPU A/B needs, "
                          "since 'auto' deliberately differs per card")
     ap.add_argument("--no-simplify", dest="simplify", action="store_false", default=True)
-    ap.add_argument("--els", action="store_true",
-                    help="also do equivalent-literal substitution (removes vars: faster propagate + "
-                         "bigger K). Sound + model-preserving; ~1.5x throughput on the niche")
+    ap.add_argument("--no-els", action="store_true",
+                    help="disable equivalent-literal substitution (ON by default since 2026-08-19: "
+                         "sound + model-preserving, 1.42x geomean over 24 circuit instances). Pass "
+                         "this to reproduce a pre-2026-08-19 sweep")
     ap.add_argument("--also-plain", action="store_true", help="also run GPAP without simplification")
     ap.add_argument("--verify-cpu", action="store_true", help="also CPU-verify a few models vs clauses")
     ap.add_argument("--max-clauses", type=int, default=None,
@@ -614,7 +615,7 @@ def _run_one(path0, row, args, device, portfolio, mine, quality,
     runs = []
     for s in (args.seeds or [args.seed]):
         try:
-            g = sample_file(path, device, simplify=args.simplify, els=args.els,
+            g = sample_file(path, device, simplify=args.simplify, els=not args.no_els,
                             n_time=args.n_time, n_cov=args.n_cov, b=args.b,
                             k_cap=args.k_cap, verify_cpu=args.verify_cpu,
                             configs=portfolio, max_chunks=args.max_chunks, seed=s,

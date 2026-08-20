@@ -182,20 +182,6 @@ typedef struct {
                             * tuple is a repeat or a direct contradiction, so it conflicts for
                             * reasons that have nothing to do with the formula. Default for a
                             * literal pool; pass 0 only if you want them. */
-    int32_t skip_subsumed; /* 1 = do not report a conflict that BCP reached WITHOUT deriving a
-                            * single implication. Zero implications means the assumption literals
-                            * alone (plus what the formula's own units already falsified) emptied
-                            * a clause that is ALREADY THERE — so the clause this tuple would
-                            * prove is implied by one the formula holds, and reporting it only
-                            * makes the formula bigger and later propagation slower.
-                            * SOUND but INCOMPLETE: it never drops a clause that is not already
-                            * implied (measured 0 false positives), yet it misses the cases where
-                            * propagation happened to derive an implication before reaching the
-                            * dead clause, which is launch-order dependent. Measured on b03-c25 at
-                            * width 3 over its support: 59,160 conflicts of which 59,153 are
-                            * redundant and 7 are useful; this drops 57,625 of them (97.4%) inside
-                            * the engine, so they never occupy the result buffer or cross the bus.
-                            * A caller that wants exactness still filters what survives. */
     int32_t refuse_over_max; /* what `max_tuples` MEANS. 0 (default) = a WORK BUDGET: probe the
                             * first max_tuples candidates and report `exhausted = 0`. Every
                             * conflict found is still a genuine entailed clause — a truncated
@@ -209,7 +195,6 @@ typedef struct {
     int64_t total;      /* candidates the full enumeration has (after distinct_vars) */
     int64_t probed;     /* candidates actually probed — a prefix of the enumeration */
     int64_t conflicts;  /* how many of those conflicted AND were reported */
-    int64_t subsumed;   /* conflicts dropped by skip_subsumed (reached with 0 implications) */
     int32_t exhausted;  /* 1 iff probed == total and nothing cut the sweep short */
     int32_t stop;       /* gpap_probe_stop */
     double  seconds;
@@ -228,9 +213,8 @@ gpap_status gpap_probe_tuples(gpap_engine *e, const int32_t *tuples, int64_t n, 
 /** How many k-subsets `pool` has, EXACTLY, without generating any of them — the number to check
  *  a ceiling against BEFORE enumerating. Saturates at INT64_MAX rather than wrapping, because a
  *  wrapped count would compare BELOW a ceiling and let through the very sweep it should refuse.
- *  `pool = NULL` counts over every free literal. Exported because a caller that filters candidates
- *  itself (mining drops subsumed ones) must still be able to reject an impossible width without
- *  materializing it. */
+ *  `pool = NULL` counts over every free literal. Exported because a caller that filters the
+ *  RESULTS (gpap.mining does) must still be able to reject an impossible width up front. */
 int64_t gpap_probe_count(gpap_engine *e, const int32_t *pool, int32_t pool_n, int32_t k,
                          int32_t distinct_vars);
 void gpap_probe_free(gpap_probe *p);

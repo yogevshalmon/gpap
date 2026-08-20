@@ -81,7 +81,7 @@ def _cmd_sample(args):
     out_cap = min(args.n, args.max_samples) if (args.out or args.sim_check) else 0
     mine = {"auto": "auto", "on": True, "off": False}[args.mine]
     info = sample_file(path, device, n_time=args.n, n_cov=args.n_cov, out_cap=out_cap,
-                       seed=args.seed, simplify=not args.no_simplify, els=args.els, mine=mine,
+                       seed=args.seed, simplify=not args.no_simplify, els=not args.no_els, mine=mine,
                        uniformity=args.uniformity, configs=portfolio, k_cap=args.k_cap,
                        time_limit=args.time_limit)
     if encode_s is not None:
@@ -259,7 +259,7 @@ def _cmd_mine(args):
         res = mine_entailed(cnf.nv, cnf.clauses, device,
                             pool=pool,
                             widths=tuple(widths), seconds=args.seconds,
-                            max_tuples=args.max_tuples)
+                            max_tuples=args.max_tuples, drop=args.drop)
         print(f"  mined {res.summary()}")
         if res.seconds:
             print(f"  engine: {res.implications:,} implications "
@@ -310,6 +310,7 @@ def _cmd_mine(args):
                                   else "explicit"),
                     "widths": widths, "seconds": res.seconds, "encode_s": encode_s,
                     "max_tuples": args.max_tuples, "seconds_budget": args.seconds,
+                    "drop": args.drop, "n_dropped_derivable": res.derivable,
                     "n_mined": len(res.clauses),
                     "candidates_total": total_cand, "probed_total": total_probed,
                     "coverage": (total_probed / total_cand) if total_cand else None,
@@ -351,6 +352,8 @@ def _cmd_bench(args):
         argv += ["--seeds"] + [str(s) for s in args.seeds]
     if args.twise:
         argv += ["--twise"]
+    if args.no_els:
+        argv += ["--no-els"]
     if args.sim_baseline:
         argv += ["--sim-baseline"]
     if args.abc:
@@ -520,14 +523,17 @@ def main(argv=None):
                         "(Barbarik rejects it 5/5) — opt in only when throughput matters and "
                         "uniformity does not")
     s.add_argument("--no-simplify", action="store_true")
-    s.add_argument("--els", action="store_true", help="equivalent-literal substitution (removes vars)")
+    s.add_argument("--no-els", action="store_true",
+                   help="disable equivalent-literal substitution (ON by default: it merges "
+                        "mutually-implied literals, removing variables and clauses. Measured 1.42x "
+                        "geomean over 24 circuit instances, and uniformity-fuzzed at 0 verdict "
+                        "flips / 0 unsound rows against the exact oracle)")
     s.add_argument("--cycles", type=int, default=25,
                    help="unroll depth (circuit inputs; combinational AIGs clamp to 1)")
     s.add_argument("--pin-outputs", type=int, default=None, help="outputs to pin (circuit input)")
     s.add_argument("--mine", choices=["auto", "on", "off"], default="auto",
-                   help="entailed-clause mining: 'auto' (on, except for ABC-encoded CNFs, whose "
-                        "backbone dc2/fraig already removed — measured 0-45 units for a full 5s "
-                        "budget) | 'on' (force) | 'off'")
+                   help="entailed-clause mining: 'auto' (on, bounded by a 5s total budget) | "
+                        "'on' (force, ignores the size gate) | 'off'")
     s.add_argument("--uniformity", choices=["off", "fast", "exact"], default="off",
                    help="uniformity readout: 'off' (default — the readout costs an extra "
                         "sampling pass) | 'fast' (repeat-rate check: l2_ratio, ~1.0 = uniform, "
@@ -581,6 +587,14 @@ def main(argv=None):
                         "--max-tuples of them and is reported as not exhaustive — the clauses it "
                         "finds are still entailed. Cost is the PROBE, not the enumeration: "
                         "probing n tuples initializes n x M clause words")
+    m.add_argument("--drop", choices=["none", "subsumed", "derivable"], default="subsumed",
+                   help="which REDUNDANT clauses to leave out. 'subsumed' (default) drops a clause "
+                        "some clause already covers — free. 'derivable' ALSO drops the ones unit "
+                        "propagation re-derives on demand in EVERY direction (61%% of them on "
+                        "b03-c25), which is what a CDCL preprocessor wants; it costs one extra "
+                        "pass and is NOT the default because a derivable clause still shortens "
+                        "propagation, worth +29-43%% to GPAP's own sampler. 'none' keeps "
+                        "everything proved")
     m.add_argument("--out", default=None,
                    help="write the STRENGTHENED CNF here (original + mined clauses)")
     m.add_argument("--out-mined", default=None, help="write ONLY the mined clauses here")
@@ -635,7 +649,11 @@ def main(argv=None):
                         "Conversion/target stays --seed")
     b.add_argument("--pin-outputs", type=int, default=None, help="outputs to pin (circuit input)")
     b.add_argument("--mine", choices=["auto", "on", "off"], default="auto",
-                   help="entailed-clause mining: 'auto' (on, except ABC-encoded CNFs) | 'on' | 'off'")
+                   help="entailed-clause mining: 'auto' (on, bounded by a 5s total budget) | "
+                        "'on' (force, ignores the size gate) | 'off'")
+    b.add_argument("--no-els", action="store_true",
+                   help="disable equivalent-literal substitution (ON by default since 2026-08-19; "
+                        "pass this to reproduce a pre-2026-08-19 sweep)")
     b.add_argument("--uniformity", choices=["off", "fast", "exact"], default="off",
                    help="per-instance uniformity readout: 'off' (default — costs an extra "
                         "sampling pass) | 'fast' (repeat-rate check) | 'exact' (chi-square on "

@@ -209,7 +209,7 @@ equivalent pair could be assigned unequal values = an invalid projection). Valid
 `tests/test_sampler.py::test_els_*` (projection set == CaDiCaL enumeration; equivalent vars stay
 equal). On the laptop K is k_cap-capped so the **N-reduction → bigger-K benefit is largely masked** —
 on an A100 with uncapped K it stacks directly onto the K-scaling lever, so the win should grow.
-Enabled via `els=True` (default on in the colab driver; `--els` in `sample_benchmark.py`).
+Enabled via `els=True`, which became the **default 2026-08-19** (`--no-els` restores the old behaviour): 1.42x geomean over 24 circuit instances, uniformity-fuzzed against the exact oracle at 0 verdict flips / 0 unsound rows.
 
 ## The real improvement: B = 8 (free, +60 % throughput)
 

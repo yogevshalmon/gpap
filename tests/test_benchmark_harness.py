@@ -232,3 +232,28 @@ def test_prepare_variant_falls_back_to_raw_when_abc_is_missing(tmp_path, monkeyp
     path, info = prepare_variant(src, "abc", str(tmp_path), cycles=5, seed=5)
     assert path == src and "no abc binary" in info["error"]
     assert "-> raw" in variant_note(info)
+
+class TestCliHelpRenders:
+    """Every --help screen must actually render.
+
+    argparse runs `%`-expansion over help strings, so a literal `%` in prose (a percentage —
+    exactly what this repo's help text is full of) raises at FORMAT time, not at parse time. The
+    result is a subcommand whose --help crashes with a TypeError while every real invocation of it
+    works, so nothing else in the suite can see it. `gpap mine --help` shipped broken this way.
+    """
+
+    @pytest.mark.parametrize("sub", ["sample", "mine", "bench", "circuit2cnf", "info"])
+    def test_subcommand_help_renders(self, sub):
+        from gpap.cli import main
+
+        with pytest.raises(SystemExit) as e:
+            main([sub, "--help"])
+        assert e.value.code == 0
+
+    def test_top_level_help_renders(self):
+        from gpap.cli import main
+
+        with pytest.raises(SystemExit) as e:
+            main(["--help"])
+        assert e.value.code == 0
+

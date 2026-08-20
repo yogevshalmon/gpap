@@ -36,11 +36,42 @@ def _support_literals(support):
 # Mining budget and per-width candidate ceilings, as the pipeline uses them. Width 1 (the
 # backbone) always runs; the wide widths are gated on their candidate COUNT, which is known
 # before any GPU work and is what actually predicts their cost.
+#: TOTAL wall budget for mining, across BOTH stages. ⚠️ It used to bound neither: stage 1 passed
+#: no `seconds` at all (so it inherited mine_entailed's own 5 s default and this constant was
+#: decorative), and stage 2's budget had a `max(1.0, ...)` FLOOR that fired even when stage 1 had
+#: already spent everything — so the real ceiling was 6 s, and b14-c25 measured 6.11 s. Both stages
+#: now draw from one deadline. Honored to CHUNK granularity: a single chunk is the smallest unit of
+#: GPU work and is never abandoned half-written, so a formula with a very large M can overshoot by
+#: one chunk.
 MINE_SECONDS = 5.0
 #: Stage 1 — only the wide widths that are cheap for this support size.
 STAGE1_MAX_TUPLES = {2: 80_000, 3: 40_000}
 #: Stage 2 — forced wide widths for an instance that is still stuck after the units are in.
 STAGE2_MAX_TUPLES = 2_000_000
+#: Formulas smaller than this skip mining entirely. ⚠️ Was an inline 3000, justified by "even 0.3s
+#: of probing would dominate the e2e wall" — which is not what mining costs down there: 0.01-0.04 s
+#: measured. The gate mattered because ABC-encoded CNFs are SMALL by construction, so it excluded
+#: exactly the instances ABC produces. Lowering it to 500 was worth 2.68x on b03-c25/abcfast
+#: (M=2,087) and 1.65x on b09-c25/abcfast (M=2,882) in the 24-instance sweep.
+MINE_MIN_CLAUSES = 500
+
+
+def _mine_score(smp, warm) -> float:
+    """Models a chunk is expected to yield — batch rows x completion rate.
+
+    THE proxy for "did mining pay?", and it costs no extra GPU work: both terms are already in
+    hand. K is sized as ~budget/row_bytes with row_bytes ~ 4M, so `K x M` is roughly the memory
+    budget WHATEVER the formula is — a chunk therefore costs about the same wall before and after
+    mining, and what actually moves is how many rows fit and how many of them complete. Mined
+    clauses push those two OPPOSITE ways (more clauses => smaller K, stronger propagation =>
+    higher success), which is exactly the trade the caller has to adjudicate.
+
+    ⚠️ A PROXY, not a measurement. The warmup pins K <= 1024, so its success rate is read at a
+    batch the timed run will not use; and holding chunk wall constant ignores that a longer trail
+    costs more per row. It is deliberately cheap — the alternative is a second timed run, which
+    costs more than the clauses are worth on the instances where this fires.
+    """
+    return float(smp.K) * float(warm["best_success"])
 
 
 class VarOrder(int, Enum):
@@ -232,20 +263,20 @@ def sample_file(path, device, **kw):
     phases["parse"] = time.perf_counter() - t_start
     # Wire map (var -> input@cycle) embedded by a .bench conversion — lets sample output name each
     # column by its circuit wire. Empty for a plain (non-circuit) CNF.
-    from gpap.circuits.bench import parse_encoder_comment, parse_support_labels
+    from gpap.circuits.bench import parse_support_labels
     wire_map = parse_support_labels(path)
-    # Encoder provenance gate (2026-07-10): on an ABC-encoded CNF the entailed-clause miner is
-    # pure overhead — dc2/fraig already removed the backbone L1 harvests structurally (measured:
-    # 0-45 units found vs 59-1007 on the same circuits' Tseitin CNFs, while costing its full 5 s
-    # budget; b15-c25: 4.8 s of a 9.4 s e2e wall for 45 units on a 222k-clause formula). The gate
-    # only downgrades the DEFAULT ("auto"); pass mine=True to force probing anyway.
-    if kw.get("mine", "auto") == "auto" and parse_encoder_comment(path) == "abc":
-        kw["mine"] = False
+    # NOTE (2026-08-19): there USED to be an encoder-provenance gate here that turned mining OFF
+    # by default on any CNF carrying `c encoder abc`, on the grounds that dc2/fraig has already
+    # removed the backbone (measured 0-45 units found vs 59-1007 on the same circuits' Tseitin
+    # CNFs). The unit COUNT was the wrong proxy — it never measured the sampling rate. Measured
+    # over 24 instances x 2 encoders, mining is worth MORE on ABC-encoded CNFs than on Tseitin
+    # ones (geomean 3.28x vs 2.05x; s386-c25 14.3x, s832-c25 5.5x, b10-c25 4.0x), because WHICH
+    # units are found matters more than how many. The gate is gone; MINE_SECONDS bounds the cost.
     return sample_clauses(cnf0.nv, cnf0.clauses, sup0, device,
                           _t_start=t_start, _phases=phases, _wire_map=wire_map, **kw)
 
 
-def sample_clauses(nv, clauses, support, device, *, simplify=True, els=False, n_time=50_000,
+def sample_clauses(nv, clauses, support, device, *, simplify=True, els=True, n_time=50_000,
                    n_cov=0, out_cap=0, uniformity="off", n_uni=2000, b=8, k_cap="auto",
                    max_chunks=None, time_limit=60.0, cov_chunks=4, max_rounds=300,
                    lookahead=False, verify_clauses=None, verify_cpu=False, cov_k_cap=2048,
@@ -323,10 +354,10 @@ def sample_clauses(nv, clauses, support, device, *, simplify=True, els=False, n_
         phases["warmup"] = time.perf_counter() - _tw
         # Entailed-clause mining (gpap.mining, an application of the engine's tuple-probe
         # primitive). Every learned clause is ENTAILED, so the model set is exactly unchanged and
-        # this can only make propagation stronger. Mine on every non-tiny formula (M >= 3000;
-        # below that the timed run is ~instant and even 0.3s of probing would dominate the e2e
-        # wall). Effect on sampling: docs/findings/MINING_FINDINGS.md.
-        if mine in ("auto", True) and smp.M >= 3000:   # True = forced (bypasses provenance gate)
+        # mining can only make propagation stronger — but NOT necessarily the sampler faster, which
+        # is what KEEP_IF_IT_HELPS below is about. Skipped on tiny formulas (MINE_MIN_CLAUSES);
+        # `mine=True` ("--mine on") forces past that gate. Effect: docs/findings/MINING_FINDINGS.md.
+        if mine is True or (mine == "auto" and smp.M >= MINE_MIN_CLAUSES):
             try:
                 # Two stages. Stage 1 mines the backbone (width 1, always — the cheap fixpoint
                 # and the dominant win) plus the wider widths that are AFFORDABLE for this
@@ -335,8 +366,10 @@ def sample_clauses(nv, clauses, support, device, *, simplify=True, els=False, n_
                 # everywhere because mining is exactly what lifts it, so gating the wide widths
                 # on the PRE-mining rate burned the budget suite-wide.
                 _tm = time.perf_counter()
+                score_before = _mine_score(smp, w)       # what we have to beat to keep the clauses
+                mine_deadline = _tm + MINE_SECONDS      # ONE budget, shared by both stages
                 mi = mine_entailed(nv, clauses, device, pool=_support_literals(support),
-                                   max_tuples=STAGE1_MAX_TUPLES)
+                                   max_tuples=STAGE1_MAX_TUPLES, seconds=MINE_SECONDS)
                 phases["mine"] = time.perf_counter() - _tm
                 learned = list(mi.clauses)
                 stuck = w["best_success"] < mine_gate
@@ -350,13 +383,14 @@ def sample_clauses(nv, clauses, support, device, *, simplify=True, els=False, n_
                         support=support, k_cap=k_cap, seed=seed)
                     phases["rebuild"] = time.perf_counter() - _tm
                     _tm = time.perf_counter()
-                    stuck = _warmup(smp)["best_success"] < mine_gate   # post-units stuck signal
+                    warm = _warmup(smp)                 # post-units: the stuck signal AND the score
+                    stuck = warm["best_success"] < mine_gate
                     phases["recheck"] = time.perf_counter() - _tm
-                if stuck:
+                left = mine_deadline - time.perf_counter()
+                if stuck and left > 0.25:               # no floor: an exhausted budget stays spent
                     _tm = time.perf_counter()
                     mi2 = mine_entailed(nv, clauses + learned, device, pool=_support_literals(support),
-                                        max_tuples=STAGE2_MAX_TUPLES,
-                                        seconds=max(1.0, MINE_SECONDS - mi.seconds))
+                                        max_tuples=STAGE2_MAX_TUPLES, seconds=left)
                     phases["mine"] += time.perf_counter() - _tm
                     if mi2.clauses:
                         learned = learned + list(mi2.clauses)
@@ -366,11 +400,45 @@ def sample_clauses(nv, clauses, support, device, *, simplify=True, els=False, n_
                             els=els, support=support, k_cap=k_cap, seed=seed)
                         phases["rebuild"] = (phases.get("rebuild", 0.0)
                                              + time.perf_counter() - _tm)
+                        _tm = time.perf_counter()
+                        warm = _warmup(smp)             # re-score: stage 2 changed the formula
+                        phases["recheck"] = phases.get("recheck", 0.0) + time.perf_counter() - _tm
                     for width, n in mi2.by_width.items():
                         mi.by_width[width] = mi.by_width.get(width, 0) + n
                     mi.seconds += mi2.seconds
+                # KEEP THE CLAUSES ONLY IF THEY HELP (2026-08-20). Mined clauses are always
+                # sound, but they enlarge the formula, and K is sized as budget/row_bytes with
+                # row_bytes ~ 4M — so a bigger M buys a SMALLER batch. Since K x M is then roughly
+                # constant, a chunk costs about the same either way and models-per-chunk
+                # `K x success` is the throughput proxy, readable with no extra GPU work. Compare
+                # it against the pre-mining sampler and revert when mining did not pay. This is
+                # what turns "mining helps on average" into "mining never hurts": measured on
+                # b06-c25/abc, where 5 units shrank K and cost 0.55x with nothing gained.
+                score_after = _mine_score(smp, warm if learned else w)
+                # `score_before > 0` guard: when the un-mined sampler completed NOTHING in the
+                # warmup there is no baseline to be worse than, and mining is the only thing that
+                # has ever converted those (b12-c25/abc: 516 -> 20,031 models). Keep the clauses.
+                if learned and score_before > 0 and score_after <= score_before:
+                    _tm = time.perf_counter()
+                    smp = GPUSampler.from_clauses(nv, clauses, device, simplify=simplify, els=els,
+                                                  support=support, k_cap=k_cap, seed=seed)
+                    phases["rebuild"] = phases.get("rebuild", 0.0) + time.perf_counter() - _tm
+                    # Re-warm. EVERY other route into the timed run has been through `_warmup`
+                    # (the no-mining path warms at the top, the keep path warms in the recheck),
+                    # and a reverted run must not be the one exception — otherwise the instances
+                    # this guard fires on are also the only ones paying first-touch cost inside
+                    # the measurement, which would show up as a regression caused by the guard
+                    # rather than by the clauses.
+                    _tm = time.perf_counter()
+                    _warmup(smp)
+                    phases["recheck"] = phases.get("recheck", 0.0) + time.perf_counter() - _tm
+                    log.info("mining reverted: %d clauses did not pay (%.2fx projected)",
+                             len(learned), score_after / score_before if score_before else 0.0)
+                    learned = []
                 mine_info = {"n_units": mi.by_width.get(1, 0), "n_binary": mi.by_width.get(2, 0),
-                             "n_ternary": mi.by_width.get(3, 0), "seconds": mi.seconds}
+                             "n_ternary": mi.by_width.get(3, 0), "seconds": mi.seconds,
+                             "kept": bool(learned),
+                             "gain": (score_after / score_before) if score_before else None}
             except RuntimeError as e:   # mining is an optimization — never let it kill the run
                 log.warning("mining skipped after a device error: %s", e)
     t0 = time.perf_counter()

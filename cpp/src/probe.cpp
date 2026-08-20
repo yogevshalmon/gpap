@@ -163,7 +163,7 @@ class Combinations {
     bool done_ = false;
 };
 
-const gpap_probe_options kDefaults = {0.0, 0, 0, 1, 0, 0};  /* skip_subsumed, refuse_over_max off */
+const gpap_probe_options kDefaults = {0.0, 0, 0, 1, 0};   /* refuse_over_max off */
 
 /* Tuples one launch can hold: the engine's own per-row state plus the (batch, k) int64 decision
  * matrix this entry point allocates and the sampler's path never does. ONE model, the shared one —
@@ -179,28 +179,24 @@ int32_t probe_batch(gpap_engine *e, int32_t k, int64_t n_tuples, int32_t request
     return static_cast<int32_t>(std::max<int64_t>(1, b));
 }
 
-/* Run one chunk of already-materialized tuples and append the conflicting ones to `out`. */
+/* Run one chunk of already-materialized tuples and append the conflicting ones to `out`.
+ *
+ * NOTE there is no redundancy filter here, deliberately. There was one (`skip_subsumed`: drop a
+ * conflict the assumptions alone caused). It was SOUND but worth 0.0-0.3% of the result buffer on
+ * every instance measured, while costing an int32 per row and a branch in the innermost loop of
+ * both propagate kernels — and the host-side filter in gpap.mining has to be exact anyway, since
+ * it is the one that decides what a caller receives. Redundancy is a property of the CLAUSE
+ * against a FORMULA, so it belongs where the formula is known, not in the sweep. */
 gpap_status probe_chunk(gpap_engine *e, const std::vector<int64_t> &tuples, int32_t k,
-                        bool skip_subsumed, std::vector<int8_t> &flags,
-                        std::vector<int32_t> &impl, gpap_probe *out) {
+                        std::vector<int8_t> &flags, gpap_probe *out) {
     const int32_t rows = static_cast<int32_t>(tuples.size() / static_cast<size_t>(k));
     if (rows == 0) return GPAP_OK;
     GPAP_TRY(gpap_engine_reset(e, rows));           /* broadcast-restore the post-units cache */
     GPAP_TRY(gpap_engine_apply(e, tuples.data(), k));
     flags.resize(static_cast<size_t>(rows));
     GPAP_TRY(gpap_flags(e, nullptr, flags.data()));
-    if (skip_subsumed) {
-        /* The implication count the kernel already produced IS the redundancy test — no extra
-         * work, no second pass over the clauses. See gpap_probe_options::skip_subsumed. */
-        impl.resize(static_cast<size_t>(rows));
-        GPAP_TRY(gpap_num_propagated(e, impl.data()));
-    }
     for (int32_t r = 0; r < rows; ++r) {
         if (!flags[static_cast<size_t>(r)]) continue;
-        if (skip_subsumed && impl[static_cast<size_t>(r)] == 0) {
-            out->stats.subsumed += 1;
-            continue;
-        }
         for (int32_t j = 0; j < k; ++j)
             out->conflicts.push_back(
                 to_dimacs(tuples[static_cast<size_t>(r) * static_cast<size_t>(k) + j]));
@@ -245,7 +241,6 @@ gpap_status run_sweep(gpap_engine *e, int32_t k, int64_t total, const gpap_probe
     const int32_t batch = probe_batch(e, k, std::max<int64_t>(limit, 1), o.batch);
     std::vector<int64_t> chunk;
     std::vector<int8_t> flags;
-    std::vector<int32_t> impl;
     while (out->stats.probed < limit) {
         /* Checked BETWEEN chunks: a chunk is the smallest unit of GPU work and abandoning one
          * mid-flight would leave the engine's row state half-written. */
@@ -256,7 +251,7 @@ gpap_status run_sweep(gpap_engine *e, int32_t k, int64_t total, const gpap_probe
         const int64_t want = std::min<int64_t>(batch, limit - out->stats.probed);
         const int64_t got = next(chunk, want);
         if (got == 0) break;
-        GPAP_TRY(probe_chunk(e, chunk, k, o.skip_subsumed != 0, flags, impl, out));
+        GPAP_TRY(probe_chunk(e, chunk, k, flags, out));
         out->stats.probed += got;
     }
     out->stats.exhausted =

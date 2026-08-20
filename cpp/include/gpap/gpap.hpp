@@ -822,12 +822,6 @@ struct ProbeBudget {
      *  generated. A WORK BUDGET: the sweep probes this many and reports `exhausted() == false`.
      *  Every conflict found is still a genuine entailed clause. */
     std::int64_t max_tuples = 0;
-    /** Drop conflicts BCP reached without deriving a single implication: the assumption alone
-     *  emptied a clause the formula already has, so the clause this tuple would prove is already
-     *  implied. Sound (never drops a useful clause) but not complete. Measured on b03-c25 at
-     *  width 3: removes 57,625 of 59,153 redundant conflicts inside the engine, where only 7 of
-     *  59,160 were useful. */
-    bool skip_subsumed = false;
     /** Refuse the sweep outright when it exceeds `max_tuples`, instead of probing that many.
      *  For a caller that wants an exhaustive answer or none at all. */
     bool refuse_over_max = false;
@@ -871,8 +865,6 @@ class Probe {
     std::int64_t total() const { return stats_.total; }
     /** Candidates actually probed — a prefix of the enumeration. */
     std::int64_t probed() const { return stats_.probed; }
-    /** Conflicts dropped as already-implied (see ProbeBudget::skip_subsumed). */
-    std::int64_t subsumed() const { return stats_.subsumed; }
     double seconds() const { return stats_.seconds; }
     /** TRUE iff every candidate was probed. This is what makes a NEGATIVE result meaningful: an
      *  exhausted sweep that found nothing PROVES no entailed clause of this width exists (that
@@ -918,7 +910,7 @@ class Probe {
  *  undetermined — probing a settled literal tells you nothing. Literals are DIMACS throughout.
  *
  *  This is the PRIMITIVE, not a mining strategy: which widths to sweep, over which pool, whether
- *  to fold proven units back in and re-sweep, and which candidates to skip as already-subsumed
+ *  to fold proven units back in and re-sweep, and which of the resulting clauses to keep
  *  are decisions an application makes. `gpap.mining` (Python) is one such application; a C++
  *  consumer builds its own on top of `probe` and `assume`.
  *
@@ -1003,7 +995,6 @@ class Prober {
         o.max_tuples = b.max_tuples;
         o.batch = b.batch;
         o.distinct_vars = b.distinct_vars ? 1 : 0;
-        o.skip_subsumed = b.skip_subsumed ? 1 : 0;
         o.refuse_over_max = b.refuse_over_max ? 1 : 0;
         return o;
     }

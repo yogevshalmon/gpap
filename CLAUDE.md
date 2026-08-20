@@ -50,6 +50,10 @@ cpp/                       # THE ENGINE CORE — libgpap (C ABI + header-only C+
 examples/                  # RUNNABLE examples, both faces: sample_solutions.py +
                            #   check_assumptions.py (python) + a README pointing at cpp/examples/
 gpap/
+  implications.py          # what each literal IMPLIES — one width-1 sweep, three readers:
+                           #   failed literals, hyper-binary resolvents, equivalent literals
+                           #   (`equivalence_edges` feeds preprocess's ELS; strictly stronger
+                           #   than its binary-clause edges, 1.11-1.32x more vars removed)
   mining.py                # entailed-clause mining — the STRATEGY (widths, fixpoint,
                            #   subsumption vs the BASELINE-REDUCED formula, `_Subsumption`)
                            #   over the core's probe primitive; `gpap mine` fronts it
@@ -68,6 +72,7 @@ gpap/
     pipeline.py            # sample_file / sample_clauses: the full e2e flow + the portfolios
                            #   (VarOrder/Lookahead enums + SamplingConfig NamedTuple, so a config
                            #   documents itself; `portfolio(name, allow_soft=)` is the accessor)
+                           #   DEFAULTS CHANGED 2026-08-19/20 — see "Sampling defaults" below
     preprocess.py          # unit_closure / equivalent_literal_substitution (ELS) primitives
     metrics.py             # distinct/two-wise + UNIFORMITY (exact chi2/TV or collision l2_ratio)
     output.py              # compact sample writers (bits / npy / dimacs) — GPU bit-projection out
@@ -123,21 +128,29 @@ archive/                   # concluded experiments (not maintained; see archive/
    budget/4M the broadcast is ~0.80·free VRAM *per chunk whatever the instance* — a fixed ~26 ms
    on the 4080, 41–94% of probe wall (b09 41%, b03 70%, b12 84%, 6s215rb0 94%). See
    docs/findings/MINING_FINDINGS.md for the delta-restore design and its regime bound.
-   ⚠️ **Subsumed conflicts are the overwhelming majority and are dropped
-   IN THE ENGINE** (`skip_subsumed`): a conflict reached with ZERO implications was caused by a
-   clause that was already empty but for the assumed literals, so the kernel's implication
-   counter IS the test — free. b03-c25 width 3: 59,160 conflicts, 7 useful; the filter removes
-   57,625 in-engine (693→18 KiB of result buffer). ⚠️ It is "already implied" **relative to the
-   engine's BASELINE, not to the input formula** — mining folds proven units into the flush, so an
-   input (a|b|c) whose `c` the baseline falsified is a binary constraint during the sweep and the
-   filter drops a clause no input clause subsumes (17 of them on b03-c25). Sound for the intended
-   use (the consumer takes the mined units too, and derives it by propagation), which is why
-   mining's host-side test is against the RESIDUES (`mining._Subsumption`) and not the raw
-   clauses. It is also INCOMPLETE and order- hence KERNEL-dependent (wave can derive an
-   implication in the same warp-wide step that empties the clause): with the raw-clause test,
-   b03-c25 emitted 3,096 clauses under scalar and 3,113 under wave. The residue test restores
-   kernel-invariance — gated by `test_mining_is_kernel_invariant`. That test is SUBSUMPTION, not
-   deduplication: mining cannot emit the same clause twice.
+   ⚠️ **Redundancy is filtered on the HOST, and there are THREE levels** (`mine_entailed(drop=)`,
+   `gpap mine --drop`), each stronger than the last: `none` / **`subsumed`** (default — a clause
+   some clause already covers; free, `mining._Subsumption`) / `derivable` (ALSO the ones unit
+   propagation re-derives on demand — assume all but one literal and the last is forced; one extra
+   batched launch, ~40-70% of mining wall). ⚠️ **The default is NOT the strongest, on purpose.**
+   `derivable` removes **61% of the wide clauses on b03-c25 where `subsumed` removes 0%** — the two
+   notions barely overlap — but a derivable clause still SHORTENS propagation, and GPAP's sampler
+   is propagation-bound: keeping them is measured at **+29% (b03-c25) / +43% (s386-c25) / +3%
+   (b09-c25)** end-to-end. ⚠️ **A clause does k JOBS** (when the other k-1 literals are false it
+   forces the remaining one) and ALL of them must be covered before it can go. Dropping on ONE
+   covered job — the first cut, and what the HBR literature's transitive reduction can do because
+   the binary implication graph is symmetric — discards **a third of the mined wide clauses with a
+   live direction** (b03-c25 34.6%, b09-c25 34.2%), because propagation is NOT
+   contrapositive-complete: `(-1|5),(-1|6),(-5|-6|2)` gives `1 ⇒ 2` but not `-2 ⇒ -1`. Drop them for a consumer that wants a minimal formula (a CDCL
+   preprocessor); keep them for one that wants speed. ⚠️ The `_Subsumption` reference is the formula
+   REDUCED by the engine's baseline, not the input clauses — mining folds proven units into the
+   flush, so an input (a|b|c) whose `c` the baseline falsified is a binary constraint during the
+   sweep and proves a clause no input clause subsumes (17 of them on b03-c25). Testing against the
+   raw input also made the output KERNEL-DEPENDENT (3,096 clauses under scalar vs 3,113 under
+   wave); gated by `test_mining_is_kernel_invariant`. ⚠️ There is deliberately **no filter in the
+   engine** any more: `skip_subsumed` was sound but worth 0.0-0.3% of the result buffer while
+   costing an int32 per row and a branch in both propagate loops — redundancy is a property of a
+   CLAUSE against a FORMULA, so it belongs where the formula is known.
 2. **Fused trajectory sampling**: `reset(K)` + `run_trajectory(order, n_support, B, seed,
    soft=…)` — the whole randomized decide+propagate loop in one launch.
 
@@ -237,9 +250,9 @@ kernels are the only path — the oracle is `tests/reference_bcp.py`).
   not where the convenient wrapper is. `plan_for` survives in both faces as a pure query.
   GPUSampler still PINS the mode to the chunk batch via `set_mode` so its small resets (warmup,
   short final chunk) cannot switch kernel mid-measurement. Same state, pure launch flag
-  (confluence ⇒ it can only change speed) — but note it is NOT observationally pure through the
-  `skip_subsumed` filter, which reads the order-dependent implication counter (see entry point 1
-  above).
+  (confluence ⇒ it can only change speed). It used NOT to be observationally pure, through the
+  engine's `skip_subsumed` filter — that filter is deleted (entry point 1), and mining's answer is
+  kernel-invariant again, gated by `test_mining_is_kernel_invariant`.
   **THE RULE IS `gpap_dispatch_wave(M, batch, device)` in `cpp/src/calibrate.cpp` — ONE definition,
   and it keys off M, the CLAUSE COUNT, not the batch** (2026-08-18): warp-wide **WAVE** propagate
   (≤W trail lits at once, occ segments flattened, the packed-word `atomic_add` return value
@@ -286,6 +299,36 @@ gpap bench 'path/*.cnf' --cmsgen /path/to/cmsgen --n-cov 5000
 scripts/build_abc.sh                                         # optional: pinned abc -> ~/.cache/gpap/bin
 ```
 
+## Sampling defaults — changed 2026-08-19/20 (⚠️ this moves every recorded benchmark number)
+
+| | was | is | flag to restore |
+|---|---|---|---|
+| ELS (equivalent-literal substitution) | off | **on** | `--no-els` |
+| mining on ABC-encoded CNFs | off (provenance gate) | **on** (gate deleted) | `--mine off` |
+| `MINE_MIN_CLAUSES` | 3000 (inline) | **500** | — |
+| `MINE_SECONDS` | decorative (real ceiling ~6 s) | **a real 5 s total** across both stages | — |
+| mined clauses | always kept | **kept only if they pay** | — |
+
+Validated over 24 instances x 2 encoders (tseitin + abc:fast): **D/A geomean 2.543x**, 23 win /
+1 loss; abc:fast 3.276x, tseitin 2.053x. ELS was uniformity-fuzzed against the exact oracle at
+0 verdict flips / 0 unsound rows, controls identical. ⚠️ **Every paper sweep, CMSGen ratio and
+encoder A/B in `$GPAP_RESULTS` predates this** — re-run, or label with the flags above.
+
+- **`MINE_SECONDS` is honored to CHUNK granularity** — a chunk is the smallest unit of GPU work and
+  is never abandoned half-written, so a large-M formula can overshoot by one (b12-c50 measures
+  5.06 s). It is a wall-clock deadline from mining start, so the between-stage rebuild + recheck are
+  inside it; that bounds total pre-sampling overhead, which is the useful thing to bound.
+- **`--mine on` FORCES past `MINE_MIN_CLAUSES`**; `auto` respects it. They used to be identical
+  because the thing `on` bypassed was the (now deleted) provenance gate, so `on` silently did
+  nothing on a small formula — fixed 2026-08-20, gated by tests/test_mining_pipeline.py.
+- **KEEP-IF-IT-HELPS**: mined clauses are sound but enlarge M, and `K ~ budget/4M`, so a bigger
+  formula buys a SMALLER batch. `K x M` is ~constant ⇒ chunk wall is ~constant ⇒ **models per chunk
+  = `K x success`** is the throughput proxy, and both terms are already in hand (no extra GPU
+  work). If it does not beat the pre-mining sampler the clauses are dropped and the original is
+  rebuilt. It is a PROXY (warmup pins K<=1024), and it deliberately keeps the clauses when the
+  un-mined warmup completed NOTHING — there is no baseline to be worse than, and mining is the only
+  thing that has converted those. `mined.kept` / `mined.gain` in `--stats`.
+
 **Circuit inputs**: `.bench` AND AIGER `.aig`/`.aag` (aig2cnf.py — native parse/simulate/unroll;
 latch resets 0/1 honoured, `x` rejected, combinational clamps to T=1; labels from the symbol
 table or `i<k>`).
@@ -314,9 +357,11 @@ CI/CO mapping is POSITIONAL (frame-major), name-verified when symbols exist.
 whole cross-frame win (b12's 12-14x NEEDS an equivalence sweep; dc2-only gets 1.4x) — `auto`
 runs `full` below ~50k estimated unrolled ANDs, `fast` (pre-unroll opt + cheap post) above.
 Encode wall is printed + in stats (`encode_s`) — it is NOT inside the pipeline's e2e rate.
-**Miner overlap**: dc2/fraig removes the backbone width-1 mining finds (0-45 units on ABC CNFs vs 59-1007 on
-Tseitin, for the same 5s budget) ⇒ `sample_file` auto-disables mining on `c encoder abc` CNFs
-(`--mine on` forces). **At `--target rare` the encoder is PER-INSTANCE** (2026-07-14, same
+**Miner overlap**: dc2/fraig removes most of the backbone width-1 mining finds (0-45 units on ABC
+CNFs vs 59-1007 on Tseitin) — but that COUNT is not the effect. ⚠️ Mining is worth MORE on ABC CNFs
+than Tseitin (geomean 3.28x vs 2.05x over 24x2), so the provenance gate that keyed off it is
+DELETED (2026-08-19), along with the `MINE_MIN_CLAUSES` 3000→500 that hid the same small ABC
+formulas a second way. **At `--target rare` the encoder is PER-INSTANCE** (2026-07-14, same
 engine, 3-seed): ABC wins 1.8-5.7× on most and unlocks b14 (0→24 models/s), but the rare-pin
 success can COLLAPSE under dc2/fraig (b13 1.00→0.00 succ = 0.0001×, s386 0.22×, s1196 0.62×)
 — don't report suite geomeans across encoders without the split (see INSIGHTS).

@@ -63,7 +63,6 @@ class ProbeBudget:
     seconds: float | None = None
     max_tuples: int | None = None
     deadline: float | None = field(default=None)   # absolute perf_counter() stamp, if shared
-    skip_subsumed: bool = False                     # drop conflicts reached with 0 implications
     refuse_over_max: bool = False                   # over the budget: refuse, instead of probing it
 
     def remaining(self, now: float | None = None) -> float:
@@ -93,7 +92,6 @@ class ProbeResult:
     conflicting: np.ndarray                 # (m, k) int32 DIMACS
     total: int                              # candidates the full enumeration has
     probed: int                             # candidates actually probed (a prefix)
-    subsumed: int = 0                       # conflicts dropped as already-implied (skip_subsumed)
     seconds: float = 0.0
     stopped: str = ""                       # "" = ran to completion, else why it stopped
 
@@ -110,7 +108,7 @@ class ProbeResult:
     def _from_sweep(cls, sweep) -> "ProbeResult":
         st = sweep.stats
         return cls(conflicting=sweep.conflicts(), total=int(st.total), probed=int(st.probed),
-                   subsumed=int(st.subsumed), seconds=float(st.seconds),
+                   seconds=float(st.seconds),
                    stopped=_core.PROBE_STOP.get(int(st.stop), "") if not st.exhausted else "")
 
 
@@ -226,8 +224,7 @@ class LiteralProbe:
                                probed=0, stopped="unsat")
         sweep = self._engine.probe_combinations(
             pool, size, seconds=b.remaining(), max_tuples=b.max_tuples,
-            distinct_vars=distinct_vars, skip_subsumed=b.skip_subsumed,
-            refuse_over_max=b.refuse_over_max)
+            distinct_vars=distinct_vars, refuse_over_max=b.refuse_over_max)
         with sweep:
             return ProbeResult._from_sweep(sweep)
 
@@ -244,7 +241,7 @@ class LiteralProbe:
             return ProbeResult(conflicting=tuples[:0], total=int(tuples.shape[0]), probed=0,
                                stopped="unsat" if self.unsat else "")
         sweep = self._engine.probe_tuples(tuples, seconds=b.remaining(),
-                                          max_tuples=b.max_tuples, skip_subsumed=b.skip_subsumed,
+                                          max_tuples=b.max_tuples,
                                           refuse_over_max=b.refuse_over_max)
         with sweep:
             return ProbeResult._from_sweep(sweep)

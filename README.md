@@ -168,9 +168,9 @@ Encoding **cost** is visible and tunable: the CLI prints `encoded in N.Ns [...]`
 `--stats` JSON as `encode_s`), and `--abc-opt` picks the effort — `full` optimizes the *unrolled*
 AIG (best shrink; its SAT sweep can cost ~100 s on the biggest unrolls), `fast` optimizes the
 small sequential AIG *before* unrolling plus one cheap post-pass, and `auto` (default) uses
-`full` where it is cheap and `fast` where it would blow up. Since the encoder already removes
-the formula's backbone, the pipeline's entailed-clause miner auto-disables on ABC-encoded CNFs
-(a `c encoder abc` provenance comment travels with the file; `--mine on` forces it back).
+`full` where it is cheap and `fast` where it would blow up. The encoder removes most of the formula's backbone, so the
+entailed-clause miner finds far fewer units on ABC-encoded CNFs — but measured end to end it is
+worth MORE there than on Tseitin ones (geomean 3.28x vs 2.05x), so mining stays on for both.
 
 ABC is **optional and never vendored**. Build a pinned upstream commit into the GPAP cache:
 

@@ -69,6 +69,8 @@ class MiningResult:
     #: clauses/s it does not depend on how many clauses happened to be entailed, so it is what to
     #: compare across instances, GPUs or engine changes.
     implications: int = 0
+    #: clauses removed because propagation already derives them (`drop="derivable"` only).
+    derivable: int = 0
     seconds: float = 0.0
 
     @property
@@ -92,10 +94,14 @@ class MiningResult:
         return (", ".join(parts) or "nothing") + cover + f" in {self.seconds:.2f}s" + rate
 
 
+#: What `drop=` may remove, weakest first. Each level implies the one before it.
+DROP_LEVELS = ("none", "subsumed", "derivable")
+
+
 def mine_entailed(num_vars: int, clauses: list, device, *, pool: list | None = None,
                   widths=DEFAULT_WIDTHS, seconds: float | None = 5.0,
                   max_tuples: "int | dict[int, int]" = DEFAULT_MAX_TUPLES,
-                  min_units_for_wide: int = 0) -> MiningResult:
+                  min_units_for_wide: int = 0, drop: str = "subsumed") -> MiningResult:
     """Mine entailed clauses of the given `widths` and return them.
 
     `pool`: DIMACS LITERALS to combine at widths >= 2, and the natural knob — the interesting
@@ -110,10 +116,25 @@ def mine_entailed(num_vars: int, clauses: list, device, *, pool: list | None = N
     `min_units_for_wide`: run widths >= 2 only if width 1 proved at least this many units. The
       wide tiers are the expensive ones and on many formulas they find nothing, so a caller that
       wants mining to be nearly free on barren inputs sets this to 1.
+    `drop`: which REDUNDANT clauses to leave out. Three levels, each stronger than the last:
+      "none"       keep everything proved (for analysis).
+      "subsumed"   (default) leave out a clause some clause already covers — a subset of it is
+                   present in the formula the sweep ran against, so it constrains nothing new.
+                   Free: a set test over the handful of clauses found.
+      "derivable"  ALSO leave out clauses propagation re-derives on demand (assume all but one
+                   literal, and the last one is forced). This is the probing literature's notion
+                   for hyper-binary resolvents, and it is far stronger: on b03-c25 it removes 96%
+                   where "subsumed" removes 0%. Costs one extra batched launch (~40-70% of mining
+                   wall). ⚠️ NOT the default, deliberately: a derivable clause still SHORTENS
+                   propagation, and GPAP's own sampler is propagation-bound — keeping them is
+                   measured at +29-43% end-to-end. Drop them for a consumer that wants a minimal
+                   formula (a CDCL preprocessor), not for one that wants speed.
 
     Width 1 is iterated to a FIXPOINT: each proven unit narrows the formula, which can expose
     further failed literals. Later widths run once, on the narrowed formula.
     """
+    if drop not in DROP_LEVELS:
+        raise ValueError(f"drop must be one of {DROP_LEVELS}, got {drop!r}")
     t0 = time.perf_counter()
     res = MiningResult()
     sub = _Subsumption(max(widths, default=0))
@@ -133,10 +154,10 @@ def mine_entailed(num_vars: int, clauses: list, device, *, pool: list | None = N
         mining wall — recorded for the invariant, not the speed; the recording still happens
         because later widths need it.)
 
-        It runs on the handful of conflicts the engine's cheap filter let through, never on
-        candidates. Its predecessor filtered CANDIDATES and cost 65s to drop 0 of 122M.
+        It runs on the conflicts the sweep REPORTED, never on candidates. Its predecessor filtered
+        CANDIDATES and cost 65s to drop 0 of 122M.
         """
-        if check and sub.subsumes(clause):
+        if check and drop != "none" and sub.subsumes(clause):
             return False
         sub.add(clause)
         res.clauses.append(list(clause))
@@ -190,8 +211,30 @@ def mine_entailed(num_vars: int, clauses: list, device, *, pool: list | None = N
         del probe
         _release(device)
 
+    if drop == "derivable" and res.clauses:
+        _drop_derivable(res, num_vars, clauses, device)
     res.seconds = time.perf_counter() - t0
     return res
+
+
+def _drop_derivable(res: MiningResult, num_vars: int, clauses: list, device) -> None:
+    """Remove the clauses propagation already derives, judged against what the caller will HAVE.
+
+    That is the input formula plus the mined UNITS — not the input alone. A caller takes the whole
+    result, so the units are part of the context a wider clause has to earn its place against;
+    judging against the input alone understates the redundancy (on b03-c25, 53% vs 96%)."""
+    from gpap.implications import derivable_mask
+
+    units = [c for c in res.clauses if len(c) == 1]
+    mask = derivable_mask(res.clauses, list(clauses) + units, num_vars, device)
+    kept = [c for c, red in zip(res.clauses, mask) if not red]
+    res.derivable = int(mask.sum())
+    res.clauses = kept
+    by_width: dict[int, int] = {}
+    for c in kept:
+        by_width[len(c)] = by_width.get(len(c), 0) + 1
+    for w in res.by_width:
+        res.by_width[w] = by_width.get(w, 0)
 
 
 class _Subsumption:
@@ -205,13 +248,14 @@ class _Subsumption:
     is not subsumed by any INPUT clause, which is why testing against those let 17 of them through
     on b03-c25.
 
-    That also makes the answer DETERMINISTIC, which the engine-side filter alone is not: it reads
-    the implication counter, and on a conflicted row that counter is order-dependent (wave can
-    derive implications in the same warp-wide step that empties the clause), so scalar dropped 17
-    where wave dropped 0. Same soundness either way, different output — and a library whose
-    results move with a launch flag is a library that cannot be gated. The engine filter stays as
-    the CHEAP pass (it removes ~97% in-engine, keeping the result buffer small); this is the exact
-    one, over the handful that survive.
+    That also makes the answer DETERMINISTIC. There used to be a second filter inside the engine
+    (`skip_subsumed`) that read the implication counter, and on a conflicted row that counter is
+    order-dependent — wave can derive implications in the same warp-wide step that empties the
+    clause — so scalar dropped 17 where wave dropped 0. Same soundness either way, different
+    output, and a library whose results move with a launch flag is a library that cannot be gated.
+    It was deleted (it was worth 0.0-0.3% of the result buffer): redundancy is a property of a
+    CLAUSE against a FORMULA, so it belongs on the host, where the formula is known. This is the
+    only filter, and it is exact.
     """
 
     def __init__(self, max_width: int):
@@ -271,15 +315,8 @@ class _Subsumption:
 
 
 def _budget_with(budget: ProbeBudget, max_tuples: int) -> ProbeBudget:
-    """The run-wide budget, plus this width's work budget — and the engine-side redundancy filter.
-
-    `skip_subsumed` is what keeps a wide sweep's RESULTS small. A conflict BCP reached without
-    deriving any implication was caused by a clause the formula already has, so the clause it
-    would prove is already implied. Measured on b03-c25 at width 3: 59,160 conflicts of which
-    only 7 are useful — without this the engine buffers and returns 8,451x more than anyone
-    wants, and the host then throws it away."""
-    return ProbeBudget(seconds=budget.seconds, max_tuples=max_tuples, deadline=budget.deadline,
-                       skip_subsumed=True)
+    """The run-wide budget plus this width's work budget."""
+    return ProbeBudget(seconds=budget.seconds, max_tuples=max_tuples, deadline=budget.deadline)
 
 
 def _ceiling(max_tuples, width: int) -> int:

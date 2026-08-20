@@ -16,6 +16,7 @@ import gpap.engine.probe
 from gpap.engine import core_available
 from gpap.engine.probe import LiteralProbe, ProbeBudget
 from gpap.mining import _Subsumption, mine_entailed
+from gpap.sampling.pipeline import sample_clauses
 from tests.reference_combinations import combinations
 
 DEV = torch.device("cuda") if torch.cuda.is_available() else torch.device("cpu")
@@ -405,66 +406,70 @@ class TestSubsumption:
         assert full.exhausted[2] and full.probed[2] == full.candidates[2]
 
 
-class TestEngineSideSubsumption:
-    """`skip_subsumed`: a conflict BCP reached with ZERO implications was caused by a clause that
-    was ALREADY EMPTY but for the assumed literals — so the clause it would prove is subsumed by
-    that clause's residue under the engine's baseline assignment.
+class TestSubsumptionFilter:
+    """`mining._Subsumption`: the ONE redundancy filter, and it runs on the host.
 
-    Note "under the baseline", not "by an input clause": mining folds proven units into the flush
-    cache, so an input (a | b | c) whose `c` the baseline falsified acts as a binary constraint,
-    and the filter drops a clause no INPUT clause subsumes (17 of them on b03-c25). Sound for the
-    intended use — a consumer takes the mined units too, and then derives it by propagation — but
-    the host-side test has to be against the same reduced formula, which is what `_Subsumption`
-    rebuilds. It is deliberately incomplete (a conflict that derived an implication first is kept),
-    and that incompleteness is ORDER-dependent, hence kernel-dependent: see
-    `test_mining_is_kernel_invariant`. Measured on b03-c25 at width 3: 59,160 conflicts, 7 useful;
-    this removes 57,625 inside the engine, so the result buffer is 18 KiB instead of 693 KiB."""
+    There used to be a second one inside the engine (`skip_subsumed`: drop a conflict the assumed
+    literals alone caused). It was sound, but worth 0.0-0.3% of the result buffer on every instance
+    measured, while costing an int32 per row and a branch in the innermost loop of both propagate
+    kernels — so it was removed and this is what remains. Redundancy is a property of a CLAUSE
+    against a FORMULA, so the host is where it belongs: that is where the formula is known.
 
-    CLAUSES = [[-1, -2], [3, 4], [-3, 5], [-3, -5], [6, 7]]
-
-    def test_never_drops_a_clause_that_is_not_already_implied(self):
-        p = LiteralProbe(7, self.CLAUSES, DEV)
-        lits = p.free_literals()
-        loose = {tuple(sorted(-int(x) for x in row))
-                 for row in p.probe(lits, 2).conflicting}
-        tight = {tuple(sorted(-int(x) for x in row))
-                 for row in p.probe(lits, 2, budget=ProbeBudget(skip_subsumed=True)).conflicting}
-        assert tight <= loose, "the filter may only REMOVE conflicts"
-        # the reference is the formula REDUCED by the baseline, which is what the filter can see
-        sub = _Subsumption(2)
-        sub.rebuild(self.CLAUSES, 7, p.assigned_literals())
-        for cl in loose - tight:
-            assert sub.subsumes(cl), f"{cl} was dropped but nothing known subsumes it"
+    The reference is the formula REDUCED by the engine's baseline, not the input clauses. Mining
+    folds proven units into the flush, so an input (a | b | c) whose `c` the baseline falsified
+    acts as a binary constraint; a conflict on (~a, ~b) then proves (a | b), which no INPUT clause
+    subsumes. Testing against the raw input let 17 such clauses through on b03-c25."""
 
     def test_drops_only_what_the_baseline_makes_redundant(self):
-        """The exact statement of the filter's soundness, on a formula where the baseline MATTERS.
-
-        (-1 | -2 | -3) with 3 forced FALSE by the flush is a binary constraint during the sweep, so
-        assuming (1, 2) empties it with zero implications. The mined (-1 | -2) is entailed and no
-        input clause subsumes it — only the input clause's RESIDUE does."""
+        """(-1 | -2 | 3) with 3 forced FALSE by the flush is a binary constraint during the sweep,
+        so assuming (1, 2) proves (-1 | -2) — entailed, and subsumed by the RESIDUE only."""
         clauses = [[-3], [-1, -2, 3], [4, 5], [-4, 5], [4, -5]]
         p = LiteralProbe(5, clauses, DEV)
         assert -3 in p.assigned_literals().tolist(), "the flush must have settled 3"
-        lits = p.free_literals()
-        loose = {tuple(sorted(-int(x) for x in row)) for row in p.probe(lits, 2).conflicting}
-        tight = {tuple(sorted(-int(x) for x in row))
-                 for row in p.probe(lits, 2, budget=ProbeBudget(skip_subsumed=True)).conflicting}
-        dropped = loose - tight
-        assert (-2, -1) in dropped, "the residue-caused conflict is exactly what the filter is for"
-        raw = {tuple(sorted(c)) for c in clauses}
-        assert not any(sub in raw for r in (1, 2) for sub in it.combinations((-2, -1), r)), \
-            "and no INPUT clause subsumes it, which is why the host test uses the residues"
         sub = _Subsumption(2)
         sub.rebuild(clauses, 5, p.assigned_literals())
-        assert sub.subsumes((-2, -1)), "the RESIDUE of (-1 | -2 | 3) does"
+        assert sub.subsumes((-2, -1)), "the residue of (-1 | -2 | 3) subsumes it"
+        raw = {tuple(sorted(c)) for c in clauses}
+        assert not any(x in raw for r in (1, 2) for x in it.combinations((-2, -1), r)), \
+            "...and no INPUT clause does, which is why the reference is the reduced formula"
+
+    def test_keeps_a_two_clause_inference(self):
+        """A clause proved by RESOLUTION between two clauses is not subsumed and must survive.
+
+        (-1|-2|3) and (-1|-2|-3) each go unit under (1, 2) and force opposite literals, proving
+        (-1|-2). Nothing subsumes it. An in-engine filter that keyed on how EARLY the conflict came
+        threw 28 such clauses away on b03-c25 before it was removed."""
+        clauses = [[-1, -2, 3], [-1, -2, -3], [4, 5], [-4, 5], [4, -5]]
+        res = mine_entailed(5, clauses, DEV, widths=(1, 2), seconds=30.0)
+        assert [-2, -1] in [sorted(c) for c in res.clauses]
+
+    def test_fuzz_never_emits_a_subsumed_clause(self):
+        """The property mining promises, on random formulas: nothing it returns is subsumed by the
+        formula it was mined from (reduced by the baseline), and everything it returns is entailed."""
+        rng = random.Random(11)
+        for _ in range(40):
+            nv = rng.randint(4, 12)
+            clauses = [c for c in ([list({rng.choice([1, -1]) * rng.randint(1, nv)
+                                          for _ in range(rng.randint(1, 3))})
+                                    for _ in range(rng.randint(4, 24))]) if c]
+            res = mine_entailed(nv, clauses, DEV, widths=(1, 2), seconds=30.0)
+            if not res.clauses:
+                continue
+            p = LiteralProbe(nv, clauses, DEV)
+            sub = _Subsumption(2)
+            sub.rebuild(clauses, nv, p.assigned_literals())
+            for cl in res.clauses:
+                t = tuple(sorted(cl))
+                if len(t) > 1:                      # width 1 is provably never subsumed
+                    assert not sub.subsumes(t), f"emitted {t}, which the formula subsumes"
 
     def test_mining_is_kernel_invariant(self):
         """What mining RETURNS must not depend on which propagate kernel ran.
 
-        It nearly did: the engine filter reads the implication counter, which is order-dependent on
-        conflicted rows, so wave and scalar drop different subsets. Before the host test was made
-        residue-based, that leaked all the way out — b03-c25 emitted 3,096 clauses under scalar and
-        3,113 under wave, i.e. `gpap mine` answered differently depending on a launch flag."""
+        It did once: the engine-side filter read the implication counter, which is order-dependent
+        on conflicted rows, so wave and scalar dropped different subsets and b03-c25 emitted 3,096
+        clauses under scalar against 3,113 under wave. With the filter on the host, over a formula
+        both kernels agree on, the answer is the same by construction — pinned here anyway."""
         clauses = [[-4], [-1, -2, 4], [-1, -3, 4], [5, 6], [-5, 6], [5, -6], [2, 3], [1, 7]]
         out = {}
         for mode in ("scalar", "wave"):
@@ -478,22 +483,6 @@ class TestEngineSideSubsumption:
                 gpap.engine.probe.LiteralProbe.__init__ = orig
             out[mode] = sorted(map(sorted, res.clauses))
         assert out["scalar"] == out["wave"]
-
-    def test_reports_what_it_dropped(self):
-        """Silently discarding results would be worse than keeping them — the count is reported."""
-        p = LiteralProbe(7, self.CLAUSES, DEV)
-        r = p.probe(p.free_literals(), 2, budget=ProbeBudget(skip_subsumed=True))
-        assert r.subsumed >= 0
-        plain = p.probe(p.free_literals(), 2)
-        assert len(plain) == len(r) + r.subsumed, "reported + dropped must account for every conflict"
-
-    def test_mining_output_is_unchanged_by_it(self):
-        """It is a transport optimization: the host filter is exact, so what mining RETURNS must
-        not depend on how much the engine pre-filtered."""
-        clauses = [[-1, -2], [1, 3], [2, 3], [-3, 4], [-3, -4], [5, 6], [-5, 6], [5, -6]]
-        a = mine_entailed(8, clauses, DEV, widths=(1, 2, 3), seconds=30.0)
-        b = mine_entailed(8, clauses, DEV, widths=(1, 2, 3), seconds=30.0)
-        assert sorted(map(sorted, a.clauses)) == sorted(map(sorted, b.clauses))
 
 
 class TestMiningWorkMetrics:
@@ -530,3 +519,44 @@ class TestMiningWorkMetrics:
         mined = {c[0] for c in res.clauses if len(c) == 1}
         assert not (formula_units & mined), "a mined unit can never be one the formula had"
         assert len(mined) == len(res.clauses), "width 1 yields units only"
+
+
+class TestMiningPipelineDefaults:
+    """The pipeline's mining GATES — the two knobs a user is told about, checked to do what the
+    help text says. Both were wrong at some point and both were invisible when wrong: a gate that
+    silently declines to mine looks exactly like an instance with nothing to mine."""
+
+    def test_mine_on_forces_past_the_size_gate(self):
+        """`--mine on` is documented as forcing; `auto` respects MINE_MIN_CLAUSES.
+
+        They used to be identical, because the thing `on` bypassed was the ABC provenance gate —
+        deleted 2026-08-19 — while the SIZE gate applied to both. So on any formula below the
+        threshold `--mine on` quietly did nothing at all."""
+        from gpap.sampling import pipeline
+
+        assert pipeline.MINE_MIN_CLAUSES > 0
+        # a formula far below the gate: `auto` must decline, `on` must not
+        nv = 6
+        clauses = [[1, 2], [-1, 3], [2, -3], [4, 5], [-4, 5], [4, -5], [6, -6]]
+        got = {}
+        for mode in (True, "auto"):
+            info = sample_clauses(nv, clauses, None, DEV, n_time=200, time_limit=10.0, mine=mode)
+            got[mode] = info.get("mined")
+        assert got["auto"] is None, "auto must respect the size gate"
+        assert got[True] is not None, "--mine on must force past it"
+
+    def test_the_keep_if_it_helps_guard_reports_its_decision(self, circuit_cnfs):
+        """The guard reports what it decided, and the run is SOUND either way.
+
+        Whichever way it goes the model set is unchanged — mined clauses are entailed — so this
+        pins the bookkeeping (`kept`/`gain` present and consistent), not the direction."""
+        c = circuit_cnfs["b03-c25"]
+        info = sample_clauses(c["nv"], c["clauses"], c["support"], DEV, n_time=2000,
+                              time_limit=30.0, mine=True)
+        mi = info.get("mined")
+        if mi is None:
+            pytest.skip("nothing mined on this instance")
+        assert "kept" in mi and "gain" in mi
+        if mi["gain"] is not None and mi["kept"]:
+            assert mi["gain"] > 1.0, "clauses were kept, so the guard must have seen a gain"
+        assert info["gpu_sound"], "the run must be sound whether or not the clauses were kept"
