@@ -242,6 +242,22 @@ extern "C" gpap_status gpap_sat_rows(gpap_engine *e, const int32_t *rows, int32_
     return GPAP_OK;
 }
 
+extern "C" gpap_status gpap_packed_rows(gpap_engine *e, const int32_t *rows, int32_t n_rows,
+                                        int32_t *out_host) {
+    /* RAW words, sum field included — gpap_sat_rows above masks it off, which would hide sum
+     * corruption from the CLEAN-mode identity gate (tests/test_clean_mode.py). */
+    if (!e || !rows || !out_host || n_rows < 0) return GPAP_ERR_ARG;
+    GPAP_TRY(engine_use_ctx(e));
+    const int32_t M = e->num_clauses;
+    for (int32_t i = 0; i < n_rows; ++i) {
+        if (rows[i] < 0 || rows[i] >= e->K) return GPAP_ERR_ARG;
+        GPAP_CU(cuMemcpyDtoH(out_host + (size_t)i * M,
+                             e->packed.ptr + (size_t)rows[i] * M * sizeof(int32_t),
+                             (size_t)M * sizeof(int32_t)));
+    }
+    return GPAP_OK;
+}
+
 extern "C" gpap_status gpap_engine_flushed_assignment(gpap_engine *e, int8_t *out_host) {
     if (!e || !out_host) return GPAP_ERR_ARG;
     GPAP_TRY(engine_use_ctx(e));

@@ -377,3 +377,131 @@ def _bcp_trajectory_kernel(
         tl.store(nops_ptr + k, nops)
         tl.store(nprops_ptr + k, tail)    # literals assigned (decisions + implications)
         tl.store(ndecs_ptr + k, decs)     # decisions only (implications = nprops - ndecs)
+
+@triton.jit
+def _clean_packed(st_row, init_ptr, trail_row, occ_off_ptr, occ_cls_ptr, tail, M,
+                  W: tl.constexpr):
+    """Rewrite every packed word this row can have touched back to the baseline row
+    (`init_ptr` = the post-units-flush packed state) — the CLEAN-mode tail.
+
+    Soundness (docs/plans/RESET_RESTORE_PLAN.md §3.1): packed writes only ever happen in the
+    occ walk of literals POPPED FROM THE TRAIL, so the damage is a subset of
+    ∪ occ[l] over trail[0..tail) — for surviving AND conflicted rows (a mid-list or mid-wave
+    stop only shrinks the damage). Every store writes the baseline value, so over-covering
+    (trail tails never propagated, occ words never reached, two trail literals sharing a
+    clause) rewrites baseline over baseline: idempotent, no atomics, benign lane races.
+
+    DEEP-ROW GUARD: scattered 4-byte stores pull 32-byte sectors (~8x amplification), so a row
+    whose total occ work exceeds M/8 streams its WHOLE row from baseline instead — that row
+    degrades to (its share of) the old broadcast cost, never past it.
+
+    Vectorized W-wide in both kernel modes (the scalar/wave split is about the PROPAGATE
+    algorithm; nothing here mutates shared state non-idempotently, so redundant lanes and the
+    flattened-segment races are all benign)."""
+    lanes = tl.arange(0, W)
+    total = tail * 0
+    t = tail * 0
+    while t < tail:
+        m = t + lanes < tail
+        lit_v = tl.load(trail_row + t + lanes, mask=m, other=0)
+        s_v = tl.load(occ_off_ptr + lit_v, mask=m, other=0)
+        e_v = tl.load(occ_off_ptr + lit_v + 1, mask=m, other=0)
+        total += tl.sum(tl.where(m, e_v - s_v, 0), 0)
+        t += W
+    if total > M // 8:
+        j = tail * 0
+        while j < M:
+            jm = j + lanes < M
+            v = tl.load(init_ptr + j + lanes, mask=jm, other=0)
+            tl.store(st_row + j + lanes, v, mask=jm)
+            j += W
+    else:
+        t = tail * 0
+        while t < tail:
+            # flatten up to W trail literals' occ segments — the _wave_propagate idiom
+            f = tl.minimum(tail - t, W)
+            lm = lanes < f
+            lit_v = tl.load(trail_row + t + lanes, mask=lm, other=0)
+            s_v = tl.load(occ_off_ptr + lit_v, mask=lm, other=0)
+            e_v = tl.load(occ_off_ptr + lit_v + 1, mask=lm, other=0)
+            len_v = tl.where(lm, e_v - s_v, 0)
+            cum_v = tl.cumsum(len_v, 0)
+            T = tl.max(cum_v, 0)
+            t += f
+            t0 = f * 0
+            while t0 < T:
+                t_v = t0 + lanes
+                act = t_v < T
+                seg_v = tl.sum((cum_v[None, :] <= t_v[:, None]).to(tl.int32), 1)
+                oneh = lanes[None, :] == seg_v[:, None]
+                excl_v = tl.sum(tl.where(oneh, (cum_v - len_v)[None, :], 0), 1)
+                base_v = tl.sum(tl.where(oneh, s_v[None, :], 0), 1)
+                o_v = base_v + (t_v - excl_v)
+                c_v = tl.load(occ_cls_ptr + o_v, mask=act, other=0).to(tl.int64)
+                v = tl.load(init_ptr + c_v, mask=act, other=0)
+                tl.store(st_row + c_v, v, mask=act)
+                t0 += W
+
+@triton.jit
+def _bcp_fixpoint_clean_kernel(
+    st_ptr, ab_ptr, active_ptr, conflict_ptr, dec_ptr, occ_off_ptr, occ_cls_ptr,
+    init_ptr,      # (M,) int32 packed_flushed — the baseline the clean tail restores
+    trail_ptr, nprops_ptr, nops_ptr, ndecs_ptr,
+    M, NW, B, TRAIL_CAP,
+    SHIFT: tl.constexpr,
+    WAVE: tl.constexpr,
+    W: tl.constexpr,
+):
+    """CLEAN-mode batched assumption check: seed + propagate EXACTLY as _bcp_fixpoint_kernel,
+    emit the same flags/counters, then restore this row's packed words to the baseline before
+    exiting — so the NEXT chunk's reset needs no K·M broadcast (docs/plans/RESET_RESTORE_PLAN.md
+    §9; v1 cleans PACKED only, abits/flags are restored by the cheap reset-lite).
+
+    A caller that reads post-apply STATE (assignment_rows, sat_rows, recache_flush, the
+    selection api) must use the plain kernel — after this one, the state IS the baseline.
+    Flags and the (K,) counters survive; they are the result.
+
+    The seed loop and the propagate dispatch are duplicated VERBATIM from
+    _bcp_fixpoint_kernel — keep them in lockstep (the original is deliberately untouched so
+    its 29 shipped cubins stay byte-identical)."""
+    k = tl.program_id(0).to(tl.int64)
+    if tl.load(active_ptr + k) != 0:
+        st_row = st_ptr + k * M
+        ab_row = ab_ptr + k * NW
+        trail_row = trail_ptr + k * TRAIL_CAP
+
+        conflict = B * 0
+        tail = B * 0
+        head = B * 0
+        nops = B * 0
+
+        for j in range(0, B):
+            lit64 = tl.load(dec_ptr + k * B + j)
+            if (lit64 >= 0) & (conflict == 0):
+                lit = lit64.to(tl.int32)
+                w = tl.load(ab_row + (lit >> 5))
+                if (w & (1 << ((lit ^ 1) & 31))) != 0:
+                    conflict = 1
+                elif (w & (1 << (lit & 31))) == 0:
+                    tl.store(ab_row + (lit >> 5), w | (1 << (lit & 31)))
+                    tl.store(trail_row + tail, lit)
+                    tail += 1
+        ndecs = tail
+
+        if WAVE:
+            head, tail, conflict, nops = _wave_propagate(
+                st_row, ab_row, trail_row, occ_off_ptr, occ_cls_ptr,
+                head, tail, conflict, nops, TRAIL_CAP, SHIFT, W)
+        else:
+            head, tail, conflict, nops = _propagate(
+                st_row, ab_row, trail_row, occ_off_ptr, occ_cls_ptr,
+                head, tail, conflict, nops, TRAIL_CAP, SHIFT)
+
+        if conflict != 0:
+            tl.store(conflict_ptr + k, 1)
+            tl.store(active_ptr + k, 0)
+        tl.store(nprops_ptr + k, tail)
+        tl.store(nops_ptr + k, nops)
+        tl.store(ndecs_ptr + k, ndecs)
+
+        _clean_packed(st_row, init_ptr, trail_row, occ_off_ptr, occ_cls_ptr, tail, M, W)

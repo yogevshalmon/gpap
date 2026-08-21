@@ -152,6 +152,8 @@ def _declare(lib: ctypes.CDLL) -> None:
         ("gpap_engine_reset", [c_void_p, c_int32], c_int),
         ("gpap_engine_apply", [c_void_p, _I64P, c_int32], c_int),
         ("gpap_engine_apply_dev", [c_void_p, c_size_t, c_int32], c_int),
+        ("gpap_engine_apply_clean", [c_void_p, _I64P, c_int32], c_int),
+        ("gpap_engine_reset_stats", [c_void_p, POINTER(c_int64), POINTER(c_int64)], None),
         ("gpap_engine_trajectory", [c_void_p, _I32P, c_int32, c_int32, c_int32, c_int64, c_int,
                                     _I32P], c_int),
         ("gpap_engine_trajectory_dev", [c_void_p, c_size_t, c_int32, c_int32, c_int32, c_int64,
@@ -172,6 +174,7 @@ def _declare(lib: ctypes.CDLL) -> None:
         ("gpap_flags", [c_void_p, _I8P, _I8P], c_int),
         ("gpap_num_propagated", [c_void_p, _I32P], c_int),
         ("gpap_sat_rows", [c_void_p, _I32P, c_int32, _I32P], c_int),
+        ("gpap_packed_rows", [c_void_p, _I32P, c_int32, _I32P], c_int),
         ("gpap_counters_get", [c_void_p, POINTER(Counters)], c_int),
         ("gpap_trail_cap", [c_int32, c_int32], c_int32),
         ("gpap_row_bytes", [c_int32, c_int32, c_int32], c_int64),
@@ -505,6 +508,18 @@ class Engine:
     def apply_dev(self, ptr: int, L: int) -> None:
         check(load().gpap_engine_apply_dev(self._h, ptr, L), "apply(dev)")
 
+    def apply_clean(self, decisions: np.ndarray) -> None:
+        """apply(), CLEAN mode: the same fixpoint — identical flags and counters — but the
+        launch restores its own packed rows to the post-flush baseline before exiting, so the
+        NEXT reset() skips the K x M broadcast (reset-lite). Use ONLY when nothing reads
+        post-apply state: the assignment/sat accessors would return the BASELINE, not the
+        fixpoint. $GPAP_CLEAN=0 (read at engine create) turns this back into apply()."""
+        d = np.ascontiguousarray(decisions, dtype=np.int64)
+        if d.ndim == 1:
+            d = d.reshape(1, -1)
+        check(load().gpap_engine_apply_clean(self._h, _p(d, c_int64), d.shape[1]),
+              "apply(clean)")
+
     def trajectory(self, order, n_support: int, B: int, seed: int, soft: bool = False) -> int:
         """Whole randomized decide+propagate trajectories, ONE launch. Returns max rounds."""
         o = i32(order)
@@ -711,6 +726,23 @@ class Engine:
         out = np.empty((r.size, self.num_clauses), dtype=np.int32)
         check(load().gpap_sat_rows(self._h, _p(r, c_int32), r.size, _p(out, c_int32)), "sat rows")
         return out
+
+    def packed_rows(self, rows) -> np.ndarray:
+        """RAW packed words (sat_count | sum << SHIFT) for the given rows — sat_rows masks the
+        sum field off, which would hide sum corruption from the CLEAN-mode identity gate."""
+        r = i32(rows)
+        out = np.empty((r.size, self.num_clauses), dtype=np.int32)
+        check(load().gpap_packed_rows(self._h, _p(r, c_int32), r.size, _p(out, c_int32)),
+              "packed rows")
+        return out
+
+    def reset_stats(self) -> "tuple[int, int]":
+        """(full broadcasts, lite resets) this engine has run — the lite count is the proof
+        CLEAN mode actually removed broadcasts (a silent fallback would measure 1.00x)."""
+        full = c_int64(0)
+        lite = c_int64(0)
+        load().gpap_engine_reset_stats(self._h, byref(full), byref(lite))
+        return int(full.value), int(lite.value)
 
     def flushed_assignment(self) -> np.ndarray:
         out = np.empty(2 * self.num_vars, dtype=np.int8)

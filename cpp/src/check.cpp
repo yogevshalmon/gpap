@@ -100,7 +100,13 @@ extern "C" gpap_status gpap_check_sets(gpap_engine *e, const int32_t *lits,
 
         GPAP_TRY(gpap_engine_reset(e, K));   /* the LAST chunk is short: reset to its own size
                                               * (this is also where GPAP_MODE_AUTO resolves) */
-        GPAP_TRY(gpap_engine_apply(e, decisions.data(), static_cast<int32_t>(L)));
+        /* Flags-only calls take the CLEAN kernel: the launch restores its own rows, so the
+         * next chunk's reset skips the K*M broadcast. Calls that read STATE (assignments /
+         * sat_count) need it to SURVIVE the launch — they keep the plain kernel. */
+        if (assign_out || sat_out)
+            GPAP_TRY(gpap_engine_apply(e, decisions.data(), static_cast<int32_t>(L)));
+        else
+            GPAP_TRY(gpap_engine_apply_clean(e, decisions.data(), static_cast<int32_t>(L)));
         GPAP_TRY(gpap_flags(e, nullptr, conflict_out + a));
         GPAP_TRY(gpap_num_propagated(e, propagated_out + a));
         if (assign_out || sat_out) {

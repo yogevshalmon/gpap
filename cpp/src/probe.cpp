@@ -184,8 +184,10 @@ gpap_status probe_chunk(gpap_engine *e, const std::vector<int64_t> &tuples, int3
                         std::vector<int8_t> &flags, gpap_probe *out) {
     const int32_t rows = static_cast<int32_t>(tuples.size() / static_cast<size_t>(k));
     if (rows == 0) return GPAP_OK;
-    GPAP_TRY(gpap_engine_reset(e, rows));           /* broadcast-restore the post-units cache */
-    GPAP_TRY(gpap_engine_apply(e, tuples.data(), k));
+    GPAP_TRY(gpap_engine_reset(e, rows));       /* reset-LITE after chunk 1: the CLEAN launch
+                                                 * below restores its own rows, so only abits +
+                                                 * flags are rebuilt here (RESET_RESTORE_PLAN §9) */
+    GPAP_TRY(gpap_engine_apply_clean(e, tuples.data(), k));
     flags.resize(static_cast<size_t>(rows));
     GPAP_TRY(gpap_flags(e, nullptr, flags.data()));
     for (int32_t r = 0; r < rows; ++r) {

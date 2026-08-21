@@ -249,10 +249,17 @@ to be gated the way every K change is, since it alters what a chunk costs.
   see INSIGHTS) measured up to 31x on exactly this low-touch regime. Much larger change; the
   trail-restore gets most of it for a fraction of the risk.
 
-> **STATUS: designed, measured, NOT implemented (2026-08-20).** Parked as future work — the sampler
-> sits on the losing side of the crossover, so this only ever pays for probing/mining workloads,
-> and mining is now a bounded few seconds of a run. Reviving it means re-validating K the way every
-> K change is validated (kill-switch + dispatch re-check).
+> **STATUS: SHIPPED 2026-08-21, as the FUSED variant — CLEAN mode.** The restore did not end up
+> a separate pass at the next reset: `gpap_engine_apply_clean` runs the identical fixpoint and
+> then rewrites its own touched words back to the baseline INSIDE the same launch (trail still
+> in registers, touched words still in L2), and `gpap_engine_reset` skips the K·M broadcast when
+> the rows are provably clean ("reset-lite"). Probing/mining and flags-only checking ride it;
+> plain apply / trajectory / recache keep full semantics and full broadcasts; `GPAP_CLEAN=0`
+> restores exact legacy behaviour. Design + soundness lemmas + gates + first measurements
+> (b03-c25 e2e 2.60x; b12-c50 GPU-side 20.9 -> 4.7 ms per chunk = 4.4x; the quiet-box protocol
+> is still owed): `docs/plans/RESET_RESTORE_PLAN.md` §9. The trail-length and touched-words
+> analysis above is what sized it; the conflicted-row analysis below is why it rewrites the
+> baseline instead of undoing arithmetic.
 
 ## What it does
 

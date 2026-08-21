@@ -131,11 +131,18 @@ in `docs/findings/`. Do not put a dated measurement or a card name back into a s
    OOM-killed reaching the comparison. ⚠️ **The cost is the PROBE, not the enumeration**: probing
    n tuples initializes n·M clause words (~1.2 GiB broadcast per chunk), so generation is free
    beside it — measured, a paged sweep of 4M tuples beats probing the same 4M pre-materialized.
-   Do not "optimize" the enumerator. ⚠️ **THE RESET IS THE BOTTLENECK, not the propagate**: the
-   broadcast writes rows·M words while a probe MODIFIES 0.02–2.5% of them, and since K ≈
-   budget/4M the broadcast is ~0.80·free VRAM *per chunk whatever the instance* — a fixed ~26 ms
-   per chunk, 41–94% of probe wall depending on instance. See
-   docs/findings/MINING_FINDINGS.md for the delta-restore design and its regime bound.
+   Do not "optimize" the enumerator. ⚠️ **THE RESET WAS THE BOTTLENECK, and CLEAN mode removed it** (the broadcast wrote
+   rows·M words per chunk — ~26 ms, 41–94% of probe wall — while a probe modifies 0.02–2.5% of
+   them): `gpap_engine_apply_clean` runs the same fixpoint then restores its OWN touched words
+   from the baseline inside the launch (trail in registers, words hot in L2), and `reset()` goes
+   LITE (skips the K·M broadcast) when rows are provably clean — b12-c50 chunk 20.9→4.7 ms
+   (4.4×), b03-c25 sweep 2.60× e2e. Probe sweeps + flags-only `check_sets` ride it; anything
+   that READS post-apply state (assignments/sat readout, `recache_flush`, selections) must use
+   plain `apply` — the clean launch leaves the BASELINE behind. `GPAP_CLEAN=0` = exact legacy
+   (also disables reset-lite, so A/Bs are uncontaminated); `gpap_engine_reset_stats` proves lite
+   actually fired. Gated by tests/test_clean_mode.py (state-identity fuzz vs a plain twin + the
+   reference BCP, both kernels × both splits; fails against a sabotaged tail). Design +
+   lemmas: docs/plans/RESET_RESTORE_PLAN.md §9, findings in docs/findings/MINING_FINDINGS.md.
    ⚠️ **Redundancy is filtered on the HOST, and there are THREE levels** (`mine_entailed(drop=)`,
    `gpap mine --drop`), each stronger than the last: `none` / **`subsumed`** (default — a clause
    some clause already covers; free, `mining._Subsumption`) / `derivable` (ALSO the ones unit

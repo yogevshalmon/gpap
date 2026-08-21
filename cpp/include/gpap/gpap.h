@@ -135,6 +135,18 @@ gpap_status gpap_engine_reset(gpap_engine *e, int32_t K);
 gpap_status gpap_engine_apply(gpap_engine *e, const int64_t *decisions_host, int32_t L);
 gpap_status gpap_engine_apply_dev(gpap_engine *e, uintptr_t decisions_dev, int32_t L);
 
+/* CLEAN-mode apply: the same fixpoint launch — identical conflict flags and (K,) counters —
+ * that additionally restores its own packed rows to the post-flush baseline before exiting.
+ * The next gpap_engine_reset then skips the K*M state broadcast ("reset-lite"), which is
+ * 41-94% of a probe chunk's wall (docs/plans/RESET_RESTORE_PLAN.md). Contract: reset() first,
+ * exactly as gpap_engine_apply — and nothing may read post-apply STATE afterwards: the
+ * assignment/sat readout, the selection api and recache_flush would see the BASELINE, not the
+ * fixpoint. Flags and counters are the result. Probing/mining and flags-only checking run on
+ * this; GPAP_CLEAN=0 in the environment (read at engine create) restores EXACT legacy
+ * behaviour — every apply_clean becomes plain apply AND every reset broadcasts — the A/B
+ * lever and the escape hatch. */
+gpap_status gpap_engine_apply_clean(gpap_engine *e, const int64_t *decisions_host, int32_t L);
+
 /* Entry point 2 — the whole randomized decide+propagate trajectory per row, one launch.
  * `order` is P variable indices (0-based), support variables first; a decision group never
  * straddles the n_support boundary. Polarity is a stateless hash of (seed, row, var), so a run
@@ -148,6 +160,11 @@ gpap_status gpap_engine_trajectory_dev(gpap_engine *e, uintptr_t order_dev, int3
 
 /* Incremental-units hook (the entailed-clause miner): reset(1) + apply(units) + recache. */
 gpap_status gpap_engine_recache_flush(gpap_engine *e);
+
+/* How this engine's resets executed: *full_out = K*M broadcasts run, *lite_out = broadcasts
+ * SKIPPED because the previous CLEAN-mode launch had already restored the baseline. The lite
+ * count is how you verify the optimization actually engaged (a silent fallback measures 1.00x). */
+void gpap_engine_reset_stats(const gpap_engine *e, int64_t *full_out, int64_t *lite_out);
 int gpap_engine_flush_conflict(const gpap_engine *e);
 gpap_status gpap_engine_flushed_assignment(gpap_engine *e, int8_t *out_host); /* (2N,) */
 
@@ -323,6 +340,11 @@ gpap_status gpap_flags(gpap_engine *e, int8_t *active_out, int8_t *conflict_out)
 gpap_status gpap_num_propagated(gpap_engine *e, int32_t *out_host);
 /* (rows, M) int32 sat_count values for `n_rows` explicit row indices — inspection/tests. */
 gpap_status gpap_sat_rows(gpap_engine *e, const int32_t *rows, int32_t n_rows, int32_t *out_host);
+
+/* RAW packed words (sat_count | sum << SHIFT), unmasked — gpap_sat_rows keeps only the count
+ * field. Tests/debugging: this is the CLEAN-mode identity gate's readout. */
+gpap_status gpap_packed_rows(gpap_engine *e, const int32_t *rows, int32_t n_rows,
+                             int32_t *out_host);
 
 /* ------------------------------------------------------------------ counters + sizing */
 
