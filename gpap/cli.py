@@ -339,7 +339,7 @@ def _cmd_mine(args):
 
 def _cmd_bench(args):
     # Delegate to the benchmark table driver (gpap/benchmark.py — inside the package, so this
-    # works from any directory; scripts/sample_benchmark.py is a shim around the same module).
+    # works from any directory).
     from gpap import benchmark
     argv = ["--glob", args.glob, "--n-time", str(args.n),
             "--time-limit", str(args.time_limit), "--n-cov", str(args.n_cov),
@@ -380,7 +380,7 @@ def _cmd_bench(args):
 def _convert_circuit(path, outp, args, quiet=False):
     """Dispatch one circuit file (.bench or .aig/.aag) to its converter. `args` needs the shared
     conversion attributes: cycles, seed, pin_outputs, encoder, abc, abc_opt, target (see
-    _add_encoder_args) — scripts/sample_benchmark.py reuses this for circuit globs."""
+    _add_encoder_args) — the bench front-end reuses this for circuit globs."""
     tm = getattr(args, "target", "random")
     if path.endswith(".bench"):
         from gpap.circuits.bench import convert_one
@@ -488,7 +488,7 @@ def _add_encoder_args(sp):
                          "dc2/fraig via berkeley-abc, 2-8x fewer clauses, same solution space; "
                          "needs an abc binary — see scripts/build_abc.sh) | 'auto' (abc if found)")
     sp.add_argument("--abc", default=None,
-                    help="path to an `abc` binary (else $GPAP_ABC, PATH, ~/.cache/gpap/bin/abc)")
+                    help="path to an `abc` binary (else $GPAP_ABC, PATH, <repo>/.gpap/bin/abc)")
     sp.add_argument("--abc-opt", choices=["full", "fast", "auto"], default="auto",
                     help="abc optimization effort: 'full' (optimize the unrolled AIG — best "
                          "shrink, expensive on big unrolls) | 'fast' (optimize pre-unroll + one "
@@ -539,7 +539,7 @@ def main(argv=None):
                         "sampling pass) | 'fast' (repeat-rate check: l2_ratio, ~1.0 = uniform, "
                         ">1.5 = certified skew; no solver work) | 'exact' (also enumerate small "
                         "solution spaces and run a chi-square test vs uniform — the sensitive "
-                        "check). Real certificates on big spaces: eval/barbarik_gpap.py")
+                        "check). Real certificates on big spaces: eval/uniformity/barbarik_gpap.py")
     _add_encoder_args(s)
     s.add_argument("--sim-baseline", action="store_true",
                    help="(circuit inputs) also measure the REJECTION-SAMPLING rival: random "
@@ -652,8 +652,8 @@ def main(argv=None):
                    help="entailed-clause mining: 'auto' (on, bounded by a 5s total budget) | "
                         "'on' (force, ignores the size gate) | 'off'")
     b.add_argument("--no-els", action="store_true",
-                   help="disable equivalent-literal substitution (ON by default since 2026-08-19; "
-                        "pass this to reproduce a pre-2026-08-19 sweep)")
+                   help="disable equivalent-literal substitution (ON by default; pass this to "
+                        "reproduce a run made before it became the default)")
     b.add_argument("--uniformity", choices=["off", "fast", "exact"], default="off",
                    help="per-instance uniformity readout: 'off' (default — costs an extra "
                         "sampling pass) | 'fast' (repeat-rate check) | 'exact' (chi-square on "

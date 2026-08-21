@@ -30,7 +30,7 @@ Soundness: `l` implying `m` means F & l |= m, so F |= (~l | m) — the binary cl
 mutual implication gives F |= (l <-> m), so substituting one for the other preserves every model.
 Both are checked against a brute-force reference in tests/test_implications.py.
 
-FUTURE WORK (deliberately not built — this module is the simple sound core, 2026-08-20):
+FUTURE WORK (deliberately not built — this module is the simple sound core):
   * TRANSITIVE REDUCTION for `hyper_binary`. It returns EVERY closure edge, which is ~1000x the
     input formula on a real instance (b03-c25: 14,011,572 binary clauses against M=14,505), and the
     literature's whole point is that most are implied by the binary implication graph. Until that

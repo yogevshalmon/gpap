@@ -22,7 +22,7 @@ from gpap.engine import _core
 # `default_k_cap` can answer for a non-CUDA device without touching the driver; the number that
 # matters is the one `gpap_default_k_cap` returns, and tests assert the two agree.
 K_CAP_REF = 49_152
-K_CAP_VRAM_REF = 12_878_086_144   # RTX 4080 Laptop, total_memory
+K_CAP_VRAM_REF = 12_878_086_144   # total VRAM of the reference card these were calibrated on
 
 
 def trail_cap(num_vars: int, decisions_per_round: int = 8) -> int:
@@ -92,6 +92,6 @@ def dispatch_mode(num_clauses: int, batch: int, device: torch.device) -> str:
     a pure launch-flag choice that can never change an answer.
 
     NOTE the signature: this used to take `(batch, device)` only, and keying on the batch was a
-    PROXY for the clause count that the 2026-08-18 batch-sizing collapse invalidated — see the
+    PROXY for the clause count that a batch-sizing change invalidated — see the
     history note in cpp/src/calibrate.cpp before considering a batch-only rule again."""
     return "wave" if _core.dispatch_wave(num_clauses, batch, device.index or 0) else "scalar"

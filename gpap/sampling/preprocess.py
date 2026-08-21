@@ -5,9 +5,8 @@ it up to a recorded variable substitution (equivalent_literal_substitution + var
 exactly what the sampler's simplify_cnf / simplify_cnf_els need: shrink M and N so BCP is
 faster and a larger K fits, without changing the set of valid support projections.
 
-The GPU inprocessing-for-solve pipeline that used to live here (vivify / subsumption /
-preprocess()) is archived — see archive/solver/preprocess_pipeline.py and
-docs/findings/INSIGHTS.md ("preprocessing-for-solve is retired").
+A GPU inprocessing-for-solve pipeline (vivify / subsumption / preprocess()) used to live here
+and was retired — see docs/findings/INSIGHTS.md ("preprocessing-for-solve is retired").
 """
 from collections import defaultdict
 

@@ -36,23 +36,19 @@ def _support_literals(support):
 # Mining budget and per-width candidate ceilings, as the pipeline uses them. Width 1 (the
 # backbone) always runs; the wide widths are gated on their candidate COUNT, which is known
 # before any GPU work and is what actually predicts their cost.
-#: TOTAL wall budget for mining, across BOTH stages. ⚠️ It used to bound neither: stage 1 passed
-#: no `seconds` at all (so it inherited mine_entailed's own 5 s default and this constant was
-#: decorative), and stage 2's budget had a `max(1.0, ...)` FLOOR that fired even when stage 1 had
-#: already spent everything — so the real ceiling was 6 s, and b14-c25 measured 6.11 s. Both stages
-#: now draw from one deadline. Honored to CHUNK granularity: a single chunk is the smallest unit of
-#: GPU work and is never abandoned half-written, so a formula with a very large M can overshoot by
-#: one chunk.
+#: TOTAL wall budget for mining. Both stages draw from ONE deadline, so this bounds the whole
+#: phase rather than either half of it. Honored to CHUNK granularity: a chunk is the smallest unit
+#: of GPU work and is never abandoned half-written, so a formula with a very large M can overshoot
+#: by one chunk.
 MINE_SECONDS = 5.0
 #: Stage 1 — only the wide widths that are cheap for this support size.
 STAGE1_MAX_TUPLES = {2: 80_000, 3: 40_000}
 #: Stage 2 — forced wide widths for an instance that is still stuck after the units are in.
 STAGE2_MAX_TUPLES = 2_000_000
-#: Formulas smaller than this skip mining entirely. ⚠️ Was an inline 3000, justified by "even 0.3s
-#: of probing would dominate the e2e wall" — which is not what mining costs down there: 0.01-0.04 s
-#: measured. The gate mattered because ABC-encoded CNFs are SMALL by construction, so it excluded
-#: exactly the instances ABC produces. Lowering it to 500 was worth 2.68x on b03-c25/abcfast
-#: (M=2,087) and 1.65x on b09-c25/abcfast (M=2,882) in the 24-instance sweep.
+#: Formulas smaller than this skip mining under `mine="auto"` (`--mine on` forces past it).
+#: Set from measured mining cost at small M, not from a guess: see docs/findings/MINING_FINDINGS.md.
+#: ⚠️ Raising it excludes ABC-encoded CNFs, which are small by construction and where mining pays
+#: MOST.
 MINE_MIN_CLAUSES = 500
 
 
@@ -66,10 +62,10 @@ def _mine_score(smp, warm) -> float:
     clauses push those two OPPOSITE ways (more clauses => smaller K, stronger propagation =>
     higher success), which is exactly the trade the caller has to adjudicate.
 
-    ⚠️ A PROXY, not a measurement. The warmup pins K <= 1024, so its success rate is read at a
-    batch the timed run will not use; and holding chunk wall constant ignores that a longer trail
-    costs more per row. It is deliberately cheap — the alternative is a second timed run, which
-    costs more than the clauses are worth on the instances where this fires.
+    ⚠️ A PROXY, not a measurement. The warmup pins K to a small batch, so its success rate is read
+    at a batch the timed run will not use; and holding chunk wall constant ignores that a longer
+    trail costs more per row. It is deliberately cheap — the alternative is a second timed run,
+    which costs more than the clauses are worth on the instances where this fires.
     """
     return float(smp.K) * float(warm["best_success"])
 
@@ -126,10 +122,9 @@ class SamplingConfig(NamedTuple):
         return f"{self.var_order.name.lower()} order, B={self.decisions_per_round}{la}"
 
 
-# CIRCUIT portfolio (circuit-unroll evaluation). Measured per-config on 22+ circuit instances
-# (RTX 4080, 2026-07-02..04); each entry is the outright winner somewhere and the adaptive bandit
-# picks per instance. ("orac" — high-B on the retired PYTHON engine — was removed 2026-07-06 after
-# 0/64 wins, and the engine path it needed was deleted 2026-07-13.)
+# CIRCUIT portfolio (circuit-unroll evaluation). Every entry is the outright winner on some
+# instance, and the adaptive bandit picks per instance; configs that never won anywhere were
+# removed. Per-config measurements: docs/findings/GPU_SAMPLING_FINDINGS.md.
 CIRCUIT_PORTFOLIO = [
     SamplingConfig(VarOrder.RANDOM, 8),    # broad deep-circuit winner
     SamplingConfig(VarOrder.RANDOM, 1),    # B=1's success edge is free in-kernel: wins the
@@ -137,17 +132,15 @@ CIRCUIT_PORTFOLIO = [
 ]
 
 # Default portfolio for projected sampling (the sk_ / CMSGen-comparison story).
-# NOTE 2026-07-13: the (RANDOM,8) and (STRUCTURED,1) entries used to run the retired PyTorch v1
-# path; they now run in-kernel — sk_-suite numbers published before this date predate that switch.
 DEFAULT_PORTFOLIO = [
     SamplingConfig(VarOrder.RANDOM, 8),        # the classic niche config (BCP-determined support)
     SamplingConfig(VarOrder.RANDOM, 1),        # the sk_ winner
     SamplingConfig(VarOrder.STRUCTURED, 1),    # the search-heavy "service" family
 ]
 
-# OPT-IN ONLY (`--allow-soft`). Removed from CIRCUIT_PORTFOLIO 2026-07-30: the bandit selects on
-# models/second with NO uniformity term, so leaving soft in the default portfolio meant any
-# instance where it won silently emitted a Barbarik-REJECTED distribution. Nothing unsound — every
+# OPT-IN ONLY (`--allow-soft`), and deliberately NOT a default-portfolio member: the bandit
+# selects on models/second with NO uniformity term, so leaving soft in the default portfolio meant
+# any instance where it won silently emitted a Barbarik-REJECTED distribution. Nothing unsound — every
 # row is a real solution — but it is not what someone asking for a *sampler* expects. It stays
 # reachable because the regime-dependence rule stands: it is the right config for "many solutions
 # fast, distribution does not matter".
@@ -160,10 +153,10 @@ SOFT_CONFIG = SamplingConfig(VarOrder.RANDOM, 8, Lookahead.SOFT)
 # Why this exists: the bandit optimises models/wall with no stability term, so on instances where
 # two configs are close it can pick differently between machines or between repeats of the same
 # command — and then a comparison silently A/Bs the bandit instead of the thing under test.
-# MEASURED 2026-08-03: the same b12-c25 chose B=1 on the 4080 (succ 0.53) but B=8 on an A100
-# (succ 0.27), which is most of why that instance's cross-GPU speedup read 1.19x while its raw
-# work rate was 2.16x; and 27.sk_3_32 alternated between 491,806 and 581,412 models across
-# repeated identical local runs. Pin a config for any cross-GPU or before/after comparison.
+# Measured: one instance chose B=1 on one GPU and B=8 on another, which accounted for most of an
+# apparent cross-GPU speedup difference; and another alternated ~18% in model count across repeated
+# identical local runs. Pin a config for any cross-GPU or before/after comparison.
+# Numbers: docs/findings/CROSS_GPU_FINDINGS.md.
 SINGLE_PORTFOLIOS = {
     "b8": [SamplingConfig(VarOrder.RANDOM, 8)],        # throughput-leaning; over-constrains
     "b1": [SamplingConfig(VarOrder.RANDOM, 1)],        # success-leaning; the deep-circuit winner
@@ -265,13 +258,11 @@ def sample_file(path, device, **kw):
     # column by its circuit wire. Empty for a plain (non-circuit) CNF.
     from gpap.circuits.bench import parse_support_labels
     wire_map = parse_support_labels(path)
-    # NOTE (2026-08-19): there USED to be an encoder-provenance gate here that turned mining OFF
-    # by default on any CNF carrying `c encoder abc`, on the grounds that dc2/fraig has already
-    # removed the backbone (measured 0-45 units found vs 59-1007 on the same circuits' Tseitin
-    # CNFs). The unit COUNT was the wrong proxy — it never measured the sampling rate. Measured
-    # over 24 instances x 2 encoders, mining is worth MORE on ABC-encoded CNFs than on Tseitin
-    # ones (geomean 3.28x vs 2.05x; s386-c25 14.3x, s832-c25 5.5x, b10-c25 4.0x), because WHICH
-    # units are found matters more than how many. The gate is gone; MINE_SECONDS bounds the cost.
+    # There is deliberately NO encoder-provenance gate here. One used to turn mining off on any
+    # CNF carrying `c encoder abc`, reasoning that dc2/fraig has already removed the backbone —
+    # but the unit COUNT it keyed on never measured the sampling rate, and mining is in fact worth
+    # MORE on ABC-encoded CNFs than on Tseitin ones. MINE_SECONDS bounds the cost instead, and the
+    # keep-if-it-helps guard bounds the risk. Measurements: docs/findings/MINING_FINDINGS.md.
     return sample_clauses(cnf0.nv, cnf0.clauses, sup0, device,
                           _t_start=t_start, _phases=phases, _wire_map=wire_map, **kw)
 
@@ -302,8 +293,8 @@ def sample_clauses(nv, clauses, support, device, *, simplify=True, els=True, n_t
     large auto-K on a low-RAM host (12 GB Colab) OOM-kills the session collecting a full chunk.
 
     `k_cap="auto"` (default) sizes the cap to THIS GPU's VRAM (engine.default_k_cap) instead of
-    the historical hardcoded 49,152 — which pinned every GPU to the 12 GB laptop's batch size and
-    made a bigger card report the laptop's throughput. It is an exact no-op at or below the
+    a hardcoded constant, which pinned every GPU to the reference card's batch size and made a
+    bigger card report the smaller card's throughput. It is an exact no-op at or below the
     reference budget; pass an int to force a fixed cap (what a cross-GPU A/B needs)."""
     if configs == "default":
         configs = DEFAULT_PORTFOLIO
@@ -406,18 +397,19 @@ def sample_clauses(nv, clauses, support, device, *, simplify=True, els=True, n_t
                     for width, n in mi2.by_width.items():
                         mi.by_width[width] = mi.by_width.get(width, 0) + n
                     mi.seconds += mi2.seconds
-                # KEEP THE CLAUSES ONLY IF THEY HELP (2026-08-20). Mined clauses are always
+                # KEEP THE CLAUSES ONLY IF THEY HELP. Mined clauses are always
                 # sound, but they enlarge the formula, and K is sized as budget/row_bytes with
                 # row_bytes ~ 4M — so a bigger M buys a SMALLER batch. Since K x M is then roughly
                 # constant, a chunk costs about the same either way and models-per-chunk
                 # `K x success` is the throughput proxy, readable with no extra GPU work. Compare
                 # it against the pre-mining sampler and revert when mining did not pay. This is
-                # what turns "mining helps on average" into "mining never hurts": measured on
-                # b06-c25/abc, where 5 units shrank K and cost 0.55x with nothing gained.
+                # what turns "mining helps on average" into "mining never hurts": on an
+                # instance that already completes there is no success left to win, and the batch
+                # loss is all that happens.
                 score_after = _mine_score(smp, warm if learned else w)
                 # `score_before > 0` guard: when the un-mined sampler completed NOTHING in the
-                # warmup there is no baseline to be worse than, and mining is the only thing that
-                # has ever converted those (b12-c25/abc: 516 -> 20,031 models). Keep the clauses.
+                # warmup there is no baseline to be worse than, and mining is the only
+                # thing that has ever converted those instances. Keep the clauses.
                 if learned and score_before > 0 and score_after <= score_before:
                     _tm = time.perf_counter()
                     smp = GPUSampler.from_clauses(nv, clauses, device, simplify=simplify, els=els,
@@ -463,10 +455,8 @@ def sample_clauses(nv, clauses, support, device, *, simplify=True, els=True, n_t
     # ran, and at what K. Captured here — after the (possible) post-mining rebuild, before the
     # coverage pass lowers K. This is the evidence that a headline number came from the sum-trick
     # packed kernel inside its non-overflowing envelope (see engine.packed_envelope).
-    # `core` records WHICH build produced the number — results from before the C++ core
-    # (2026-07-28) carry no such field, which is exactly how a pre/post-port comparison is told
-    # apart. The kernels themselves are unchanged (AOT vs JIT of the same source, bit-identical
-    # SASS), so the two are comparable; the field just makes the provenance explicit.
+    # `core` records WHICH build produced the number, so rows from different engine builds are
+    # distinguishable in a results file rather than silently comparable.
     engine_info = {"kernel": "triton-packed-sum", "mode": smp.engine.mode,
                    "shift": smp.engine.shift,
                    "split": f"{smp.engine.shift}|{32 - smp.engine.shift}",

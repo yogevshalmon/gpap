@@ -13,7 +13,7 @@ SOUNDNESS. `strash`/`dc2`/`fraig`/`&fraig`/`scorr` are function-preserving, and 
 set under both encoders and asserts SET EQUALITY. Only internal gate variables are restructured.
 `zero` is MANDATORY: without it ABC turns the T=0 register state into FREE primary inputs.
 
-COST — the `opt` presets (measured 2026-07-10, see docs/findings/INSIGHTS.md):
+COST — the `opt` presets (measured; see docs/findings/INSIGHTS.md):
   "full" : optimize AFTER unrolling (`dc2; dc2; fraig` on the T-times-larger AIG). Best shrink —
            the post-unroll fraig catches cross-frame equivalences (b12-c25 collapses 14x) — but
            that fraig is also the whole cost: ~99 s on b15-c25 (160k ANDs).
@@ -33,13 +33,15 @@ import shutil
 import subprocess
 import tempfile
 
+from gpap import paths
+
 from gpap.circuits.aiger import Aig, read_aiger, split_frame_name
 
 # (pre_frames, post_frames) optimization script halves; either may be empty. "fast"'s post pass
 # is dc2 ONLY, deliberately: a post-unroll equivalence sweep (fraig or &fraig) is where both the
 # b12-class cross-frame collapse (12-14x) AND the unbounded cost live (&fraig >300s on b15-c25's
 # 160k-AND unroll) — a default must be predictable, and the cross-frame cases are small enough
-# that `auto` routes them to "full" anyway (2026-07-10 profiling).
+# that `auto` routes them to "full" anyway.
 ABC_OPT_PRESETS = {
     "full": ("", "dc2; dc2; fraig"),
     "fast": ("dc2; dc2; fraig", "dc2"),
@@ -50,16 +52,15 @@ AUTO_FAST_EST_ANDS = 50_000
 
 
 def find_abc(explicit: str | None = None) -> str | None:
-    """Locate an `abc` binary: explicit path -> $GPAP_ABC -> PATH -> $GPAP_ABC_HOME/bin/abc
-    (default ~/.cache/gpap/bin/abc, where scripts/build_abc.sh installs it). None if absent."""
+    """Locate an `abc` binary: explicit path -> $GPAP_ABC -> PATH -> GPAP's own tool dir
+    (see `gpap.paths`, where scripts/build_abc.sh installs it). None if absent."""
     for cand in (explicit, os.environ.get("GPAP_ABC")):
         if cand and os.path.isfile(cand) and os.access(cand, os.X_OK):
             return cand
     found = shutil.which("abc")
     if found:
         return found
-    home = os.environ.get("GPAP_ABC_HOME") or os.path.join(os.path.expanduser("~"), ".cache/gpap")
-    cand = os.path.join(home, "bin", "abc")
+    cand = str(paths.tool("abc"))
     return cand if os.path.isfile(cand) and os.access(cand, os.X_OK) else None
 
 
@@ -215,7 +216,7 @@ def write_bench_from_aig(aig: Aig, path: str, *, name: str = "abc") -> None:
     for k, (cur, _nxt, _r) in enumerate(aig.latches):
         var_name[cur >> 1] = f"lat{k}"          # AIGER latch symbols are not parsed (aiger.py)
     # constants: an AIG literal may be 0/1; build them from the first PI (x AND ~x), the same
-    # trick eval/unroll_to_bench.py uses, so no gate library extension is needed.
+    # trick eval/rivals/unroll_to_bench.py uses, so no gate library extension is needed.
     anchor = var_name.get(aig.inputs[0] >> 1) if aig.n_inputs else None
     const0 = "GPAP_ZERO"
     if anchor:

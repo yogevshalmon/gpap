@@ -10,7 +10,7 @@ Barbarik (Chakraborty & Meel, AAAI'19) needs conditional sampling — but skew i
 distribution-free: the collision estimator p2 = sum c_i(c_i-1)/(n(n-1)) is unbiased for ||p||_2^2,
 and under ANY uniform distribution ||p||_2^2 = 1/|S| <= 1/d (d = distinct seen <= |S|), so
 l2_ratio = p2*d substantially above 1 certifies non-uniformity with NO knowledge of |S|.
-For a real certificate on large spaces, run the Barbarik harness (eval/barbarik_gpap.py).
+For a real certificate on large spaces, run the Barbarik harness (eval/uniformity/barbarik_gpap.py).
 """
 import math
 import time

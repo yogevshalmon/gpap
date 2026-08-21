@@ -1,7 +1,6 @@
 """Benchmark the GPU BCP-completion sampler (gpap.sampling) against CMSGen — a thin CLI/table
 layer over gpap.sampling.pipeline.sample_file (the shared e2e flow). Lives INSIDE the package so
-the installed `gpap bench` entry point works from any directory; `scripts/sample_benchmark.py`
-is a back-compat shim around this module.
+the installed `gpap bench` entry point works from any directory.
 
 GPAP runs CMSGen's UniformLikeWitness algorithm (random var + random polarity + unit propagation)
 massively in parallel on the GPU. This harness compares them with the SAT-sampling literature's
@@ -39,9 +38,8 @@ both samplers consume the identical CNF, so the encode cost is common to the com
 emitting one row per (instance, encoder) — the paired A/B the encoder plots consume.
 
 Usage:
-  gpap bench 'benchmarks/sampling/*.cnf' --cmsgen ~/.cache/gpap/bin/cmsgen --n-cov 5000
+  gpap bench 'benchmarks/sampling/*.cnf' --cmsgen .gpap/bin/cmsgen --n-cov 5000
   gpap bench 'benchmarks/circuits/bench/seq/*.bench' --encoders tseitin abc:fast --target rare
-  PYTHONPATH=. .venv/bin/python scripts/sample_benchmark.py --glob '...'   # equivalent
 """
 import argparse
 import glob
@@ -174,7 +172,7 @@ def cmsgen_run(path, cmsgen_bin, n, scratch, *, keep=None, timeout=60.0, write=T
 
 
 def cmsgen_sample(path, cmsgen_bin, n, scratch, keep=None, timeout=60.0):
-    """Back-compat wrapper (eval/colab_sampling_benchmark.py imports this): stock write-mode run,
+    """Back-compat wrapper (eval/colab/colab_sampling_benchmark.py imports this): stock write-mode run,
     returning (samples_per_s, models)."""
     r = cmsgen_run(path, cmsgen_bin, n, scratch, keep=keep, timeout=timeout, write=True)
     return r["samples_per_s"], r["models"]
@@ -287,8 +285,8 @@ def _build_argparser():
                          "'default' (the sk_ projected-sampling portfolio). 'b8'/'b1'/'s1' pin "
                          "ONE config and disable the bandit — use those for any cross-GPU or "
                          "before/after MEASUREMENT, since the bandit optimises models/wall with "
-                         "no stability term and can pick differently per machine (measured: "
-                         "b12-c25 chose B=1 on a 4080 but B=8 on an A100), which silently "
+                         "no stability term and can pick differently per machine (measured: the same "
+                         "instance chose a different config on two GPUs), which silently "
                          "confounds the comparison")
     ap.add_argument("--allow-soft", action="store_true",
                     help="add the soft risk-polarity config to the portfolio. Higher success on "
@@ -299,15 +297,15 @@ def _build_argparser():
                          "success barely drops; B>=16 over-constrains and collapses success)")
     ap.add_argument("--k-cap", type=_k_cap_arg, default="auto",
                     help="ceiling on the per-chunk batch K. 'auto' (default) sizes it to this "
-                         "GPU's VRAM, so a 48 GB L40S / 80 GB A100 is not pinned to the 12 GB "
-                         "laptop's K (throughput is ~linear in K); no-op at or below that "
+                         "GPU's VRAM, so a large card is not pinned to a small one's K "
+                         "(throughput is ~linear in K); no-op at or below the reference "
                          "budget. Pass an int to FIX the cap — what a cross-GPU A/B needs, "
                          "since 'auto' deliberately differs per card")
     ap.add_argument("--no-simplify", dest="simplify", action="store_false", default=True)
     ap.add_argument("--no-els", action="store_true",
-                    help="disable equivalent-literal substitution (ON by default since 2026-08-19: "
-                         "sound + model-preserving, 1.42x geomean over 24 circuit instances). Pass "
-                         "this to reproduce a pre-2026-08-19 sweep")
+                    help="disable equivalent-literal substitution (ON by default: sound and "
+                         "model-preserving, and a solid geomean win on circuit instances). Pass "
+                         "this to reproduce a run made before it became the default)")
     ap.add_argument("--also-plain", action="store_true", help="also run GPAP without simplification")
     ap.add_argument("--verify-cpu", action="store_true", help="also CPU-verify a few models vs clauses")
     ap.add_argument("--max-clauses", type=int, default=None,
@@ -524,12 +522,12 @@ def _drop_cnf(row, args):
 def _cpu_info():
     """Host CPU provenance — REQUIRED to quote any GPAP/CMSGen ratio.
 
-    CMSGen is single-core CPU, so the ratio moves with the host as much as with the GPU:
-    measured 2026-08-04, the same 29 sk_ instances gave 48.5x on an RTX 4080 laptop and 113.1x on
-    a Colab L4 box, and CMSGen's OWN propagation and decision counters both put that host at
-    0.413x the laptop's. A sweep that records the GPU but not the CPU cannot tell those apart,
-    and a reviewer reading 113x without the CPU alongside would be right to call it a rigged
-    baseline (docs/BENCHMARKING.md)."""
+    CMSGen is single-core CPU, so the ratio moves with the HOST as much as with the GPU. The
+    same instance set has been measured at very different ratios on two machines purely because
+    their CPUs differ — CMSGen's own propagation and decision counters confirm the slower host is
+    the cause. A sweep that records the GPU but not the CPU cannot tell "our GPU got faster" from
+    "their CPU got slower", and a reviewer reading a large ratio without the CPU alongside would
+    be right to call it a rigged baseline (docs/BENCHMARKING.md)."""
     info = {"count": os.cpu_count()}
     try:
         with open("/proc/cpuinfo") as fh:

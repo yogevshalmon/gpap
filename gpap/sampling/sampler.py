@@ -27,7 +27,7 @@ Design knobs (the throughput vs. success-rate tradeoff):
   random_var          : pick a random free var per sample (diverse) vs. the first free
                         one (cheap, low-index-biased).
 
-K is auto-sized to the GPU (capped by default to stay off the WSL2 host-RAM spill cliff).
+K is auto-sized to the GPU (capped by default to stay off the host-RAM spill cliff).
 `PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True` is what makes that K reachable; it is set in
 `gpap/__init__.py`, which always runs before this module (see there for the measurement).
 """
@@ -132,8 +132,9 @@ class GPUSampler:
         tests/test_circuits.py once reached 28 GB asking for 1000 models).
 
         Pinning ABOVE the calibrated value is allowed and is how the no-change gate fixes K across
-        builds, but it overrides the memory model — this box then spills to host RAM rather than
-        erroring, so size it yourself (docs/BENCHMARKING.md §2, kill-switch)."""
+        builds, but it overrides the memory model. On platforms that SPILL to host RAM instead
+        of failing the allocation, an oversized K degrades silently rather than erroring, so size
+        it yourself (docs/BENCHMARKING.md §2, kill-switch)."""
         self.K = max(1, int(n))
         return self.K
 
@@ -653,7 +654,7 @@ class GPUSampler:
         # Per-config work counters (decs/props) alongside models/wall so the reported dec/s, impl/s,
         # assigns/s can be attributed to the SAME config as the headline samples/s (best_rate) —
         # otherwise they blend over the bandit's exploration (incl. the slow orac chunk), understating
-        # the winner ~2x and diverging across GPUs (measured on b06.c25, 2026-07-04).
+        # the winner ~2x and diverging across GPUs.
         cfg_stats = {c: {"models": 0, "attempts": 0, "wall": 0.0, "chunks": 0,
                          "decs": 0, "props": 0} for c in plan}
         models: list[list[int]] = []
@@ -677,8 +678,8 @@ class GPUSampler:
         while True:
             # Stop once n_target is met — BUT for the adaptive bandit, always measure every config at
             # least once first. Otherwise on a big-K GPU a single chunk can already exceed n_target, so
-            # only plan[0] ever runs and a faster config is never discovered (the A100 shallow-circuit
-            # regression). Bounded by max_chunks. Cold-start chunks are productive (real models).
+            # only plan[0] ever runs and a faster config is never discovered (this was a real
+            # regression on shallow circuits with a large-VRAM card). Bounded by max_chunks. Cold-start chunks are productive (real models).
             cold = adaptive and any(cfg_stats[c]["chunks"] == 0 for c in plan)
             # Stability: don't stop until SOME config has been measured over >= min_measure_chunks
             # chunks (the bandit piles those onto the winner). A big-K GPU meets n_target in the
