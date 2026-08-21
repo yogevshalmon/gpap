@@ -2,8 +2,8 @@
 
 Two oracles keep this honest, and NEITHER is a second GPU engine:
 
-  * the formula build is checked against `CnfFormula._init_formula_numpy` — the pure-numpy
-    REFERENCE builder in gpap/engine/formula.py, which runs on any host;
+  * the formula build is checked against `tests/reference_formula.py` — a pure-numpy
+    re-derivation of the structures, which runs on any host;
   * propagation is checked against `tests/reference_bcp.py` — a pure-Python BCP.
 
 Anything the core emits is additionally verifiable from the outside: a model must satisfy every
@@ -19,9 +19,9 @@ import pytest
 import torch
 
 from gpap.engine import _core
-from gpap.engine.formula import CnfFormula
 
 from tests.reference_bcp import assigned_set, ref_bcp
+from tests.reference_formula import ReferenceFormula
 
 CUDA = torch.cuda.is_available()
 HAVE_CORE = _core.available()
@@ -47,31 +47,23 @@ def _random_cnf(rng, nv, nc, kmax=4, kmin=1):
     return out
 
 
-def _reference_formula(num_vars, clauses):
-    """The numpy reference build, forced — `init_formula` would go to the core when it exists,
-    which is exactly how this comparison silently became a no-op before."""
-    f = CnfFormula(DEV)
-    f._init_formula_numpy(num_vars, clauses)
-    return f
-
-
 # ---------------------------------------------------------------- formula structures
 
 def test_formula_structures_match_the_reference_builder():
     rng = random.Random(7)
     for nv, nc in [(6, 10), (40, 120), (200, 900)]:
         clauses = _random_cnf(rng, nv, nc)
-        f = _reference_formula(nv, clauses)
+        f = ReferenceFormula.from_clauses(nv, clauses)
         cf = _core.Formula.from_clauses(nv, clauses)
 
         assert cf.info.num_vars == f.num_vars
         assert cf.info.num_clauses == f.num_clauses
         off, cls_ = cf.occ()
-        np.testing.assert_array_equal(off, f.occ_list.occ_offsets.cpu().numpy())
-        np.testing.assert_array_equal(cls_, f.occ_list.occ_clauses.cpu().numpy())
+        np.testing.assert_array_equal(off, f.occ_offsets)
+        np.testing.assert_array_equal(cls_, f.occ_clauses)
         sizes, lsum = cf.clause_arrays()
-        np.testing.assert_array_equal(sizes, f.clause_sizes.cpu().numpy())
-        np.testing.assert_array_equal(lsum, f.init_lit_sum.cpu().numpy())
+        np.testing.assert_array_equal(sizes, f.clause_sizes)
+        np.testing.assert_array_equal(lsum, f.init_lit_sum)
 
 
 def test_dimacs_parse_matches_the_reference_parser(tmp_path):
@@ -82,11 +74,10 @@ def test_dimacs_parse_matches_the_reference_parser(tmp_path):
         fh.write("c a comment\np cnf 30 %d\n" % len(clauses))
         for c in clauses:                       # two clauses per line: the token stream matters
             fh.write(" ".join(map(str, c)) + " 0 ")
-    f = CnfFormula(DEV)
-    f._parse_cnf_file_numpy(str(p))
+    f = ReferenceFormula.from_file(str(p))
     cf = _core.Formula.from_file(str(p))
     assert (cf.info.num_vars, cf.info.num_clauses) == (f.num_vars, f.num_clauses)
-    np.testing.assert_array_equal(cf.clause_arrays()[0], f.clause_sizes.cpu().numpy())
+    np.testing.assert_array_equal(cf.clause_arrays()[0], f.clause_sizes)
 
 
 def test_k_calibration_matches():

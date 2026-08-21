@@ -68,6 +68,7 @@ add_library(gpap SHARED
   src/readout.cpp
   src/calibrate.cpp
   src/probe.cpp
+  src/check.cpp
   ${GPAP_GENERATED})
 target_include_directories(gpap
   PUBLIC  $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>

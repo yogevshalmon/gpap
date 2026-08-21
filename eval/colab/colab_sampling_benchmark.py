@@ -171,11 +171,11 @@ def k_scaling(path: str, device: torch.device, *, b: int, chunks: int, k_cap: in
         # throughput-vs-K effect from random success-rate noise across the sweep.
         smp._gen.manual_seed(seed)
         smp._pyrng = _random.Random(seed)
-        smp.sample(k, decisions_per_round=b, max_decision_rounds=120, max_chunks=1, collect=False)  # warmup
+        smp.sample(k, decisions_per_round=b, max_chunks=1, collect=False)  # warmup
         if device.type == "cuda":
             torch.cuda.synchronize()
         t0 = time.perf_counter()
-        o = smp.sample(k * chunks, decisions_per_round=b, max_decision_rounds=120,
+        o = smp.sample(k * chunks, decisions_per_round=b,
                        max_chunks=chunks, collect=False)
         if device.type == "cuda":
             torch.cuda.synchronize()
@@ -225,7 +225,6 @@ def run_instance(path: str, device: torch.device, *, cmsgen_bin: str | None, n_t
         "unique_sps_est": g.get("unique_sps_est"), "assigns_per_s": g.get("assigns_per_s"),
         "decisions_per_s": g.get("decisions_per_s"),     # branch decisions/s
         "implications_per_s": g.get("implications_per_s"),  # unit-prop implications/s (assigns-decisions)
-        "kernel": g.get("kernel"),
         "in_niche": g["success_rate"] > 0.10,           # rough: produces models at a usable rate
     }
     if cmsgen_bin:
@@ -271,10 +270,10 @@ CIRCUIT_ITC_QUICK = ["b01", "b03", "b06", "b08", "b10", "b13"]
 #                        Replaces v1 (True,1,"soft"), which it dominates everywhere measured.
 #   (True, 64, "orac") — high-B on the PYTHON engine: ultra-shallow wide instances where the batched
 #                        tensor ops beat the per-warp kernel (b14 T=1: 53.7M/s vs 42M kernel-B64).
-# NOTES: fused configs ignore max_decision_rounds (the kernel structurally terminates in ≤|order|
-# groups; the cap is a v1-Python-loop artifact that truncated B=1 on large supports). Per-trajectory
+# NOTES: there is no decision-round cap (the kernel structurally terminates in ≤|order| groups;
+# the old cap was a v1-Python-loop artifact that truncated B=1 on large supports). Per-trajectory
 # BCP work is ~UNIFORM on circuits ⇒ straggler early-stop has no tail to trim (measured; not an
-# option). Fused/orac degrade gracefully to plain (rv,B) when the Triton kernel is unavailable.
+# option).
 from gpap.sampling.pipeline import CIRCUIT_PORTFOLIO  # single source of truth (same list)
 
 

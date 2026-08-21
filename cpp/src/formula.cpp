@@ -188,11 +188,17 @@ extern "C" gpap_status gpap_formula_from_dimacs(const char *path, gpap_formula *
             if (c0 == 'p') {
                 int n = 0, m = 0;
                 if (sscanf(p, "p cnf %d %d", &n, &m) >= 1) header_n = n;
-            } else if (c0 == 'c' && (size_t)(line_end - p) > 5 &&
-                       strncmp(p, "c ind", 5) == 0) {
-                /* independent support (UniGen / QuickSampler convention), 0-terminated */
-                const char *q = p + 5;
-                while (q < line_end) {
+            } else if (c0 == 'c') {
+                /* Independent-support headers: `c ind <v...> 0` (the UniGen / QuickSampler
+                 * convention) and the `cr <v...>` variant some samplers emit — same meaning,
+                 * both accepted. Any other c-line is a comment. */
+                const char *q = nullptr;
+                if ((size_t)(line_end - p) > 5 && strncmp(p, "c ind", 5) == 0)
+                    q = p + 5;
+                else if ((size_t)(line_end - p) > 2 && p[1] == 'r' &&
+                         (p[2] == ' ' || p[2] == '\t'))
+                    q = p + 2;
+                while (q && q < line_end) {
                     char *tail = nullptr;
                     long v = strtol(q, &tail, 10);
                     if (tail == q) break;
@@ -276,6 +282,32 @@ extern "C" gpap_status gpap_formula_clause_arrays(const gpap_formula *f, int32_t
         memcpy(sizes_out, f->clause_sizes.data(), f->clause_sizes.size() * sizeof(int32_t));
     if (lit_sum_out)
         memcpy(lit_sum_out, f->lit_sum.data(), f->lit_sum.size() * sizeof(int32_t));
+    return GPAP_OK;
+}
+
+extern "C" gpap_status gpap_formula_clauses(const gpap_formula *f, int32_t *lits_out,
+                                            int64_t *n_lits) {
+    if (!f) return GPAP_ERR_ARG;
+    if (n_lits) *n_lits = f->total_lits;
+    if (!lits_out) return GPAP_OK;
+    /* Rebuilt by INVERTING the occ CSR: occ[l] lists the clauses where ~l appears, so every
+     * entry (l, c) says clause c contains the literal l^1. Duplicate literals in the input are
+     * preserved (each contributed an entry); within-clause ORDER comes back ascending by
+     * literal index, not input order — the builder retains no input order, and no consumer of
+     * a clause is order-sensitive (the engine's structures are sums and sets). */
+    std::vector<int64_t> cursor(static_cast<size_t>(f->num_clauses) + 1, 0);
+    for (int32_t c = 0; c < f->num_clauses; ++c)
+        cursor[static_cast<size_t>(c) + 1] = cursor[c] + f->clause_sizes[static_cast<size_t>(c)];
+    const int64_t num_lits = 2ll * f->num_vars;
+    for (int64_t l = 0; l < num_lits; ++l) {
+        const int64_t in_clause = l ^ 1;                       /* the literal the clause holds */
+        const int32_t v = static_cast<int32_t>(in_clause >> 1) + 1;
+        const int32_t dimacs = (in_clause & 1) ? -v : v;
+        for (int32_t k = f->occ_offsets[static_cast<size_t>(l)];
+             k < f->occ_offsets[static_cast<size_t>(l) + 1]; ++k)
+            lits_out[cursor[static_cast<size_t>(f->occ_clauses[static_cast<size_t>(k)])]++] =
+                dimacs;
+    }
     return GPAP_OK;
 }
 

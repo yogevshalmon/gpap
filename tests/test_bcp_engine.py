@@ -4,6 +4,7 @@ scenario-level expectations are spelled out per test. CUDA-only (the engine has 
 """
 import os
 
+import numpy as np
 import pytest
 import torch
 
@@ -265,6 +266,45 @@ class TestKernelDispatch:
         eng = self._engine()
         eng.reset(64)
         assert eng.mode == "scalar"
+
+    def test_auto_dispatch_reports_whether_a_kernel_is_pinned(self, monkeypatch):
+        """The flag a caller consults before pinning a mode of its own (the sampler does): it
+        must see BOTH pin channels — the env override and an explicit set_mode."""
+        monkeypatch.delenv("GPAP_KERNEL", raising=False)
+        eng = self._engine()
+        assert eng.auto_dispatch
+        eng.set_mode("wave")
+        assert not eng.auto_dispatch
+        eng.set_mode("auto")
+        assert eng.auto_dispatch
+        monkeypatch.setenv("GPAP_KERNEL", "scalar")
+        assert not self._engine().auto_dispatch
+
+    def test_check_sets_flat_form(self, monkeypatch):
+        """Entry point 1's batched form on the engine itself: flattened DIMACS literals +
+        offsets, numpy results, the loop in the core. An empty set is legal (it propagates to
+        the units flush) and a pinned tiny chunk must not change any surviving row."""
+        monkeypatch.delenv("GPAP_KERNEL", raising=False)
+        eng = self._engine()
+        lits = np.array([1, 2, -1, -2, -3], dtype=np.int32)    # [1,2] | [] | [-1,-2,-3]
+        off = np.array([0, 2, 2, 5], dtype=np.int64)
+        conflict, prop, assign, sat = eng.check_sets(lits, off, assignments=True)
+        assert conflict.dtype == bool and conflict.shape == (3,)
+        assert not conflict[1] and prop[1] == 0                 # the empty set: flush state
+        assert assign.shape == (3, 12) and sat is None
+        c1, p1, _, _ = eng.check_sets(lits, off, chunk=1)       # 3 launches, same answers
+        np.testing.assert_array_equal(c1, conflict)
+        np.testing.assert_array_equal(p1[~c1], prop[~conflict])
+
+    def test_check_sets_rejects_offsets_past_the_literal_array(self, monkeypatch):
+        """The binding must bound-check offsets against len(lits) — the core cannot (a C
+        pointer has no length), and without the guard a short array is read past its end and
+        the call SUCCEEDS with answers built from stray memory."""
+        monkeypatch.delenv("GPAP_KERNEL", raising=False)
+        eng = self._engine()
+        with pytest.raises(ValueError, match="exceeds len"):
+            eng.check_sets(np.array([1, 2], dtype=np.int32),
+                           np.array([0, 2, 4], dtype=np.int64))
 
     def test_both_kernels_agree(self, monkeypatch):
         """The property that licenses dispatching at all: same decisions, same fixpoint."""

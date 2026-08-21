@@ -266,6 +266,32 @@ def parse_encoder_comment(path):
     return None
 
 
+def convert_common(kind, circ, cycles, seed, pin_outputs, encoder, abc_path, target_mode,
+                   out_path, native_build, abc_build):
+    """THE conversion driver both circuit formats share (`convert_one` for .bench,
+    `aig2cnf.convert_aig_one` for AIGER): resolve the target mode, resolve the encoder, build,
+    write — so the target/encoder dispatch rule has one home rather than a twin per format.
+    `native_build(target)` / `abc_build(target)` return (builder, support, target, labels).
+    Returns (builder, support, rare_est, resolved_encoder)."""
+    target = rare_est = None
+    if target_mode == "rare":
+        from gpap.circuits.simulate import rare_target
+        target, rare_est = rare_target(kind, circ, cycles, seed, pin_outputs)
+    elif target_mode != "random":
+        raise ValueError(f"unknown target_mode {target_mode!r} (random | rare)")
+    if encoder == "auto":
+        from gpap.circuits.abc_backend import abc_available
+        encoder = "abc" if abc_available(abc_path) else "tseitin"
+    if encoder == "abc":
+        b, support, target, labels = abc_build(target)
+    elif encoder == "tseitin":
+        b, support, target, labels = native_build(target)
+    else:
+        raise ValueError(f"unknown encoder {encoder!r} (tseitin | abc | auto)")
+    write_dimacs(out_path, b, support, labels, encoder=encoder)
+    return b, support, rare_est, encoder
+
+
 def convert_one(bench_path, out_path, cycles, seed, pin_outputs=None, encoder="tseitin",
                 abc_path=None, quiet=False, abc_opt="auto", target_mode="random"):
     """Convert a single .bench file to a DIMACS CNF at out_path. Returns the CnfBuilder.
@@ -287,30 +313,22 @@ def convert_one(bench_path, out_path, cycles, seed, pin_outputs=None, encoder="t
     sampling; see gpap/circuits/simulate.py)."""
     circ = parse_bench(bench_path)
     inputs, outputs, dffs, gates = circ
-    target = rare_est = None
-    if target_mode == "rare":
-        from gpap.circuits.simulate import rare_target
-        target, rare_est = rare_target("bench", circ, cycles, seed, pin_outputs)
-    elif target_mode != "random":
-        raise ValueError(f"unknown target_mode {target_mode!r} (random | rare)")
-    if encoder == "auto":
-        from gpap.circuits.abc_backend import abc_available
-        encoder = "abc" if abc_available(abc_path) else "tseitin"
-    if encoder == "abc":
+
+    def native_build(target):
+        return build_cnf(circ, cycles, seed, pin_outputs=pin_outputs, target=target)
+
+    def abc_build(target):
         from gpap.circuits.abc_backend import build_cnf_abc
-        b, support, target, labels = build_cnf_abc(circ, bench_path, cycles, seed,
-                                                   pin_outputs=pin_outputs, abc=abc_path,
-                                                   opt=abc_opt, target=target)
-    elif encoder == "tseitin":
-        b, support, target, labels = build_cnf(circ, cycles, seed, pin_outputs=pin_outputs,
-                                               target=target)
-    else:
-        raise ValueError(f"unknown encoder {encoder!r} (tseitin | abc | auto)")
-    write_dimacs(out_path, b, support, labels, encoder=encoder)
+        return build_cnf_abc(circ, bench_path, cycles, seed, pin_outputs=pin_outputs,
+                             abc=abc_path, opt=abc_opt, target=target)
+
+    b, support, rare_est, enc = convert_common("bench", circ, cycles, seed, pin_outputs,
+                                               encoder, abc_path, target_mode, out_path,
+                                               native_build, abc_build)
     if not quiet:
         rare_s = f" target=rare(freq~{rare_est:.2e})" if rare_est is not None else ""
         print(f"{bench_path} -> {out_path}: PI={len(inputs)} PO={len(outputs)} DFF={len(dffs)} "
-              f"gates={len(gates)} | cycles={cycles} enc={encoder}{rare_s} -> vars={b.nv} "
+              f"gates={len(gates)} | cycles={cycles} enc={enc}{rare_s} -> vars={b.nv} "
               f"clauses={len(b.clauses)} support={len(support)}")
     return b
 

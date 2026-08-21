@@ -55,6 +55,9 @@ import torch
 from gpap.engine.checker import AssumptionChecker
 from gpap.engine.probe import LiteralProbe
 
+__all__ = ["implications", "Implications", "closure_bytes", "hyper_binary",
+           "equivalence_edges", "equivalence_classes", "derivable_mask"]
+
 
 def _idx(lit: int) -> int:
     """DIMACS literal -> internal 2N index (+v -> 2(v-1), -v -> 2(v-1)+1)."""
@@ -125,8 +128,7 @@ def implications(num_vars: int, clauses: list, device, *, pool=None,
             f"{need / 2**30:.2f} GiB (limit {max_bytes / 2**30:.2f} GiB). Narrow the pool — an "
             f"independent support or the primary inputs — or raise max_bytes.")
 
-    ck = AssumptionChecker(device=device)
-    ck.formula.init_formula(int(num_vars), clauses)
+    ck = AssumptionChecker.from_clauses(int(num_vars), clauses, device)
     out = ck.check_assumptions([[int(l)] for l in lits], assignments=True)
     conflict = out["conflict"]
     matrix = out.pop("assignment").bool()   # pop: do not hold the int8 source AND the bool copy
@@ -245,8 +247,8 @@ def derivable_mask(clauses, base_clauses, num_vars: int, device) -> np.ndarray:
     out = np.zeros(len(clauses), dtype=bool)
     if not wide:
         return out
-    ck = AssumptionChecker(device=device)
-    ck.formula.init_formula(int(num_vars), [list(c) for c in base_clauses])
+    ck = AssumptionChecker.from_clauses(int(num_vars), [list(c) for c in base_clauses],
+                                        device)
     sets, tag = [], []
     for ci, cl in enumerate([c for c in clauses if len(c) > 1]):
         for j, want in enumerate(cl):

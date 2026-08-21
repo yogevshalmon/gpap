@@ -23,8 +23,8 @@ import sys
 from pathlib import Path
 
 import torch
-from pysat.formula import CNF
 
+from gpap.engine import read_dimacs
 from gpap.engine.probe import LiteralProbe, ProbeBudget
 from gpap.mining import mine_entailed
 
@@ -36,14 +36,14 @@ def main(path: str) -> int:
         print("this example needs a CUDA GPU (there is no CPU execution path)")
         return 1
     device = torch.device("cuda")
-    cnf = CNF(from_file=path)
-    print(f"{Path(path).name}: {cnf.nv:,} variables, {len(cnf.clauses):,} clauses\n")
+    nv, clauses, _sup = read_dimacs(path)
+    print(f"{Path(path).name}: {nv:,} variables, {len(clauses):,} clauses\n")
 
     # ---------------------------------------------------------------- 1. the primitive
-    probe = LiteralProbe(cnf.nv, cnf.clauses, device)
+    probe = LiteralProbe(nv, clauses, device)
     free = probe.free_literals()
     print(f"free literals (what is worth probing at all): {len(free):,}")
-    print(f"  the other {2 * cnf.nv - len(free):,} were already settled by the formula's own "
+    print(f"  the other {2 * nv - len(free):,} were already settled by the formula's own "
           f"unit propagation, so probing them would prove nothing.\n")
 
     # ALWAYS ask what a width costs before running it. The count is exact and needs no GPU work,
@@ -77,12 +77,12 @@ def main(path: str) -> int:
 
     # ---------------------------------------------------------------- 2. the strategy
     print("\nmine_entailed(): several widths, a fixpoint at width 1, subsumption filtering")
-    res = mine_entailed(cnf.nv, cnf.clauses, device, widths=(1, 2), seconds=10.0)
+    res = mine_entailed(nv, clauses, device, widths=(1, 2), seconds=10.0)
     print(f"  {res.summary()}")
     for w, n in sorted(res.by_width.items()):
         why = "exhaustive" if res.exhausted.get(w) else res.skipped.get(w, "stopped early")
         print(f"    width {w}: {n:,} clause(s)  [{why}]")
-    print(f"\n  stronger formula = {len(cnf.clauses):,} original + {len(res.clauses):,} mined "
+    print(f"\n  stronger formula = {len(clauses):,} original + {len(res.clauses):,} mined "
           f"clauses, with EXACTLY the same solutions.")
     return 0
 

@@ -58,9 +58,11 @@ jobs:
                 -DPython3_EXECUTABLE="$(which python)"
           cmake --build build -j
       - name: Check the artifacts exist
+        # Keep this list in sync with cpp/CMakeLists.txt's add_executable targets.
         run: |
           test -f build/libgpap.so
-          test -x build/gpap_demo
+          test -x build/gpap_c_api
           test -x build/gpap_sample
           test -x build/gpap_assumptions
+          test -x build/gpap_probe
           echo "libgpap and every example build from a clean checkout"

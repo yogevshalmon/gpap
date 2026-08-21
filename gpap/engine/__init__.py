@@ -29,6 +29,8 @@ Applications consume the engine ONLY through these:
        eng.apply_and_propagate(dec)              # (K,L) int64 lit-index tensor, -1 padding;
                                                  #   ONE kernel launch to fixpoint
        eng.conflict / eng.assignment             # (K,) bool / (K,2N) int8
+       eng.check_sets(flat, offsets)             # the BATCHED form: any number of DIMACS sets,
+                                                 #   chunked by the core (cpp/src/check.cpp)
 
    Two one-call faces sit over this, and which you want depends on where the sets come from:
 
@@ -56,6 +58,7 @@ from gpap.engine.formula import (
     ext_lit_to_lit_index,
     lit_index_to_ext_lit,
     lit_index_negation,
+    read_dimacs,
 )
 from gpap.engine.bcp_engine import (
     BCPEngine,
@@ -74,7 +77,7 @@ from gpap.engine._triton import kernel_available
 # for benchmarking and for anyone who wants to override the sizing —
 # `from gpap.engine.calibrate import compute_k_safe` — just not on the front page.
 __all__ = [
-    "CnfFormula", "BCPEngine", "make_assumption_tensor", "core_available",
+    "CnfFormula", "read_dimacs", "BCPEngine", "make_assumption_tensor", "core_available",
     "AssumptionChecker", "LiteralProbe", "ProbeBudget", "ProbeResult",
     "kernel_available",
     "packed_envelope", "clauses_envelope",

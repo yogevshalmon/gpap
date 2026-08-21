@@ -78,9 +78,17 @@ gpap_status gpap_formula_occ(const gpap_formula *f, int32_t *offsets_out, int32_
 gpap_status gpap_formula_clause_arrays(const gpap_formula *f, int32_t *sizes_out,
                                        int32_t *lit_sum_out);
 
+/* The clauses back out as FLAT DIMACS literals (clause c = the next clause_sizes[c] entries;
+ * sizes from gpap_formula_clause_arrays). Rebuilt from the occ CSR, so within-clause order is
+ * ascending by literal index, not input order. `n_lits` (may be NULL) receives total_lits;
+ * lits_out NULL = query only. This is what lets a host-side consumer (simplification, mining,
+ * re-emission) get Python/C++ clause lists from THE parser instead of shipping a second one. */
+gpap_status gpap_formula_clauses(const gpap_formula *f, int32_t *lits_out, int64_t *n_lits);
+
 /* Independent support parsed from the file's `c ind <v> ... 0` header lines (the
- * UniGen/QuickSampler convention), as 0-based variable indices, ascending. Pass out=NULL to
- * query the count. 0 means the file declared none — decide every variable. */
+ * UniGen/QuickSampler convention; the `cr <v> ...` variant is accepted too), as 0-based
+ * variable indices, ascending. Pass out=NULL to query the count. 0 means the file declared
+ * none — decide every variable. */
 gpap_status gpap_formula_support(const gpap_formula *f, int32_t *out, int32_t *count);
 
 /* Which packed split fits a formula shape, without building it: GPAP_OK + *shift_out, or
@@ -142,6 +150,46 @@ gpap_status gpap_engine_trajectory_dev(gpap_engine *e, uintptr_t order_dev, int3
 gpap_status gpap_engine_recache_flush(gpap_engine *e);
 int gpap_engine_flush_conflict(const gpap_engine *e);
 gpap_status gpap_engine_flushed_assignment(gpap_engine *e, int8_t *out_host); /* (2N,) */
+
+/* ------------------------------------------------------------------ batched checking
+ * Entry point 1, packaged: propagate ANY number of assumption sets to their BCP fixpoints,
+ * chunked to the GPU internally, results in INPUT ORDER — a caller cannot tell how many
+ * launches it took. THE chunk loop of both one-call faces (gpap::AssumptionChecker and
+ * Python's), living here for the same reason the probe sweep lives in cpp/src/probe.cpp: two
+ * wrapper copies of the same loop drift (they already had — one face validated before any
+ * launch, the other mid-loop), and the rules a caller observes — validation, chunk sizing,
+ * padding — must not depend on which language asked. */
+
+/* Sets are FLATTENED DIMACS literals: set i is lits[offsets[i] .. offsets[i+1]), offsets has
+ * n+1 entries with offsets[0] == 0 (a set may be empty: it propagates to the units flush).
+ * The WHOLE input is validated before any launch — an out-of-range literal cannot be allowed
+ * to reach the kernel (see gpap_probe_tuples for why), and failing after some chunks ran would
+ * leave a partially-filled result the caller cannot distinguish from a full one.
+ *
+ * `chunk` sets are propagated per launch; pass <= 0 to size it with gpap_check_chunk_size
+ * (callers pin it only to A/B chunking itself — results are chunk-invariant on every
+ * SURVIVING row; see below). Outputs, all host buffers, filled per chunk:
+ *   conflict_out    (n,)     int8, required — the set (with its implications) falsifies a clause
+ *   propagated_out  (n,)     int32, required — implications BCP derived beyond the assumptions
+ *   assign_out      (n, 2N)  int8, or NULL — 1 where that literal index is TRUE
+ *   sat_out         (n, M)   int32, or NULL — surviving literals per clause
+ *
+ * WHICH FIELDS ARE SPECIFIED: `conflict_out` is exact for every set. For a set that does NOT
+ * conflict, so is everything else (BCP fixpoints are confluent). For a set that DOES conflict,
+ * propagation stopped as soon as some clause emptied, so the other fields on that row are a
+ * snapshot of where BCP happened to stop — anything that moves the propagation order, the
+ * chunk size included (it feeds the wave/scalar dispatch through gpap_engine_reset), can
+ * change them. Compare conflicted rows on `conflict_out` alone. */
+gpap_status gpap_check_sets(gpap_engine *e, const int32_t *lits, const int64_t *offsets,
+                            int64_t n, int32_t chunk, int8_t *conflict_out,
+                            int32_t *propagated_out, int8_t *assign_out, int32_t *sat_out);
+
+/* Assumption sets one launch holds: the engine's own per-row state (the shared exact model,
+ * gpap_row_bytes) plus the (chunk, max_lits) int64 decision matrix this entry point allocates
+ * and the sampler's path never does — 8 bytes per literal slot per row, the dominant term on a
+ * small formula with long sets. Read against LIVE free memory, capped by gpap_default_k_cap,
+ * never larger than n_sets. */
+int64_t gpap_check_chunk_size(gpap_engine *e, int64_t n_sets, int64_t max_lits);
 
 /* ------------------------------------------------------------------ probing
  * Entry point 1 asks "do THESE assumption sets conflict". Probing asks the combinatorial form of

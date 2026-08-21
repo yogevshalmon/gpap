@@ -35,7 +35,6 @@ silently disagree with the one that runs.
 """
 from __future__ import annotations
 
-import os
 import time
 from dataclasses import dataclass, field
 
@@ -127,12 +126,22 @@ class LiteralProbe:
         wrong kernel on any formula worth probing — measured 1.28x (b03-c25, M=14.5k) to 2.20x
         (b12-c50, M=219k) of pure loss, since the dispatch rule picks WAVE from M >= 2048 up. The
         engine resolves "auto" on every reset now, so a probe sweep gets it per chunk."""
+        self._init(_core.Formula.from_clauses(num_vars, clauses), device, mode)
+
+    @classmethod
+    def from_file(cls, cnf_file: str, device: "torch.device | None" = None,
+                  *, mode: str | None = None) -> "LiteralProbe":
+        """Probe a DIMACS file directly — the core's parser, the same one every face uses."""
+        self = cls.__new__(cls)
+        self._init(_core.Formula.from_file(cnf_file), device, mode)
+        return self
+
+    def _init(self, formula, device, mode) -> None:
         if device is not None and getattr(device, "type", "cuda") != "cuda":
             raise RuntimeError("LiteralProbe requires CUDA (the engine is GPU-only)")
-        self._formula = _core.Formula.from_clauses(num_vars, clauses)
-        self._engine = _core.Engine(
-            self._formula, mode=mode or os.environ.get("GPAP_KERNEL") or "auto")
-        self._num_vars = int(num_vars)
+        self._formula = formula
+        self._engine = _core.Engine(formula, mode=mode)   # mode None -> $GPAP_KERNEL -> auto
+        self._num_vars = int(formula.info.num_vars)
         self._refresh()
 
     def _refresh(self) -> None:
@@ -160,7 +169,11 @@ class LiteralProbe:
 
     @property
     def engine(self):
-        """The underlying core engine — for callers that also want entry point 1."""
+        """The underlying `_core.Engine` — the LOW-LEVEL numpy binding to the C ABI.
+
+        An escape hatch, not part of this class's stable surface: its methods track the ABI in
+        cpp/include/gpap/gpap.h. For "propagate THESE sets" prefer `AssumptionChecker`; reach
+        through here only for raw entry-point access the faces do not cover."""
         return self._engine
 
     # ------------------------------------------------------------------ what is worth probing
