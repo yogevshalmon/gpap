@@ -138,6 +138,16 @@ struct gpap_engine {
                                  an M == 0 formula has a null one) */
     int64_t launches = 0;
 
+    /* CLEAN-mode bookkeeping (gpap_engine_apply_clean): leading rows whose packed row is KNOWN
+     * equal to packed_flushed. Raised by a full reset broadcast; PRESERVED by a completed
+     * CLEAN-mode apply (it restores its own dirt); zeroed by anything that dirties or
+     * invalidates without a restorable record — a plain apply, a trajectory, recache_flush
+     * (the baseline itself moves), or a packed realloc (DevBuf::reserve grows by
+     * release+alloc, so the contents are gone). */
+    int32_t packed_clean_rows = 0;
+    int64_t resets_full = 0, resets_lite = 0;
+    int clean_enabled = 1;   /* GPAP_CLEAN=0 kills the lite path (A/B lever + escape hatch) */
+
     /* CUDA */
     CUdevice device = 0;
     CUcontext ctx = nullptr;   /* primary context, retained */

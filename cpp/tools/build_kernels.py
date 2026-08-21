@@ -44,6 +44,7 @@ WAVE_W = 32
 _PTR_I32, _PTR_I8, _PTR_I64 = "*i32:16", "*i8:16", "*i64:16"
 
 _FIX_PTRS = [_PTR_I32, _PTR_I32, _PTR_I8, _PTR_I8, _PTR_I64] + [_PTR_I32] * 6
+_FIX_CLEAN_PTRS = _FIX_PTRS[:7] + [_PTR_I32] + _FIX_PTRS[7:]   # + init_ptr after occ_cls
 _TRAJ_PTRS = [_PTR_I32, _PTR_I32, _PTR_I8, _PTR_I8] + [_PTR_I32] * 8
 
 
@@ -79,6 +80,14 @@ def kernel_specs():
     for shift in SHIFTS:
         out.append((f"sound_rows.s{shift}", "helpers", "sound_rows",
                     [_PTR_I32, _PTR_I32, "i32", _PTR_I8, shift, 1024], 4))
+    for shift in SHIFTS:
+        for wave in (0, 1):
+            # _bcp_fixpoint_clean_kernel(... occ_cls, INIT, trail ... M, NW, B, TRAIL_CAP,
+            # SHIFT, WAVE, W) — CLEAN mode (docs/plans/RESET_RESTORE_PLAN.md §9). Appended
+            # LAST so the 29 pre-existing blobs keep their order in the generated file (the
+            # no-regression check diffs them key by key).
+            out.append((f"fixpoint_clean.s{shift}.w{wave}", "bcp", "_bcp_fixpoint_clean_kernel",
+                        _FIX_CLEAN_PTRS + ["i32"] * 4 + [shift, wave, WAVE_W], 1))
     return out
 
 

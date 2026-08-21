@@ -19,6 +19,7 @@
 #include "gpap_internal.hpp"
 
 #include <algorithm>
+#include <cstdlib>
 #include <cstring>
 #include <string>
 #include <vector>
@@ -184,6 +185,8 @@ extern "C" gpap_status gpap_engine_create(const gpap_formula *f, const gpap_engi
          * writing `gpap_engine_options o = {0}` would otherwise silently lose the warp-wide
          * decision scan (worth 12-19% on wave instances) while the header promises otherwise. */
         e->vscan = o.vscan < 0 ? 0 : 1;
+        const char *ce = std::getenv("GPAP_CLEAN");
+        e->clean_enabled = (ce && ce[0] == '0') ? 0 : 1;
         e->nw = std::max(1, (2 * f->num_vars + 31) / 32);
         e->trail_cap = f->num_vars + kDefaultBFloor + 8;
 
@@ -286,7 +289,9 @@ static gpap_status ensure_state(gpap_engine *e, int32_t K, int32_t B) {
 extern "C" gpap_status gpap_engine_reset(gpap_engine *e, int32_t K) {
     if (!e || K <= 0) return GPAP_ERR_ARG;
     GPAP_TRY(use_ctx(e));
+    const size_t packed_cap = e->packed.bytes;
     GPAP_TRY(ensure_state(e, K, kDefaultBFloor));
+    if (e->packed.bytes != packed_cap) e->packed_clean_rows = 0;   /* grow = realloc = LOST */
     e->K = K;
     /* Resolve the kernel for THIS K. Cheap (a constant compare unless M is small) and it is the
      * one place every entry point passes through, which is the whole point of putting it here. */
@@ -295,7 +300,20 @@ extern "C" gpap_status gpap_engine_reset(gpap_engine *e, int32_t K) {
                                                                            : GPAP_MODE_SCALAR;
     for (int i = 0; i < GPAP_SLOTS; ++i) { e->slots[i].rows_valid = false; e->slots[i].count = 0; }
     if (!e->flush_ready) return GPAP_OK;                 /* construction path: caller seeds */
-    GPAP_TRY(broadcast_rows(e, e->packed, e->packed_flushed, e->num_clauses, K));
+    if (e->clean_enabled && e->packed_clean_rows >= K) {
+        /* RESET-LITE: the previous launch was CLEAN-mode (or nothing dirtied since the last
+         * broadcast), so the packed rows already ARE the baseline. Skipping the K*M broadcast
+         * here is the whole point — it was 41-94% of a probe chunk
+         * (docs/plans/RESET_RESTORE_PLAN.md §9); abits + flags below are the cheap remainder
+         * (~2-4% of the old traffic). Gated on clean_enabled so GPAP_CLEAN=0 is EXACT legacy
+         * behaviour — every reset broadcasts — not just "no clean kernels": an A/B lever that
+         * still skipped some broadcasts would contaminate the measurement it exists for. */
+        e->resets_lite++;
+    } else {
+        GPAP_TRY(broadcast_rows(e, e->packed, e->packed_flushed, e->num_clauses, K));
+        if (K > e->packed_clean_rows) e->packed_clean_rows = K;
+        e->resets_full++;
+    }
     GPAP_TRY(broadcast_rows(e, e->abits, e->abits_flushed, e->nw, K));
     GPAP_TRY(fill_flags(e, e->active, e->flush_conflict ? 0 : 1, K));
     GPAP_TRY(fill_flags(e, e->conflict, e->flush_conflict ? 1 : 0, K));
@@ -305,6 +323,7 @@ extern "C" gpap_status gpap_engine_reset(gpap_engine *e, int32_t K) {
 extern "C" gpap_status gpap_engine_recache_flush(gpap_engine *e) {
     if (!e) return GPAP_ERR_ARG;
     GPAP_TRY(use_ctx(e));
+    e->packed_clean_rows = 0;                       /* the baseline itself is moving */
     GPAP_CU(cuMemcpyDtoD(e->packed_flushed.ptr, e->packed.ptr,
                          (size_t)e->num_clauses * sizeof(int32_t)));
     GPAP_CU(cuMemcpyDtoD(e->abits_flushed.ptr, e->abits.ptr, (size_t)e->nw * sizeof(int32_t)));
@@ -316,7 +335,8 @@ extern "C" gpap_status gpap_engine_recache_flush(gpap_engine *e) {
 
 /* ------------------------------------------------------------------ entry point 1 */
 
-extern "C" gpap_status gpap_engine_apply_dev(gpap_engine *e, uintptr_t decisions_dev, int32_t L) {
+static gpap_status apply_dev_common(gpap_engine *e, uintptr_t decisions_dev, int32_t L,
+                                    int clean) {
     if (!e || L < 0 || (L > 0 && !decisions_dev)) return GPAP_ERR_ARG;
     if (L == 0) return GPAP_OK;                     /* no assumptions: nothing to propagate */
     GPAP_TRY(use_ctx(e));
@@ -329,22 +349,37 @@ extern "C" gpap_status gpap_engine_apply_dev(gpap_engine *e, uintptr_t decisions
     GPAP_TRY(e->nops.zero());
     GPAP_TRY(e->ndecs.zero());
 
+    /* Dirty from here. A CLEAN launch that RUNS TO COMPLETION restores its rows to baseline,
+     * so the claim is put back after the last GPAP_TRY; any early return leaves it dropped,
+     * which is the conservative direction (the next reset broadcasts). */
+    const int32_t clean_rows_prev = e->packed_clean_rows;
+    e->packed_clean_rows = 0;
+
     Kernel k;
-    const std::string key = "fixpoint.s" + std::to_string(e->shift) + ".w" +
+    const std::string key = std::string(clean ? "fixpoint_clean.s" : "fixpoint.s") +
+                            std::to_string(e->shift) + ".w" +
                             std::to_string(e->mode == GPAP_MODE_WAVE ? 1 : 0);
     GPAP_TRY(e->kernels.get(key, &k));
     CUdeviceptr dec = (CUdeviceptr)decisions_dev;
     int32_t M = e->num_clauses, NW = e->nw, B = L, cap = e->trail_cap;
-    GPAP_TRY(launch(k, (unsigned)e->K, 1,
-                    {&e->packed.ptr, &e->abits.ptr, &e->active.ptr, &e->conflict.ptr, &dec,
-                     &e->occ_off.ptr, &e->occ_cls.ptr, &e->trail.ptr, &e->nprops.ptr,
-                     &e->nops.ptr, &e->ndecs.ptr, &M, &NW, &B, &cap}));
+    std::vector<void *> args = {&e->packed.ptr, &e->abits.ptr, &e->active.ptr, &e->conflict.ptr,
+                                &dec, &e->occ_off.ptr, &e->occ_cls.ptr};
+    if (clean) args.push_back(&e->packed_flushed.ptr);   /* init_ptr: what the tail restores */
+    for (void *p : {(void *)&e->trail.ptr, (void *)&e->nprops.ptr, (void *)&e->nops.ptr,
+                    (void *)&e->ndecs.ptr, (void *)&M, (void *)&NW, (void *)&B, (void *)&cap})
+        args.push_back(p);
+    GPAP_TRY(launch(k, (unsigned)e->K, 1, args));
     e->launches++;
     GPAP_TRY(accumulate(e, e->nops, e->acc_ops, e->K));
     GPAP_TRY(accumulate(e, e->nprops, e->acc_props, e->K));
     GPAP_TRY(accumulate(e, e->ndecs, e->acc_decs, e->K));
     for (int i = 0; i < GPAP_SLOTS; ++i) e->slots[i].rows_valid = false;
+    if (clean) e->packed_clean_rows = clean_rows_prev;
     return GPAP_OK;
+}
+
+extern "C" gpap_status gpap_engine_apply_dev(gpap_engine *e, uintptr_t decisions_dev, int32_t L) {
+    return apply_dev_common(e, decisions_dev, L, 0);
 }
 
 extern "C" gpap_status gpap_engine_apply(gpap_engine *e, const int64_t *decisions_host,
@@ -353,6 +388,15 @@ extern "C" gpap_status gpap_engine_apply(gpap_engine *e, const int64_t *decision
     GPAP_TRY(use_ctx(e));
     GPAP_TRY(stage(e->staging_a, decisions_host, (size_t)e->K * L * sizeof(int64_t)));
     return gpap_engine_apply_dev(e, (uintptr_t)e->staging_a.ptr, L);
+}
+
+extern "C" gpap_status gpap_engine_apply_clean(gpap_engine *e, const int64_t *decisions_host,
+                                               int32_t L) {
+    if (!e || !decisions_host || L <= 0) return GPAP_ERR_ARG;
+    if (!e->clean_enabled) return gpap_engine_apply(e, decisions_host, L);   /* GPAP_CLEAN=0 */
+    GPAP_TRY(use_ctx(e));
+    GPAP_TRY(stage(e->staging_a, decisions_host, (size_t)e->K * L * sizeof(int64_t)));
+    return apply_dev_common(e, (uintptr_t)e->staging_a.ptr, L, 1);
 }
 
 /* ------------------------------------------------------------------ entry point 2 */
@@ -374,6 +418,7 @@ extern "C" gpap_status gpap_engine_trajectory_dev(gpap_engine *e, uintptr_t orde
     GPAP_TRY(e->nops.zero());
     GPAP_TRY(e->ndecs.zero());
     GPAP_TRY(e->nrounds.zero());
+    e->packed_clean_rows = 0;       /* a trajectory dirties without a restorable record */
 
     Kernel k;
     GPAP_TRY(e->kernels.get(traj_key(e->shift, e->mode == GPAP_MODE_WAVE ? 1 : 0,
@@ -436,6 +481,12 @@ extern "C" gpap_status gpap_counters_get(gpap_engine *e, gpap_counters *out) {
     out->decs = v[2];
     out->launches = e->launches;
     return GPAP_OK;
+}
+
+extern "C" void gpap_engine_reset_stats(const gpap_engine *e, int64_t *full_out,
+                                        int64_t *lite_out) {
+    if (full_out) *full_out = e ? e->resets_full : 0;
+    if (lite_out) *lite_out = e ? e->resets_lite : 0;
 }
 
 extern "C" void gpap_counters_reset(gpap_engine *e) {
