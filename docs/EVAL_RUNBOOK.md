@@ -15,7 +15,7 @@ survives, and every stage here checkpoints after each row anyway.
 git clone <repo> gpap && cd gpap
 apt-get install -y build-essential cmake zlib1g-dev   # compilers for libgpap/cmsgen/abc
 pip install -e ".[dev]"                # torch+triton come with the Colab image
-eval/rivals_setup.sh                   # libgpap FIRST, then abc, patched CMSGen, the 3 rivals
+eval/rivals/rivals_setup.sh                   # libgpap FIRST, then abc, patched CMSGen, the 3 rivals
 eval/run_full_eval.sh check            # readiness table — read it before starting
 eval/run_full_eval.sh smoke            # ~5 min: every stage, 1-2 instances. Do this FIRST.
 gpap info                              # device + POWER STATE (docs/BENCHMARKING.md §1)
@@ -30,7 +30,7 @@ is the one command (cmake + a C++17 compiler + the driver + triton; no CUDA tool
 
 `rivals_setup.sh` builds CMSGen from upstream **with `scripts/cmsgen_gpap_eval.patch`** applied.
 That patch is what makes the CPU comparison honest — see §4. Everything lands in
-`~/.cache/gpap/{bin,src}`; nothing is vendored into the repo. `smoke` writes to a separate
+`.gpap/{bin,src}` beside the repo; nothing is vendored into the repo. `smoke` writes to a separate
 `<gpu>-smoke/` directory, so it can never be mistaken for (or resumed as) real results.
 
 ### How long it takes, and why the GPU barely matters
@@ -193,7 +193,7 @@ outlive the browser tab.
 cd /content && git clone <repo> gpap && cd gpap
 apt-get -qq install -y build-essential cmake zlib1g-dev >/dev/null   # libgpap/cmsgen/abc deps
 pip install -q -e ".[dev]"
-eval/rivals_setup.sh && eval/run_full_eval.sh check   # builds libgpap first; check must show it
+eval/rivals/rivals_setup.sh && eval/run_full_eval.sh check   # builds libgpap first; check must show it
 eval/run_full_eval.sh smoke                       # ~5 min sanity pass, separate output dir
 
 # --- the sweep, one family per command, detached --------------------------------
@@ -277,10 +277,10 @@ Both appear in `summary.md`'s "instances not measured" table.
 
 | harness | rival | what it runs |
 |---|---|---|
-| `eval/rivals_demotic.py --mode native` | DEMOTIC (ASP-DAC'25) | their ISCAS-85 benchmarks with their own hard-coded output pins; GPAP pins exactly the same bits |
-| `eval/rivals_demotic.py --mode miter` | DEMOTIC | OUR rare-target unrolled instance, handed to them as a single-output miter (`eval/unroll_to_bench.py`, which self-checks p(MITER=1) == p_accept) |
-| `eval/rivals_recurrent.py [--rare]` | Recurrent-CircuitSAT (MLCAD'25) | their filename-keyed target table, then our rare pins |
-| `eval/rivals_hts.py '<glob>.cnf'` | HTS | the very CNFs the `seq` stage generated |
+| `eval/rivals/rivals_demotic.py --mode native` | DEMOTIC (ASP-DAC'25) | their ISCAS-85 benchmarks with their own hard-coded output pins; GPAP pins exactly the same bits |
+| `eval/rivals/rivals_demotic.py --mode miter` | DEMOTIC | OUR rare-target unrolled instance, handed to them as a single-output miter (`eval/rivals/unroll_to_bench.py`, which self-checks p(MITER=1) == p_accept) |
+| `eval/rivals/rivals_recurrent.py [--rare]` | Recurrent-CircuitSAT (MLCAD'25) | their filename-keyed target table, then our rare pins |
+| `eval/rivals/rivals_hts.py '<glob>.cnf'` | HTS | the very CNFs the `seq` stage generated |
 
 All three are PyTorch programs run as subprocesses on the same GPU, scored with **their own**
 metric (unique solutions ÷ their `model_runtime`, which excludes their model build). Their pins
@@ -313,7 +313,7 @@ then stepped down a ladder on "device not ready".
 
 | symptom | cause / fix |
 |---|---|
-| `libgpap ... is not available` / every GPAP row errors | the engine was not built — `scripts/build_core.sh` (needs cmake + a C++17 compiler + triton). Verify with `eval/rivals_setup.sh check`. |
+| `libgpap ... is not available` / every GPAP row errors | the engine was not built — `scripts/build_core.sh` (needs cmake + a C++17 compiler + triton). Verify with `eval/rivals/rivals_setup.sh check`. |
 | `GPAP_LIB is set but does not exist` | the env var points at a typo; unset it or fix the path (it is refused rather than silently falling back to another build) |
 | every rate ~halved | GPU power cap or battery clocks — `gpap info` (BENCHMARKING §1); and note SM clocks move 2.8x WITHIN a run, so do not compare rates across runs (BENCHMARKING §1b) |
 | throughput collapses, no OOM | K too large → host-RAM spill. Never OOM-probe; use the nvidia-smi kill-switch (§2) |

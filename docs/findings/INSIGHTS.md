@@ -212,7 +212,7 @@ K_fused: sk_-suite numbers published before 2026-07-13 predate that switch (expe
 Validated by the no-change gate: 11 baseline model-set hashes (fused packed configs, pinned K,
 seed 5; circuits + ELS + wide-ladder + units-flush cases) reproduced bit-identically after the
 delete. `external_solver.py` (PySAT wrapper) moved to `scripts/`; `profile_engine.py` (profiled
-the deleted path) moved to `archive/`.
+the deleted path) was removed along with the rest of the retired experiment lines.
 
 **Final-engine suite re-runs (2026-07-14, .experiments/circuits_rare_3seed_v3.json +
 _abc_v3.json): engine session = 1.29x geomean e2e on Tseitin; ABC at RARE targets is a
@@ -595,7 +595,7 @@ unbiasedly and every uniform distribution has ||p||₂² = 1/|S| ≤ 1/d, so l2_
 certifies non-uniformity for ANY |S|; collision-free runs report the 95% birthday floor on |S|.
 KNOWN sensitivity gap (by design): b06-c4's TV=0.17 bias reads l2_ratio 1.14 → fast says OK,
 exact says p=0.000 — gross-skew detector vs goodness-of-fit test.
-(3) certificates on large spaces = conditional sampling = Barbarik (AAAI'19): eval/barbarik_gpap.py
+(3) certificates on large spaces = conditional sampling = Barbarik (AAAI'19): eval/uniformity/barbarik_gpap.py
 monkeypatches meelgroup/barbarik's SolutionRetriever to call GPAP IN-PROCESS (one torch init, not
 a subprocess per call; SPUR stays the trusted reference). Notes: their repo needs
 `git submodule update --init` (interfaces/convert); barbarik.py's own SAMPLER_* table is stale —
@@ -654,15 +654,15 @@ uniform by construction; rate = p_accept × sim-throughput).
   through both encoders.
 
 **GPU gradient-descent rivals, run on OUR hardware: they collapse exactly where sampling gets
-hard (2026-07-12, .experiments/rivals_hts_full.json, eval/rivals_hts.py +
-eval/unroll_to_bench.py).** Same RTX 4080, same instance files, their own metric (unique
+hard (2026-07-12, .experiments/rivals_hts_full.json, eval/rivals/rivals_hts.py +
+eval/rivals/unroll_to_bench.py).** Same RTX 4080, same instance files, their own metric (unique
 solutions / their model_runtime — which EXCLUDES their CPU model-build; GPAP's number includes
 construction).
 - **HTS** (arXiv 2502.08673, the newest of the Berkeley family, PyTorch): on circuit unrolls
   GPAP wins 26× (their own s15850a_3_2: 63k vs 2.5k u/s) to 380,000× (b13-c25 random); at RARE
   targets HTS finds 0–17 solutions total (b12/b13-rare: 0) while GPAP delivers 17k–4.5M u/s.
 - **DEMOTIC** (ASP-DAC'25, works on .bench directly — no CNF): fed OUR exact task via an
-  unrolled single-output miter (eval/unroll_to_bench.py, self-checked p(MITER=1) == the
+  unrolled single-output miter (eval/rivals/unroll_to_bench.py, self-checked p(MITER=1) == the
   instance's p_accept): b03-c25-rare best 43.5 u/s vs GPAP 523k (≈12,000×) — and BELOW the CPU
   rejection baseline (620k/s). b13-c25-rare (p=3e-5): 0 solutions in 111 s.
 - **Honest losses**: 75-10-1-q and prod-20 — the known jointly-constrained CNF lose-family —
@@ -680,7 +680,7 @@ construction).
 
 **Recurrent-CircuitSAT-Sampler (MLCAD'25, arXiv 2502.21226 — the gradient family's SEQUENTIAL
 member, i.e. the closest rival to our headline domain), run on OUR hardware (2026-07-13,
-.experiments/rivals_recurrent_{table,rare}.json, eval/rivals_recurrent.py): the STRONGEST rival
+.experiments/rivals_recurrent_{table,rare}.json, eval/rivals/rivals_recurrent.py): the STRONGEST rival
 yet — competitive on its own easy targets, 100–320,000× behind at rare ones.**
 - Protocol replicated exactly from their run.py: per-FILENAME target table pinning 1–2 output
   bits, reset-0 registers, unique solutions POOLED over all unroll depths start_point..T, and
@@ -810,7 +810,7 @@ random 137.7× (113.1×); comb rare 538× / random 555×; hwmcc-c25 rare 156× /
 hwmcc-c50 rare 30.9× / random 230×; epfl rare **12.7×** (3.4×) / random 11.0×.
 ⚠️ **SUPERSEDED 2026-08-04/05 — three of those figures were inflated by cells that measure the
 INSTANCE, not the sampler** (`docs/findings/L4_EVAL_FINDINGS.md` §2; re-derive with
-`eval/paper_tables.py`, which applies the exclusions in one place): vacuous pins put seq-c25 rare
+`eval/artifact/paper_tables.py`, which applies the exclusions in one place): vacuous pins put seq-c25 rare
 at 47.7× when it is **36.5×**, and zero-search cells (samples emitted with 0 decisions AND 0
 implications — the support is free after propagation) put epfl rare at 12.7× when it is **6.4×**
 and sk at 48.5× when it is **46.2×**. The encoder and regime conclusions below are unaffected.

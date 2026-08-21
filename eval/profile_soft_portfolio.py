@@ -2,7 +2,7 @@
 """Measure what dropping `soft` from a portfolio costs in throughput, on circuit benchmarks.
 
 `soft` (the in-kernel epsilon-greedy conflict-risk polarity) was removed from CIRCUIT_PORTFOLIO on
-2026-07-30 because Barbarik rejects it 5/5 — see docs/findings/UNIFORMITY_FINDINGS.md. That is a
+because Barbarik rejects it 5/5 — see docs/findings/UNIFORMITY_FINDINGS.md. That is a
 uniformity win with a real throughput price, and the price is an OPEN DECISION, so this script
 exists to re-measure it whenever the parameters or the engine change.
 
@@ -30,6 +30,8 @@ import time
 
 import numpy as np
 
+from gpap import paths
+
 REPO_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
 sys.path.insert(0, REPO_ROOT)
 
@@ -44,7 +46,7 @@ def main(argv=None):
     ap.add_argument("--cycles", type=int, default=25)
     ap.add_argument("--encoder", default="abc", choices=["tseitin", "abc"])
     ap.add_argument("--abc-opt", default="fast", choices=["full", "fast", "auto"])
-    ap.add_argument("--abc", default=os.path.expanduser("~/.cache/gpap/bin/abc"))
+    ap.add_argument("--abc", default=str(paths.tool("abc")))
     ap.add_argument("--target", default="rare", choices=["rare", "random"])
     ap.add_argument("--portfolio", default="circuit", choices=["circuit", "default"])
     ap.add_argument("--n-time", type=int, default=50_000)

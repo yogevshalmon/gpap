@@ -1,7 +1,7 @@
 # Circuit benchmarks — provenance, licenses, citations
 
 Committed here is a **curated subset** (small files only); `scripts/fetch_benchmarks.sh` fetches
-the full upstream sets into `~/.cache/gpap/benchmarks/` for breadth runs.
+the full upstream sets into `.gpap/benchmarks/` (beside the repo) for breadth runs.
 
 | directory | suite | source | license / terms | cite |
 |---|---|---|---|---|
@@ -26,5 +26,5 @@ Notes for the sampling use case:
   `gpap.circuits.simulate`) — for every other instance the output pin is vacuous and the
   instance is a free-hypercube throughput test, not constrained sampling. Pinning the RARE
   value of the property bit (`--target rare`) means "sample diverse witness traces".
-  The full 300-instance sweep is `~/.cache/gpap/benchmarks/hwmcc17_sweep.json` after running
+  The full 300-instance sweep is `.gpap/benchmarks/hwmcc17_sweep.json` after running
   the fetch script.

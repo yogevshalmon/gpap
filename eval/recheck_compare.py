@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Compare a consistency re-check against the original sweep, cell by cell.
 
-    eval/recheck_compare.py .experiments/cmsgen_l4_2026-08-03 .experiments/recheck
+    eval/recheck_compare.py <results-dir> .experiments/recheck
 
 What counts as agreement is the whole question, so it is stated rather than assumed:
 
@@ -25,7 +25,7 @@ import os
 import sys
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-from eval.paper_tables import gm                                    # noqa: E402
+from eval.artifact.paper_tables import gm                                    # noqa: E402
 
 
 SUCC_TOL = 0.05           # absolute; same seed + same config should be far tighter than this

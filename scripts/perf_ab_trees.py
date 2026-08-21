@@ -13,7 +13,7 @@ Arms select the package by cwd + PYTHONPATH, never `pip install`, so the two tre
 each other. Point GPAP_LIB at a single build when no C++ changed — otherwise you are also
 A/B-ing two compilations.
 
-Method, and it is not optional (docs/BENCHMARKING.md §1b): SM clocks on this box swing 615-1710
+Method, and it is not optional (docs/BENCHMARKING.md §1b): SM clocks can swing several-fold
 MHz *within* a run, so two sequential sweeps cannot resolve anything smaller than ~2x. Both arms
 therefore run back-to-back in the same session with the arm ORDER ALTERNATED per rep, and each
 arm is scored by its best rep.

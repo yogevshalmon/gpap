@@ -1,9 +1,9 @@
 """The VRAM-proportional K cap.
 
-Throughput is ~linear in K, so the cap decides what a bigger GPU is allowed to do. It used to be
-a hardcoded 49,152 in every driver, which pinned a 48 GB L40S or an 80 GB A100 to the 12 GB
-laptop's batch size — a cross-GPU sweep then reproduced the laptop's numbers and could not answer
-"does this scale with the GPU?" at all.
+Throughput is ~linear in K, so the cap decides what a bigger GPU is allowed to do. A hardcoded
+cap in every driver pinned large-VRAM cards to the reference card's batch size, so a cross-GPU
+sweep reproduced the small card's numbers and could not answer "does this scale with the GPU?"
+at all.
 
 Two properties are gated here, and the FIRST one is the important one:
 

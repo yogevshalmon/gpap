@@ -1,10 +1,12 @@
 #!/usr/bin/env bash
 # Fetch the FULL upstream circuit-benchmark sets that back the curated subset committed under
 # benchmarks/circuits/ (see benchmarks/circuits/README.md for provenance/licenses).
-# Everything lands in ~/.cache/gpap/benchmarks (durable — /tmp is reaped on WSL2 boxes).
+# Everything lands in <repo>/.gpap/benchmarks: durable across reboots, and repo-local so a
+# quota'd home directory does not silently fill up. Override with $GPAP_HOME.
 set -euo pipefail
 
-CACHE="${GPAP_BENCH_HOME:-$HOME/.cache/gpap/benchmarks}"
+REPO="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+CACHE="${GPAP_HOME:-$REPO/.gpap}/benchmarks"
 mkdir -p "$CACHE"
 cd "$CACHE"
 

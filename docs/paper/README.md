@@ -6,7 +6,7 @@ hand, and that is deliberate: an earlier version of the deck carried a sequentia
 is `36.5×`. The only durable fix is to derive every published figure from the data with the
 exclusions applied in exactly one place.
 
-`eval/slide_tables.py` **imports** its aggregation from `eval/paper_tables.py` rather than
+`eval/artifact/slide_tables.py` **imports** its aggregation from `eval/artifact/paper_tables.py` rather than
 restating it, so the deck cannot drift away from the paper. When the generator learned to count
 our own zeros, the deck learned it in the same commit.
 
@@ -27,7 +27,7 @@ sibling of the checkout) — they are too heavy to track. Set the variable if yo
 ```bash
 R=${GPAP_RESULTS:-../gpap-results}/gpap_experiments_l4_20260805
 
-eval/paper_tables.py \
+eval/artifact/paper_tables.py \
     --cmsgen     $R/gpap_vs_cmsgen_l4 \
     --cmsgen-ref $R/gpap_vs_cmsgen_4080_reference \
     --rivals     $R/gpap_vs_gpu_rivals_l4 \
@@ -36,16 +36,16 @@ eval/paper_tables.py \
     --soft       $R/uniformity_l4/soft_profile.json \
     --out-md docs/paper/RESULTS.md --out-tex docs/paper/tables.tex
 
-eval/soft_price_tables.py --safe $R/gpap_vs_cmsgen_l4 --soft $R/gpap_vs_cmsgen_l4_softarm \
+eval/artifact/soft_price_tables.py --safe $R/gpap_vs_cmsgen_l4 --soft $R/gpap_vs_cmsgen_l4_softarm \
     --out-md docs/paper/SOFT_PRICE.md --out-tex docs/paper/soft_price.tex
 
-eval/slide_tables.py --cmsgen $R/gpap_vs_cmsgen_l4 --rivals $R/gpap_vs_gpu_rivals_l4 \
+eval/artifact/slide_tables.py --cmsgen $R/gpap_vs_cmsgen_l4 --rivals $R/gpap_vs_gpu_rivals_l4 \
     --uniformity $R/uniformity_l4/uniformity_campaign.json --out docs/slides/l4_results.tex
 
-eval/verify_artifact.py $R/gpap_vs_cmsgen_l4 --rivals $R/gpap_vs_gpu_rivals_l4 \
+eval/artifact/verify_artifact.py $R/gpap_vs_cmsgen_l4 --rivals $R/gpap_vs_gpu_rivals_l4 \
     --uniformity $R/uniformity_l4/*.json
 
-eval/make_artifact.sh          # -> $GPAP_RESULTS/gpap_experiments_l4_<date>.tar.gz
+eval/artifact/make_artifact.sh          # -> $GPAP_RESULTS/gpap_experiments_l4_<date>.tar.gz
 ```
 
 ## The six rules the generator enforces
@@ -105,7 +105,7 @@ families with ≥3 instances) against CMSGen's 1.7–5.4×10⁶, and the identit
 samples/s ratio = (implications/s ratio) / (implications-per-sample ratio)
 ```
 
-holds to within 1% on 9 of 9 families, and `eval/verify_artifact.py` re-derives it from the raw
+holds to within 1% on 9 of 9 families, and `eval/artifact/verify_artifact.py` re-derives it from the raw
 rows rather than trusting the generator. The engine buys a flat 197–631× (geomean 306×);
 rejection sampling spends part of it back (1.0× on ISCAS-85, 5.6× on sequential T=25, 53.7× on
 EPFL); the remainder is the published ratio. ⚠️ Every column must be computed over the *same* rows — filtering each

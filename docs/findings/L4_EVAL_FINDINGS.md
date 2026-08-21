@@ -29,7 +29,7 @@ emission**.
 
 ## 1. The rivals: the ranking transfers, the magnitude does not
 
-`eval/colab_rivals_l4.sh`, 3-seed GPAP medians, rival timeout 300 s — identical protocol to the
+`eval/colab/colab_rivals_l4.sh`, 3-seed GPAP medians, rival timeout 300 s — identical protocol to the
 4080 run. Geomeans over the instances **both** cards scored.
 
 All five rival protocols are now complete on the L4 (9 instances each for Recurrent, 10 for
@@ -43,7 +43,7 @@ DEMOTIC-native, 9 for DEMOTIC-miter, 18 CNFs for HTS):
 | Recurrent-CircuitSAT | our rare pins | **634.9×** | 5/6 | 1 | 0 | 0 | 3 |
 | HTS | our CNFs, both encoders | 1,584× | 13/14 | 2 | 1 | 1 | 3 |
 
-*Both tools that report these (`eval/paper_tables.py` and `eval/rivals_summary.py`) now count
+*Both tools that report these (`eval/artifact/paper_tables.py` and `eval/rivals/rivals_summary.py`) now count
 identically — the second was aligned to the first, because a deck and a paper that disagree in
 print are worse than either alone. A cell the **rival** scored zero on is an outright win and
 enters both sides of the fraction; a cell **we** scored zero on is an outright loss and enters the
@@ -80,7 +80,7 @@ HTS is new: it produced no rows in the 4080 sweep. It needs `pycryptosat`
 
 ## 2. GPAP vs CMSGen: the ratio is a property of the CPU too
 
-`eval/colab_cmsgen_l4.sh`, **357 cells, 193 instance-slots, 0 skipped, 0 errors, 0 unsound**,
+`eval/colab/colab_cmsgen_l4.sh`, **357 cells, 193 instance-slots, 0 skipped, 0 errors, 0 unsound**,
 patched CMSGen (`--nowrite`). GPU **NVIDIA L4**, CPU **Intel Xeon @ 2.20 GHz**.
 
 Every geomean below already excludes vacuous pins and zero-search cells. The zero columns sum
@@ -122,7 +122,7 @@ They were sitting in the sequential geomeans on *both* machines:
 
 The inflation lands almost entirely on the **rare** column — the one we tell people to quote —
 and is negligible at random pins (1.04×). `eval/eval_plots.py` now emits a `no-vac` column in
-every `summary.md`, and `eval/slide_tables.py` applies the same exclusion, so a hand-copied
+every `summary.md`, and `eval/artifact/slide_tables.py` applies the same exclusion, so a hand-copied
 number cannot reintroduce it. The deck's headline frame was corrected 2026-08-04.
 
 **CMSGen scoring zero is not a win we count.** On 28 cells CMSGen emitted *no* samples inside the
@@ -143,7 +143,7 @@ both-zero row has `ratio = None` — both falsy, both fell through every branch,
 | **neither sampler emitted anything** (was invisible) | **11** — `b11`, `b14`, `b15`, `hyp`, `log2`, `multiplier` |
 
 Table 1 now carries `CMSGen=0`, `GPAP=0` and `both=0` columns that sum, with the geomean's
-instances, to the instance count — a reader can add them up and check. `eval/verify_artifact.py`
+instances, to the instance count — a reader can add them up and check. `eval/artifact/verify_artifact.py`
 fails the same way in reverse: it now warns on every instance we could not sample.
 
 **What those three losses actually are**, since we now publish them. All hit the sampler's
@@ -245,7 +245,7 @@ samples/s ratio  =  (implications/s ratio)  /  (implications-per-sample ratio)
 The `= net` column above is literally `engine advantage / work per sample`, and it reproduces
 Table 1's published geomean to the printed digit on every row. Verified to within 1% on 9 of 9
 families where it is computable — and **re-derived from the raw rows by
-`eval/verify_artifact.py`**, so the claim is checked rather than asserted by the tool that makes
+`eval/artifact/verify_artifact.py`**, so the claim is checked rather than asserted by the tool that makes
 it. The figure is `plots/propagation_summary.png`. It says something a single throughput number
 cannot:
 
@@ -269,7 +269,7 @@ identity still holds. Every column is computed over the same rows.
 
 ## 4. Uniformity, and what `soft` actually costs
 
-`eval/colab_uniformity_l4.sh` → `.experiments/uniformity/`. **72 generated instances** (36 random
+`eval/colab/colab_uniformity_l4.sh` → `.experiments/uniformity/`. **72 generated instances** (36 random
 k-CNF, 36 random Tseitin circuits) whose *entire* solution set is enumerated by brute force, so
 the target distribution is known exactly; χ² over 3 seeds, Fisher-combined, α=0.001.
 13 samplers. **0 unsound emissions out of every run.**
@@ -288,7 +288,7 @@ the target distribution is known exactly; χ² over 3 seeds, Fisher-combined, α
 **The controls calibrate the instrument**, which is what makes the rest of the column readable:
 the exact-uniform control is flagged 0/72 (no false positives) and the known-TV-0.05 control
 72/72 (full power at the sensitivity floor). Without both, "no skew detected" would be
-uninterpretable — `eval/verify_artifact.py` fails an artifact that lacks either.
+uninterpretable — `eval/artifact/verify_artifact.py` fails an artifact that lacks either.
 
 Three results:
 
@@ -326,9 +326,9 @@ the trade-off is a property of the method, not of one machine.
 Both figures above are GPAP against itself on 19 circuits. That answers "how much throughput did
 we give up", not "how much of our published lead did we give up" — and only the second is visible
 to a reader of Table 1. So the **entire GPAP-vs-CMSGen matrix was run a second time with
-`--allow-soft`** (`eval/colab_cmsgen_soft_l4.sh`, same L4 instance type, same budgets, same
+`--allow-soft`** (`eval/colab/colab_cmsgen_soft_l4.sh`, same L4 instance type, same budgets, same
 encoders, one flag changed, injected through `run_full_eval.sh`'s single `bench` call so both arms
-traverse identical code). Paired per (stage, instance, encoder) by `eval/soft_price_tables.py`.
+traverse identical code). Paired per (stage, instance, encoder) by `eval/artifact/soft_price_tables.py`.
 
 **Both arms complete: 357 cells, 13/13 stages, 0 skipped, 0 errors, 0 unsound**; the bandit chose
 `soft` on 69 of them.
@@ -395,7 +395,7 @@ is the difficulty table, not a single geomean.
 
 The sweeps above were produced across a dozen VMs over ~8 h. That is enough moving parts to ask
 whether any result depended on one machine's state, so 23 cells spanning four families were
-re-measured on a **fresh L4** with the protocol pinned (`eval/colab_recheck_l4.sh`, into its own
+re-measured on a **fresh L4** with the protocol pinned (`eval/colab/colab_recheck_l4.sh`, into its own
 directory so it can never be mistaken for the original), and compared field by field
 (`eval/recheck_compare.py`).
 
@@ -426,7 +426,7 @@ checkpointing to the VM's disk buys nothing, because that disk dies with the VM.
 run was lost exactly this way — an hour of work, fully checkpointed, all of it on a machine that
 went away.
 
-`eval/colab_supervisor.py` encodes the working loop:
+`eval/colab/colab_supervisor.py` encodes the working loop:
 
 ```
 ensure session -> push cached binaries -> bootstrap -> push partials -> launch -> poll + PULL
@@ -478,7 +478,7 @@ Raw data and how to regenerate every table here:
 .experiments/recheck/                  # the consistency re-run, deliberately separate
 
 eval/eval_plots.py     <dir>                    # summary.md + figures (has the no-vac column)
-eval/rivals_summary.py <4080-dir> <l4-dir>      # rival tables, paired across machines
-eval/slide_tables.py   --cmsgen … --rivals …    # the deck's appendix, generated
+eval/rivals/rivals_summary.py <4080-dir> <l4-dir>      # rival tables, paired across machines
+eval/artifact/slide_tables.py   --cmsgen … --rivals …    # the deck's appendix, generated
 eval/recheck_compare.py <original> <recheck>    # the consistency verdict
 ```

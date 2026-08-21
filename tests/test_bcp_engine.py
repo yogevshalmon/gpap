@@ -113,7 +113,7 @@ class TestBCPEngine:
         assert engine.num_propagated[0].item() == 0
 
     def test_reassume_implied_literal_is_noop(self):
-        """Regression (2026-07-03): assuming a literal the units flush ALREADY implied must not
+        """Regression: assuming a literal the units flush ALREADY implied must not
         double-count its falsifications (the old bulk path double-decremented sat counts ->
         garbage forced literals -> FALSE conflicts)."""
         clauses = [[1], [-1, 2], [-2, 3, 4], [-3, 4, 5]]

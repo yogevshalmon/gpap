@@ -83,7 +83,7 @@ gpap sample b10.bench --cycles 25 -n 50000 --out stim.out   # unroll, sample, wr
 gpap sample design.aig --cycles 25 -n 50000                 # AIGER input (.aig/.aag), same flow
 gpap sample b10.bench --cycles 25 --encoder abc             # smaller CNF via berkeley-abc (below)
 gpap circuit2cnf benches/ cnf_out/ --cycles 25 --pin-outputs 1   # circuit dir -> CNF dir
-gpap bench 'benchmarks/circuits/*.cnf' --cmsgen ~/.cache/gpap/bin/cmsgen --n-cov 5000
+gpap bench 'benchmarks/circuits/*.cnf' --cmsgen .gpap/bin/cmsgen --n-cov 5000
 gpap bench 'benches/*.bench' --encoders tseitin abc:fast --cycles 25 --target rare --resume
 ```
 
@@ -100,7 +100,7 @@ is just marked `cms_mode="write"`. See [`docs/BENCHMARKING.md`](docs/BENCHMARKIN
 and the figures) is one script per family — [`docs/EVAL_RUNBOOK.md`](docs/EVAL_RUNBOOK.md):
 
 ```bash
-eval/rivals_setup.sh            # abc + patched cmsgen + DEMOTIC / Recurrent-CircuitSAT / HTS
+eval/rivals/rivals_setup.sh            # abc + patched cmsgen + DEMOTIC / Recurrent-CircuitSAT / HTS
 eval/run_full_eval.sh seq       # resumable; also comb | sk | epfl | hwmcc | rivals | plots | all
 ```
 
@@ -133,7 +133,7 @@ the implied solution-space floor — no solver work, catches gross bias only). T
   run a real goodness-of-fit test: chi-square p-value + total-variation distance over all `|S|`
   solutions (e.g. `TV=0.136 chi2(255)=236 p=0.792 [exact: n=2,000 over |S|=256]`). This is the
   sensitive check — subtle instance-dependent bias invisible to the repeat-rate check shows here.
-- `eval/barbarik_gpap.py` — a standalone harness running the
+- `eval/uniformity/barbarik_gpap.py` — a standalone harness running the
   [Barbarik](https://github.com/meelgroup/barbarik) (AAAI'19) conditional-sampling tester with
   GPAP hooked in-process (SPUR as the trusted reference); the only way to *certify* uniformity on
   large spaces. Barbarik **accepts** GPAP (η=0.9, ε=0.1, δ=0.05; ~70k samples per instance) on
@@ -175,7 +175,7 @@ worth MORE there than on Tseitin ones (geomean 3.28x vs 2.05x), so mining stays 
 ABC is **optional and never vendored**. Build a pinned upstream commit into the GPAP cache:
 
 ```bash
-scripts/build_abc.sh          # -> ~/.cache/gpap/bin/abc   (git + make + gcc; a few minutes)
+scripts/build_abc.sh          # -> .gpap/bin/abc   (git + make + gcc; a few minutes)
 gpap info                     # confirms: "abc circuit encoder: <path>"
 ```
 
@@ -255,18 +255,31 @@ Literal indexing (2N scheme): `+v → 2(v-1)`, `-v → 2(v-1)+1`, negation `l ^ 
 ## Layout
 
 ```
-cpp/            # THE ENGINE CORE — libgpap: C ABI + C++ wrapper, shared by both faces
+cpp/              # THE ENGINE CORE — libgpap: C ABI + C++ wrapper, shared by both faces
 gpap/
-  engine/       # the Python face of the core (ctypes) + kernels.py, the Triton kernel SOURCE
-  sampling/     # THE FLAGSHIP — sampler, pipeline (e2e flow), miner, preprocess, metrics
-  circuits/     # bench.py: parse/unroll/Tseitin/pin .bench circuits -> projected-sampling CNF
-  cli.py        # `gpap` subcommands
-eval/           # reproducible cross-GPU sampling benchmark driver + plots (Colab / A100)
-docs/findings/  # settled results: INSIGHTS.md + the deep *_FINDINGS.md write-ups
-tests/          # pytest suite (CPU smoke + `gpu`/`slow` markers); circuit CNFs generated on demand
+  engine/         # the Python face of the core (ctypes) over libgpap
+  sampling/       # THE FLAGSHIP — sampler, pipeline (e2e flow), preprocess, metrics, output
+  circuits/       # .bench / AIGER parse, unroll, Tseitin, pin -> projected-sampling CNF
+  implications.py # what each literal implies: failed literals, HBR, equivalent literals
+  mining.py       # entailed-clause mining over the core's probe primitive
+  paths.py        # where built/fetched artifacts live (repo-local; see below)
+  cli.py          # `gpap` subcommands
+eval/             # the experiment layer
+  artifact/       #   paper + slide tables, artifact verification and packaging
+  rivals/         #   head-to-head harnesses for the GPU-sampler rivals
+  uniformity/     #   Barbarik certification + exact-oracle uniformity fuzzing
+  colab/          #   cross-GPU drivers for rented/ephemeral GPU VMs
+scripts/          # build libgpap, optional third-party tools, fetch benchmarks
+docs/             # the ONLY place measurements, dates and hardware are recorded
+  findings/       #   settled results: INSIGHTS.md + the deep *_FINDINGS.md write-ups
+tests/            # pytest suite (CPU smoke + `gpu`/`slow` markers); circuit CNFs generated on demand
 benchmarks/circuits/bench/  # tiny committed .bench sources (CNFs are generated, never committed)
-archive/        # concluded experiment lines (not maintained; see archive/README.md)
+.gpap/            # built/fetched tools, sources and benchmark sets — gitignored, NOT in $HOME
 ```
+
+Code carries the rule; `docs/` carries the evidence. A comment states what the code does and why
+it is correct; the measurement that settled it, the date it was taken and the GPU it ran on live
+in `docs/findings/`, so a reader can tell an invariant from a datum.
 
 ## Tests
 

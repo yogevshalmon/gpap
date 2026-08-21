@@ -335,7 +335,7 @@ class TestProbeDispatch:
     REGRESSION. `LiteralProbe` pinned "scalar" when the sweep was ported to the core, because the
     dispatch lived in the two WRAPPERS (BCPEngine.plan_for / gpap::Engine::plan_for) and the sweep
     calls the C ABI directly. That is the same hole the batched-assumption path had until
-    2026-08-14, and it cost 1.28x (b03-c25, M=14.5k) to 2.20x (b12-c50, M=219k) on the sweep. The
+    for a while, and it cost 1.28x (M=14.5k) to 2.20x (M=219k) on the sweep. The
     fix was to resolve GPAP_MODE_AUTO inside gpap_engine_reset — one place every entry point
     passes through — so this test is about WHERE the rule lives, not about which kernel wins."""
 
@@ -530,7 +530,7 @@ class TestMiningPipelineDefaults:
         """`--mine on` is documented as forcing; `auto` respects MINE_MIN_CLAUSES.
 
         They used to be identical, because the thing `on` bypassed was the ABC provenance gate —
-        deleted 2026-08-19 — while the SIZE gate applied to both. So on any formula below the
+        since deleted — while the SIZE gate applied to both. So on any formula below the
         threshold `--mine on` quietly did nothing at all."""
         from gpap.sampling import pipeline
 

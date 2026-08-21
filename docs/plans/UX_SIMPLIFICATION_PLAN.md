@@ -62,8 +62,8 @@ An empty list should be a no-op returning empty results, not a driver-level erro
 
 ### 0.4 Every existing `GPUSampler` caller already passes an explicit `k_cap`
 
-Checked all of them (pipeline ×3, `eval/barbarik_gpap.py`, `eval/fuzz_uniformity.py`,
-`eval/colab_sampling_benchmark.py`, and every test). **Nobody relies on the `16384` default**, so
+Checked all of them (pipeline ×3, `eval/uniformity/barbarik_gpap.py`, `eval/uniformity/fuzz_uniformity.py`,
+`eval/colab/colab_sampling_benchmark.py`, and every test). **Nobody relies on the `16384` default**, so
 changing it to `"auto"` is a behavioural no-op for existing code. This is what makes item 2 safe.
 
 ### 0.5 Three different default batch caps

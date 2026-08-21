@@ -9,7 +9,7 @@
 #                   every N samples — the CPU work rates our impl/s and dec/s are compared to
 # `gpap bench` auto-detects both (it probes --help) and falls back to stock behaviour without them.
 #
-#   scripts/build_cmsgen.sh                     # -> $HOME/.cache/gpap/bin/cmsgen
+#   scripts/build_cmsgen.sh                     # -> <repo>/.gpap/bin/cmsgen
 #   GPAP_CMSGEN_FORCE=1 scripts/build_cmsgen.sh # rebuild from scratch
 #   GPAP_CMSGEN_STOCK=1 scripts/build_cmsgen.sh # build UNPATCHED upstream (-> bin/cmsgen-stock)
 #
@@ -19,7 +19,8 @@ set -euo pipefail
 
 CMSGEN_COMMIT="${GPAP_CMSGEN_COMMIT:-8210aa90b7535c75cbde8e6a3c5bb9763b233eda}"
 CMSGEN_REPO="${GPAP_CMSGEN_REPO:-https://github.com/meelgroup/cmsgen.git}"
-PREFIX="${GPAP_CMSGEN_HOME:-$HOME/.cache/gpap}"
+REPO="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+PREFIX="${GPAP_HOME:-$REPO/.gpap}"
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 PATCH="${GPAP_CMSGEN_PATCH:-$REPO_ROOT/scripts/cmsgen_gpap_eval.patch}"
 

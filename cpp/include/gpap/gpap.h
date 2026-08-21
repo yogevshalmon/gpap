@@ -119,7 +119,7 @@ int32_t gpap_engine_num_clauses(const gpap_engine *e);
  * wrapper: every entry point resets, so every entry point dispatches. It used to be resolved by
  * gpap::Engine::plan_for and BCPEngine.plan_for instead, and the predictable happened twice --
  * a consumer that reset through the ABI ran SCALAR forever without anyone noticing (the batched
- * assumption path until 2026-08-14, then gpap_probe_combinations, measured at 1.28-2.20x). */
+ * assumption path, then gpap_probe_combinations; measured at 1.28-2.20x). */
 gpap_status gpap_engine_reset(gpap_engine *e, int32_t K);
 
 /* Entry point 1 — apply a (K, L) matrix of INTERNAL literal indices (-1 = padding) and BCP to

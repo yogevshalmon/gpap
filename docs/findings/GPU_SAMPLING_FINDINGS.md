@@ -2,9 +2,9 @@
 
 GPAP as a **GPU-parallel SAT solution sampler**. This is the first *produce-a-solution* task GPAP
 wins (clause reduction and unprojected sampling were retired — they need search GPAP lacks). Code:
-[`gpap/solver/sampler.py`](gpap/solver/sampler.py), harness
-[`scripts/sample_benchmark.py`](scripts/sample_benchmark.py), tests
-[`tests/test_sampler.py`](tests/test_sampler.py).
+[`gpap/sampling/sampler.py`](../../gpap/sampling/sampler.py), harness
+[`gpap/benchmark.py`](../../gpap/benchmark.py), tests
+[`tests/test_sampler.py`](../../tests/test_sampler.py).
 
 ## The algorithm: GPAP = GPU-parallel CMSGen
 
@@ -226,7 +226,7 @@ over-constrains and collapses success. No algorithm change, no cost.
 | 111.sk_2_36 | 1.4× | **1.8×** |
 
 Geomean over CMSGen rises **~3.4× → ~5.5×** on the niche, with the best case at **24×** — all free, just
-by setting B=8 (now the default in `scripts/sample_benchmark.py`). The A100's larger K stacks on top.
+by setting B=8 (now the default in `gpap/benchmark.py`). A larger-VRAM card's bigger K stacks on top.
 
 ## Methodology notes
 
@@ -505,7 +505,7 @@ skip-duplicates guard); regression test + miner entailment tests added.
 Full sanity pass over the CMSGen comparison + the circuit benchmark constructions, against the
 two reference papers (Recurrent CircuitSAT Sampling, arXiv 2502.21226; DEMOTIC, arXiv 2502.08086).
 
-**Comparison-fairness findings (fixed in scripts/sample_benchmark.py):**
+**Comparison-fairness findings (fixed in `gpap/benchmark.py`):**
 1. *Wall asymmetry*: CMSGen's rate was end-to-end (subprocess incl. parse+write) while GPAP's
    headline is steady-state (excludes construction/simplify/warmup/mining). Added a TRUE
    end-to-end column + `e2e/CMS` ratio. Fresh 29-instance sk suite, live CMSGen, CPU-verified:

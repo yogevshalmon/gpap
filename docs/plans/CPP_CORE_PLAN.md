@@ -35,7 +35,7 @@ Removing torch from the *application* layer. Changing any sampling semantics.
 `trail`, `active`, `conflict`, counters, occ CSR, packed-init/flush cache) is allocated and
 owned by the core with the driver API. Nothing hot lives in torch's caching allocator.
 
-**Kernel source of truth stays [`gpap/engine/kernels.py`](../../gpap/engine/kernels.py)** — still
+**Kernel source of truth stays `gpap/engine/kernels.py` (now `cpp/kernels/bcp.py`)** — still
 `@triton.jit`, still the file to edit. A build step compiles every specialization ahead of time
 into cubins that get embedded in the library. Editing a kernel = rebuild, no other change.
 

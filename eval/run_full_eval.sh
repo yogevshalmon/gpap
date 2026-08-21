@@ -5,7 +5,7 @@
 # already in it. One instance blowing up never loses the rest.
 #
 #   # once per machine
-#   eval/rivals_setup.sh
+#   eval/rivals/rivals_setup.sh
 #
 #   # then, one family at a time (each prints a live table; add & + nohup to detach)
 #   eval/run_full_eval.sh seq
@@ -38,7 +38,8 @@ PY="${PYTHON:-$REPO_ROOT/.venv/bin/python}"
 [ -x "$PY" ] || PY="$(command -v python3)"
 export PYTHONPATH="${PYTHONPATH:-.}"
 
-GPAP_HOME="${GPAP_HOME:-$HOME/.cache/gpap}"
+REPO="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+GPAP_HOME="${GPAP_HOME:-$REPO/.gpap}"
 CMSGEN="${CMSGEN:-$GPAP_HOME/bin/cmsgen}"
 GPU_SLUG="$($PY -c "
 import re, torch
@@ -106,7 +107,7 @@ if [ "$STAGE" != "check" ]; then
     if ! "$PY" -c "import sys; from gpap.engine import core_available; sys.exit(0 if core_available() else 1)" 2>/dev/null; then
         echo "[FATAL] libgpap (the engine) is not available — every GPAP row would error." >&2
         echo "        Build it:  scripts/build_core.sh" >&2
-        echo "        Details:   eval/rivals_setup.sh check" >&2
+        echo "        Details:   eval/rivals/rivals_setup.sh check" >&2
         exit 1
     fi
 fi
@@ -125,7 +126,7 @@ bench() {
         $EXTRA_ARGS "$@" 2>&1 | tee -a "$log"
 }
 
-stage_check() { bash "$REPO_ROOT/eval/rivals_setup.sh" check; }
+stage_check() { bash "$REPO_ROOT/eval/rivals/rivals_setup.sh" check; }
 
 # Circuit stages: one bench run per (target, depth); both encoders inside each run.
 stage_seq() {
@@ -187,28 +188,28 @@ stage_rivals() {
     local rto="${RIVAL_TIMEOUT:-300}"
     if [ -d "$GPAP_HOME/src/Demotic/src" ]; then
         banner "rivals: DEMOTIC (their ISCAS-85 pins)"
-        "$PY" eval/rivals_demotic.py --mode native $comb_insts --seeds $rseeds --steps "$rsteps" --timeout "$rto" \
+        "$PY" eval/rivals/rivals_demotic.py --mode native $comb_insts --seeds $rseeds --steps "$rsteps" --timeout "$rto" \
             --circuit-variants $cvars \
             --output "$OUT/rivals_demotic_native.json" 2>&1 | tee -a "$LOGS/rivals.log"
         banner "rivals: DEMOTIC (our rare fixed-T instances, as miters)"
-        "$PY" eval/rivals_demotic.py --mode miter $seq_insts -T "$T" --target rare \
+        "$PY" eval/rivals/rivals_demotic.py --mode miter $seq_insts -T "$T" --target rare \
             --seeds $rseeds --steps "$rsteps" --timeout "$rto" --circuit-variants $cvars \
             --output "$OUT/rivals_demotic_miter.json" 2>&1 | tee -a "$LOGS/rivals.log"
     else
-        echo "[skip] DEMOTIC not installed (eval/rivals_setup.sh)"
+        echo "[skip] DEMOTIC not installed (eval/rivals/rivals_setup.sh)"
     fi
     if [ -d "$GPAP_HOME/src/Recurrent-CircuitSAT-Sampler/src" ]; then
         banner "rivals: Recurrent-CircuitSAT (their target table, then our rare pins)"
-        "$PY" eval/rivals_recurrent.py $seq_insts -T "$T" --seeds $rseeds --steps "$rsteps" \
+        "$PY" eval/rivals/rivals_recurrent.py $seq_insts -T "$T" --seeds $rseeds --steps "$rsteps" \
             --timeout "$rto" \
             --circuit-variants $cvars \
             --output "$OUT/rivals_recurrent_table.json" 2>&1 | tee -a "$LOGS/rivals.log"
-        "$PY" eval/rivals_recurrent.py $seq_insts -T "$T" --rare --seeds $rseeds --steps "$rsteps" \
+        "$PY" eval/rivals/rivals_recurrent.py $seq_insts -T "$T" --rare --seeds $rseeds --steps "$rsteps" \
             --timeout "$rto" \
             --circuit-variants $cvars \
             --output "$OUT/rivals_recurrent_rare.json" 2>&1 | tee -a "$LOGS/rivals.log"
     else
-        echo "[skip] Recurrent-CircuitSAT not installed (eval/rivals_setup.sh)"
+        echo "[skip] Recurrent-CircuitSAT not installed (eval/rivals/rivals_setup.sh)"
     fi
     if [ -d "$GPAP_HOME/src/High-Throughput-SAT-Sampler/src" ]; then
         # HTS eats CNF, so build exactly the instances it should see (the bench stages delete
@@ -229,10 +230,10 @@ stage_rivals() {
                     >/dev/null 2>&1 || echo "[warn] could not build $enc CNF for $inst"
             done
         done
-        "$PY" eval/rivals_hts.py "$hts_dir/*.cnf" --timeout "$rto" \
+        "$PY" eval/rivals/rivals_hts.py "$hts_dir/*.cnf" --timeout "$rto" \
             --output "$OUT/rivals_hts.json" 2>&1 | tee -a "$LOGS/rivals.log"
     else
-        echo "[skip] HTS not installed (eval/rivals_setup.sh)"
+        echo "[skip] HTS not installed (eval/rivals/rivals_setup.sh)"
     fi
 }
 

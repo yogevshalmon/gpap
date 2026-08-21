@@ -19,7 +19,7 @@ removed from the defaults and opt-in behind `--allow-soft`.**
 
 ## 1. The instrument: generated instances with an enumerable solution set
 
-`eval/fuzz_uniformity.py` generates small formulas, enumerates their solution set exhaustively, and
+`eval/uniformity/fuzz_uniformity.py` generates small formulas, enumerates their solution set exhaustively, and
 runs a chi-square goodness-of-fit test plus total variation against the true uniform. Two families,
 both chosen so "uniform over the support projections" is UNAMBIGUOUS:
 
@@ -337,7 +337,7 @@ is a user's call, not a default to flip silently. Recommended (not implemented �
 
 ## 4. Barbarik: the standard certifier agrees, and rejects `soft`
 
-`eval/barbarik_gpap.py` now defaults to the **CMSGen paper's own parameters** (eps 0.3, eta 1.8,
+`eval/uniformity/barbarik_gpap.py` now defaults to the **CMSGen paper's own parameters** (eps 0.3, eta 1.8,
 delta 0.1 — "Designing Samplers is Easy", FMCAD'21, Table I) and can put CMSGen itself under test,
 not just GPAP. Those parameters cost ~1,872 samples per instance instead of the ~70,000 that
 eps 0.1 / eta 0.9 demands — a 38x cheaper certificate, minutes not hours. Measured budget matches
@@ -467,15 +467,15 @@ before the enums existed. Fixed at the source (`bool()`/`str()` in the label) an
 
 ```bash
 # the headline campaign: |support| > B, raw configs AND the full shipped pipeline, vs CMSGen
-PYTHONPATH=. .venv/bin/python eval/fuzz_uniformity.py --count 24 --seeds 3 --n-mult 100 \
+PYTHONPATH=. .venv/bin/python eval/uniformity/fuzz_uniformity.py --count 24 --seeds 3 --n-mult 100 \
     --sup-min 12 --configs b1 b8 b16 b32 --pipelines default circuit circuit+soft \
-    --cmsgen ~/.cache/gpap/bin/cmsgen --controls 0.0 0.05 \
+    --cmsgen .gpap/bin/cmsgen --controls 0.0 0.05 \
     --keep-dir .experiments/fuzz/instances2 --out .experiments/fuzz/round2.json
 # the B sweep (the exactness knob)
-PYTHONPATH=. .venv/bin/python eval/fuzz_uniformity.py --count 12 --seeds 3 --n-mult 100 \
+PYTHONPATH=. .venv/bin/python eval/uniformity/fuzz_uniformity.py --count 12 --seeds 3 --n-mult 100 \
     --configs b1 b2 b4 b8 b16 b32 b64 b256 --controls 0.0
 # the standard certificate, per sampler under test
-PYTHONPATH=. .venv/bin/python eval/barbarik_gpap.py .experiments/fuzz/instances/*.cnf \
+PYTHONPATH=. .venv/bin/python eval/uniformity/barbarik_gpap.py .experiments/fuzz/instances/*.cnf \
     --sampler gpap --config b8      # or: --config soft | --sampler cmsgen
 ```
 

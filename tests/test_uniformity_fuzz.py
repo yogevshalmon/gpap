@@ -1,6 +1,6 @@
 """Uniformity regression gate, over generated instances whose solution set is known EXACTLY.
 
-The full campaign lives in `eval/fuzz_uniformity.py` (see docs/findings/UNIFORMITY_FINDINGS.md);
+The full campaign lives in `eval/uniformity/fuzz_uniformity.py` (see docs/findings/UNIFORMITY_FINDINGS.md);
 this file gates the parts that must never regress silently:
 
   * the generators' own oracle is self-consistent (a broken oracle would hide every other bug);
@@ -17,7 +17,7 @@ a documented property of this algorithm class (CMSGen included) rather than a de
 import numpy as np
 import pytest
 
-from eval.fuzz_uniformity import (
+from eval.uniformity.fuzz_uniformity import (
     CONFIGS,
     all_assignments,
     brute_force_models,

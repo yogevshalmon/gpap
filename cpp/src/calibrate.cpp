@@ -27,8 +27,8 @@ namespace {
 constexpr int64_t kWddmReserveBytes = 800000000ll;   /* WDDM/WSL2 driver overhead */
 
 /* The VRAM-proportional batch cap (mirrored by calibrate.py's K_CAP_REF / K_CAP_VRAM_REF).
- * kKCapRef is the historical hardcoded cap and kKCapVramRef the TOTAL VRAM of the box it was
- * validated on (RTX 4080 Laptop), so the reference card gets back exactly 49,152 and every
+ * kKCapRef is the historical hardcoded cap and kKCapVramRef the TOTAL VRAM of the reference
+ * card it was validated on, so that card gets back exactly kKCapRef and every
  * smaller card is floored there — no existing measurement moves — while a larger card may use
  * the memory it has.
  *
@@ -38,22 +38,17 @@ constexpr int64_t kWddmReserveBytes = 800000000ll;   /* WDDM/WSL2 driver overhea
 constexpr int32_t kKCapRef = 49152;
 constexpr int64_t kKCapVramRef = 12878086144ll;
 
-/* Floor on the batch cap. This is the value that ACTUALLY bounded chunks before the sizing
- * collapse: the sampler capped its base K at kKCapRef but then ran a "fused" batch capped at
- * max(262144, k_cap), and the fused batch is what every chunk used. Both the 4080 (kKCapRef
- * scaled = 49,152) and the L4 (90,300) therefore ran against an effective ceiling of 262,144 —
- * which is why the recorded L4 sweeps show batch 258,316, memory-bound just under it. Keeping
- * the floor here preserves that behaviour with one cap instead of two.
+/* Floor on the batch cap.
  *
- * MEASURED 2026-08-18 on an L4 (23,034 MiB), because "kept for reproducibility" is not a reason to
- * keep a number: the cap BINDS on 7 of 16 ABC circuit instances there, and where it binds hardest
- * (b03-c25, M=2,087) the memory model would allow 1,505,739 rows while the run peaks at 13.6% of
- * VRAM. So it is not a safety limit — it is a saturation limit, and the saturation is real: at
- * 262,144 rows the card is ~94x oversubscribed against its 2,784 resident warps, and a 4x batch
- * was separately measured at +2.8% (see CLAUDE.md, Colab A100+L4). Raising it would buy ~nothing
- * and cost the comparability of every recorded sweep. It also bounds host-side readout, which is
- * NOT VRAM-proportional. Revisit only with a throughput measurement that shows the cap binding on
- * something that is not already occupancy-bound. */
+ * This is a SATURATION limit, not a safety limit. Where it binds hardest the memory model would
+ * allow orders of magnitude more rows than the run actually uses, so it is not protecting VRAM:
+ * at this batch the card is already ~2 orders of magnitude oversubscribed against its resident
+ * warps, and a 4x larger batch measured at +2.8%. Raising it would buy ~nothing and cost the
+ * comparability of every recorded sweep. It also bounds host-side readout, which is NOT
+ * VRAM-proportional.
+ *
+ * Revisit only with a throughput measurement showing the cap binding on something that is not
+ * already occupancy-bound. Numbers: docs/findings/CROSS_GPU_FINDINGS.md. */
 constexpr int32_t kBatchCapFloor = 262144;
 
 /* Clause count at or above which the warp-wide WAVE propagate beats the scalar one. Measured, see
@@ -142,28 +137,19 @@ extern "C" int32_t gpap_resident_warps(int device) {
  * has work to spread: WAVE hands ONE row 32 lanes, and a row with few clauses cannot fill them,
  * so SCALAR's one-thread-per-row (far more rows in flight) wins there.
  *
- * HISTORY -- this rule used to read `batch < 30 * resident_warps`, and that was a PROXY for M, not
- * a statement about occupancy. Because K ~ budget/(4*M), a small formula gets a huge batch, so
- * "huge batch" and "small M" were THE SAME ROWS and the proxy held. The 2026-08-18 sizing collapse
- * broke it: with K now 1.4-2.5x larger, mid-size formulas sit AT the batch cap, where `batch` is
- * pinned to a constant and says nothing about M -- so every one of them was classified "scalar".
- * Measured cost of exactly that misclassification (ABC-encoded circuits, fixed wall, interleaved
- * best-of-2, base vs the collapse): 0.727x geomean on the 4 rows whose kernel flipped on the 4080
- * and 0.615x/0.698x on the 2 that flipped on an L4, while the 11 rows that KEPT their kernel came
- * in at 0.993x. Do not reintroduce a batch-only rule.
+ * ⚠️ DO NOT reintroduce a batch-only rule. One existed (`batch < 30 * resident_warps`) and was a
+ * PROXY for M rather than a statement about occupancy: because K ~ budget/(4*M), a small formula
+ * gets a huge batch, so "huge batch" and "small M" were THE SAME ROWS. A later batch-sizing change
+ * broke the proxy -- mid-size formulas came to sit AT the batch cap, where `batch` is pinned to a
+ * constant and says nothing about M, so every one of them was misclassified "scalar" and lost
+ * ~1.3x. The proxy held only by coincidence of the sizing at the time.
  *
- * CALIBRATION -- forced-kernel A/B at FIXED K (so only the kernel differs), 25 instances, RTX 4080
- * Laptop + L4, three families (ABC circuit unrolls, sk_ CNFs, tiny circuits). wave/scalar
- * samples-per-second AT THE BATCH CAP, where batch is constant so M is the only variable:
- *      M=32    0.772 | M=483    0.918 | M=1,982  0.960 | M=2,098  1.041 | M=2,215  1.092
- *      M=2,882 1.407 | M=6,260  1.270 | M=14,012 1.572 | ... 1.27-1.66 for every larger M
- * WAVE wins from M ~ 2,000 upward and keeps winning out to M = 107,065; below it SCALAR wins by up
- * to 1.30x. Whole-set geomean wave/scalar was 1.39x (4080) / 1.46x (L4) -- i.e. wherever the old
- * batch-only rule fired on a mid-size formula it was leaving ~1.4x on the table.
+ * Calibrated by forced-kernel A/B at FIXED K, so only the kernel differs, across three families
+ * and two GPUs: WAVE wins from M ~ 2,000 upward and keeps winning for every larger M; below that
+ * SCALAR wins by up to 1.30x. Full per-M table: docs/findings/INSIGHTS.md.
  *
  * The batch term SURVIVES only for the regime M cannot speak for: a batch too small to fill even
- * one warp per SM, where SCALAR's extra rows do not exist to be had. Measured on M=483: WAVE is
- * 1.037x at batch 1,024 but 0.918x at the cap. */
+ * one warp per SM, where SCALAR's extra rows do not exist to be had. */
 extern "C" int32_t gpap_dispatch_wave(int32_t num_clauses, int32_t batch, int device) {
     if (num_clauses >= kWaveMinClauses) return 1;
     /* Only the small-M path needs the device query, so the common case costs nothing. */

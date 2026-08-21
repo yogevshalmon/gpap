@@ -15,7 +15,7 @@ import sys
 import pytest
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-from eval.paper_tables import cms_family, prop_rates, rival_family, zero_search  # noqa: E402
+from eval.artifact.paper_tables import cms_family, prop_rates, rival_family, zero_search  # noqa: E402
 
 
 def row(name, enc="tseitin", *, models=1000, cms=1000, sps=1e6, cms_sps=1e4,

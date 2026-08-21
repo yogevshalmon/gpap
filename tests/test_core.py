@@ -9,7 +9,7 @@ Two oracles keep this honest, and NEITHER is a second GPU engine:
 Anything the core emits is additionally verifiable from the outside: a model must satisfy every
 clause, and these tests check that directly rather than trusting either implementation.
 
-(Until 2026-08-08 this file also A/B'd the core against a retired PyTorch/Triton-JIT engine —
+(This file once also A/B'd the core against a retired PyTorch/Triton-JIT engine —
 the port gate. That engine is gone; the checks that survived it are the ones below.)
 """
 import random

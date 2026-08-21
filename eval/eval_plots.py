@@ -473,9 +473,9 @@ def write_summary(stages, out_dir, src_dir):
     cpu_s = f"{cpu.get('model', '?')} ({cpu.get('count', '?')} threads)" if cpu else "**not recorded**"
     lines += [f"GPU: **{gpu}**  |  CPU: **{cpu_s}**  |  source: `{src_dir}`", "",
               "The CPU matters as much as the GPU here: CMSGen is single-core, so the ratio moves",
-              "with the host. Measured 2026-08-04, the same 29 `sk_` instances gave 46.2x on an RTX",
-              "4080 laptop and 98.9x on a Colab L4 box whose CPU is 0.41x as fast — none of that",
-              "difference is GPAP. Never quote a ratio without the CPU beside it.", "",
+              "with the host. The same instance set has been measured at roughly double the ratio",
+              "on a machine whose CPU is ~0.4x as fast — none of that difference is GPAP.",
+              "Never quote a ratio without the CPU beside it.", "",
               "`GPAP/CMSGen` is per INSTANCE at its best encoder — the configuration a user would",
               "ship. The per-ROW figure (every instance x every encoder) is given alongside it;",
               "they differ whenever one encoder collapses on an instance the other handles, which",
@@ -486,7 +486,7 @@ def write_summary(stages, out_dir, src_dir):
               "constant at T=25 so pinning them is a tautology (up to 1.9x on the rare column); and",
               "(2) ZERO-SEARCH cells, which emit samples with no decisions AND no implications",
               "because the support is free after propagation (EPFL 29.0x -> 9.4x). **Quote the",
-              "clean column.** `eval/paper_tables.py` is authoritative; this is the same rule.", "",
+              "clean column.** `eval/artifact/paper_tables.py` is authoritative; this is the same rule.", "",
               "| stage | rows | inst | skipped | errors | encoders | GPAP/CMSGen (best enc) | "
               "**clean** | (per row) | wins | GPAP=0 | encoder A/B | CMSGen emission cost |",
               "|---|---|---|---|---|---|---|---|---|---|---|---|---|"]

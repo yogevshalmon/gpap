@@ -246,7 +246,7 @@ def test_simplify_dontcare_both_polarities():
 # --------------------------------------------------------------------- portfolio configs
 
 def test_portfolio_configs_are_tuple_compatible():
-    """The portfolios are `SamplingConfig` NamedTuples (self-describing enums) since 2026-07-30.
+    """The portfolios are `SamplingConfig` NamedTuples (self-describing enums).
     They must still BE the `(random_var, B, lookahead)` triples every consumer has always read,
     or the refactor silently changed behaviour."""
     from gpap.sampling.pipeline import (CIRCUIT_PORTFOLIO, DEFAULT_PORTFOLIO, Lookahead,

@@ -385,8 +385,8 @@ struct SampleOptions {
     /** Upper bound on the auto-sized K. **0 (default) = size the cap to this GPU's total VRAM**
      *  (`gpap_default_k_cap`); a positive value is that cap verbatim — what a cross-GPU A/B needs,
      *  since the auto value differs per card; negative means no cap at all, leaving the analytic
-     *  memory model as the only bound. This used to default to a hardcoded 49,152, which handed
-     *  an 80 GB A100 the 12 GB laptop's batch. */
+     *  memory model as the only bound. A hardcoded default would hand a large-VRAM card the
+     *  reference card's batch. */
     std::int32_t k_cap = 0;
     /** Verify on the device that emitted rows really satisfy every clause. Costs ~nothing;
      *  turning it off is only for measuring the kernel in isolation. */
