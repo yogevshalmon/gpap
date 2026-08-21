@@ -22,9 +22,14 @@ import torch
 from gpap.engine.calibrate import resolve_k_cap
 from gpap.mining import mine_entailed
 
-from gpap.sampling.sampler import GPUSampler, parse_independent_support
+from gpap.sampling.sampler import GPUSampler
 
 log = logging.getLogger(__name__)
+
+__all__ = ["sample_file", "sample_clauses",
+           "portfolio", "describe_portfolio", "PORTFOLIOS", "SamplingConfig", "VarOrder",
+           "Lookahead", "DEFAULT_PORTFOLIO", "CIRCUIT_PORTFOLIO", "SINGLE_PORTFOLIOS",
+           "SOFT_CONFIG"]
 
 
 def _support_literals(support):
@@ -192,7 +197,7 @@ def _core_provenance() -> str:
         return "unknown"
 
 
-def _uniformity_readout(smp, clauses, sup1, rate, config, max_rounds, mode="fast", target=2000):
+def _uniformity_readout(smp, clauses, sup1, rate, config, mode="fast", target=2000):
     """The uniformity readout (OFF the timing path; see metrics.py for the statistics).
 
     mode="fast" (the default): collect a small sample of projections and check their REPEAT
@@ -204,7 +209,6 @@ def _uniformity_readout(smp, clauses, sup1, rate, config, max_rounds, mode="fast
 
     The sample size is clamped to ~2 s of the measured steady rate either way (a 100/s stuck
     instance gets a 256-sample readout, a 1M/s instance its full target in milliseconds)."""
-    import numpy as np
     from collections import Counter
     from gpap.sampling.metrics import enumerate_projections, uniformity_stats
 
@@ -219,8 +223,7 @@ def _uniformity_readout(smp, clauses, sup1, rate, config, max_rounds, mode="fast
         target = min(max(target, 5 * S), 20_000)   # n >= 5*S makes the chi-square p valid
     if rate:
         target = max(256, min(target, int(rate * 2.0)))
-    bits, cols = smp.sample_bits(target, config=config, max_decision_rounds=max_rounds,
-                                 max_chunks=40)
+    bits, cols = smp.sample_bits(target, config=config, max_chunks=40)
     if bits is None or len(bits) == 0:
         return {"mode": "empty", "n": 0, "note": "no samples collected", "enum_status": status}
     ci = {v: i for i, v in enumerate(cols)}
@@ -244,15 +247,15 @@ def sample_file(path, device, **kw):
     """Run the full sampling pipeline on a DIMACS CNF file (support read from `c ind` lines).
     Returns the same rich dict as sample_clauses; the parse is charged to phases["parse"] and
     to the end-to-end wall."""
-    from pysat.formula import CNF
+    from gpap.engine import read_dimacs
 
     t_start = time.perf_counter()   # TRUE end-to-end clock: parse + construction + simplify +
     #                                 warmup + mining + the timed run
     phases = {}
-    # THE single parse. It is shared by sampler construction, mining and the caller's table
-    # metadata — parsing a 1M-clause unroll costs ~2s, so it must happen exactly once.
-    cnf0 = CNF(from_file=path)
-    sup0 = parse_independent_support(path)
+    # THE single parse (the core's — clauses AND the `c ind` support in one pass). It is shared
+    # by sampler construction, mining and the caller's table metadata — parsing a 1M-clause
+    # unroll is seconds, so it must happen exactly once.
+    nv0, cls0, sup0 = read_dimacs(path)
     phases["parse"] = time.perf_counter() - t_start
     # Wire map (var -> input@cycle) embedded by a .bench conversion — lets sample output name each
     # column by its circuit wire. Empty for a plain (non-circuit) CNF.
@@ -263,15 +266,15 @@ def sample_file(path, device, **kw):
     # but the unit COUNT it keyed on never measured the sampling rate, and mining is in fact worth
     # MORE on ABC-encoded CNFs than on Tseitin ones. MINE_SECONDS bounds the cost instead, and the
     # keep-if-it-helps guard bounds the risk. Measurements: docs/findings/MINING_FINDINGS.md.
-    return sample_clauses(cnf0.nv, cnf0.clauses, sup0, device,
+    return sample_clauses(nv0, cls0, sup0, device,
                           _t_start=t_start, _phases=phases, _wire_map=wire_map, **kw)
 
 
 def sample_clauses(nv, clauses, support, device, *, simplify=True, els=True, n_time=50_000,
                    n_cov=0, out_cap=0, uniformity="off", n_uni=2000, b=8, k_cap="auto",
-                   max_chunks=None, time_limit=60.0, cov_chunks=4, max_rounds=300,
+                   max_chunks=None, time_limit=60.0, cov_chunks=4,
                    lookahead=False, verify_clauses=None, verify_cpu=False, cov_k_cap=2048,
-                   random_var="auto", configs="default", mine="auto",
+                   random_var=True, configs="default", mine="auto",
                    mine_gate=0.15, min_measure_chunks=3, seed=5,
                    _t_start=None, _phases=None, _wire_map=None):
     """Throughput run timed end-to-end (construction + simplify + sample, to match CMSGen's
@@ -286,7 +289,8 @@ def sample_clauses(nv, clauses, support, device, *, simplify=True, els=True, n_t
     circuit unrolls): a throughput bandit that runs the best config per chunk at full K,
     dynamically switching to the winner — cracks the search-heavy "service" family (structured
     order + B=1) AND keeps the niche fast (random order + B=8) in one run. Pass configs=None to
-    fall back to `random_var` (e.g. "auto"). The dominant config is REUSED for the coverage run.
+    run the single fixed (`random_var`, `b`) config with no bandit — the other way, besides a
+    one-entry portfolio, to pin the algorithm. The dominant config is REUSED for the coverage run.
 
     The coverage run COLLECTS models to host RAM (one chunk = K models × N ints reconstructed),
     so its K is capped to `cov_k_cap` independently of the (full-K) timing run — otherwise a
@@ -324,7 +328,7 @@ def sample_clauses(nv, clauses, support, device, *, simplify=True, els=True, n_t
         # and restores both models on the way out.
         with s.pinned_batch(min(s.K, 1024)):
             w = s.sample(1, configs=cw, decisions_per_round=b, random_var=random_var,
-                         max_decision_rounds=max_rounds, max_chunks=len(cw) if cw else 1,
+                         max_chunks=len(cw) if cw else 1,
                          collect=False, lookahead=lookahead)
         bd = (w.get("config_breakdown") or {}).values()
         w["best_success"] = max((c["success_rate"] for c in bd), default=w["success_rate"])
@@ -441,12 +445,12 @@ def sample_clauses(nv, clauses, support, device, *, simplify=True, els=True, n_t
                      (max_chunks - (len(configs) if configs else 1)) if max_chunks
                      else min_measure_chunks))
     if configs:
-        t = smp.sample(n_time, configs=configs, max_decision_rounds=max_rounds,
+        t = smp.sample(n_time, configs=configs,
                        max_chunks=max_chunks, collect=False, lookahead=lookahead,
                        min_measure_chunks=mmc, max_seconds=time_limit)
     else:
         t = smp.sample(n_time, decisions_per_round=b, random_var=random_var,
-                       max_decision_rounds=max_rounds, max_chunks=max_chunks, collect=False,
+                       max_chunks=max_chunks, collect=False,
                        lookahead=lookahead, min_measure_chunks=mmc, max_seconds=time_limit)
     if device.type == "cuda":
         torch.cuda.synchronize()
@@ -510,8 +514,7 @@ def sample_clauses(nv, clauses, support, device, *, simplify=True, els=True, n_t
     phases["output"] = 0.0
     if out_cap:
         _to = time.perf_counter()
-        samples, cols = smp.sample_bits(out_cap, config=(tuned_rv, tuned_b, tuned_la),
-                                        max_decision_rounds=max_rounds)
+        samples, cols = smp.sample_bits(out_cap, config=(tuned_rv, tuned_b, tuned_la))
         phases["output"] = time.perf_counter() - _to
     if n_cov:
         # Bound host RAM: this run RECONSTRUCTS every completed row into python lists, so the batch
@@ -524,7 +527,7 @@ def sample_clauses(nv, clauses, support, device, *, simplify=True, els=True, n_t
     # the model reconstruction / dedup cost is NOT charged to samples/s — this is a correctness/quality
     # readout ("do we actually emit distinct solutions?"), not a throughput number.
     vc = clauses if (verify_cpu and verify_clauses is None) else verify_clauses
-    c = (smp.sample(n_cov, decisions_per_round=tuned_b, random_var=tuned_rv, max_decision_rounds=max_rounds,
+    c = (smp.sample(n_cov, decisions_per_round=tuned_b, random_var=tuned_rv,
                     max_chunks=cov_chunks, collect=True, verify_clauses=vc,
                     lookahead=tuned_la) if n_cov else {})
     # Uniformity readout, OPT-IN (default "off": it costs an extra ~2s sampling pass even off the
@@ -538,7 +541,7 @@ def sample_clauses(nv, clauses, support, device, *, simplify=True, els=True, n_t
         _tu = time.perf_counter()
         try:
             uni = _uniformity_readout(smp, clauses, sup1, sps, (tuned_rv, tuned_b, tuned_la),
-                                      max_rounds, mode=uniformity, target=int(n_uni))
+                                      mode=uniformity, target=int(n_uni))
         except Exception as e:  # noqa: BLE001 — a diagnostic must never kill the run
             uni = {"mode": "error", "note": f"{type(e).__name__}: {e}"}
         phases["uniformity"] = time.perf_counter() - _tu
@@ -569,7 +572,6 @@ def sample_clauses(nv, clauses, support, device, *, simplify=True, els=True, n_t
             "assigns_per_s": aps,                             # literals assigned/s (CDCL props/s analogue)
             "decisions_per_s": dps,                           # branch decisions/s (best-rate config)
             "implications_per_s": ips,                        # unit-prop implications/s (=assigns-decisions)
-            "kernel": t.get("kernel", False),                 # fused Triton BCP kernel active?
             "engine": engine_info,                            # packed split / kernel variant / K
             "attempts_per_s": t.get("attempts_per_s"),        # raw trajectory throughput (K/chunk rate)
             "bcp_rounds_per_chunk": t.get("bcp_rounds_per_chunk"),

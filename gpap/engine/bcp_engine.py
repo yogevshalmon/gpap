@@ -20,8 +20,6 @@ keeps the completion test and the soundness check on the GPU and returns only co
 matrices. The tensor-shaped accessors (`assignment`, `conflict`, `active`, `sat_rows`) are
 convenience copies for tests and for off-hot-path consumers.
 """
-import os
-
 import numpy as np
 import torch
 
@@ -98,20 +96,16 @@ class BCPEngine:
 
     def __init__(self, formula: CnfFormula, *, force_wide: bool = False,
                  mode: "str | None" = None):
-        """`mode`: "auto" (default) picks the propagate kernel from the batch size on every
-        `reset(K)` — see `plan_for`. "scalar" = the serial-trail kernels, "wave" = the warp-wide
-        wavefront propagate; naming either PINS it. Same state, same fixpoints (confluence),
-        different propagation order. Env override: GPAP_KERNEL=scalar|wave pins it too.
+        """`mode`: None resolves to $GPAP_KERNEL when set, else "auto" (resolved by the
+        `_core.Engine` binding, ONCE, so every face built on it honours the override). "auto"
+        picks the propagate kernel per `reset(K)` — see `plan_for`. "scalar" = the serial-trail
+        kernels, "wave" = the warp-wide wavefront propagate; naming either PINS it. Same state,
+        same fixpoints (confluence), different propagation order.
 
         Auto is the default so that every consumer of the engine gets the dispatch, not just the
         one that remembered to ask — and it is RESOLVED IN THE CORE, on every `gpap_engine_reset`,
         so that promise covers consumers this class knows nothing about (the C++ face, the probe
-        sweep in cpp/src/probe.cpp). This module only carries the "auto" word and the GPAP_KERNEL
-        env override, which have no C counterpart."""
-        self._mode = mode or os.environ.get("GPAP_KERNEL") or "auto"
-        if self._mode not in ("scalar", "wave", "auto"):
-            raise ValueError(f"unknown kernel mode {self._mode!r} (scalar|wave|auto)")
-        self._auto_mode = self._mode == "auto"
+        sweep in cpp/src/probe.cpp)."""
         # `force_wide` pins the 8|24 split on a formula that would otherwise take 16|16 — the
         # A/B hook that lets the wide kernel be exercised on small, fast formulas.
         self._formula = formula
@@ -119,8 +113,10 @@ class BCPEngine:
         if self._device.type != "cuda":
             raise RuntimeError("BCPEngine requires CUDA (the engine is GPU-only; there is no "
                                "CPU path). Check `gpap info`.")
-        self._core = _core.Engine(formula.core, device=self._device.index or 0, mode=self._mode,
+        self._core = _core.Engine(formula.core, device=self._device.index or 0, mode=mode,
                                   force_shift=8 if force_wide else 0)
+        self._mode = self._core.requested_mode
+        self._auto_mode = self._mode == "auto"
         self._K = 0
         self._counter_base = (0, 0, 0, 0)
 
@@ -135,7 +131,15 @@ class BCPEngine:
         engine on "auto" and let `plan_for` choose."""
         self._core.set_mode(mode)
         self._mode = mode
-        self._auto_mode = False
+        self._auto_mode = mode == "auto"
+
+    @property
+    def auto_dispatch(self) -> bool:
+        """True while no kernel is pinned — neither by the constructor/`$GPAP_KERNEL` nor by a
+        later `set_mode`. A caller about to pin a mode of its own (the sampler does, to keep its
+        warmup and short final chunk on the measured kernel) should check this first, so it
+        never overrides an explicit pin."""
+        return self._auto_mode
 
     def plan_for(self, K: int) -> str:
         """The propagate kernel a chunk of K rows will run. PURE — `reset(K)` is what applies it.
@@ -201,6 +205,21 @@ class BCPEngine:
             return
         self._core.apply(d)
 
+    def check_sets(self, lits, offsets, *, chunk: int = 0, assignments: bool = False,
+                   sat_count: bool = False) -> tuple:
+        """Entry point 1, batched: ANY number of assumption sets (flattened DIMACS literals +
+        (n+1,) offsets), chunked to the GPU by the CORE (cpp/src/check.cpp — one loop for every
+        face) and returned in input order as numpy arrays. `AssumptionChecker` is the
+        list-of-lists / torch face over this; call it directly when the flat form is already in
+        hand. `chunk` <= 0 sizes launches with `check_chunk_size`."""
+        return self._core.check_sets(lits, offsets, chunk=chunk, assignments=assignments,
+                                     sat_count=sat_count)
+
+    def check_chunk_size(self, n_sets: int, max_lits: int = 1) -> int:
+        """Assumption sets one `check_sets` launch holds (the core's model: `row_bytes` plus
+        the decision matrix this entry point allocates)."""
+        return self._core.check_chunk_size(n_sets, max_lits)
+
     def run_trajectory(self, order, n_support: int, B: int, seed: int,
                        *, soft: bool = False) -> int:
         """Whole randomized decide+propagate trajectories for every row — ONE launch. `order` =
@@ -243,10 +262,6 @@ class BCPEngine:
         crosses the bus. Two slots exist so a caller can hold "fully assigned" and "support
         complete" at the same time."""
         return self._core.select_complete(mask_id, slot)
-
-    def selection_rows(self, slot: int, count: int) -> np.ndarray:
-        """(count,) int32 ascending row indices of a selection."""
-        return self._core.selection_rows(slot, count)
 
     def check_sound(self, slot: int = 0, max_rows: int = 4096) -> int:
         """How many selected rows have ANY clause with sat_count == 0 — must be 0.
@@ -297,11 +312,6 @@ class BCPEngine:
     def flush_conflict(self) -> bool:
         """True iff the formula's own units already conflict (formula UNSAT)."""
         return self._core.flush_conflict
-
-    @property
-    def flushed_assignment(self) -> torch.Tensor:
-        """(2N,) int8 — the cached post-flush assignment row (formula units + implications)."""
-        return torch.from_numpy(self._core.flushed_assignment()).to(self._device)
 
     # ------------------------------------------------------------------ work counters
 

@@ -42,6 +42,8 @@ cpp/                       # THE ENGINE CORE — libgpap (C ABI + header-only C+
   src/calibrate.cpp        # K sizing, VRAM model + THE wave/scalar dispatch rule
   src/probe.cpp            # combinatorial probing: every k-subset of a literal set, paged +
                            #   budgeted (enumeration/chunking/ceiling all live HERE, not per-face)
+  src/check.cpp            # batched checking: THE chunk loop of both AssumptionChecker faces
+                           #   (validate-before-any-launch, chunk sizing, padding — one home)
   src/runtime.cpp          # cubin registry + launches
   kernels/bcp.py           # THE 2 BCP kernels (fixpoint + trajectory, SHIFT=16|8, scalar/WAVE)
   kernels/helpers.py       # support kernels (Triton, so the toolchain stays nvcc-free)
@@ -52,7 +54,7 @@ examples/                  # RUNNABLE examples, both faces: sample_solutions.py 
 gpap/
   implications.py          # what each literal IMPLIES — one width-1 sweep, three readers:
                            #   failed literals, hyper-binary resolvents, equivalent literals
-                           #   (`equivalence_edges` feeds preprocess's ELS; strictly stronger
+                           #   (`equivalence_edges` CAN feed preprocess's ELS; strictly stronger
                            #   than its binary-clause edges, 1.11-1.32x more vars removed)
   mining.py                # entailed-clause mining — the STRATEGY (widths, fixpoint,
                            #   subsumption vs the BASELINE-REDUCED formula, `_Subsumption`)
@@ -60,11 +62,13 @@ gpap/
                            #   (docs/findings/MINING_FINDINGS.md)
   engine/                  # THE PYTHON FACE of the core (app-agnostic, reusable)
     _core.py               # ctypes binding to libgpap (private)
-    formula.py             # CnfFormula: facade over the core's builder (numpy fallback off-GPU)
+    formula.py             # CnfFormula: facade over the core's builder (the numpy REFERENCE
+                           #   build is tests/reference_formula.py, the core's oracle)
     bcp_engine.py          # BCPEngine: marshalling + torch-friendly accessors over the core
     _triton.py             # `kernel_available()`: can this host REBUILD kernels? (gpap info only)
     calibrate.py           # K sizing, VRAM model, gpu_mem_available
-    checker.py             # AssumptionChecker: the batched-assumptions API face
+    checker.py             # AssumptionChecker: the batched-assumptions face (marshalling only;
+                           #   the chunk LOOP is cpp/src/check.cpp, shared with the C++ face)
     probe.py               # LiteralProbe: a thin DIMACS face over the core's probe ABI (the
                            #   sweep itself is cpp/src/probe.cpp) — mining/backbone/lookahead
   sampling/                # THE FLAGSHIP

@@ -50,7 +50,7 @@ import subprocess
 import sys
 import time
 
-from gpap.cli import CIRCUIT_EXTS   # single source for "is this a circuit input?"
+from gpap.cli import CIRCUIT_EXTS, _k_cap_arg   # shared with the `gpap` CLI
 
 SCHEMA = 3          # results-JSON schema version (docs/BENCHMARKING.md §7)
 #   1: original flat rows
@@ -205,13 +205,6 @@ def enc_key(encoder, abc_opt):
 
 
 # --------------------------------------------------------------------------- driver
-
-def _k_cap_arg(v):
-    """--k-cap accepts the literal 'auto' or an int; the pipeline resolves 'auto' per device."""
-    if v == "auto":
-        return v
-    return int(v)
-
 
 def _build_argparser():
     ap = argparse.ArgumentParser(prog="gpap bench")

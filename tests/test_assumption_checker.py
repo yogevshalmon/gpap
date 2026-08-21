@@ -37,6 +37,13 @@ class TestAssumptionChecker:
         assert checker.formula.num_vars == 3
         assert checker.formula.num_clauses == 4
 
+    def test_from_clauses_constructor(self):
+        """The clause-list constructor mirrors the C++ face's Formula::from_clauses route and
+        replaces the two-step `AssumptionChecker(); checker.formula.init_formula(...)` flow."""
+        ck = AssumptionChecker.from_clauses(3, [[1, 2], [-1, 3], [-2, -3]])
+        r = ck.check_assumptions([[1, 2, 3], [2]])
+        assert bool(r["conflict"][0]) and not bool(r["conflict"][1])
+
     def test_propagation_count(self):
         checker = AssumptionChecker()
         # chain: (~x1 OR x2), (~x2 OR x3)
@@ -112,6 +119,7 @@ class TestChunking:
         ck = AssumptionChecker()
         self._formula(ck)
         assert ck.chunk_size(10, 3) == 10, "never larger than the input"
+        assert ck.chunk_size(0, 1) == 1, "floor of 1 even for an empty ask (historical contract)"
         assert ck.chunk_size(10**9, 3) > 0
         assert ck.chunk_size(10**9, 100_000) >= 1, "a huge L must not drive it to zero"
         assert ck.chunk_size(10**9, 3) >= ck.chunk_size(10**9, 100_000), "L costs 8 bytes/row"

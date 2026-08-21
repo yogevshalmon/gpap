@@ -19,8 +19,8 @@ import sys
 from pathlib import Path
 
 import torch
-from pysat.formula import CNF
 
+from gpap.engine import read_dimacs
 from gpap.implications import (
     closure_bytes,
     equivalence_classes,
@@ -35,15 +35,15 @@ def main(path: str) -> int:
     if not torch.cuda.is_available():
         print("this example needs a CUDA GPU (there is no CPU execution path)")
         return 1
-    cnf = CNF(from_file=path)
-    print(f"{Path(path).name}: {cnf.nv:,} variables, {len(cnf.clauses):,} clauses\n")
+    nv, clauses, _sup = read_dimacs(path)
+    print(f"{Path(path).name}: {nv:,} variables, {len(clauses):,} clauses\n")
 
     # ALWAYS ask the cost first. The closure is P x 2N and dense, so on a big unroll it is
     # gigabytes — `implications` refuses rather than reserving, and the fix is a narrower pool.
     print(f"closure for every free literal would need "
-          f"~{closure_bytes(cnf.nv, 2 * cnf.nv) / 2**20:.0f} MB (upper bound)\n")
+          f"~{closure_bytes(nv, 2 * nv) / 2**20:.0f} MB (upper bound)\n")
 
-    imp = implications(cnf.nv, cnf.clauses, torch.device("cuda"))
+    imp = implications(nv, clauses, torch.device("cuda"))
     print(f"probed {len(imp):,} free literals in ONE batched sweep\n")
 
     # ---------------------------------------------------------------- 1. failed literals
@@ -63,7 +63,7 @@ def main(path: str) -> int:
     # ---------------------------------------------------------------- 3. hyper-binary resolvents
     hb = hyper_binary(imp)
     print(f"\nhyper-binary resolvents: {len(hb):,} binary clauses the formula entails "
-          f"({len(hb) / max(1, len(cnf.clauses)):.0f}x the formula)")
+          f"({len(hb) / max(1, len(clauses)):.0f}x the formula)")
     for c in hb[:3]:
         print(f"  ({c[0]:+d} | {c[1]:+d})")
     print("  NOTE these are entailed but LOGICALLY REDUNDANT by construction — propagation")

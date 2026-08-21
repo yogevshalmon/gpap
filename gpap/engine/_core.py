@@ -138,6 +138,7 @@ def _declare(lib: ctypes.CDLL) -> None:
         ("gpap_formula_free", [c_void_p], None),
         ("gpap_formula_occ", [c_void_p, _I32P, _I32P, _I32P, _I64P], c_int),
         ("gpap_formula_clause_arrays", [c_void_p, _I32P, _I32P], c_int),
+        ("gpap_formula_clauses", [c_void_p, _I32P, _I64P], c_int),
         ("gpap_formula_support", [c_void_p, _I32P, _I32P], c_int),
         ("gpap_packed_envelope", [c_int32, c_int32, _I32P], c_int),
         ("gpap_engine_create", [c_void_p, POINTER(EngineOptions), POINTER(c_void_p)], c_int),
@@ -158,6 +159,9 @@ def _declare(lib: ctypes.CDLL) -> None:
         ("gpap_engine_recache_flush", [c_void_p], c_int),
         ("gpap_engine_flush_conflict", [c_void_p], c_int),
         ("gpap_engine_flushed_assignment", [c_void_p, _I8P], c_int),
+        ("gpap_check_sets", [c_void_p, _I32P, _I64P, c_int64, c_int32, _I8P, _I32P, _I8P,
+                             _I32P], c_int),
+        ("gpap_check_chunk_size", [c_void_p, c_int64, c_int64], c_int64),
         ("gpap_pair_mask_create", [c_void_p, _I32P, c_int32, _I32P], c_int),
         ("gpap_select_complete", [c_void_p, c_int32, c_int32, _I32P], c_int),
         ("gpap_selection_rows", [c_void_p, c_int32, _I32P, c_int32], c_int),
@@ -281,7 +285,6 @@ class ProbeSweep:
 
     def conflicts(self):
         """(n, k) int32 of DIMACS literals: the tuples whose assumption drove BCP to a conflict."""
-        import numpy as np
         n = int(self.stats.conflicts)
         out = np.empty((n, self._k), dtype=np.int32)
         if n:
@@ -304,70 +307,12 @@ def _probe_options(seconds=None, max_tuples=None, batch=0, distinct_vars=True,
                         1 if distinct_vars else 0, 1 if refuse_over_max else 0)
 
 
-def probe_combinations(engine, pool, k: int, **kw) -> ProbeSweep:
-    """Probe every k-subset of `pool` (DIMACS literals); `pool=None` means all free literals."""
-    import numpy as np
-    lib = load()
-    h = c_void_p()
+def _pool_arg(pool) -> tuple:
+    """(ptr, n) for a literal pool; None means "all free literals" (a NULL pool in the ABI)."""
     if pool is None:
-        ptr, n = None, 0
-    else:
-        arr = np.ascontiguousarray(pool, dtype=np.int32).reshape(-1)
-        ptr, n = arr.ctypes.data_as(_I32P), int(arr.size)
-    check(lib.gpap_probe_combinations(engine, ptr, n, int(k), byref(_probe_options(**kw)),
-                                      byref(h)), "gpap_probe_combinations")
-    return ProbeSweep(h, k)
-
-
-def probe_count(engine, pool, k: int, distinct_vars: bool = True) -> int:
-    """Exact k-subset count of `pool` (None = all free literals), WITHOUT generating it.
-
-    The number to check a ceiling against before enumerating. One definition, in the core — a
-    second copy of this arithmetic in Python is exactly the drift the sizing collapse removed."""
-    import numpy as np
-    if pool is None:
-        ptr, n = None, 0
-    else:
-        arr = np.ascontiguousarray(pool, dtype=np.int32).reshape(-1)
-        ptr, n = arr.ctypes.data_as(_I32P), int(arr.size)
-    return int(load().gpap_probe_count(engine, ptr, n, int(k), 1 if distinct_vars else 0))
-
-
-def probe_tuples(engine, tuples, **kw) -> ProbeSweep:
-    """Probe an explicit (n, k) array of DIMACS literals."""
-    import numpy as np
-    arr = np.ascontiguousarray(tuples, dtype=np.int32)
-    if arr.ndim == 1:
-        arr = arr.reshape(-1, 1)
-    n, k = arr.shape
-    lib = load()
-    h = c_void_p()
-    check(lib.gpap_probe_tuples(engine, arr.ctypes.data_as(_I32P), int(n), int(k),
-                                byref(_probe_options(**kw)), byref(h)), "gpap_probe_tuples")
-    return ProbeSweep(h, k)
-
-
-def free_literals(engine):
-    """DIMACS literals the formula's unit flush left undetermined, ascending by variable."""
-    import numpy as np
-    lib = load()
-    n = c_int32(0)
-    check(lib.gpap_free_literals(engine, None, byref(n)), "gpap_free_literals")
-    out = np.empty(int(n.value), dtype=np.int32)
-    if n.value:
-        check(lib.gpap_free_literals(engine, out.ctypes.data_as(_I32P), byref(n)),
-              "gpap_free_literals")
-    return out
-
-
-def assume_units(engine, lits) -> None:
-    """Fold proven units into the cached flush state in place."""
-    import numpy as np
-    arr = np.ascontiguousarray(lits, dtype=np.int32).reshape(-1)
-    if arr.size == 0:
-        return
-    check(load().gpap_assume_units(engine, arr.ctypes.data_as(_I32P), int(arr.size)),
-          "gpap_assume_units")
+        return None, 0
+    arr = np.ascontiguousarray(pool, dtype=np.int32).reshape(-1)
+    return arr.ctypes.data_as(_I32P), int(arr.size)
 
 
 def packed_envelope(num_vars: int, max_clause_len: int) -> "tuple[int | None, str]":
@@ -440,6 +385,26 @@ class Formula:
             check(lib.gpap_formula_support(self._h, _p(out, c_int32), None), "support")
         return out
 
+    def clauses(self) -> list:
+        """The clauses back out of the built formula, as list[list[DIMACS literal]].
+
+        Rebuilt from the occ CSR by the core (`gpap_formula_clauses`), so within-clause order is
+        ascending by literal index, not input order — no consumer of a clause is
+        order-sensitive. A dropped empty clause is NOT re-appended here; check
+        `info.has_empty_clause` (read_dimacs does)."""
+        total = int(self.info.total_lits)
+        flat = np.empty(total, dtype=np.int32)
+        if total:
+            check(load().gpap_formula_clauses(self._h, _p(flat, c_int32), None),
+                  "gpap_formula_clauses")
+        sizes = np.empty(self.info.num_clauses, dtype=np.int32)
+        check(load().gpap_formula_clause_arrays(self._h, _p(sizes, c_int32), None),
+              "clause sizes")
+        bounds = np.zeros(len(sizes) + 1, dtype=np.int64)
+        np.cumsum(sizes, out=bounds[1:])
+        fl = flat.tolist()
+        return [fl[a:b] for a, b in zip(bounds[:-1].tolist(), bounds[1:].tolist())]
+
     def clause_arrays(self) -> "tuple[np.ndarray, np.ndarray]":
         """(clause_sizes, lit_sum) — inspection / tests."""
         m = self.info.num_clauses
@@ -461,22 +426,29 @@ class Formula:
 class Engine:
     """Owns a `gpap_engine*`: the packed row state, the launches and the readout.
 
-    Mirrors gpap.engine.bcp_engine.BCPEngine, but every readout returns NUMPY (the state lives
-    in library-owned device memory, not in torch tensors — that ownership is the point)."""
+    This is the BASE Python wrapper over the ABI — every readout returns NUMPY, because the
+    state lives in library-owned device memory, not in torch tensors (that ownership is the
+    point). `gpap.engine.bcp_engine.BCPEngine` adapts this class to torch for the sampling
+    stack; `gpap.engine.probe.LiteralProbe` consumes it directly."""
 
     MODE_SCALAR, MODE_WAVE, MODE_AUTO = 0, 1, 2
     _MODES = {"scalar": MODE_SCALAR, "wave": MODE_WAVE, "auto": MODE_AUTO}
 
-    def __init__(self, formula: Formula, device: int = 0, mode: str = "auto",
+    def __init__(self, formula: Formula, device: int = 0, mode: "str | None" = None,
                  force_shift: int = 0, vscan: int = 0):
-        """`mode="auto"` (the default) lets the CORE pick the kernel on every reset(K).
+        """`mode=None` resolves to $GPAP_KERNEL when set, else "auto" — HERE, once, so the env
+        override reaches every face built on this class rather than only the ones that remember
+        to read it. "auto" lets the CORE pick the kernel on every reset(K); the resolved request
+        is kept in `requested_mode`.
 
         Pin "scalar"/"wave" only to A/B them: the two share the same state and reach the same
         fixpoints, so the choice can change speed and nothing else."""
         lib = load()
+        self.requested_mode = mode or os.environ.get("GPAP_KERNEL") or "auto"
         self._f = formula                       # keep the formula alive
         h = c_void_p()
-        opts = EngineOptions(device, self._mode_code(mode), int(force_shift), int(vscan))
+        opts = EngineOptions(device, self._mode_code(self.requested_mode), int(force_shift),
+                             int(vscan))
         check(lib.gpap_engine_create(formula.handle, byref(opts), byref(h)), "create engine")
         self._h = h
         self._K = 0
@@ -556,6 +528,45 @@ class Engine:
     def recache_flush(self) -> None:
         check(load().gpap_engine_recache_flush(self._h), "recache flush")
 
+    # -------------------------------------------------- batched checking (entry point 1)
+    def check_sets(self, lits, offsets, *, chunk: int = 0, assignments: bool = False,
+                   sat_count: bool = False) -> tuple:
+        """Propagate every assumption set to its BCP fixpoint — THE chunk loop, run by the CORE
+        (`gpap_check_sets`, cpp/src/check.cpp), so every face shares one validation, one chunk
+        model and one padding rule.
+
+        `lits` is the sets FLATTENED as DIMACS literals; `offsets` is (n+1,) int64 with set i =
+        lits[offsets[i]:offsets[i+1]]. `chunk` <= 0 sizes launches with `check_chunk_size`.
+        Returns numpy `(conflict (n,) bool, propagated (n,) int32, assignment (n, 2N) int8 or
+        None, sat (n, M) int32 or None)` — the last two only when asked for, since they are
+        what makes a big call expensive."""
+        lits = np.ascontiguousarray(lits, dtype=np.int32).reshape(-1)
+        off = np.ascontiguousarray(offsets, dtype=np.int64).reshape(-1)
+        n = int(off.size) - 1
+        # The core validates offsets' SHAPE (monotone, starting at 0) but cannot know the
+        # literal array's length — that bound is this binding's to enforce, or a short `lits`
+        # is read past its end and the call silently returns answers built from stray memory.
+        if n > 0 and int(off[-1]) > lits.size:
+            raise ValueError(f"offsets[-1]={int(off[-1])} exceeds len(lits)={lits.size} — the "
+                             f"flat literal array must cover every set")
+        conflict = np.zeros(n, dtype=np.int8)
+        prop = np.zeros(n, dtype=np.int32)
+        assign = np.zeros((n, 2 * self.num_vars), dtype=np.int8) if assignments else None
+        sat = np.zeros((n, self.num_clauses), dtype=np.int32) if sat_count else None
+        if n > 0:
+            check(load().gpap_check_sets(
+                self._h, _p(lits, c_int32), _p(off, c_int64), n, int(chunk),
+                _p(conflict, c_int8), _p(prop, c_int32),
+                _p(assign, c_int8) if assign is not None else None,
+                _p(sat, c_int32) if sat is not None else None), "gpap_check_sets")
+        return conflict.astype(bool), prop, assign, sat
+
+    def check_chunk_size(self, n_sets: int, max_lits: int = 1) -> int:
+        """Assumption sets one launch holds — `gpap_check_chunk_size`, the core's one model
+        (the engine's exact per-row state plus the (chunk, L) decision matrix this entry point
+        allocates and the sampler's path never does)."""
+        return int(load().gpap_check_chunk_size(self._h, int(n_sets), int(max_lits)))
+
     # -------------------------------------------------- probing (entry point 1b)
     # The sweep runs in the CORE: enumeration, chunking and the budget all live in
     # cpp/src/probe.cpp, so a Python caller and a C++ caller get the same candidate order, the
@@ -563,24 +574,53 @@ class Engine:
 
     def probe_combinations(self, pool, k: int, **kw) -> ProbeSweep:
         """Probe every k-subset of `pool` (DIMACS literals); `pool=None` = every free literal."""
-        return probe_combinations(self._h, pool, k, **kw)
+        ptr, n = _pool_arg(pool)
+        h = c_void_p()
+        check(load().gpap_probe_combinations(self._h, ptr, n, int(k),
+                                             byref(_probe_options(**kw)), byref(h)),
+              "gpap_probe_combinations")
+        return ProbeSweep(h, k)
 
     def probe_tuples(self, tuples, **kw) -> ProbeSweep:
         """Probe an explicit (n, k) array of DIMACS literals."""
-        return probe_tuples(self._h, tuples, **kw)
+        arr = np.ascontiguousarray(tuples, dtype=np.int32)
+        if arr.ndim == 1:
+            arr = arr.reshape(-1, 1)
+        n, k = arr.shape
+        h = c_void_p()
+        check(load().gpap_probe_tuples(self._h, arr.ctypes.data_as(_I32P), int(n), int(k),
+                                       byref(_probe_options(**kw)), byref(h)),
+              "gpap_probe_tuples")
+        return ProbeSweep(h, k)
 
     def probe_count(self, pool, k: int, distinct_vars: bool = True) -> int:
-        """Exact candidate count without generating anything — check ceilings against this."""
-        return probe_count(self._h, pool, k, distinct_vars)
+        """Exact k-subset count of `pool` (None = all free literals), WITHOUT generating it.
+
+        The number to check a ceiling against before enumerating. One definition, in the core —
+        a second copy of this arithmetic in Python is exactly the drift the sizing collapse
+        removed."""
+        ptr, n = _pool_arg(pool)
+        return int(load().gpap_probe_count(self._h, ptr, n, int(k), 1 if distinct_vars else 0))
 
     def free_literals(self) -> np.ndarray:
-        """DIMACS literals the unit flush left undetermined — what is worth probing."""
-        return free_literals(self._h)
+        """DIMACS literals the unit flush left undetermined, ascending by variable — what is
+        worth probing."""
+        n = c_int32(0)
+        check(load().gpap_free_literals(self._h, None, byref(n)), "gpap_free_literals")
+        out = np.empty(int(n.value), dtype=np.int32)
+        if n.value:
+            check(load().gpap_free_literals(self._h, out.ctypes.data_as(_I32P), byref(n)),
+                  "gpap_free_literals")
+        return out
 
     def assume_units(self, lits) -> None:
         """Fold PROVEN units into the cached flush state in place (see the ABI note: this
         assumes entailment rather than checking it)."""
-        assume_units(self._h, lits)
+        arr = np.ascontiguousarray(lits, dtype=np.int32).reshape(-1)
+        if arr.size == 0:
+            return
+        check(load().gpap_assume_units(self._h, arr.ctypes.data_as(_I32P), int(arr.size)),
+              "gpap_assume_units")
 
     # -------------------------------------------------- selections + readout
     def pair_mask(self, vars_=None) -> int:

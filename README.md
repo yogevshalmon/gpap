@@ -23,7 +23,7 @@ assumption sets at once** (PyTorch + fused Triton kernels), and a flagship appli
 ```bash
 pip install -e ".[build]"    # python side + triton (triton ships with torch on Linux/Colab)
 scripts/build_core.sh        # the engine core: libgpap.so  (cmake + gcc; NO CUDA toolkit needed)
-pip install -e ".[dev]"      # + pytest, ruff  (for tests/lint)
+pip install -e ".[dev]"      # + pytest, ruff, python-sat  (for tests/lint)
 ```
 
 The engine itself is a C++ library, [`libgpap`](cpp/) — the same one C++ consumers link against
@@ -251,6 +251,13 @@ Instead of a clause matrix, GPAP keeps:
    detection; see [`cpp/kernels/bcp.py`](cpp/kernels/bcp.py) and [docs/ENGINE.md](docs/ENGINE.md).
 
 Literal indexing (2N scheme): `+v → 2(v-1)`, `-v → 2(v-1)+1`, negation `l ^ 1`.
+
+## Using it as a library
+
+[`docs/PYTHON_API.md`](docs/PYTHON_API.md) is the map: the API tiers (`gpap.sample()` → the
+one-call faces → the `BCPEngine` primitive), the conventions that hold everywhere (DIMACS
+literals, nobody names K, `__all__` is the contract), and which runnable example to start from.
+C++ consumers start at [`cpp/README.md`](cpp/README.md) — same engine, two faces.
 
 ## Layout
 

@@ -19,8 +19,8 @@ CIRCUIT_EXTS = (".bench", ".aig", ".aag")   # the single source for "is this a c
 
 
 def _k_cap_arg(v):
-    """--k-cap accepts 'auto' or an int. Deliberately duplicated in gpap/benchmark.py rather
-    than shared: this module stays import-light (no torch at parser-build time)."""
+    """--k-cap accepts the literal 'auto' or an int; the pipeline resolves 'auto' per device.
+    Shared with gpap/benchmark.py (which already imports this module for CIRCUIT_EXTS)."""
     return v if v == "auto" else int(v)
 
 
@@ -168,6 +168,14 @@ def _cmd_sample(args):
         os.unlink(tmp)
 
 
+def _write_cnf(path, num_vars, clauses):
+    """Plain DIMACS writer (header + 0-terminated clauses)."""
+    with open(path, "w") as f:
+        f.write(f"p cnf {num_vars} {len(clauses)}\n")
+        for c in clauses:
+            f.write(" ".join(map(str, c)) + " 0\n")
+
+
 def _parse_pool(spec, cnf_path, num_vars):
     """Resolve --pool into DIMACS literals, or None for "every free literal".
 
@@ -182,7 +190,7 @@ def _parse_pool(spec, cnf_path, num_vars):
     if spec in (None, "all"):
         return None
     if spec == "support":
-        from gpap.sampling.pipeline import parse_independent_support
+        from gpap.sampling import parse_independent_support
         sup = parse_independent_support(cnf_path)
         if not sup:
             raise SystemExit(f"--pool support: {cnf_path} declares no `c ind` support. "
@@ -230,15 +238,14 @@ def _cmd_mine(args):
     if not core_available():
         raise SystemExit("the engine core (libgpap) is not built. Run scripts/build_core.sh, "
                          "then `gpap info` to confirm.")
-    from pysat.formula import CNF
-
     device = torch.device(args.device) if args.device else torch.device("cuda")
     path, tmp, encode_s = _ensure_cnf(args)
     try:
-        cnf = CNF(from_file=path)
-        pool = _parse_pool(args.pool, path, cnf.nv)
+        from gpap.engine import read_dimacs
+        nv, clauses, _sup = read_dimacs(path)
+        pool = _parse_pool(args.pool, path, nv)
         widths = sorted(set(args.width))
-        print(f"{os.path.basename(args.input)}: N={cnf.nv} M={len(cnf.clauses)} "
+        print(f"{os.path.basename(args.input)}: N={nv} M={len(clauses)} "
               f"pool={args.pool}{'' if pool is None else f' ({len(pool)} literals)'} "
               f"widths={widths}")
 
@@ -248,7 +255,7 @@ def _cmd_mine(args):
         # These are UPPER BOUNDS. Width 1 runs first and its proven units narrow the formula, so a
         # later width sees fewer free literals and its real count is smaller than printed here.
         from gpap.engine.probe import LiteralProbe
-        probe = LiteralProbe(cnf.nv, cnf.clauses, device)
+        probe = LiteralProbe(nv, clauses, device)
         for w in widths:
             n = probe.count(pool if w > 1 else None, w)
             over = "" if n <= args.max_tuples else f"  > --max-tuples {args.max_tuples:,}"
@@ -256,7 +263,7 @@ def _cmd_mine(args):
         del probe
         torch.cuda.empty_cache()
 
-        res = mine_entailed(cnf.nv, cnf.clauses, device,
+        res = mine_entailed(nv, clauses, device,
                             pool=pool,
                             widths=tuple(widths), seconds=args.seconds,
                             max_tuples=args.max_tuples, drop=args.drop)
@@ -288,14 +295,11 @@ def _cmd_mine(args):
         if args.out:
             # The STRENGTHENED formula: original + mined. Sound by construction — every mined
             # clause is entailed, so the model set is unchanged.
-            out = CNF()
-            out.extend(cnf.clauses)
-            out.extend(res.clauses)
-            out.to_file(args.out)
-            print(f"  wrote {args.out} ({len(cnf.clauses):,} original + {len(res.clauses):,} "
+            _write_cnf(args.out, nv, clauses + list(res.clauses))
+            print(f"  wrote {args.out} ({len(clauses):,} original + {len(res.clauses):,} "
                   f"mined clauses)")
         if args.out_mined:
-            CNF(from_clauses=res.clauses).to_file(args.out_mined)
+            _write_cnf(args.out_mined, nv, list(res.clauses))
             print(f"  wrote {args.out_mined} ({len(res.clauses):,} mined clauses only)")
         if args.stats:
             # Report WHAT WAS DONE, not only what was found. An empty `clauses` with no coverage
@@ -303,9 +307,9 @@ def _cmd_mine(args):
             # width" from "we probed 0.0008% of the space and ran out of budget".
             total_cand = sum(res.candidates.values())
             total_probed = sum(res.probed.values())
-            info = {"input": args.input, "nv": cnf.nv, "n_clauses": len(cnf.clauses),
+            info = {"input": args.input, "nv": nv, "n_clauses": len(clauses),
                     "pool": args.pool,
-                    "pool_size": (2 * cnf.nv if pool is None else len(pool)),
+                    "pool_size": (2 * nv if pool is None else len(pool)),
                     "pool_note": ("all free literals (resolved per width)" if pool is None
                                   else "explicit"),
                     "widths": widths, "seconds": res.seconds, "encode_s": encode_s,

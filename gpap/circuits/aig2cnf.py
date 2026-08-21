@@ -165,34 +165,26 @@ def convert_aig_one(aig_path, out_path, cycles, seed, pin_outputs=None, encoder=
                     abc_path=None, quiet=False, abc_opt="auto", target_mode="random"):
     """Convert a single .aig/.aag file to a projected-sampling DIMACS CNF. Mirrors
     `bench.convert_one` (same encoder choices, same target_mode random|rare, same
-    `c ind`/`c wire`/provenance output)."""
-    from gpap.circuits.bench import write_dimacs
+    `c ind`/`c wire`/provenance output) — both are faces of `bench.convert_common`."""
+    from gpap.circuits.bench import convert_common
 
     aig = read_aiger(aig_path)
-    target = rare_est = None
-    if target_mode == "rare":
-        from gpap.circuits.simulate import rare_target
-        target, rare_est = rare_target("aig", aig, cycles, seed, pin_outputs)
-    elif target_mode != "random":
-        raise ValueError(f"unknown target_mode {target_mode!r} (random | rare)")
-    if encoder == "auto":
-        from gpap.circuits.abc_backend import abc_available
-        encoder = "abc" if abc_available(abc_path) else "tseitin"
-    if encoder == "abc":
+
+    def native_build(target):
+        return build_cnf_aig(aig, cycles, seed, pin_outputs=pin_outputs, target=target)
+
+    def abc_build(target):
         from gpap.circuits.abc_backend import build_cnf_abc_aig
-        b, support, target, labels = build_cnf_abc_aig(aig, aig_path, cycles, seed,
-                                                       pin_outputs=pin_outputs, abc=abc_path,
-                                                       opt=abc_opt, target=target)
-    elif encoder == "tseitin":
-        b, support, target, labels = build_cnf_aig(aig, cycles, seed, pin_outputs=pin_outputs,
-                                                   target=target)
-    else:
-        raise ValueError(f"unknown encoder {encoder!r} (tseitin | abc | auto)")
-    write_dimacs(out_path, b, support, labels, encoder=encoder)
+        return build_cnf_abc_aig(aig, aig_path, cycles, seed, pin_outputs=pin_outputs,
+                                 abc=abc_path, opt=abc_opt, target=target)
+
+    b, support, rare_est, enc = convert_common("aig", aig, cycles, seed, pin_outputs,
+                                               encoder, abc_path, target_mode, out_path,
+                                               native_build, abc_build)
     if not quiet:
         T = 1 if aig.n_latches == 0 else cycles
         rare_s = f" target=rare(freq~{rare_est:.2e})" if rare_est is not None else ""
         print(f"{aig_path} -> {out_path}: PI={aig.n_inputs} PO={aig.n_outputs} "
-              f"L={aig.n_latches} ands={len(aig.ands)} | cycles={T} enc={encoder}{rare_s} -> "
+              f"L={aig.n_latches} ands={len(aig.ands)} | cycles={T} enc={enc}{rare_s} -> "
               f"vars={b.nv} clauses={len(b.clauses)} support={len(support)}")
     return b

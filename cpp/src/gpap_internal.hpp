@@ -17,6 +17,15 @@ namespace gpap {
 void set_error(const char *fmt, ...);
 const char *get_error();
 
+/* DIMACS literal -> internal 2N index (+v -> 2(v-1), -v -> 2(v-1)+1), or -1 if out of range
+ * for an N-variable formula. The one conversion every DIMACS-speaking entry point shares. */
+inline int64_t lit_index_from_dimacs(int32_t lit, int32_t num_vars) {
+    if (lit == 0) return -1;
+    const int32_t v = lit > 0 ? lit : -lit;
+    if (v > num_vars) return -1;
+    return 2ll * (v - 1) + (lit < 0 ? 1 : 0);
+}
+
 /* Every driver call goes through this: it records a readable message and returns. */
 #define GPAP_CU(call)                                                                    \
     do {                                                                                 \

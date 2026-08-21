@@ -18,14 +18,6 @@ classifiers = [
 dependencies = [
     "torch>=2.1",
     "numpy>=1.24",
-    # `.dev0` in the specifier is LOAD-BEARING, not sloppiness: python-sat ships only
-    # pre-releases for recent CPython (1.9.dev7 is the sole cp312 wheel), and PEP 440 says pip
-    # ignores pre-releases unless the specifier itself mentions one. With a plain `>=0.1.8`,
-    # `pip install -e .` dies with "No matching distribution found for python-sat" on any clean
-    # Python 3.12 box — it only ever worked here because this venv already had 1.9.dev2. Found
-    # on a fresh Colab VM 2026-08-03; it would have hit the HPC cluster identically.
-    "python-sat>=0.1.8.dev0",
-    "tqdm>=4.65",
 ]
 
 [project.optional-dependencies]
@@ -33,8 +25,14 @@ dependencies = [
 # shipped library links libcuda alone, so nothing here is needed to RUN the engine. It ships
 # with torch on Linux/Colab, so this extra is usually already satisfied.
 build = ["triton>=3.0"]       # rebuilding cpp/kernels/*.py into cubins
-eval = ["matplotlib>=3.7"]    # eval/ plots
-dev = ["pytest>=7.4", "ruff>=0.4"]
+# `--uniformity exact` enumerates the projected solution space with a SAT solver; everything
+# else parses and runs without python-sat (the DIMACS parser is the core's — gpap.engine
+# .read_dimacs). The `.dev0` in the specifier is LOAD-BEARING: python-sat publishes only
+# pre-releases for recent CPython, and PEP 440 makes pip ignore pre-releases unless the
+# specifier itself names one — a plain `>=0.1.8` fails to resolve on a clean recent Python.
+solver = ["python-sat>=0.1.8.dev0"]
+eval = ["matplotlib>=3.7", "python-sat>=0.1.8.dev0"]    # eval/ plots + rival/oracle harnesses
+dev = ["pytest>=7.4", "ruff>=0.4", "python-sat>=0.1.8.dev0"]
 
 [project.scripts]
 gpap = "gpap.cli:main"

@@ -718,7 +718,6 @@ class AssumptionChecker {
     explicit AssumptionChecker(Formula formula, int device = 0)
         : formula_(std::move(formula)), engine_(formula_, options(device)) {
         n_vars_ = formula_.num_vars();
-        device_ = device;
     }
 
     /** Propagate every set to a fixpoint. `sets` hold DIMACS literals (+v / -v).
@@ -726,6 +725,10 @@ class AssumptionChecker {
      *  ANY NUMBER of sets: they are split into GPU-sized chunks internally and the results come
      *  back in input order, so how many launches it took is not observable. `chunk_size()` says
      *  what one launch holds if you want to know, but nothing here requires you to.
+     *
+     *  The chunk loop itself is `gpap_check_sets` in the CORE (cpp/src/check.cpp) — this method
+     *  only flattens the sets and shapes the results, so a Python caller and a C++ caller get
+     *  the same validation, the same chunking and the same padding.
      *
      *  `with_assignments` materializes the full per-row assignment (n x 2N bytes) so that
      *  `value()` and `literals()` work; drop it when only the conflict flags matter — it is the
@@ -737,64 +740,36 @@ class AssumptionChecker {
         r.n_vars_ = n_vars_;
         if (sets.empty()) return r;
 
-        std::size_t L = 0;
-        for (const auto &s : sets) L = std::max(L, s.size());
-        L = std::max<std::size_t>(L, 1);
-
         const std::size_t n = sets.size();
-        const std::size_t row_lits = 2 * static_cast<std::size_t>(n_vars_);
+        std::vector<std::int32_t> lits;
+        std::vector<std::int64_t> offsets(n + 1, 0);
+        std::size_t total = 0;
+        for (const auto &s : sets) total += s.size();
+        lits.reserve(total);
+        for (std::size_t i = 0; i < n; ++i) {
+            lits.insert(lits.end(), sets[i].begin(), sets[i].end());
+            offsets[i + 1] = static_cast<std::int64_t>(lits.size());
+        }
+
         r.conflict_.assign(n, 0);
         r.propagated_.assign(n, 0);
-        if (with_assignments) r.assign_.assign(n * row_lits, 0);
-
-        const std::size_t step = static_cast<std::size_t>(chunk_size(n, L));
-        std::vector<std::int64_t> decisions;
-        for (std::size_t a = 0; a < n; a += step) {
-            const std::size_t b = std::min(a + step, n);
-            const std::int32_t K = static_cast<std::int32_t>(b - a);
-            // Padded (K, L) matrix of INTERNAL literal indices: +v -> 2(v-1), -v -> 2(v-1)+1.
-            decisions.assign((b - a) * L, -1);
-            for (std::size_t k = a; k < b; ++k)
-                for (std::size_t j = 0; j < sets[k].size(); ++j) {
-                    const std::int32_t lit = sets[k][j];
-                    if (lit == 0 || std::abs(lit) > n_vars_)
-                        throw Error(GPAP_ERR_ARG, "assumption literal out of range");
-                    decisions[(k - a) * L + j] = 2 * (std::abs(lit) - 1) + (lit < 0 ? 1 : 0);
-                }
-
-            engine_.reset(K);          /* the LAST chunk is short: reset to its own size */
-            engine_.apply(decisions, static_cast<std::int32_t>(L));
-
-            auto fl = engine_.flags();
-            std::copy_n(fl.second.begin(), b - a, r.conflict_.begin() + a);
-            const std::vector<std::int32_t> prop = engine_.num_propagated();
-            std::copy_n(prop.begin(), b - a, r.propagated_.begin() + a);
-            if (with_assignments) {
-                std::vector<std::int32_t> rows(static_cast<std::size_t>(K));
-                std::iota(rows.begin(), rows.end(), 0);
-                engine_.selection_set(/*slot=*/2, rows);
-                const std::vector<std::int8_t> rowsa = engine_.assignment_rows(K, /*slot=*/2);
-                std::copy_n(rowsa.begin(), (b - a) * row_lits, r.assign_.begin() + a * row_lits);
-            }
-        }
+        if (with_assignments)
+            r.assign_.assign(n * 2 * static_cast<std::size_t>(n_vars_), 0);
+        gpap::check(gpap_check_sets(engine_.handle(), lits.data(), offsets.data(),
+                                    static_cast<std::int64_t>(n), /*chunk=*/0,
+                                    r.conflict_.data(), r.propagated_.data(),
+                                    with_assignments ? r.assign_.data() : nullptr,
+                                    /*sat_out=*/nullptr),
+                    "gpap_check_sets");
         return r;
     }
 
-    /** Assumption sets one launch holds. The engine's own per-row state (the conservative,
-     *  kill-switch-validated model) plus the (K, L) int64 decision matrix this entry point
-     *  allocates and the sampler's path does not — 8 bytes per literal slot per row, which on a
-     *  small formula with long assumption sets is the dominant term. Capped like the sampler is,
-     *  and never larger than the input. */
-    std::size_t chunk_size(std::size_t n_sets, std::size_t max_lits) const {
-        const gpap_formula_info i = formula_.info();
-        const std::int64_t free_bytes = gpap_mem_available(device_, 0.80);
-        const std::int64_t per_row =
-            gpap_row_bytes(i.num_clauses, i.num_vars, 0) +
-            8ll * static_cast<std::int64_t>(std::max<std::size_t>(max_lits, 1));
-        std::int64_t k = free_bytes / std::max<std::int64_t>(per_row, 1);
-        k = std::min<std::int64_t>(k, gpap_default_k_cap(device_));
-        k = std::max<std::int64_t>(k, 1);
-        return std::min<std::size_t>(static_cast<std::size_t>(k), n_sets);
+    /** Assumption sets one launch holds — `gpap_check_chunk_size`, the core's one model
+     *  (the engine's exact per-row state plus the decision matrix this entry point adds). */
+    std::size_t chunk_size(std::size_t n_sets, std::size_t max_lits) {
+        return static_cast<std::size_t>(
+            gpap_check_chunk_size(engine_.handle(), static_cast<std::int64_t>(n_sets),
+                                  static_cast<std::int64_t>(max_lits)));
     }
 
     Engine &engine() noexcept { return engine_; }
@@ -809,7 +784,6 @@ class AssumptionChecker {
     Formula formula_;
     Engine engine_;
     std::int32_t n_vars_ = 0;
-    int device_ = 0;
 };
 
 // ---------------------------------------------------------------------------- probing

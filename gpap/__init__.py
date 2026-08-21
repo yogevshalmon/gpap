@@ -17,6 +17,9 @@ os.environ.setdefault("PYTORCH_CUDA_ALLOC_CONF", "expandable_segments:True")
 
 __version__ = "0.1.0"
 
+# THE tier-0 contract (docs/PYTHON_API.md: `__all__` is the supported API).
+__all__ = ["sample", "sample_clauses", "sample_circuit", "MAX_SAMPLES", "__version__"]
+
 
 # ---------------------------------------------------------------------------- the top-level API
 # THE contract of these three: you ask for n samples, you get n samples. Nothing here mentions a
@@ -54,14 +57,21 @@ def sample_clauses(num_vars, clauses, n=50_000, *, support=None, device=None, se
                     max_samples, full_models, kw)
 
 
-def sample_circuit(bench_path, cycles=25, n=50_000, *, pin_outputs=None, seed=5,
+def sample_circuit(circuit_path, cycles=25, n=50_000, *, pin_outputs=None, seed=5,
                    device=None, **kw):
-    """Unroll a .bench circuit `cycles` times (Tseitin, outputs pinned to a simulated reachable
-    pattern) and sample the primary-input support. Returns (samples, info); the columns are the
-    circuit's primary inputs per cycle, named by `info["wire_map"]`."""
-    from gpap.circuits.bench import parse_bench, build_cnf
-    circ = parse_bench(bench_path)
-    b, support, _target, labels = build_cnf(circ, cycles, seed, pin_outputs=pin_outputs)
+    """Unroll a circuit (`.bench`, or AIGER `.aig`/`.aag`) `cycles` times (Tseitin, outputs
+    pinned to a simulated reachable pattern) and sample the primary-input support. Returns
+    (samples, info); the columns are the circuit's primary inputs per cycle, named by
+    `info["wire_map"]`."""
+    if str(circuit_path).endswith((".aig", ".aag")):
+        from gpap.circuits.aig2cnf import build_cnf_aig
+        from gpap.circuits.aiger import read_aiger
+        b, support, _target, labels = build_cnf_aig(read_aiger(circuit_path), cycles, seed,
+                                                    pin_outputs=pin_outputs)
+    else:
+        from gpap.circuits.bench import parse_bench, build_cnf
+        circ = parse_bench(circuit_path)
+        b, support, _target, labels = build_cnf(circ, cycles, seed, pin_outputs=pin_outputs)
     # The labels exist right here, so name the columns rather than making the caller re-derive
     # which CNF variable is which input at which cycle. `sample_file` recovers the same map by
     # re-parsing the CNF's `c wire` comments; this path never writes a file.

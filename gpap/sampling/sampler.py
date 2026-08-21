@@ -32,7 +32,6 @@ K is auto-sized to the GPU (capped by default to stay off the host-RAM spill cli
 `gpap/__init__.py`, which always runs before this module (see there for the measurement).
 """
 import contextlib
-import os
 import time
 
 import numpy as np
@@ -112,8 +111,9 @@ class GPUSampler:
         # also issues small resets — the warmup's pinned 1024, a short final chunk — and those
         # must not silently switch kernel mid-run: `engine.mode` is recorded as row provenance and
         # a measurement whose kernel changes underneath it is not a measurement. The RULE lives in
-        # engine.calibrate.dispatch_mode; this only chooses its input.
-        if os.environ.get("GPAP_KERNEL") is None and device.type == "cuda":
+        # engine.calibrate.dispatch_mode; this only chooses its input. `auto_dispatch` guards it:
+        # a kernel pinned any other way ($GPAP_KERNEL, an explicit mode) must not be overridden.
+        if self.engine.auto_dispatch and device.type == "cuda":
             self.engine.set_mode(dispatch_mode(self.M, self.K, device))
 
     # ---------------------------------------------------------------- THE batch size
@@ -160,16 +160,15 @@ class GPUSampler:
         formula, reconstructing full original models at collection time (see simplify_cnf).
         `els=True` additionally does equivalent-literal substitution (simplify_cnf_els): removes
         more variables/clauses -> faster propagate + bigger K (implies simplify)."""
-        support = parse_independent_support(path)   # 0-based, or None
         if not (simplify or els):
             formula = CnfFormula(device)
-            formula.parse_cnf_file(path)
+            formula.parse_cnf_file(path)            # ONE parse; support comes off the same core
             smp = cls(formula, device, **kw)
-            smp.support = support
+            smp.support = formula.support
             return smp
-        from pysat.formula import CNF
-        cnf = CNF(from_file=path)
-        return cls._from_simplified(cnf.nv, cnf.clauses, support, device, els=els, **kw)
+        from gpap.engine import read_dimacs
+        nv, clauses, support = read_dimacs(path)
+        return cls._from_simplified(nv, clauses, support, device, els=els, **kw)
 
     @classmethod
     def from_clauses(cls, num_vars: int, clauses, device: torch.device, *,
@@ -247,21 +246,20 @@ class GPUSampler:
         return self._pm_all, self._pm_sup
 
     @torch.inference_mode()
-    def _run_chunk(self, K: int, B: int, random_var: bool, max_rounds: "int | None",
+    def _run_chunk(self, K: int, B: int, random_var: bool,
                    support_mask: torch.Tensor | None, complete: bool, lookahead=False):
         """One chunk of K trajectories — the WHOLE decide+propagate loop in ONE fused kernel
         launch (engine.run_trajectory). Decision order = support vars first (phase 1), then, if
         `complete`, the remaining vars (phase 2); the kernel never straddles the phase boundary.
-        `lookahead` in ("soft", "fsoft") enables the in-kernel risk-polarity; `max_rounds` is
-        accepted for API compatibility but never applied (the kernel structurally terminates in
-        <= |order| decision groups; a cap cripples B=1 on large supports — measured 2x on s832).
+        `lookahead` in ("soft", "fsoft") enables the in-kernel risk-polarity. There is
+        deliberately no round cap: the kernel structurally terminates in <= |order| decision
+        groups, and a cap cripples B=1 on large supports (measured 2x on s832).
 
-        Returns (n_fully, n_support_complete, rounds, free_after_support):
-          n_fully            : rows that are active AND have no free var -> guaranteed models.
-                               The row selection stays on the GPU in engine slot 0 (slot 1 holds
-                               the support-complete selection); read it out with the engine's
-                               selection accessors, no (K,) mask ever crosses the bus.
-          free_after_support : always 0.0 (unmeasurable mid-trajectory in the fused path).
+        Returns (n_fully, n_support_complete, rounds):
+          n_fully : rows that are active AND have no free var -> guaranteed models.
+                    The row selection stays on the GPU in engine slot 0 (slot 1 holds
+                    the support-complete selection); read it out with the engine's
+                    selection accessors, no (K,) mask ever crosses the bus.
         """
         eng = self.engine
         # reset broadcast-restores the cached post-units-flush state: no (K,M) state writes
@@ -292,51 +290,11 @@ class GPUSampler:
         pm_all, pm_sup = self._pair_masks(support_mask)
         n_fully = eng.select_complete(pm_all, slot=0)
         n_sup = (eng.select_complete(pm_sup, slot=1) if support_mask is not None else n_fully)
-        return n_fully, n_sup, rounds, 0.0
-
-    @torch.inference_mode()
-    def _autotune(self, K, B_hint, max_rounds, support_mask, complete, lookahead, probe_k=2048):
-        """Probe a small (random_var, B) grid and return the (rv, B) with the best THROUGHPUT
-        (models / wall) on this formula. Both are strong, formula-dependent levers (polarity stays
-        random throughout, so diversity / 2-wise coverage are preserved — validated == CMSGen):
-          - niche (support BCP-determines the rest): B=8, order irrelevant — fast, high success.
-          - "service" family (search-heavy residual, freeAft≈685): random_var=False (structured order
-            follows the gate DAG) + B=1 (avoid over-committing) is the ONLY combo that completes them
-            (ActivityService modelOK 0.05%→12%); B≥4 OR random order → ≈0.
-          - low-supOK family (7/80.sk): random_var=True.
-        Selecting by throughput (not raw count) never trades a fast high-success combo for a slow one:
-        a B=1 run that collects more models per chunk but takes 60 rounds loses to a 3-round B=8 run.
-        Niche fast-path: if (random, B_hint) already succeeds well, return immediately so the niche
-        pays one cheap probe; only the lose-cases explore the full grid (≤6 chunks)."""
-        pk = max(1, min(K, probe_k))
-
-        def probe(rv, B):
-            self._sync(); t0 = time.perf_counter()
-            n, _, _, _ = self._run_chunk(pk, B, rv, max_rounds, support_mask, complete, lookahead)
-            self._sync()
-            return n, time.perf_counter() - t0
-
-        n0, dt0 = probe(True, B_hint)
-        if n0 / pk > 0.1:                       # workable at (random, B_hint) — keep it; B_hint is fast.
-            # (Threshold is deliberately low: a small-K probe under-rates large B — fewer rounds means
-            #  kernel-launch overhead dominates its wall — so the grid over-favors B=1. If random+B_hint
-            #  already produces at a usable rate, don't risk that misjudgment; only truly-stuck formulas
-            #  (service family ≈0 here) fall through to the full (order,B) grid.)
-            return True, B_hint
-        best = (n0 / dt0 if dt0 > 0 else 0.0, True, B_hint)
-        for rv in (True, False):
-            for B in sorted({1, 4, B_hint}):
-                if rv is True and B == B_hint:  # already probed above
-                    continue
-                n, dt = probe(rv, B)
-                rate = n / dt if dt > 0 else 0.0
-                if rate > best[0]:
-                    best = (rate, rv, B)
-        return best[1], best[2]
+        return n_fully, n_sup, rounds
 
     def _select_config(self, plan, stats, chunk, exploit=False):
         """Adaptive (bandit) config selection: dynamically switch to the best-THROUGHPUT config as it
-        is measured on real full-K chunks. More robust than the small-K `_autotune` probe (which
+        is measured on real full-K chunks. More robust than a small-K pre-probe (which
         under-rates large B because kernel-launch overhead dominates its few rounds, and commits
         permanently): here every measurement is a productive full-K chunk and the choice can change.
         Policy: try each config once, then decaying-epsilon-greedy (explore shrinks as 1/sqrt(chunk),
@@ -533,7 +491,7 @@ class GPUSampler:
 
     @torch.inference_mode()
     def sample_bits(self, n_target: int, *, config=(True, 8, False),
-                    max_decision_rounds: "int | None" = 300, max_chunks: "int | None" = None):
+                    max_chunks: "int | None" = None):
         """Collect up to `n_target` support-projection bit-rows efficiently. Only the small
         (n, S) bit matrix crosses to host RAM per chunk (not full N-var models), so a big output
         is cheap. Returns (matrix, cols_1based): matrix is a numpy uint8 (got, S) array of 0/1,
@@ -553,8 +511,7 @@ class GPUSampler:
             if max_chunks is not None and chunk >= max_chunks:
                 break
             chunk += 1
-            n_done, _, _, _ = self._run_chunk(K, B, rv, max_decision_rounds,
-                                              support_mask, True, la)
+            n_done, _, _ = self._run_chunk(K, B, rv, support_mask, True, la)
             if n_done == 0:
                 if chunk >= 3:                    # cold start + grace: instance is producing nothing
                     break
@@ -573,8 +530,7 @@ class GPUSampler:
         n_target: int,
         *,
         decisions_per_round: int = 1,
-        random_var: "bool | str" = True,
-        max_decision_rounds: int | None = None,
+        random_var: bool = True,
         max_chunks: int | None = None,
         collect: bool = True,
         verify_clauses: list | None = None,
@@ -605,20 +561,24 @@ class GPUSampler:
         (equals n_models when the support is a true independent support). If `verify_clauses`
         is given, every fully-assigned model is independently checked and `all_valid` is set.
 
-        `random_var`: True = random decision order (diverse), False = structured/index order (follows
-        the gate DAG — completes search-heavy residuals), "auto" = cheaply probe a (order, B) grid and
-        pick the best-throughput combo per formula (recommended; overrides `decisions_per_round` with
-        the tuned B — cracks the service family with (structured, B=1) without hurting the niche's B=8).
+        `random_var`: True = random decision order (diverse), False = structured/index order
+        (follows the gate DAG — completes search-heavy residuals). Per-formula adaptation is the
+        portfolio bandit's job (`configs`), which measures both orders on real full-K chunks.
 
         `configs`: a PORTFOLIO of (random_var, B) tuples, run as a throughput BANDIT — each chunk
         runs ONE config at full K, picked by its measured models/wall so far, dynamically switching
         to the winner and re-checking the rest (decaying-epsilon). Robust like a portfolio yet ~as
-        fast as the best single config; it fixes both of `_autotune`'s weaknesses (it measures at
-        full K, and it can change its mind). A one-entry portfolio leaves it nothing to select, which
+        fast as the best single config; unlike the retired small-K pre-probe it measures at
+        full K, and it can change its mind. A one-entry portfolio leaves it nothing to select, which
         is how a MEASUREMENT pins the algorithm (see pipeline.SINGLE_PORTFOLIOS).
         `config_breakdown` reports each config's models/chunks/throughput. Overrides
         random_var/decisions_per_round when set.
         """
+        if isinstance(random_var, str):
+            raise ValueError(f"random_var={random_var!r} is not a mode: pass a bool. Per-formula "
+                             "adaptation is the portfolio bandit (configs=...); the old 'auto' "
+                             "probe was retired — the bandit measures at full K and can change "
+                             "its mind, which are exactly what the probe could not do.")
         B = max(1, decisions_per_round)
         sup = self.support if (isinstance(support, str) and support == "auto") else support
         support_mask = None
@@ -628,9 +588,6 @@ class GPUSampler:
             sup_t = torch.tensor(sup, dtype=torch.long, device=self.device)
             support_mask[sup_t] = True
             sup_idx = sup_t                                 # for projection
-        if configs is None and isinstance(random_var, str) and random_var == "auto":
-            random_var, B = self._autotune(self.K, B, max_decision_rounds, support_mask,
-                                           complete, lookahead)
         # Normalise the portfolio to (random_var, B, lookahead) triples. A config may be a 2-tuple
         # (rv, B) — lookahead defaults off — or a 3-tuple (rv, B, lookahead), lookahead ∈
         # {False, "soft"} ("fused"/"fsoft" accepted as aliases from the pre-packed-only era).
@@ -662,7 +619,6 @@ class GPUSampler:
         n_models = 0
         n_support_complete = 0
         rounds_hist: list[int] = []
-        free_after_hist: list[float] = []
         chunk = 0
         all_valid = True
         gpu_unsound = 0          # rows that were 'fully+active' yet a clause had sat_count==0 (should be 0)
@@ -710,10 +666,9 @@ class GPUSampler:
                     p_before = self.engine.props_total()
                     d_before = self.engine.decs_total()
                     t_cfg = time.perf_counter()
-                n_done, n_sup, rounds, free_after = self._run_chunk(
-                    K_c, B_c, rv_c, max_decision_rounds, support_mask, complete, la_c)
+                n_done, n_sup, rounds = self._run_chunk(
+                    K_c, B_c, rv_c, support_mask, complete, la_c)
                 rounds_hist.append(rounds)
-                free_after_hist.append(free_after)
                 attempts += K_c
                 n_models += n_done
                 n_support_complete += n_sup
@@ -786,14 +741,12 @@ class GPUSampler:
             "decisions_per_s": (bcp_decs / elapsed) if elapsed > 0 else 0.0,
             "implications_per_s": (bcp_impl / elapsed) if elapsed > 0 else 0.0,
             "bcp_decisions": bcp_decs, "bcp_implications": bcp_impl,
-            "mean_free_after_support": (sum(free_after_hist) / len(free_after_hist)) if free_after_hist else 0.0,
             "n_chunks": chunk, "K": K, "B": B, "random_var": bool(random_var),
             "support_size": (len(sup) if sup else None),
             "mean_decision_rounds": (sum(rounds_hist) / len(rounds_hist)) if rounds_hist else 0,
             "max_decision_rounds": max(rounds_hist) if rounds_hist else 0,
             "n_distinct": len(distinct) if keep_rows else None,
             "gpu_sound": gpu_unsound == 0, "gpu_unsound": gpu_unsound,
-            "kernel": True,
         }
         if collect:
             out["models"] = models

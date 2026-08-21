@@ -35,6 +35,9 @@ from gpap.engine.probe import LiteralProbe, ProbeBudget
 
 log = logging.getLogger(__name__)
 
+__all__ = ["mine_entailed", "MiningResult", "DROP_LEVELS", "DEFAULT_WIDTHS",
+           "DEFAULT_MAX_TUPLES"]
+
 #: Widths mined by default: units, then binaries, then ternaries.
 DEFAULT_WIDTHS = (1, 2, 3)
 

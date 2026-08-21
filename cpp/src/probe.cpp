@@ -63,13 +63,6 @@ int64_t sat_mul(int64_t a, int64_t b) {
     return a * b;
 }
 
-/* DIMACS literal -> internal 2N index, or -1 if out of range for an N-variable formula. */
-inline int64_t to_index(int32_t lit, int32_t num_vars) {
-    if (lit == 0) return -1;
-    const int32_t v = lit > 0 ? lit : -lit;
-    if (v > num_vars) return -1;
-    return 2ll * (v - 1) + (lit < 0 ? 1 : 0);
-}
 inline int32_t to_dimacs(int64_t idx) {
     const int32_t v = static_cast<int32_t>(idx / 2) + 1;
     return (idx % 2) ? -v : v;
@@ -269,12 +262,12 @@ gpap_status build_pool(gpap_engine *e, const int32_t *pool, int32_t pool_n,
         std::vector<int32_t> lits(static_cast<size_t>(std::max(count, 0)));
         if (count > 0) GPAP_TRY(gpap_free_literals(e, lits.data(), &count));
         out->reserve(lits.size());
-        for (int32_t l : lits) out->push_back(to_index(l, e->num_vars));
+        for (int32_t l : lits) out->push_back(gpap::lit_index_from_dimacs(l, e->num_vars));
         return GPAP_OK;
     }
     out->reserve(static_cast<size_t>(std::max(pool_n, 0)));
     for (int32_t i = 0; i < pool_n; ++i) {
-        const int64_t idx = to_index(pool[i], e->num_vars);
+        const int64_t idx = gpap::lit_index_from_dimacs(pool[i], e->num_vars);
         if (idx < 0) {
             set_error("probe pool: literal %d out of range (formula has %d variables; literals "
                       "are DIMACS, 1..%d or -1..-%d, never 0)",
@@ -314,7 +307,7 @@ extern "C" gpap_status gpap_assume_units(gpap_engine *e, const int32_t *lits, in
     if (n <= 0) return GPAP_OK;
     std::vector<int64_t> row(static_cast<size_t>(n));
     for (int32_t i = 0; i < n; ++i) {
-        row[static_cast<size_t>(i)] = to_index(lits[i], e->num_vars);
+        row[static_cast<size_t>(i)] = gpap::lit_index_from_dimacs(lits[i], e->num_vars);
         if (row[static_cast<size_t>(i)] < 0) {
             set_error("gpap_assume_units: literal %d out of range (formula has %d variables)",
                       lits[i], e->num_vars);
@@ -360,7 +353,7 @@ extern "C" gpap_status gpap_probe_tuples(gpap_engine *e, const int32_t *tuples, 
      * nothing downstream can detect it. One pass over the caller's own array is cheap; being
      * wrong here is undetectable. (Same reasoning as AssumptionChecker's `_flatten`.) */
     for (int64_t i = 0; i < n * k; ++i) {
-        if (to_index(tuples[i], e->num_vars) < 0) {
+        if (gpap::lit_index_from_dimacs(tuples[i], e->num_vars) < 0) {
             set_error("probe tuple: literal %d out of range (formula has %d variables; literals "
                       "are DIMACS, 1..%d or -1..-%d, never 0)",
                       tuples[i], e->num_vars, e->num_vars, e->num_vars);
@@ -376,7 +369,7 @@ extern "C" gpap_status gpap_probe_tuples(gpap_engine *e, const int32_t *tuples, 
             const int64_t take = std::min<int64_t>(want, n - cursor);
             for (int64_t i = 0; i < take; ++i)
                 for (int32_t j = 0; j < k; ++j)
-                    c.push_back(to_index(tuples[(cursor + i) * k + j], e->num_vars));
+                    c.push_back(gpap::lit_index_from_dimacs(tuples[(cursor + i) * k + j], e->num_vars));
             cursor += take;
             return take;
         },

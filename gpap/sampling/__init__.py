@@ -11,5 +11,13 @@ consumer of it.
 """
 from gpap.sampling.sampler import GPUSampler, parse_independent_support
 from gpap.sampling.output import write_samples
+from gpap.sampling.pipeline import (
+    Lookahead,
+    SamplingConfig,
+    VarOrder,
+    portfolio,
+    sample_file,
+)
 
-__all__ = ["GPUSampler", "parse_independent_support", "write_samples"]
+__all__ = ["GPUSampler", "parse_independent_support", "write_samples",
+           "sample_file", "portfolio", "SamplingConfig", "VarOrder", "Lookahead"]
