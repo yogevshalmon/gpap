@@ -19,9 +19,20 @@ CIRCUIT_EXTS = (".bench", ".aig", ".aag")   # the single source for "is this a c
 
 
 def _k_cap_arg(v):
-    """--k-cap accepts the literal 'auto' or an int; the pipeline resolves 'auto' per device.
+    """--k-cap accepts the literal 'auto' or a POSITIVE int; the pipeline resolves 'auto' per
+    device. 0 would mean "uncapped" to the memory model — on the CLI that is a footgun (an
+    uncapped K on a big-VRAM box is the host-RAM-spill hazard), so ask for it explicitly via the
+    Python API (k_cap=None) if that is really what you want.
     Shared with gpap/benchmark.py (which already imports this module for CIRCUIT_EXTS)."""
-    return v if v == "auto" else int(v)
+    if v == "auto":
+        return v
+    try:
+        n = int(v)
+    except ValueError:
+        raise argparse.ArgumentTypeError(f"expected 'auto' or a positive integer, got {v!r}") from None
+    if n < 1:
+        raise argparse.ArgumentTypeError(f"expected 'auto' or a positive integer, got {n}")
+    return n
 
 
 def _ensure_cnf(args):
@@ -39,16 +50,21 @@ def _ensure_cnf(args):
     import time as _time
     tmp = tempfile.NamedTemporaryFile(suffix=".cnf", delete=False).name
     t0 = _time.perf_counter()
-    if path.endswith(".bench"):
-        from gpap.circuits.bench import convert_one
-        convert_one(path, tmp, args.cycles, args.seed, pin_outputs=args.pin_outputs,
-                    encoder=args.encoder, abc_path=args.abc, abc_opt=args.abc_opt,
-                    target_mode=args.target)
-    else:
-        from gpap.circuits.aig2cnf import convert_aig_one
-        convert_aig_one(path, tmp, args.cycles, args.seed, pin_outputs=args.pin_outputs,
+    try:
+        if path.endswith(".bench"):
+            from gpap.circuits.bench import convert_one
+            convert_one(path, tmp, args.cycles, args.seed, pin_outputs=args.pin_outputs,
                         encoder=args.encoder, abc_path=args.abc, abc_opt=args.abc_opt,
                         target_mode=args.target)
+        else:
+            from gpap.circuits.aig2cnf import convert_aig_one
+            convert_aig_one(path, tmp, args.cycles, args.seed, pin_outputs=args.pin_outputs,
+                            encoder=args.encoder, abc_path=args.abc, abc_opt=args.abc_opt,
+                            target_mode=args.target)
+    except BaseException:
+        with contextlib.suppress(OSError):   # a failed conversion must not leak its temp file
+            os.unlink(tmp)
+        raise
     encode_s = _time.perf_counter() - t0
     print(f"  encoded in {encode_s:.1f}s [{args.encoder}"
           f"{'/' + args.abc_opt if args.encoder != 'tseitin' else ''}]")
@@ -56,10 +72,7 @@ def _ensure_cnf(args):
 
 
 def _cmd_sample(args):
-    import json
     import torch
-    from gpap.sampling.metrics import format_uniformity
-    from gpap.sampling.pipeline import sample_file, describe_portfolio, portfolio as _portfolio
 
     from gpap.engine import core_available
     if not torch.cuda.is_available():
@@ -69,7 +82,28 @@ def _cmd_sample(args):
         raise SystemExit("the engine core (libgpap) is not built. Run scripts/build_core.sh, "
                          "then `gpap info` to confirm.")
     device = torch.device(args.device) if args.device else torch.device("cuda")
+    # Fail on an unwritable destination BEFORE the run, not after minutes of sampling.
+    for flag, dest in (("--out", args.out), ("--stats", args.stats)):
+        if dest:
+            d = os.path.dirname(dest) or "."
+            if not os.path.isdir(d):
+                raise SystemExit(f"{flag}: directory {d!r} does not exist")
     path, tmp, encode_s = _ensure_cnf(args)
+    try:
+        _sample_run(args, device, path, tmp, encode_s)
+    finally:
+        if tmp:
+            with contextlib.suppress(OSError):
+                os.unlink(tmp)
+
+
+def _sample_run(args, device, path, tmp, encode_s):
+    """The body of `gpap sample`, after the environment checks and the circuit conversion —
+    split out so the converted temp CNF is unlinked on every exit path."""
+    import json
+    from gpap.sampling.metrics import format_uniformity
+    from gpap.sampling.pipeline import sample_file, describe_portfolio, portfolio as _portfolio
+
     portfolio = _portfolio(args.portfolio, allow_soft=args.allow_soft)
     if args.allow_soft:
         print("  [warn] --allow-soft: the soft risk-polarity config is in the portfolio. It\n"
@@ -94,6 +128,9 @@ def _cmd_sample(args):
     # as support_size.
     print(f"{os.path.basename(args.input)}: N={info['nv']} M={info['n_clauses']} "
           f"|sup|={len(info['sup1'])}")
+    if info["n_clauses"] == 0:
+        print("  [warn] the formula has 0 clauses (empty or comment-only input?) — every "
+              "assignment is a model, so these numbers measure nothing")
     print(f"  {info['n_models']:,}{capped} models in {info['wall_total_s']:.1f}s e2e "
           f"({info['wall_timed_s']:.1f}s sampling)")
     print(f"  {info['samples_per_s']:,.0f} samples/s (steady-state), "
@@ -164,8 +201,6 @@ def _cmd_sample(args):
         stats = {k: v for k, v in info.items() if k not in ("samples", "models", "cols")}
         json.dump(stats, open(args.stats, "w"), indent=1, default=str)
         print(f"  wrote stats -> {args.stats}")
-    if tmp:
-        os.unlink(tmp)
 
 
 def _write_cnf(path, num_vars, clauses):
@@ -198,8 +233,11 @@ def _parse_pool(spec, cnf_path, num_vars):
         return [s for v in sup for s in (v + 1, -(v + 1))]
     text = spec
     if spec.startswith("@"):
-        with open(spec[1:]) as fh:
-            text = fh.read()
+        try:
+            with open(spec[1:]) as fh:
+                text = fh.read()
+        except OSError as e:
+            raise SystemExit(f"--pool: cannot read {spec[1:]!r} ({e.strerror or e})") from None
     lits = []
     for tok in text.replace(",", " ").split():
         try:
@@ -245,6 +283,8 @@ def _cmd_mine(args):
         nv, clauses, _sup = read_dimacs(path)
         pool = _parse_pool(args.pool, path, nv)
         widths = sorted(set(args.width))
+        if widths and widths[0] < 1:
+            raise SystemExit(f"--width: widths must be >= 1, got {widths}")
         print(f"{os.path.basename(args.input)}: N={nv} M={len(clauses)} "
               f"pool={args.pool}{'' if pool is None else f' ({len(pool)} literals)'} "
               f"widths={widths}")
@@ -265,7 +305,8 @@ def _cmd_mine(args):
 
         res = mine_entailed(nv, clauses, device,
                             pool=pool,
-                            widths=tuple(widths), seconds=args.seconds,
+                            widths=tuple(widths),
+                            seconds=None if args.seconds <= 0 else args.seconds,
                             max_tuples=args.max_tuples, drop=args.drop)
         print(f"  mined {res.summary()}")
         if res.seconds:
@@ -288,9 +329,13 @@ def _cmd_mine(args):
                 print(f"  (nothing found in the {done:,} candidates probed — that is "
                       f"{100.0 * done / cand:.3g}% of the space, so this is NOT evidence that "
                       f"nothing is entailed. Raise --max-tuples/--seconds, or narrow --pool.)")
-            else:
+            elif all(res.exhausted.get(w, False) for w in widths):
                 print("  (nothing entailed was found, and the search WAS exhaustive — the "
                       "formula's propagation is already tight at these widths)")
+            else:
+                # No candidates were even generated (a skipped or errored width) — say so
+                # instead of claiming exhaustiveness the sweep never earned.
+                print("  (nothing was probed — see the per-width status above)")
 
         if args.out:
             # The STRENGTHENED formula: original + mined. Sound by construction — every mined

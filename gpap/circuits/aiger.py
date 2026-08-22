@@ -82,6 +82,9 @@ def _read_aag(path: str, text: str) -> Aig:
     lines = text.splitlines()
     hdr = lines[0].split()
     M, I, L, O, A = _check_header(path, hdr)
+    if len(lines) < 1 + I + L + O + A:
+        raise ValueError(f"{path}: truncated .aag — header declares {I + L + O + A} "
+                         f"definition line(s), file has {len(lines) - 1}")
     pos = 1
     inputs = [int(lines[pos + k].split()[0]) for k in range(I)]
     pos += I

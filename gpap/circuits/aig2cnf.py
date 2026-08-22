@@ -77,6 +77,8 @@ def build_cnf_aig(aig: Aig, T: int, seed: int, pin_outputs: int | None = None, t
     (e.g. simulate.rare_target) to override the default random_target_aig pattern."""
     from gpap.circuits.bench import CnfBuilder
 
+    if T < 1:
+        raise ValueError(f"cycles must be >= 1, got {T}")
     if aig.n_latches == 0:
         T = 1                                      # combinational: unrolling = independent copies
     names = input_labels(aig)

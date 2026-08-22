@@ -14,6 +14,7 @@ import os
 # (~2.3x more usable K for the same VRAM). setdefault so an explicit user setting wins.
 # Importing gpap before any CUDA use guarantees the ordering.
 os.environ.setdefault("PYTORCH_CUDA_ALLOC_CONF", "expandable_segments:True")
+del os                     # not part of the package namespace (`__all__` is the contract)
 
 __version__ = "0.1.0"
 
@@ -52,6 +53,12 @@ def sample(path, n=50_000, *, device=None, seed=5, max_samples=MAX_SAMPLES,
 def sample_clauses(num_vars, clauses, n=50_000, *, support=None, device=None, seed=5,
                    max_samples=MAX_SAMPLES, full_models=False, **kw):
     """Like sample(), for an in-memory clause list. `support` = 0-based projection vars."""
+    if support is not None:
+        bad = [v for v in support if not 0 <= int(v) < num_vars]
+        if bad:
+            raise ValueError(
+                f"support variables are 0-BASED indices in [0, {num_vars - 1}] "
+                f"(DIMACS var v is index v-1); out of range: {bad[:5]}")
     from gpap.sampling.pipeline import sample_clauses as _sc
     return _samples(_sc, (num_vars, clauses, support, _resolve_device(device)), n, seed,
                     max_samples, full_models, kw)

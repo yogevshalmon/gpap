@@ -194,6 +194,15 @@ class BCPEngine:
             if decisions.numel() == 0:
                 return
             if decisions.is_cuda:
+                # The row-count check is memory safety, same as _core._decisions on the host
+                # path: apply_dev hands the core a raw pointer it reads K rows from, so a short
+                # tensor is an out-of-bounds device read whose garbage becomes literal indices.
+                k = self._core.K
+                if decisions.size(0) != k:
+                    raise ValueError(
+                        f"apply_and_propagate: decisions has {decisions.size(0)} rows but the "
+                        f"engine is sized for K={k} — pass one row per assumption set, or "
+                        f"reset({decisions.size(0)}) first")
                 d = decisions.to(torch.int64).contiguous()
                 self._core.apply_dev(d.data_ptr(), d.size(1))
                 return

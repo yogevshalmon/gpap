@@ -356,6 +356,9 @@ def main(argv=None):
     device = (torch.device(args.device) if args.device
               else torch.device("cuda" if torch.cuda.is_available() else "cpu"))
     files = sorted(glob.glob(args.glob))
+    if not files:
+        print(f"[warn] no instances matched {args.glob!r} — nothing to run "
+              f"(is the glob quoted so the shell did not expand it?)", file=sys.stderr)
     portfolio = _portfolio(args.portfolio, allow_soft=args.allow_soft)
     if args.twise and args.n_cov == 0:
         args.n_cov = 2000                          # 2-wise needs the collected quality sample
