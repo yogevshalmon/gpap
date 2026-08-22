@@ -47,7 +47,7 @@ cpp/                       # THE ENGINE CORE — libgpap (C ABI + header-only C+
   src/runtime.cpp          # cubin registry + launches
   kernels/bcp.py           # THE 2 BCP kernels (fixpoint + trajectory, SHIFT=16|8, scalar/WAVE)
   kernels/helpers.py       # support kernels (Triton, so the toolchain stays nvcc-free)
-  tools/build_kernels.py   # AOT: kernels.py + helpers.py -> embedded cubins (29 specializations)
+  tools/build_kernels.py   # AOT: kernels.py + helpers.py -> embedded cubins (33 specializations)
   examples/                # sample.cpp + assumptions.cpp (tier 1) + c_api.c (raw C ABI)
 examples/                  # RUNNABLE examples, both faces: sample_solutions.py +
                            #   check_assumptions.py (python) + a README pointing at cpp/examples/

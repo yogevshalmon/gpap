@@ -47,7 +47,15 @@ def _support_literals(support):
 #: by one chunk.
 MINE_SECONDS = 5.0
 #: Stage 1 — only the wide widths that are cheap for this support size.
-STAGE1_MAX_TUPLES = {2: 80_000, 3: 40_000}
+#: ⚠️ The width-2 ceiling is a COST calibration, and the cost moved: at 80,000 it was set when a
+#: probe chunk paid a full K·M state broadcast, and it TRUNCATED the support-pool sweep on any
+#: instance with |sup| >~ 200 (C(2·275,2) = 150,975 on b04/b10, 244,650 on s1196) — so those
+#: swept a lexicographic PREFIX, which MINING_FINDINGS notes is not a uniform sample of the
+#: space. With the reset broadcast gone (CLEAN mode) the whole support pool is exhaustible for
+#: free: measured on b04-c25 the uncapped sweep ran 0.40 s vs 0.46 s capped, reported
+#: `exhausted` instead of a truncation, and found a clause the ceiling had cut. 1,000,000 covers
+#: |sup| up to ~700 exhaustively; past that MINE_SECONDS is the real (and correct) bound.
+STAGE1_MAX_TUPLES = {2: 1_000_000, 3: 40_000}
 #: Stage 2 — forced wide widths for an instance that is still stuck after the units are in.
 STAGE2_MAX_TUPLES = 2_000_000
 #: Formulas smaller than this skip mining under `mine="auto"` (`--mine on` forces past it).

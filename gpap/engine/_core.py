@@ -498,25 +498,48 @@ class Engine:
         check(load().gpap_engine_reset(self._h, int(K)), "reset")
         self._K = int(K)
 
-    def apply(self, decisions: np.ndarray) -> None:
-        """(K, L) int64 internal literal indices, -1 = padding. ONE fixpoint launch."""
+    def _decisions(self, decisions: np.ndarray, what: str) -> np.ndarray:
+        """(K, L) int64, contiguous, with the ROW COUNT checked against the engine's K.
+
+        The check is memory safety, not politeness: the C side stages K*L int64s from this
+        pointer, so a short array is read past its end and the garbage becomes literal indices —
+        and an index past 2N makes the kernel's atomic_or write into a LATER row (the corruption
+        gpap_probe_tuples validates against, undetectable downstream). K comes from the CORE, not
+        a locally tracked value, so it is right even if the caller never called reset()."""
         d = np.ascontiguousarray(decisions, dtype=np.int64)
         if d.ndim == 1:
             d = d.reshape(1, -1)
+        if d.ndim != 2:
+            raise ValueError(f"{what}: decisions must be (K, L), got shape {d.shape}")
+        k = self.K
+        if d.shape[0] != k:
+            raise ValueError(
+                f"{what}: decisions has {d.shape[0]} rows but the engine is sized for K={k} — "
+                f"pass one row per assumption set, or reset({d.shape[0]}) first")
+        return d
+
+    def apply(self, decisions: np.ndarray) -> None:
+        """(K, L) int64 internal literal indices, -1 = padding. ONE fixpoint launch."""
+        d = self._decisions(decisions, "apply")
         check(load().gpap_engine_apply(self._h, _p(d, c_int64), d.shape[1]), "apply")
 
     def apply_dev(self, ptr: int, L: int) -> None:
         check(load().gpap_engine_apply_dev(self._h, ptr, L), "apply(dev)")
 
     def apply_clean(self, decisions: np.ndarray) -> None:
-        """apply(), CLEAN mode: the same fixpoint — identical flags and counters — but the
-        launch restores its own packed rows to the post-flush baseline before exiting, so the
-        NEXT reset() skips the K x M broadcast (reset-lite). Use ONLY when nothing reads
-        post-apply state: the assignment/sat accessors would return the BASELINE, not the
-        fixpoint. $GPAP_CLEAN=0 (read at engine create) turns this back into apply()."""
-        d = np.ascontiguousarray(decisions, dtype=np.int64)
-        if d.ndim == 1:
-            d = d.reshape(1, -1)
+        """apply(), CLEAN mode: same (K, L) contract, same fixpoint, identical flags and
+        counters — but the launch restores its own PACKED rows to the post-flush baseline before
+        exiting, so the next reset() skips the K x M broadcast (reset-lite).
+
+        Use ONLY when nothing reads post-launch state. What survives and what does not is
+        asymmetric, because v1 cleans PACKED only:
+          * flags + counters      — the RESULT, always valid;
+          * sat/soundness readout — sees the BASELINE (sat_rows, check_sound, packed_rows);
+          * assignment readout    — sees the FIXPOINT (assignment_rows, var_bits,
+                                    select_complete); abits are untouched by the clean tail;
+          * recache_flush         — REFUSED, since that pair is inconsistent by construction.
+        $GPAP_CLEAN=0 (read at engine create) turns this back into apply()."""
+        d = self._decisions(decisions, "apply_clean")
         check(load().gpap_engine_apply_clean(self._h, _p(d, c_int64), d.shape[1]),
               "apply(clean)")
 
