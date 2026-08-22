@@ -17,6 +17,10 @@ namespace gpap {
 void set_error(const char *fmt, ...);
 const char *get_error();
 
+/* Guard for PACKED-derived readouts: errors when a CLEAN launch left the baseline behind
+ * (defined in engine.cpp, used by readout.cpp). */
+gpap_status engine_reject_if_packed_is_baseline(gpap_engine *e, const char *what);
+
 /* DIMACS literal -> internal 2N index (+v -> 2(v-1), -v -> 2(v-1)+1), or -1 if out of range
  * for an N-variable formula. The one conversion every DIMACS-speaking entry point shares. */
 inline int64_t lit_index_from_dimacs(int32_t lit, int32_t num_vars) {
@@ -145,6 +149,12 @@ struct gpap_engine {
      * (the baseline itself moves), or a packed realloc (DevBuf::reserve grows by
      * release+alloc, so the contents are gone). */
     int32_t packed_clean_rows = 0;
+    /* 1 = packed and abits describe DIFFERENT states: a CLEAN launch restored packed to the
+     * baseline while abits kept the fixpoint. Only recache_flush cares — snapshotting that pair
+     * would cache a self-contradictory baseline (abits claiming literals TRUE whose clause
+     * decrements packed never recorded), so it refuses. Cleared by reset (re-broadcasts abits)
+     * and by any plain apply / trajectory (both leave the two consistent). */
+    int abits_diverged = 0;
     int64_t resets_full = 0, resets_lite = 0;
     int clean_enabled = 1;   /* GPAP_CLEAN=0 kills the lite path (A/B lever + escape hatch) */
 

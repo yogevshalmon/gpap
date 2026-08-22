@@ -315,6 +315,7 @@ extern "C" gpap_status gpap_engine_reset(gpap_engine *e, int32_t K) {
         e->resets_full++;
     }
     GPAP_TRY(broadcast_rows(e, e->abits, e->abits_flushed, e->nw, K));
+    e->abits_diverged = 0;             /* abits are the baseline again, same as packed */
     GPAP_TRY(fill_flags(e, e->active, e->flush_conflict ? 0 : 1, K));
     GPAP_TRY(fill_flags(e, e->conflict, e->flush_conflict ? 1 : 0, K));
     return GPAP_OK;
@@ -322,6 +323,19 @@ extern "C" gpap_status gpap_engine_reset(gpap_engine *e, int32_t K) {
 
 extern "C" gpap_status gpap_engine_recache_flush(gpap_engine *e) {
     if (!e) return GPAP_ERR_ARG;
+    if (e->abits_diverged) {
+        /* REFUSED, not silently wrong. After a CLEAN launch packed holds the baseline and abits
+         * hold the fixpoint, so caching that pair would produce a baseline in which abits claim
+         * literals TRUE whose clause decrements packed never recorded — every later reset would
+         * broadcast the contradiction and every later launch would propagate from corrupt
+         * sat_counts, undetectably. The caller wants the FIXPOINT cached, which is what a plain
+         * gpap_engine_apply leaves behind (gpap_assume_units already uses it). */
+        set_error("gpap_engine_recache_flush: the last launch was gpap_engine_apply_clean, which "
+                  "restored the packed state to the baseline while the assignment bitmap kept the "
+                  "fixpoint — caching that pair would corrupt the flush cache. Re-run the "
+                  "assumption with gpap_engine_apply (the plain kernel) and recache that.");
+        return GPAP_ERR_ARG;
+    }
     GPAP_TRY(use_ctx(e));
     e->packed_clean_rows = 0;                       /* the baseline itself is moving */
     GPAP_CU(cuMemcpyDtoD(e->packed_flushed.ptr, e->packed.ptr,
@@ -374,6 +388,9 @@ static gpap_status apply_dev_common(gpap_engine *e, uintptr_t decisions_dev, int
     GPAP_TRY(accumulate(e, e->nprops, e->acc_props, e->K));
     GPAP_TRY(accumulate(e, e->ndecs, e->acc_decs, e->K));
     for (int i = 0; i < GPAP_SLOTS; ++i) e->slots[i].rows_valid = false;
+    /* A CLEAN launch leaves packed at the baseline but abits at the fixpoint; a plain one
+     * leaves both at the fixpoint. Either way this is the authoritative update. */
+    e->abits_diverged = clean ? 1 : 0;
     if (clean) e->packed_clean_rows = clean_rows_prev;
     return GPAP_OK;
 }
@@ -419,6 +436,7 @@ extern "C" gpap_status gpap_engine_trajectory_dev(gpap_engine *e, uintptr_t orde
     GPAP_TRY(e->ndecs.zero());
     GPAP_TRY(e->nrounds.zero());
     e->packed_clean_rows = 0;       /* a trajectory dirties without a restorable record */
+    e->abits_diverged = 0;          /* ...but it leaves packed and abits CONSISTENT */
 
     Kernel k;
     GPAP_TRY(e->kernels.get(traj_key(e->shift, e->mode == GPAP_MODE_WAVE ? 1 : 0,
@@ -461,6 +479,20 @@ extern "C" gpap_status gpap_engine_trajectory(gpap_engine *e, const int32_t *ord
 /* Selections and readout live in readout.cpp; these helpers are shared with it. */
 namespace gpap {
 gpap_status engine_use_ctx(gpap_engine *e) { return use_ctx(e); }
+
+/* Refuse a PACKED-derived readout after a CLEAN launch. Those calls would answer from the
+ * baseline the clean tail restored — a plausible-looking value describing no launch that ran,
+ * which is worse than an error (gpap_check_sound would pronounce on the wrong state entirely).
+ * gpap_packed_rows is deliberately NOT guarded: it is the raw/debug readout, and it is what the
+ * identity gate uses to prove the restore happened. */
+gpap_status engine_reject_if_packed_is_baseline(gpap_engine *e, const char *what) {
+    if (!e || !e->abits_diverged) return GPAP_OK;
+    set_error("%s: the last launch was gpap_engine_apply_clean, which restored the packed state "
+              "to the baseline — this readout would describe the baseline, not the fixpoint. Use "
+              "gpap_engine_apply (the plain kernel) when you need the packed state afterwards.",
+              what);
+    return GPAP_ERR_ARG;
+}
 gpap_status engine_stage(DevBuf &buf, const void *host, size_t n) { return stage(buf, host, n); }
 gpap_status engine_ensure_rows(gpap_engine *e, int32_t slot) { return ensure_rows(e, slot); }
 size_t engine_readout_slice_bytes() { return kReadoutSliceBytes; }
