@@ -231,6 +231,8 @@ class LiteralProbe:
         host memory a sweep needs, whatever C(P,k) is. `budget.max_tuples` bounds how many are
         probed, not whether the sweep runs at all.
         """
+        if size < 1:
+            raise ValueError(f"probe size must be >= 1, got {size}")
         b = budget or ProbeBudget()
         if self.unsat:
             return ProbeResult(conflicting=np.empty((0, size), np.int32), total=0,
@@ -247,7 +249,11 @@ class LiteralProbe:
         The escape hatch for callers that build candidates themselves — filtered, weighted, or
         drawn from somewhere other than a plain enumeration."""
         b = budget or ProbeBudget()
-        tuples = np.ascontiguousarray(tuples, dtype=np.int32)
+        try:
+            tuples = np.ascontiguousarray(tuples, dtype=np.int32)
+        except ValueError:
+            raise ValueError("probe_tuples needs a rectangular (n, k) array — all tuples must "
+                             "have the same width (probe each width separately)") from None
         if tuples.ndim == 1:
             tuples = tuples.reshape(-1, 1)
         if self.unsat or tuples.shape[0] == 0:

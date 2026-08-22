@@ -173,6 +173,8 @@ def build_cnf(circ, T, seed, pin_outputs=None, target=None):
     the CircuitSAT problem keeps a large, samplable solution space (the DEMOTIC-style single-output
     setup). `target` overrides the pinned pattern ({output: bool}, e.g. simulate.rare_target);
     it MUST be a simulation-reachable pattern or the CNF is UNSAT — default = random_target(seed)."""
+    if T < 1:
+        raise ValueError(f"cycles must be >= 1, got {T}")
     inputs, outputs, dffs, gates = circ
     if target is None:
         target = random_target(circ, T, seed)

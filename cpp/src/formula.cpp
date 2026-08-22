@@ -10,6 +10,8 @@
 #include "gpap_internal.hpp"
 
 #include <algorithm>
+#include <cerrno>
+#include <cstdint>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
@@ -171,23 +173,50 @@ extern "C" gpap_status gpap_formula_from_dimacs(const char *path, gpap_formula *
     /* Token stream: clauses are 0-TERMINATED, not line-based (multiple clauses per line and
      * clauses spanning lines are both legal). 'c' comments and the SATLIB '%' end marker are
      * handled line-wise; N = max(header N, highest variable used) so trailing declared
-     * variables (support vars that appear only in `c ind` lines) keep their slots. */
+     * variables (support vars that appear only in `c ind` lines) keep their slots.
+     *
+     * STRICT on corruption, lenient on structure. Anything that is not a literal, a comment,
+     * the header or the '%' trailer is a PARSE ERROR naming the line — a stray token used to be
+     * silently dropped, which turned a corrupt file into a DIFFERENT formula with no warning.
+     * Deliberately still tolerated (all common in real benchmark files): a missing header
+     * (N from the highest variable), a header whose counts disagree with the body, a final
+     * clause unterminated at EOF, and empty/tautological/duplicate-literal clauses (the engine
+     * is sound on all of them). */
     std::vector<int32_t> toks;
     std::vector<int32_t> support;
     int32_t header_n = 0;
+    bool seen_header = false;
+    long line = 1;
     const char *p = buf.c_str(), *end = p + buf.size();
     bool at_line_start = true;
     while (p < end) {
         if (*p == ' ' || *p == '\t' || *p == '\r') { ++p; continue; }
-        if (*p == '\n') { ++p; at_line_start = true; continue; }
+        if (*p == '\n') { ++p; ++line; at_line_start = true; continue; }
         if (at_line_start && (*p == 'c' || *p == 'p' || *p == '%')) {
             const char c0 = *p;
             const char *line_end = (const char *)memchr(p, '\n', (size_t)(end - p));
             if (!line_end) line_end = end;
             if (c0 == '%') break;
             if (c0 == 'p') {
+                /* sscanf is NOT line-bounded — on "p cnf\n1 2 0" it would walk through the
+                 * newline and read the counts off the next clause. Scan a copy of the line. */
+                const std::string hline(p, line_end);
                 int n = 0, m = 0;
-                if (sscanf(p, "p cnf %d %d", &n, &m) >= 1) header_n = n;
+                if (sscanf(hline.c_str(), "p cnf %d %d", &n, &m) != 2 || n < 0 || m < 0) {
+                    set_error("'%s' line %ld: malformed header (expected 'p cnf <vars> "
+                              "<clauses>')", path, line);
+                    return GPAP_ERR_IO;
+                }
+                /* The QuickSampler/HTS benchmark distributions repeat the IDENTICAL header
+                 * line — harmless redundancy, accepted. Two headers that DISAGREE are two
+                 * different formulas glued together; that is corruption. */
+                if (seen_header && n != header_n) {
+                    set_error("'%s' line %ld: conflicting 'p cnf' header (%d vars after a "
+                              "header declaring %d)", path, line, n, header_n);
+                    return GPAP_ERR_IO;
+                }
+                seen_header = true;
+                header_n = n;
             } else if (c0 == 'c') {
                 /* Independent-support headers: `c ind <v...> 0` (the UniGen / QuickSampler
                  * convention) and the `cr <v...>` variant some samplers emit — same meaning,
@@ -211,13 +240,34 @@ extern "C" gpap_status gpap_formula_from_dimacs(const char *path, gpap_formula *
         }
         at_line_start = false;
         if (*p == '-' || (*p >= '0' && *p <= '9')) {
+            const bool neg = (*p == '-');
             char *tail = nullptr;
+            errno = 0;
             long v = strtol(p, &tail, 10);
-            if (tail == p) { ++p; continue; }
+            if (tail == p) {                       /* '-' followed by a non-digit */
+                set_error("'%s' line %ld: stray '-' is not a literal", path, line);
+                return GPAP_ERR_IO;
+            }
+            if (errno == ERANGE || v > INT32_MAX || v < -(long)INT32_MAX) {
+                set_error("'%s' line %ld: literal magnitude exceeds %d", path, line, INT32_MAX);
+                return GPAP_ERR_IO;
+            }
+            if (v == 0 && neg) {                   /* '-0' is a typo, not a terminator */
+                set_error("'%s' line %ld: '-0' is not a literal (0 alone terminates a clause)",
+                          path, line);
+                return GPAP_ERR_IO;
+            }
+            if (tail < end && *tail != ' ' && *tail != '\t' && *tail != '\r' && *tail != '\n') {
+                set_error("'%s' line %ld: malformed token — unexpected '%c' after a literal",
+                          path, line, *tail);
+                return GPAP_ERR_IO;
+            }
             toks.push_back((int32_t)v);
             p = tail;
         } else {
-            ++p;   /* stray character: ignore, as the Python tokenizer does */
+            set_error("'%s' line %ld: unexpected character '%c' — not DIMACS (comments start "
+                      "with 'c' at the beginning of a line)", path, line, *p);
+            return GPAP_ERR_IO;
         }
     }
 
