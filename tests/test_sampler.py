@@ -276,7 +276,7 @@ def test_soft_is_not_in_any_default_portfolio():
     assert all(c[2] is Lookahead.NONE for c in (*CIRCUIT_PORTFOLIO, *DEFAULT_PORTFOLIO))
 
 
-@pytest.mark.skipif(not CUDA, reason="needs CUDA")
+@needs_gpu
 def test_config_breakdown_keys_stay_legacy_formatted():
     """The results-JSON config keys must not gain the enum repr — rows recorded before the enums
     existed are compared against new ones."""

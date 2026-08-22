@@ -28,6 +28,10 @@ from gpap.engine import BCPEngine, CnfFormula, LiteralProbe, core_available
 
 AVAIL = torch.cuda.is_available() and core_available()
 needs_gpu = pytest.mark.skipif(not AVAIL, reason="requires CUDA + a built libgpap")
+# The DIMACS parser lives in the C++ core, so its tests need the LIBRARY but no GPU device —
+# except that loading libgpap needs libcuda, so on a driverless CI runner these skip too.
+needs_core = pytest.mark.skipif(not core_available(),
+                                reason="requires a built libgpap (the parser is in the core)")
 
 TINY_BENCH = """\
 INPUT(a)
@@ -159,6 +163,7 @@ PARSER_ACCEPT = {
 }
 
 
+@needs_core
 @pytest.mark.parametrize("text", PARSER_REJECT.values(), ids=list(PARSER_REJECT))
 def test_dimacs_rejects_corruption(tmp_path, text):
     from gpap.engine import read_dimacs
@@ -168,6 +173,7 @@ def test_dimacs_rejects_corruption(tmp_path, text):
         read_dimacs(str(p))
 
 
+@needs_core
 @pytest.mark.parametrize("text", PARSER_ACCEPT.values(), ids=list(PARSER_ACCEPT))
 def test_dimacs_keeps_structural_leniency(tmp_path, text):
     from gpap.engine import read_dimacs
