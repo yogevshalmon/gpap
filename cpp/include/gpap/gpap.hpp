@@ -212,6 +212,15 @@ class Engine {
         check(gpap_engine_apply(h_, decisions.data(), L), "gpap_engine_apply");
     }
 
+    /** apply() in CLEAN mode: identical flags and counters, but the launch restores its own
+     *  packed rows to the baseline so the NEXT reset(K) skips the K*M broadcast. Only for
+     *  callers that read flags/counters and nothing else — see gpap_engine_apply_clean in
+     *  gpap.h for exactly which readouts see the baseline, which see the fixpoint, and why
+     *  recache_flush() refuses afterwards. */
+    void apply_clean(const std::vector<std::int64_t> &decisions, std::int32_t L) {
+        check(gpap_engine_apply_clean(h_, decisions.data(), L), "gpap_engine_apply_clean");
+    }
+
     /** Entry point 2: the whole randomized decide+propagate trajectory per row, one launch.
      *  `order` is the decision priority as 0-based variable indices, support variables FIRST;
      *  `n_support` is where phase 1 ends. Returns the max decision rounds any row used. */
@@ -226,6 +235,14 @@ class Engine {
 
     void recache_flush() {
         check(gpap_engine_recache_flush(h_), "gpap_engine_recache_flush");
+    }
+
+    /** How the resets executed: {full K*M broadcasts, broadcasts SKIPPED after a clean launch}.
+     *  The lite count is the proof CLEAN mode engaged — a silent fallback measures as 1.00x. */
+    std::pair<std::int64_t, std::int64_t> reset_stats() const {
+        std::int64_t full = 0, lite = 0;
+        gpap_engine_reset_stats(h_, &full, &lite);
+        return {full, lite};
     }
 
     // ---------------------------------------------------------------- selections + readout

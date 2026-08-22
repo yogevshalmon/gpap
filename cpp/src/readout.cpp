@@ -125,6 +125,7 @@ extern "C" gpap_status gpap_selection_rows(gpap_engine *e, int32_t slot, int32_t
 extern "C" gpap_status gpap_check_sound(gpap_engine *e, int32_t slot, int32_t max_rows,
                                         int32_t *n_unsound_out) {
     if (!e || slot < 0 || slot >= GPAP_SLOTS || !n_unsound_out) return GPAP_ERR_ARG;
+    GPAP_TRY(gpap::engine_reject_if_packed_is_baseline(e, "gpap_check_sound"));
     GPAP_TRY(engine_use_ctx(e));
     GPAP_TRY(engine_ensure_rows(e, slot));
     Selection &s = e->slots[slot];
@@ -229,6 +230,7 @@ extern "C" gpap_status gpap_num_propagated(gpap_engine *e, int32_t *out_host) {
 extern "C" gpap_status gpap_sat_rows(gpap_engine *e, const int32_t *rows, int32_t n_rows,
                                      int32_t *out_host) {
     if (!e || !rows || !out_host || n_rows < 0) return GPAP_ERR_ARG;
+    GPAP_TRY(gpap::engine_reject_if_packed_is_baseline(e, "gpap_sat_rows"));
     GPAP_TRY(engine_use_ctx(e));
     const int32_t M = e->num_clauses;
     const uint32_t sat_mask = (uint32_t)((1u << e->shift) - 1);
