@@ -176,11 +176,20 @@ class TestInputValidation:
 
     def test_oversized_result_is_refused_not_spilled(self):
         """`assignments` is (n, 2N) for the caller's own n — chunking cannot shrink it. This box
-        degrades to host RAM instead of failing, so an unmet request must say so."""
+        degrades to host RAM instead of failing, so an unmet request must say so.
+
+        The ask is sized FROM THE DEVICE's live budget, because that is what the guard compares
+        against. A hardcoded "obviously too big" number is only too big on the card it was
+        written on: 40,000 sets x 200k vars is 16 GiB, which a 12 GiB laptop 4080 refuses and a
+        23.6 GiB L4 happily accepts — the test failed there for the healthiest possible reason
+        (measured 2026-08-21)."""
+        from gpap.engine.calibrate import gpu_mem_available
         ck = AssumptionChecker()
         ck.formula.init_formula(200_000, [[1, 2]])       # 400 kB of assignment per set
+        row_bytes = 2 * 200_000
+        n = int(gpu_mem_available(ck.formula.device) // row_bytes) + 1_000   # over ANY budget
         with pytest.raises(MemoryError, match="assumption sets"):
-            ck.check_assumptions([[1]] * 40_000, assignments=True)   # 16 GB asked for
+            ck.check_assumptions([[1]] * n, assignments=True)
 
 
 @pytest.mark.gpu

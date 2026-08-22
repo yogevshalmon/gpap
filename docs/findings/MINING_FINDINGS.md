@@ -261,6 +261,71 @@ to be gated the way every K change is, since it alters what a chunk costs.
 > analysis above is what sized it; the conflicted-row analysis below is why it rewrites the
 > baseline instead of undoing arithmetic.
 
+## The width-2 ceiling was calibrated against the OLD reset cost (2026-08-21)
+
+`STAGE1_MAX_TUPLES[2] = 80,000` dates from when every probe chunk paid a full K·M state
+broadcast. With that gone (CLEAN mode, §"The RESET is the bottleneck"), the ceiling — not the
+clock — is what truncates the production sweep, and it truncates precisely the wide-support
+instances. Support-literal pool, `MINE_SECONDS = 5.0`, RTX 4080 Laptop:
+
+| instance | \|sup\| | width-2 candidates | 80k ceiling | uncapped | verdict |
+|---|---|---|---|---|---|
+| b03-c25 | 100 | 19,900 | 933 cl, 0.41s, exhaustive | 933 cl, 0.19s | ceiling never bound |
+| s386-c25 | 175 | 61,075 | 42 cl, 0.24s, exhaustive | 42 cl, 0.24s | ceiling never bound |
+| b04-c25 | 275 | 150,975 | 260 cl, 0.46s, **truncated** | **262 cl, 0.40s, exhaustive** | +2 clauses, FASTER |
+| b10-c25 | 275 | 150,975 | 59 cl, 0.37s, **truncated** | 59 cl, 0.37s, exhaustive | proof, same clauses |
+| s1196-c25 | 350 | 244,650 | 0 cl, 0.38s, **truncated** | 0 cl, 0.40s, exhaustive | proof, same clauses |
+
+Uncapping is free — it never costs more than 0.02 s and sometimes costs LESS (the capped run
+still pays the same per-chunk overheads for a partial answer). What it buys is mostly the
+`exhausted` flag: "no width-2 entailed clause over this support exists that BCP can see" is a
+PROOF, where a truncated sweep licenses nothing and, per the lex-prefix note below, is not even
+an unbiased sample. Raised to **1,000,000** (exhaustive to \|sup\| ≈ 700); past that
+`MINE_SECONDS` is the real bound, which is the correct behaviour.
+
+### Validated e2e on an L4 (2026-08-21)
+
+Full seq family, T=25, target rare, tseitin, n_time 50k / 60 s cap, circuit portfolio, seed 5 —
+NEW (CLEAN mode + the 1M ceiling) against OLD (`GPAP_CLEAN=0` + the 80k ceiling) **on the same
+VM, same session**, 19 instances each, 0 errors and 0 unsound in both arms. Data:
+`$GPAP_RESULTS/clean_mode_l4_20260821/`.
+
+**16/19 instances have BIT-IDENTICAL model counts**, and all three that differ are exactly the
+ones whose mined clause SET changed — i.e. CLEAN mode on its own moved nothing, which is what the
+state-identity gate promises. Where the ceiling bound, the tune is a clear win:
+
+| instance | mined u/b/t NEW → OLD | M_eff | K | succ | models |
+|---|---|---|---|---|---|
+| s832-c25 | 211/3/46 → 202/2/**4457** | **23,554 → 28,039** | **146,910 → 128,108** | 0.0102 → 0.0067 | +25 (**1.75× throughput**) |
+| s1196-c25 | 381/**10**/0 → 381/**4**/0 | 29,846 → 29,840 | ~equal | **0.818 → 0.782** | **+14.8%** |
+| b14-c25 | **917**/0/0 → 65/0/0 | 525,066 → 528,422 | 5,576 → 5,539 | 0.0007 → 0.0006 | +12 ⚠ bandit picked B=1 vs B=8, confounded |
+
+⚠️ **s832 is the instructive one, and it runs against the intuition that a bigger ceiling means a
+bigger formula.** Exhausting width 2 (404,550 candidates, well inside the new ceiling) proves a
+few good binaries and leaves less budget for width 3; the OLD arm truncated width 2 at 80k, spent
+the remainder on width 3, and kept **4,457 ternaries** that inflated the effective formula. Since
+`K ≈ budget/4M`, the smaller mined formula bought a **15% larger batch** and 1.75× the
+throughput. Cheaper mining and a better result: the ceiling was not trading cost for quality,
+it was buying the wrong width.
+
+Whole-family steady-state geomean NEW/OLD **1.064×** (14 instances, vacuous pins excluded) — most
+rows sit at 1.02-1.05× because mining is a small share of e2e wall on an instance the ceiling
+never bound.
+
+⚠️ **The tempting next step is WRONG: do not widen the POOL.** Mining every free literal instead
+of the support finds 100-1000× more clauses — b03-c25 131,380 vs 933, s386-c25 289,933 vs 42 —
+all sound and all entailed. Sampling the augmented formula is a catastrophe, because `K ≈
+budget/4M` and M grows with them:
+
+| instance | M before → after | e2e sampling |
+|---|---|---|
+| b03-c25 | 14,502 → 146,326 | **292,343 → 502 models/s (582× SLOWER)** |
+| s386-c25 | 12,652 → 304,322 | 144,755 models/s → **zero models** |
+
+The keep-if-it-helps gate rejects them, correctly. Width 3 over the support pool is also poor
+value (+4 clauses on b09-c25, nothing elsewhere, up to 4.9 s). The support pool at widths 1-2 is
+the right ask; only its ceiling was stale.
+
 ## What it does
 
 Assume a set of literals, propagate, and see whether BCP conflicts. If it does, the formula
@@ -325,8 +390,9 @@ End-to-end effect at the production 5 s budget, identical clause sets on all thr
 Two of the three were previously hitting the wall-clock budget, i.e. the old tier gating was
 protecting against a cost that was mostly avoidable. **The `pairs="auto"` thresholds (80,000
 candidate pairs / 40,000 triples) were calibrated against the slow enumeration and are now
-loose** — they survive as `pipeline.STAGE1_MAX_TUPLES` for continuity, and are worth re-tuning
-against probe cost alone.
+loose** — they survive as `pipeline.STAGE1_MAX_TUPLES`. RE-TUNED 2026-08-21 after the reset cost
+collapsed: width 2 raised to 1,000,000, width 3 left alone (it earns nothing on the support
+pool). See "The width-2 ceiling was calibrated against the OLD reset cost" below.
 
 ## Widths must be mined in order, on the strengthened formula
 

@@ -1,8 +1,9 @@
 # Reset-restore plan — kill the per-chunk state broadcast
 
-**STATUS: PLAN, nothing implemented (2026-08-21). §9 REVISES the architecture: the restore
-is FUSED into the fixpoint kernel as a per-launch CLEAN mode (the user's proposal) — read
-§§2-3 for the soundness groundwork, then §9 for what actually gets built.** Revives the
+**STATUS: IMPLEMENTED AND GATED (2026-08-21), as the FUSED variant in §9 — the restore is a
+per-launch CLEAN mode inside the fixpoint kernel, not the separate pass §3 designed. Read
+§§2-3 for the soundness groundwork, then §9 for what actually shipped and its measurements.
+§3's separate `trail_restore` kernel and its state machine were SUPERSEDED and never built.** Revives the
 design parked in
 `docs/findings/MINING_FINDINGS.md` §"The RESET is the bottleneck" (2026-08-20) — the user has
 pulled it off the shelf because probing/mining is a first-class workload and its wall is 41–94%
@@ -292,6 +293,43 @@ below.
 - Perf expectation vs §5's floors: fused ≈ 1.3-1.7× apply per chunk (vs restore-at-reset's
   ≈ 1.7-2×) — 6s215rb0-c25 ~26.6 → ~1.5-2 ms/chunk, b03-c25 ~31.8 → ~13 ms; b09-c25 stays ~1.0×
   (guard rows stream). Same interleaved-A/B protocol, still deferred until the box is free.
+
+### L4 validation (2026-08-21) — the gate §5 asked for, on a second GPU
+
+Colab L4 (sm_89), full seq family at T=25/rare/tseitin, NEW vs `GPAP_CLEAN=0` on the same VM:
+**19/19 rows both arms, 0 errors, 0 unsound; 16/19 BIT-IDENTICAL model counts** (the 3 that
+differ are the mining-ceiling tune, not CLEAN — their mined clause sets differ). The full test
+suite runs on the L4 too: 386 passed, 54 skipped, 1 failed — and that one
+(`test_oversized_result_is_refused_not_spilled`) is a PRE-EXISTING portability bug unrelated to
+this work: it hardcoded a 16 GiB "obviously too big" ask, which a 23.6 GiB L4 legitimately
+accepts. Fixed to size the ask from the device's own budget.
+
+Against the RECORDED 2026-08-05 L4 eval the same family is **2.30× faster (geomean, vacuous pins
+excluded) with M identical on 19/19** — same formula, same problem, pure throughput. That figure
+is CUMULATIVE over everything since (the dispatch fix flipped 8 instances scalar→wave, plus the
+batch-model collapse and this work), NOT a CLEAN-mode attribution; the same-VM A/B above is what
+attributes CLEAN, and on the sampler it is ~1.0× by construction.
+
+Data: `$GPAP_RESULTS/clean_mode_l4_20260821/`.
+
+### Review fixes (2026-08-22) — the contract is now ENFORCED, not commented
+
+A code-review pass found that the asymmetry CLEAN mode creates (packed = baseline, abits =
+fixpoint) was documented but not defended, and one legal ABI sequence corrupted the engine:
+
+| | was | now |
+|---|---|---|
+| `recache_flush` after a clean launch | cached the INCONSISTENT pair — abits claiming literals TRUE whose clause decrements packed never recorded, poisoning every later launch, silently | **refused** with an error naming the fix (`engine.abits_diverged`) |
+| `gpap_sat_rows` / `gpap_check_sound` after one | answered from the baseline: plausible values describing no launch that ran; `check_sound` pronounced on the wrong state | **refused**, same flag |
+| `gpap_packed_rows` | — | deliberately still OPEN: the raw/debug readout, and what the identity gate uses to PROVE the restore |
+| `Engine.apply` / `apply_clean` row count | unchecked — the C side stages K·L int64s, so a short array read past its end and the garbage became literal indices, and an index past 2N makes the kernel write into a LATER row | `ValueError` in the binding, both entry points |
+| the header's contract | claimed the assignment readout sees the baseline — WRONG, v1 cleans packed only, so abits keep the fixpoint | states the asymmetry per-readout |
+| tier-2 `gpap::Engine` | no `apply_clean` / `reset_stats` — C++ consumers could not opt in without dropping to the raw ABI | both wrappers added |
+
+`abits_diverged` is the one new bit of state: set by a completed clean launch, cleared by
+`reset` (which re-broadcasts abits) and by any plain apply or trajectory (which leave the two
+halves consistent). Gated by `TestCleanModeGuards` in tests/test_clean_mode.py — each guard has
+a positive control, so a guard that stopped firing fails the suite rather than passing quietly.
 
 ### Why not do §3 first as a stepping stone
 
