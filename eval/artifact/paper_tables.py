@@ -9,9 +9,8 @@ the data with the exclusions applied in ONE place.
 The raw data lives OUTSIDE the repo, in $GPAP_RESULTS (default ../gpap-results) — it is too heavy
 to track. See docs/paper/README.md for the full regeneration recipe.
 
-    R=${GPAP_RESULTS:-../gpap-results}/gpap_experiments_l4_20260805
+    R=.experiments/l4_campaign_20260823          # or $GPAP_RESULTS/l4_campaign_20260823
     eval/artifact/paper_tables.py --cmsgen $R/gpap_vs_cmsgen_l4 \\
-        --cmsgen-ref $R/gpap_vs_cmsgen_4080_reference \\
         --rivals $R/gpap_vs_gpu_rivals_l4 \\
         --recheck $R/reproducibility_recheck_l4 \\
         --uniformity $R/uniformity_l4/uniformity_campaign.json \\
@@ -396,22 +395,24 @@ def build(args):
          "## Table 1 — GPAP vs CMSGen", "",
          "Columns add up: `inst` = geomean instances + CMSGen=0 + GPAP=0 + both=0.", "",
          "| family | depth | targets | inst | GPAP/CMSGen | wins | CMSGen=0 | GPAP=0 | both=0 |"
-         " no-search | ref GPU |",
-         "|---|---|---|---:|---:|---:|---:|---:|---:|---:|---:|"]
+         " no-search |" + (" ref GPU |" if ref else ""),
+         "|---|---|---|---:|---:|---:|---:|---:|---:|---:|" + ("---:|" if ref else "")]
     for stem, label, depth, tgt in CMS_FAMILIES:
         v = cms.get(stem)
         if not v:
             continue
         exp = expected.get(stem.split("-")[0], v["inst"])
         mark = "" if v["inst"] >= exp else f" (partial {v['inst']}/{exp})"
+        # The reference-GPU column exists only when a second sweep is passed (--cmsgen-ref); a
+        # reference recorded under different defaults is not a reference, so the default is none.
         rv = ref.get(stem)
-        refs = f"{rv['gm']:,.1f}x" if rv and rv["gm"] else "—"
+        refs = (f" {rv['gm']:,.1f}x |" if rv and rv["gm"] else " — |") if ref else ""
         gms = f"{v['gm']:,.1f}x" if v["gm"] else "— (all CMSGen=0)"
         if v["gm"] and v["n_gm"] < 3:
             gms += f" ⚠n={v['n_gm']}"
         M.append(f"| {label}{mark} | {depth} | {tgt} | {v['inst']} | "
                  f"{gms} | {v['wins']}/{v['n']} | {v['inf']} | {v['gpap0']} | {v['both0']} "
-                 f"| {v['free']} | {refs} |")
+                 f"| {v['free']} |{refs}")
     g0 = sorted({n for v in cms.values() if v for n in v["gpap0_names"]})
     b0 = sorted({n for v in cms.values() if v for n in v["both0_names"]})
     M += ["",

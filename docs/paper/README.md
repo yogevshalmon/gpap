@@ -25,11 +25,10 @@ sibling of the checkout) — they are too heavy to track. Set the variable if yo
 ## Regenerate
 
 ```bash
-R=${GPAP_RESULTS:-../gpap-results}/gpap_experiments_l4_20260805
+R=.experiments/l4_campaign_20260823      # or $GPAP_RESULTS/l4_campaign_20260823
 
 eval/artifact/paper_tables.py \
     --cmsgen     $R/gpap_vs_cmsgen_l4 \
-    --cmsgen-ref $R/gpap_vs_cmsgen_4080_reference \
     --rivals     $R/gpap_vs_gpu_rivals_l4 \
     --recheck    $R/reproducibility_recheck_l4 \
     --uniformity $R/uniformity_l4/uniformity_campaign.json \
