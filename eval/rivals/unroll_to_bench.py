@@ -22,7 +22,7 @@ import argparse
 import os
 import sys
 
-REPO_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
+REPO_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))  # eval/<sub>/ -> repo
 sys.path.insert(0, REPO_ROOT)
 
 from gpap.circuits.bench import parse_bench                                   # noqa: E402

@@ -13,7 +13,7 @@
 #   DEADLINE_H=4.3 bash eval/colab/colab_rivals_l4.sh
 set -uo pipefail
 
-REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"   # this file lives in eval/colab/
 cd "$REPO_ROOT"
 export PYTHONPATH="$REPO_ROOT"
 PY="${PYTHON:-python3}"

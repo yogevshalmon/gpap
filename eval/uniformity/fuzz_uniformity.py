@@ -57,7 +57,7 @@ from dataclasses import dataclass, field
 
 import numpy as np
 
-REPO_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
+REPO_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))  # eval/<sub>/ -> repo
 sys.path.insert(0, REPO_ROOT)
 
 from gpap.sampling.metrics import chi2_sf, uniformity_stats  # noqa: E402
