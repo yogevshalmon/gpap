@@ -21,8 +21,9 @@ is named b13.bench so their table pins [-1]=1 = MITER=1 (their table is FILENAME
 s*-named branch would index two outputs and break on a single-output module). Their solutions
 then satisfy outputs@t == pattern-of-T for any depth t — still a superset of GPAP's t=T space.
 
-Setup (once): git clone https://github.com/arashardakani/Recurrent-CircuitSAT-Sampler \
-                  <repo>/.gpap/src/Recurrent-CircuitSAT-Sampler
+Setup (once): eval/rivals/rivals_setup.sh — clones
+    https://github.com/arashardakani/Recurrent-CircuitSAT-Sampler into
+    <repo>/.gpap/src/Recurrent-CircuitSAT-Sampler at the PINNED evaluated commit.
 Usage:
   PYTHONPATH=. .venv/bin/python eval/rivals/rivals_recurrent.py b03 b13 s1196 [--rare] [-T 25] \
       [--steps 1] [--output out.json]
@@ -45,10 +46,10 @@ import sys
 import tempfile
 import time
 
-REPO_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
+REPO_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))  # eval/<sub>/ -> repo
 sys.path.insert(0, REPO_ROOT)
 
-from eval.rivals.rival_common import VARIANTS, prepare_variant, variant_note   # noqa: E402
+from eval.rivals.rival_common import VARIANTS, prepare_variant, rival_commit, variant_note  # noqa: E402
 
 from gpap import paths
 
@@ -382,7 +383,7 @@ def main():
         row = {"name": name, "mode": "rare" if args.rare else "table", "pin": pin_desc,
                "variant": variant, "circuit": vinfo,
                "p_accept": sim["p_accept"], "p_accept_lt": sim.get("p_accept_lt"),
-               "rcs": rcs, "gpap": g}
+               "rival_commit": rival_commit(args.rival), "rcs": rcs, "gpap": g}
         out.append(row)
         if args.output:      # checkpoint after every instance: this stage runs for HOURS, and a
             os.makedirs(os.path.dirname(args.output) or ".", exist_ok=True)   # death at 90% used

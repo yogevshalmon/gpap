@@ -15,7 +15,7 @@
 #   TARGETS=rare CYCLES=25 bash eval/...      # the headline slice only
 set -uo pipefail
 
-REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"   # this file lives in eval/colab/
 cd "$REPO_ROOT"
 export PYTHONPATH="$REPO_ROOT"
 export PYTHON="${PYTHON:-python3}"

@@ -18,7 +18,7 @@
 # Both write JSON; eval/artifact/paper_tables.py turns them into the paper's uniformity tables.
 set -uo pipefail
 
-REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"   # this file lives in eval/colab/
 cd "$REPO_ROOT"
 export PYTHONPATH="$REPO_ROOT"
 PY="${PYTHON:-python3}"

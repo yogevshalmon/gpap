@@ -22,9 +22,11 @@ GPAP is hooked IN-PROCESS (their SolutionRetriever monkeypatched): one CUDA init
 test instead of a subprocess per call; the SPUR reference keeps their stock ./samplers/spur path.
 CMSGen runs as a subprocess, which is how it is normally invoked.
 
-Setup (once):
+Setup (once) — pinned at the commit the recorded certification runs used:
   git clone https://github.com/meelgroup/barbarik <repo>/.gpap/src/barbarik
-  cd <repo>/.gpap/src/barbarik && git submodule update --init
+  cd <repo>/.gpap/src/barbarik \
+      && git checkout 2c0a6691b97c796a829408dc4db70d9f59f49382 \
+      && git submodule update --init
 
 Usage:
   PYTHONPATH=. .venv/bin/python eval/uniformity/barbarik_gpap.py <cnf> [<cnf> ...] \
@@ -41,7 +43,7 @@ import tempfile
 
 from gpap import paths
 
-REPO_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
+REPO_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))  # eval/<sub>/ -> repo
 sys.path.insert(0, REPO_ROOT)
 
 # (random_var, B, lookahead), as gpap.sampling.pipeline defines a config. "bsup" is special-cased

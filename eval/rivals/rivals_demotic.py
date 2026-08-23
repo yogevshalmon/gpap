@@ -23,8 +23,8 @@ gradient loop ONLY — their timer excludes model build AND the solution re-chec
 comparable figure is unique_sps_est (raw samples/s x distinct fraction, dedup measured off the
 timing path) and its rate INCLUDES construction. Both generous to them, kept that way.
 
-Setup (once): git clone https://github.com/arashardakani/Demotic \
-                  <repo>/.gpap/src/Demotic
+Setup (once): eval/rivals/rivals_setup.sh — clones https://github.com/arashardakani/Demotic
+    into <repo>/.gpap/src/Demotic at the PINNED evaluated commit.
 Usage:
   PYTHONPATH=. .venv/bin/python eval/rivals/rivals_demotic.py --mode native c432 c880 c1355
   PYTHONPATH=. .venv/bin/python eval/rivals/rivals_demotic.py --mode miter b03 b13 s1196 -T 25 \
@@ -42,10 +42,10 @@ import sys
 import tempfile
 import time
 
-REPO_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
+REPO_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))  # eval/<sub>/ -> repo
 sys.path.insert(0, REPO_ROOT)
 
-from eval.rivals.rival_common import VARIANTS, prepare_variant, variant_note   # noqa: E402
+from eval.rivals.rival_common import VARIANTS, prepare_variant, rival_commit, variant_note  # noqa: E402
 from eval.rivals.rivals_recurrent import reorder_bench, run_gpap          # noqa: E402
 from eval.rivals.unroll_to_bench import write_unrolled_miter              # noqa: E402
 
@@ -173,7 +173,9 @@ def run_demotic(root, bench_file, key, *, steps, batch, circuit_type, T, lr="15e
         return {"error": f"timeout {timeout}s", "wall_s": timeout}
     wall = time.perf_counter() - t0
     if p.returncode != 0:
-        err = ((p.stderr or p.stdout).strip().splitlines() or ["?"])[-1][:200]
+        # keep the traceback TAIL, not just the last line — "KeyError: 'c432'" alone cost a
+        # remote round-trip to learn WHICH frame raised (the py3.13 locals() break)
+        err = (p.stderr or p.stdout or "?").strip()[-300:]
         # transient WSL2 driver hiccup between back-to-back CUDA processes — settle and retry
         if "device not ready" in err and retry:
             time.sleep(10)
@@ -307,7 +309,8 @@ def main():
         os.makedirs(os.path.dirname(args.output) or ".", exist_ok=True)
         json.dump({"mode": args.mode, "circuit_type": args.circuit_type, "cycles": args.cycles,
                    "target": args.target, "steps": args.steps,
-                   "circuit_variants": list(args.circuit_variants), "rows": out},
+                   "circuit_variants": list(args.circuit_variants),
+                   "rival_commit": rival_commit(args.demotic), "rows": out},
                   open(args.output, "w"), indent=1)
 
     for name, variant in ((n, v) for n in args.names for v in args.circuit_variants):

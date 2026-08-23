@@ -13,8 +13,9 @@ SUPPORT projections — identical on deterministic-circuit Tseitin CNFs (interna
 functions of the inputs), which is why the shared instances here are our circuit unrolls plus
 their own s15850a/prod circuit CNFs (`c ind` present).
 
-Setup (once):  git clone https://github.com/arashardakani/High-Throughput-SAT-Sampler \
-                   <repo>/.gpap/src/High-Throughput-SAT-Sampler
+Setup (once): eval/rivals/rivals_setup.sh — clones
+    https://github.com/arashardakani/High-Throughput-SAT-Sampler into
+    <repo>/.gpap/src/High-Throughput-SAT-Sampler at the PINNED evaluated commit.
 Usage:
   PYTHONPATH=. .venv/bin/python eval/rivals/rivals_hts.py '.experiments/rival_cnfs/*.cnf' \
       [--steps 10] [--batch 100 1000] [--gpap-n 50000] [--output out.json]
@@ -33,8 +34,10 @@ import time
 
 from gpap import paths
 
-REPO_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
+REPO_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))  # eval/<sub>/ -> repo
 sys.path.insert(0, REPO_ROOT)
+
+from eval.rivals.rival_common import rival_commit    # noqa: E402
 
 HTS_DEFAULT = str(paths.src_dir() / "High-Throughput-SAT-Sampler")
 # Per-SUBPROCESS wall cap for the rival, default 300 s = 5x the 60 s sampling budget GPAP gets
@@ -159,7 +162,7 @@ def main():
                 best = r
         g = run_gpap(cnf, args.gpap_n, device, time_limit=args.gpap_time_limit,
                      n_cov=args.n_cov)
-        row = {"name": name, "hts": best, "gpap": g}
+        row = {"name": name, "rival_commit": rival_commit(args.hts), "hts": best, "gpap": g}
         out.append(row)
         if args.output:                       # checkpoint after every instance, not at the end
             os.makedirs(os.path.dirname(args.output) or ".", exist_ok=True)

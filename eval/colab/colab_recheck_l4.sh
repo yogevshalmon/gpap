@@ -14,7 +14,7 @@
 # encoders, same portfolio. The ONE thing deliberately left free is the GPU itself.
 set -uo pipefail
 
-REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"   # this file lives in eval/colab/
 cd "$REPO_ROOT"
 export PYTHONPATH="$REPO_ROOT"
 PY="${PYTHON:-python3}"

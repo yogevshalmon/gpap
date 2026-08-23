@@ -22,8 +22,21 @@ ANDs, s386 166 -> 113), so in practice the rivals see essentially the same circu
 which is itself the point: their gap is not an encoding artifact.
 """
 import os
+import subprocess
 
 VARIANTS = ("raw", "abc")
+
+
+def rival_commit(path: str):
+    """HEAD of the rival checkout at `path`, or None. Recorded into every head-to-head JSON:
+    rivals_setup.sh pins the clones, but a pin can be overridden or a checkout moved by hand —
+    the result must carry what actually ran, not what was intended."""
+    try:
+        out = subprocess.run(["git", "-C", path, "rev-parse", "HEAD"],
+                             capture_output=True, text=True, timeout=10)
+        return out.stdout.strip() or None
+    except Exception:                                   # noqa: BLE001 — provenance, never fatal
+        return None
 
 
 def prepare_variant(src: str, variant: str, tmpdir: str, *, cycles: int, seed: int,
