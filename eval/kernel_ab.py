@@ -229,6 +229,8 @@ def main(argv=None):
     ap.add_argument("--seed", type=int, default=5)
     ap.add_argument("--out", required=True)
     ap.add_argument("--resume", action="store_true")
+    ap.add_argument("--only", nargs="*", default=None, metavar="FAMILY/INSTANCE/ENCODER",
+                    help="measure only these cells (a re-measurement pass; merge by key)")
     args = ap.parse_args(argv)
     if args.k_cap != "auto":
         args.k_cap = int(args.k_cap)
@@ -270,6 +272,9 @@ def main(argv=None):
         f"mining OFF | validation K<={args.val_k_cap} x {args.val_chunks} chunks | "
         f"timing {args.time_limit}s x {args.reps} reps alternated | {gpu['name']}")
 
+    if args.only:
+        keep = {tuple(k.split("/")) for k in args.only}
+        work = [w for w in work if (w[0], w[1], w[2]) in keep]
     for i, (fam, inst, enc, src, kind, cycles, pin) in enumerate(work):
         if (fam, inst, enc) in done:
             continue

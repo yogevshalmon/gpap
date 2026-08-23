@@ -190,10 +190,12 @@ kernels are the only path — the oracle is `tests/reference_bcp.py`).
   ~1/3 of the packed fit; the 4096×M soundness transient is now read in ≤256 MB slices). A
   runtime memory PROBE is unreliable here — do not resurrect it.
 - **The `cap` is VRAM-proportional** (`engine.calibrate.default_k_cap`; `--k-cap auto`
-  is the default of `gpap sample`/`gpap bench`/`pipeline.sample_clauses`). `K_CAP_REF ·
-  total_VRAM / K_CAP_VRAM_REF` floored at K_CAP_REF — EXACT no-op on the reference card and
-  smaller (gated
-  by tests/test_k_cap.py + a bit-identical model-count A/B). Keys off **total** VRAM, not free: a
+  is the default of `gpap sample`/`gpap bench`/`pipeline.sample_clauses`). `max(kBatchCapFloor =
+  262,144, K_CAP_REF · total_VRAM / K_CAP_VRAM_REF)` (`cpp/src/calibrate.cpp`) — since 2026-08-18
+  the FLOOR binds on every card up to ~64 GB, so the resolved cap is 262,144 on the 4080, the L4
+  and the A100 alike; it is a saturation limit (4× batch measured +2.8%), not a safety one. ⚠️
+  Sweeps recorded before that date ran at the old caps (4080 49,152 / L4 90,300) — one more
+  reason they are not comparable to new ones (gated by tests/test_k_cap.py). Keys off **total** VRAM, not free: a
   free-memory cap drifted between runs in one session (49,526 vs 49,671), and a sweep whose K
   depends on what else was resident is not a measurement. Resolved value in every row's
   `engine.k_cap`; **a cross-GPU A/B must pass an explicit `--k-cap N`** since `auto` differs per
@@ -283,6 +285,11 @@ kernels are the only path — the oracle is `tests/reference_bcp.py`).
   batch cap so M is the only variable): M=32 0.772, M=483 0.918, M=1,982 0.960, M=2,098 1.041,
   M=2,882 1.407, M=14,012 1.572, and 1.27-1.66 for every larger M out to M=107,065; whole-set
   geomean wave/scalar 1.39–1.46× across both cards. Do NOT reintroduce a batch-only rule.
+  **The paper's number is the L4 A/B** (`eval/kernel_ab.py`, 141 cells, all families × both
+  encoders, validated by identical model counts at pinned K, mining OFF — it is wall-budgeted so
+  a faster kernel would mine more and the arms would run different formulas): **1.30× geomean,
+  1.01× below 2k clauses → 1.33× (2k–20k) → 1.48× (20k–100k) → 1.64× (>100k)**; the rule picked
+  the faster kernel on 77/93, every miss in the M≈0.5–9k tie band. docs/findings/KERNEL_AB_FINDINGS.md.
   Session total vs the pre-wave baseline: b14 5.7×, b12 2.8×, b04 1.8×, b03 1.5×. `GPAP_KERNEL=scalar|wave`
   forces; W via `GPAP_WAVE_W` (32 best; W>32 spreads over W/32 real warps via num_warps —
   measured 2-5× WORSE, cross-warp reduction sync dominates). The trajectory kernel's

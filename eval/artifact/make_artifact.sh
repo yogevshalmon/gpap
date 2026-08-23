@@ -114,7 +114,6 @@ VERDICT="$(tail -1 "$STAGE/VERIFICATION.txt")"
   echo
   echo '```bash'
   echo "eval/artifact/paper_tables.py --cmsgen gpap_vs_cmsgen_l4 \\"
-  echo "    --cmsgen-ref gpap_vs_cmsgen_4080_reference \\"
   echo "    --rivals gpap_vs_gpu_rivals_l4 --recheck reproducibility_recheck_l4 \\"
   echo "    --uniformity uniformity_l4/uniformity_campaign.json \\"
   echo "    --soft uniformity_l4/soft_profile.json \\"
