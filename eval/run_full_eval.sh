@@ -226,7 +226,7 @@ stage_rivals() {
                 case " $cvars " in *" ${enc/tseitin/raw} "*|*" $enc "*) ;; *) continue ;; esac
                 local cnf="$hts_dir/$inst-c$T-$enc.cnf"
                 [ -f "$cnf" ] || "$PY" -m gpap.cli circuit2cnf "$src" "$cnf" \
-                    --cycles "$T" --target rare --encoder "$enc" --abc-opt fast \
+                    --cycles "$T" --target rare --encoder "$enc" --abc-opt fast --seed 5 \
                     >/dev/null 2>&1 || echo "[warn] could not build $enc CNF for $inst"
             done
         done

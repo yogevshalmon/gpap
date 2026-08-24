@@ -266,12 +266,23 @@ def run_gpap(bench_file, T, pin_outputs, target, seeds, n_time, device, time_lim
                             configs=CIRCUIT_PORTFOLIO, time_limit=time_limit, seed=s)
             runs.append({"seed": s, "sps": g["samples_per_s"], "sps_e2e": g.get("sps_e2e_total"),
                          "unique_per_s_est": g.get("unique_sps_est") or 0.0,
-                         "success": g["success_rate"], "n_models": g["n_models"]})
+                         "success": g["success_rate"], "n_models": g["n_models"],
+                         # engine provenance per row, same as the CMSGen sweeps: gpu_sound is
+                         # the on-device model check, dec/s + impl/s let the zero-search screen
+                         # (paper_tables.zero_search) run on rival rows too
+                         "gpu_sound": g.get("gpu_sound"),
+                         "decisions_per_s": g.get("decisions_per_s"),
+                         "implications_per_s": g.get("implications_per_s")})
     finally:
         os.unlink(cnf_path)
     med = lambda k: statistics.median(r[k] for r in runs)
+    med0 = lambda k: statistics.median((r.get(k) or 0.0) for r in runs)
     return {"seeds": runs, "unique_per_s_est": med("unique_per_s_est"), "sps": med("sps"),
-            "success": med("success"), "n_vars": b.nv, "n_clauses": len(b.clauses)}
+            "success": med("success"), "n_vars": b.nv, "n_clauses": len(b.clauses),
+            "gpu_sound": all(r.get("gpu_sound") is not False for r in runs),
+            "decisions_per_s": med0("decisions_per_s"),
+            "implications_per_s": med0("implications_per_s"),
+            "n_models": int(med("n_models"))}
 
 
 # ---------------------------------------------------------------- driver

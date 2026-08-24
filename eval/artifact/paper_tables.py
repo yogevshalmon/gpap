@@ -245,11 +245,17 @@ def rival_family(d, stem, key):
     seen = {}
     for r in rows:
         seen[(r["name"], r.get("variant", "-"))] = r        # a retry supersedes its error row
-    ratios, errs, zero, gzero, both = [], 0, 0, 0, 0
+    ratios, errs, zero, gzero, both, free = [], 0, 0, 0, 0, 0
     for r in seen.values():
         rv, g = r.get(key) or {}, r.get("gpap") or {}
         if rv.get("error"):
             errs += 1
+            continue
+        # Same zero-search screen as Table 1, where the row carries the counters (recorded
+        # since 2026-08-23): a support that is FREE after propagation measures the instance,
+        # not either sampler — a seed-mismatched b13 cell once carried a 4.7e9x ratio this way.
+        if "decisions_per_s" in g and zero_search(g):
+            free += 1
             continue
         rate = rv.get("unique_per_s") or 0.0
         ours = g.get("unique_per_s_est") or 0.0
@@ -266,7 +272,7 @@ def rival_family(d, stem, key):
             ratios.append(ours / rate)
     return {"cells": len(seen), "gm": gm(ratios), "n": len(ratios) + zero + gzero,
             "wins": sum(1 for x in ratios if x >= 1) + zero, "errors": errs, "zero": zero,
-            "gpap0": gzero, "both0": both}
+            "gpap0": gzero, "both0": both, "free": free}
 
 
 # ------------------------------------------------------------------ uniformity
@@ -424,17 +430,31 @@ def build(args):
           + " — these bound the reach of the whole comparison, not of either tool."]
     M += ["", "## Table 2 — GPAP vs the GPU gradient samplers", "",
           "| rival | protocol | cells | GPAP/rival | wins | rival=0 | GPAP=0 | both=0 |"
-          " rival failed |",
-          "|---|---|---:|---:|---:|---:|---:|---:|---:|"]
+          " no-search | rival failed |",
+          "|---|---|---:|---:|---:|---:|---:|---:|---:|---:|"]
     for stem, _, rival, proto in RIVALS:
         v = riv.get(stem)
         if not v:
-            M.append(f"| {rival} | {proto} | — | not run | — | — | — | — | — |")
+            M.append(f"| {rival} | {proto} | — | not run | — | — | — | — | — | — |")
             continue
         gs = f"{v['gm']:,.1f}x" if v["gm"] else "—"
         M.append(f"| {rival} | {proto} | {v['cells']} | {gs} | "
                  f"{v['wins']}/{v['n']} | {v['zero']} | {v['gpap0']} | {v['both0']} "
-                 f"| {v['errors']} |")
+                 f"| {v.get('free', 0)} | {v['errors']} |")
+    M += ["",
+          "The two protocols are DIFFERENT TASKS and must never be pooled: 'their pins' rows "
+          "pin the 1–5 outputs the rival's own table names (rejection-easy by construction — "
+          "p_accept is 0.03–0.5 there, printed per row), while miter/rare rows pin ALL outputs "
+          "to a rare reachable pattern (p_accept ~1e-2–1e-6). Recurrent-CircuitSAT is scored on "
+          "its own depth-POOLED unique count — solutions satisfying the target at ANY unroll "
+          "depth start_point..T, a superset of the fixed-depth task every other row measures "
+          "(the fixed-depth-only count is recorded per row as `unique_at_T`). The rival's batch "
+          "is sized by a fixed 5 GiB autograd-graph budget (`pick_batch`); on easy instances "
+          "their unique count saturates at that batch, so their score is bounded by a knob we "
+          "set — generous timeouts (300 s vs our 60 s) and best-of-batch offset it, but state "
+          "it. Constraint alignment is VERIFIED per row: miter mode asserts p(MITER=1) equals "
+          "the instance's p_accept; native mode asserts bit-identical acceptance words between "
+          "their index table on the original file and our reordered pins (`pin_check_ok`)."]
     if any(prop.values()):
         M += ["", "## Table 3 — propagation throughput (the engine, not the sampler)", "",
               "`impl/s` is Boolean implications per second: GPAP's from the packed-word kernel, "
