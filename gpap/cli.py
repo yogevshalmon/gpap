@@ -721,7 +721,11 @@ def main(argv=None):
     c.add_argument("input", help="a .bench/.aig/.aag file or a directory of them")
     c.add_argument("output", help="output .cnf (single) or output directory")
     c.add_argument("--cycles", type=int, default=25)
-    c.add_argument("--seed", type=int, default=1)
+    # 5 = the same conversion/target seed `gpap sample` and `gpap bench` default to. It was 1
+    # here, so CNFs built via this subcommand pinned a DIFFERENT rare pattern than the sweep's
+    # in-process conversions of the same circuit — the HTS rival arm inherited a degenerate
+    # (zero-search) b13 instance from exactly that mismatch.
+    c.add_argument("--seed", type=int, default=5)
     c.add_argument("--pin-outputs", type=int, default=None)
     _add_encoder_args(c)
     c.set_defaults(func=_cmd_circuit2cnf)

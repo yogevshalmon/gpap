@@ -286,6 +286,26 @@ All three are PyTorch programs run as subprocesses on the same GPU, scored with 
 metric (unique solutions ÷ their `model_runtime`, which excludes their model build). Their pins
 are rejection-easy by construction, so `p_acc` is printed alongside every row.
 
+Protocol invariants (each one was a wrong number once):
+
+- **Every target/conversion seed is 5** — the sweep's, both circuit harnesses' `--target-seed`,
+  and the HTS CNF builds (`circuit2cnf --seed 5`, now also its default). The HTS arm once built
+  its CNFs at the old `circuit2cnf` default of 1: a different seed pins a different rare
+  pattern, and seed-1 b13 happened to be a ZERO-SEARCH instance whose two cells carried ratios
+  up to 4.7e9x (re-measured 2026-08-23; the seed-1 rows are kept as `_superseded/`).
+- **Recurrent-CircuitSAT is scored on a depth-POOLED superset**: their loop applies the target
+  at every unroll depth `start_point..T` and pools unique solutions, so their count covers an
+  easier task than the fixed-depth CNF every other row measures. Generous, kept, and stated;
+  the fixed-depth-only count is recorded per row as `unique_at_T`.
+- **Constraint alignment is verified, not assumed**: miter mode asserts p(MITER=1) equals the
+  instance's p_accept; native mode asserts bit-identical acceptance words between their
+  index-table pins on the original file and our reordered pins (`pin_check_ok`; all 10
+  recorded ISCAS-85 cells re-verified 2026-08-23).
+- The rivals' batch is sized by a fixed 5 GiB autograd budget (`pick_batch`) — on easy
+  instances their unique count saturates at the batch, so their score is bounded by a knob we
+  set. Offset by the 300 s wall (vs our 60 s) and best-of-batch; a larger-budget rerun is
+  future work, noted in the generated Table 2 caveats.
+
 **Both sides get the same circuit.** GPAP's circuit numbers are reported on two encodings (native
 Tseitin and ABC), and DEMOTIC/Recurrent consume `.bench` and unroll it themselves — so comparing
 our ABC arm against a rival that only ever saw the raw circuit would credit the encoder to the

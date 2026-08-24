@@ -89,6 +89,29 @@ def demotic_target(module_name: str, circuit_type: str):
     return [0, 15, 31, 63, -1], [1, 0, 1, 0, 1]
 
 
+def native_pin_check(orig, reordered, idx, vals, pin_n, T, n_words=256):
+    """Verify the native-mode constraint alignment END TO END: pinning the outputs at THEIR
+    table indices `idx` on the ORIGINAL file must accept exactly the same input sequences as
+    pinning the FIRST pin_n outputs of our REORDERED copy (what GPAP's build_cnf gets).
+
+    Both files share the same primary inputs in the same order, so the same rng feeds them
+    identical stimuli and the acceptance words must match BIT FOR BIT — the same style of check
+    the miter mode already runs (p_miter == p_accept). This closes the one link that was only
+    asserted by construction: negative-index resolution and the reorder itself. The remaining
+    cross-parser link — that DEMOTIC's own parser reads OUTPUT() in file order — is verified by
+    reading their comb_parser/seq_parser at the pinned commit (outputs.append per OUTPUT line,
+    emitted in that order by the generated forward)."""
+    import numpy as np
+    from gpap.circuits.bench import parse_bench
+    from gpap.circuits.simulate import _accept_words, _run_bench, _topo_gates
+    co, cr = parse_bench(orig), parse_bench(reordered)
+    tgt_o = {co[1][i]: bool(v) for i, v in zip(idx, vals)}
+    tgt_r = {w: bool(v) for w, v in zip(cr[1][:pin_n], vals)}
+    lo = _run_bench(co, _topo_gates(co), T, n_words, rng=np.random.default_rng(7))
+    lr = _run_bench(cr, _topo_gates(cr), T, n_words, rng=np.random.default_rng(7))
+    return bool(np.array_equal(_accept_words(lo, tgt_o), _accept_words(lr, tgt_r)))
+
+
 # ------------------------------------------------------------------ bench sanitising
 # DEMOTIC GENERATES PYTHON SOURCE from the .bench (signal name -> local variable) and exec's it,
 # so every signal name must be a valid Python identifier. The classic ISCAS-85 distribution we
@@ -360,6 +383,10 @@ def main():
             pin_desc = ",".join(f"[{i}]={v}" for i, v in zip(idx, vals))
             sim = sim_baseline(gpap_file, gpap_T, args.target_seed, pin_outputs=pin_n,
                                target=gpap_target)
+            pin_ok = native_pin_check(src, gpap_file, idx, vals, pin_n, gpap_T)
+            if not pin_ok:
+                print(f"{name:<10}{variant:>6}  PIN CHECK FAILED — reordered pins do not match "
+                      f"their index table; row flagged", flush=True)
         # Their side only: make every wire name a valid Python identifier (they exec generated
         # source). Pure alpha-rename — our side keeps the original file.
         rival_safe = os.path.join(tmp, f"{name}_{variant}_{args.mode}_safe.bench")
@@ -373,6 +400,7 @@ def main():
                      time_limit=args.gpap_time_limit)
         row = {"name": name, "mode": args.mode, "variant": variant, "circuit": vinfo,
                "pin": pin_desc, "cycles": gpap_T,
+               "pin_check_ok": (pin_ok if args.mode == "native" else True),
                "p_accept": sim["p_accept"], "p_accept_lt": sim.get("p_accept_lt"),
                "demotic": dem, "gpap": g, "batch": batch}
         if args.mode == "miter":
