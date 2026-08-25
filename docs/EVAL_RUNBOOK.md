@@ -305,6 +305,34 @@ Protocol invariants (each one was a wrong number once):
   instances their unique count saturates at the batch, so their score is bounded by a knob we
   set. Offset by the 300 s wall (vs our 60 s) and best-of-batch; a larger-budget rerun is
   future work, noted in the generated Table 2 caveats.
+- **EMISSION SYMMETRY — no tool is timed while delivering its solutions.** Ours is the reason
+  CMSGen is timed with the patch's `--nowrite` (a stock binary writing every sample cost 8.2x of
+  its wall on 27.sk_3_32), so the same has to hold for the GPU rivals or the ratio is partly a
+  measurement of their PCIe traffic. Re-derive it, don't assume it:
+  `python eval/rivals/check_emission_symmetry.py --results .experiments/<campaign>` AST-scans the
+  function each rival's own `timer(...)` wraps for host transfers and IO, checks that every
+  `.sample()` in our timed window passes `collect=False`, and audits `cms_mode` over the recorded
+  rows (its GPAP half is also a runtime gate:
+  `test_timed_run_never_gathers_a_model_to_the_host` disarms `var_bits` and re-runs). Verdict on
+  the pinned commits: DEMOTIC and HTS time the descent loop alone and count/dedup solutions
+  *after* the clock stops; all 737 recorded CMSGen rows are `nowrite`; our timed run gathers
+  nothing (`keep_rows` is False). Note the asymmetry that runs against US, and is likewise left
+  alone: our timed loop pays a per-chunk on-device soundness check no rival performs at all.
+  **One exception — Recurrent-CircuitSAT**, which snapshots its per-depth candidate assignments
+  to the host inside its timed loop (`run.py:186`, `|PI| x sum(d+1 for d in start_point..T-1)`
+  strided copies = 0.5-4.0 GiB per run). MEASURED, not modelled (RTX 4080, `--num_steps 10`, by
+  timing that block directly): **0.70% (b03@100k), 1.32-1.42% (s386@100k), 0.88% (s1196@30k) of
+  `model_runtime`; bound <=~2.2% on the recorded cells.** Removing the copy — snapshots kept on
+  the device, which is semantically identical since their `_check_solution` does
+  `par.to(self.device)` on each — leaves `num_unique_solutions` **bit-identical** (1,995,117 /
+  2,134,454 / 662,936) and saves **1.41% on s386 over 4 interleaved repetitions**, against a
+  1.32% meter reading. ⚠️ One un-repeated on/off pair cannot resolve this: run-to-run spread is
+  the size of the effect (the first pairs read -0.23 s, +3.11 s, +0.06 s).
+  **DELIBERATELY NOT CORRECTED.** It is one rival, worth ~1%, and it moves the ratio in OUR
+  favour — deducting it would raise our number, so leaving it keeps the rival's rate exactly as
+  published and the harness simple. Instrumenting it (meter + on/off switch + a rival-only
+  re-measure path) was built, validated, and reverted for that reason; if it is ever wanted
+  again, the mechanism is a timed block around `run.py:186` reported on stdout.
 
 **Both sides get the same circuit.** GPAP's circuit numbers are reported on two encodings (native
 Tseitin and ABC), and DEMOTIC/Recurrent consume `.bench` and unroll it themselves — so comparing

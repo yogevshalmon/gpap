@@ -83,6 +83,23 @@ marks any row it had to measure the old way as `cms_mode="write"`. The patch's `
 also exports CryptoMiniSat's own propagation/decision counters, which is where the `Cdec/s` /
 `Cimpl/s` columns come from. **Ratios published before 2026-07-27 include the emission handicap.**
 
+The same rule binds the GPU rivals, and it is CHECKED rather than assumed:
+`python eval/rivals/check_emission_symmetry.py --results <campaign>` AST-scans the function each
+rival's own `timer(...)` wraps for host transfers and IO, asserts every `.sample()` in our timed
+window passes `collect=False`, and audits `cms_mode` over the recorded rows. On the pinned
+commits DEMOTIC and HTS time the descent loop alone (they count and dedup *after* the timer
+stops). The GPAP half is also a runtime gate:
+`test_timed_run_never_gathers_a_model_to_the_host` disarms `var_bits` and re-runs the timed path.
+
+One exception, measured and left uncorrected: Recurrent-CircuitSAT copies its per-depth candidate
+assignments to the host inside its own timed loop. Timing that block directly on an RTX 4080 puts
+it at **0.7–1.4% of `model_runtime`** (bound ≤2.2%), and removing it — snapshots kept on device,
+semantically identical for their solution check — leaves the unique-solution count bit-identical
+while saving 1.41% on s386 over 4 interleaved repetitions. ⚠️ A single on/off pair is worthless
+here: run-to-run spread is the size of the effect. We do not deduct it, because it is one rival,
+worth ~1%, and the correction points **our** way — an uncorrected row under-reports GPAP rather
+than flattering it, which is the right side to err on.
+
 ## 5. Benchmark against the competitor's OWN optimized operation
 
 Compare GPU work against CMSGen's actual C++ sampler (or a solver's in-C `process()`), never a naive

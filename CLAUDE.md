@@ -90,7 +90,10 @@ gpap/
   benchmark.py             # the `gpap bench` suite driver (in-package so it works installed)
 eval/                      # the experiment layer: run_full_eval.sh (staged/resumable terminal
                            #   sweep) + eval_plots.py + rivals_{demotic,recurrent,hts}.py +
-                           #   rivals_setup.sh + barbarik_gpap.py (CM_test, gpap|cmsgen under
+                           #   rivals_setup.sh + check_emission_symmetry.py (RE-DERIVES that
+                           #   no tool is timed while DELIVERING solutions: AST-scans what each
+                           #   rival's own timer() wraps, our collect=False, cmsgen --nowrite)
+                           #   + barbarik_gpap.py (CM_test, gpap|cmsgen under
                            #   test) + fuzz_uniformity.py (exact-oracle uniformity fuzzing)
                            #   + the cross-GPU Colab driver + colab_supervisor.py (survives the
                            #   ~1h VM lifetime: mirror every cycle, reseed, resume)
