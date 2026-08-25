@@ -11,7 +11,9 @@ the timing path); GPAP's rate additionally includes construction+simplify (sps_e
 stricter e2e). Solution-uniqueness caveat: HTS counts unique FULL assignments, GPAP distinct
 SUPPORT projections — identical on deterministic-circuit Tseitin CNFs (internal vars are
 functions of the inputs), which is why the shared instances here are our circuit unrolls plus
-their own s15850a/prod circuit CNFs (`c ind` present).
+their own s15850a/prod circuit CNFs (`c ind` present). Their timer is emission-free — the
+unique-solution dedup and the results CSV both land after it stops — matching CMSGen's
+`--nowrite` and our `collect=False` timed run (checked by eval/rivals/check_emission_symmetry.py).
 
 Setup (once): eval/rivals/rivals_setup.sh — clones
     https://github.com/arashardakani/High-Throughput-SAT-Sampler into

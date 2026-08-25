@@ -286,3 +286,29 @@ def test_config_breakdown_keys_stay_legacy_formatted():
     r = smp.sample(300, configs=portfolio("default"), collect=False, max_chunks=9)
     for k in (r.get("config_breakdown") or {}):
         assert k.startswith("rv=True,") or k.startswith("rv=False,"), k
+
+
+@needs_gpu
+def test_timed_run_never_gathers_a_model_to_the_host():
+    """EMISSION SYMMETRY: the timed run must not pay to deliver its samples.
+
+    Every rival in the paper is timed on generation alone — CMSGen through the patch's
+    `--nowrite`, the gradient samplers because their own `timer` wraps the descent loop only.
+    Ours holds because `collect=False` leaves `keep_rows` False, so the (n, N) `var_bits` gather
+    never fires; the writer and the coverage pass run after the clock stops. Assert it instead
+    of trusting the flag: `eval/rivals/check_emission_symmetry.py` checks the same property
+    statically on the rival side, and this is its GPAP half.
+    """
+    from gpap.sampling.pipeline import Lookahead
+    smp = GPUSampler.from_clauses(4, [[1, 2], [-1, 3], [-2, -3], [2, 3, 4]], DEV, k_cap=256,
+                                  seed=1)
+
+    def _boom(*a, **k):
+        raise AssertionError("timed run gathered model rows to the host")
+
+    smp.engine.var_bits = _boom
+    r = smp.sample(300, configs=[(True, 1, Lookahead.NONE)], collect=False, max_chunks=4)
+    assert r["n_models"] >= 0                       # ran to completion with the gather disarmed
+    del smp.engine.var_bits
+    r2 = smp.sample(50, configs=[(True, 1, Lookahead.NONE)], collect=True, max_chunks=4)
+    assert r2["models"], "collect=True must still gather (the trap above proves the difference)"

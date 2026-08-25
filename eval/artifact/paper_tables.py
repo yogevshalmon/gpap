@@ -454,7 +454,16 @@ def build(args):
           "set — generous timeouts (300 s vs our 60 s) and best-of-batch offset it, but state "
           "it. Constraint alignment is VERIFIED per row: miter mode asserts p(MITER=1) equals "
           "the instance's p_accept; native mode asserts bit-identical acceptance words between "
-          "their index table on the original file and our reordered pins (`pin_check_ok`)."]
+          "their index table on the original file and our reordered pins (`pin_check_ok`). "
+          "**No tool is timed while delivering its solutions**: CMSGen runs under the patch's "
+          "`--nowrite`, DEMOTIC and HTS count and dedup their solutions after their own timer "
+          "stops, and our timed run gathers no model row to the host (`collect=False`) — "
+          "re-derived from the pinned sources by `eval/rivals/check_emission_symmetry.py`. The "
+          "one exception is Recurrent-CircuitSAT, which copies its per-depth candidate "
+          "assignments to the host inside its timed loop: measured at 0.7-1.4% of its "
+          "`model_runtime` (bound <=2.2% on these cells), left uncorrected so its rate is "
+          "exactly the one it publishes. Deducting it would RAISE the ratios below, so this row "
+          "under-reports GPAP by ~1% rather than flattering it."]
     if any(prop.values()):
         M += ["", "## Table 3 — propagation throughput (the engine, not the sampler)", "",
               "`impl/s` is Boolean implications per second: GPAP's from the packed-word kernel, "

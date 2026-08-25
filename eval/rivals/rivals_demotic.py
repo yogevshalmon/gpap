@@ -21,7 +21,10 @@ Two modes, because "who wins" depends entirely on whose task is being sampled:
 Their metric (used verbatim): num_unique_solutions / model_runtime, where model_runtime times the
 gradient loop ONLY — their timer excludes model build AND the solution re-check pass. GPAP's
 comparable figure is unique_sps_est (raw samples/s x distinct fraction, dedup measured off the
-timing path) and its rate INCLUDES construction. Both generous to them, kept that way.
+timing path) and its rate INCLUDES construction. Both generous to them, kept that way. Their
+timer is also emission-free — no host copy, no file write inside `run_back_prop_*` — which is
+what makes the comparison against CMSGen's `--nowrite` and our `collect=False` timed run
+like-for-like (checked by eval/rivals/check_emission_symmetry.py).
 
 Setup (once): eval/rivals/rivals_setup.sh — clones https://github.com/arashardakani/Demotic
     into <repo>/.gpap/src/Demotic at the PINNED evaluated commit.

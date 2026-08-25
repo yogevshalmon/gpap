@@ -10,6 +10,20 @@ depths start_point..T (each depth's constraint sits at that depth's last cycle),
 Both are GENEROUS to them and kept as-is; we additionally parse their per-depth stdout list for
 the depth-T-only count (`uniq@T`) — the number directly comparable to GPAP's fixed-depth CNF.
 
+EMISSION SYMMETRY (the one asymmetry that runs the OTHER way, measured and deliberately NOT
+corrected): every other tool here is timed on generation alone — CMSGen via --nowrite, DEMOTIC
+and HTS because their own timer wraps the descent loop only, GPAP because its timed run is
+collect=False. This rival instead .cpu()s its per-depth candidate assignments INSIDE the loop its
+timer wraps (run.py:186 — `|PI| x sum(d+1 for d in start_point..T-1)` strided copies, 0.5-4.0 GiB
+per run), so its published rate is charged for delivery. Measured on an RTX 4080 by timing that
+block directly: 0.70% (b03), 1.32-1.42% (s386), 0.88% (s1196) of model_runtime, and removing the
+copy entirely (snapshots kept on device — their _check_solution already does
+`par.to(self.device)`) leaves num_unique_solutions BIT-IDENTICAL while saving 1.41% on s386 over
+4 interleaved repetitions. Bound for the recorded cells: <=~2.2% of their model_runtime.
+NOT deducted, on purpose: it is a single rival, the correction is ~1% and it moves the ratio in
+OUR favour, so leaving it in keeps their number exactly as they publish it and keeps this
+harness simple. Re-derive with eval/rivals/check_emission_symmetry.py.
+
 GPAP side: identical constraint via output-reordered .bench (their target_idx outputs moved
 first, then build_cnf pin_outputs=len(idx) with the same values, pinned at cycle T), sampled at
 MEDIAN OF 3 SEEDS. Rejection baseline (p_acc) comes from sim_baseline on the same reordered
