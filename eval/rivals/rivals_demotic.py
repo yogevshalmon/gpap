@@ -48,7 +48,9 @@ import time
 REPO_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))  # eval/<sub>/ -> repo
 sys.path.insert(0, REPO_ROOT)
 
-from eval.rivals.rival_common import VARIANTS, prepare_variant, rival_commit, variant_note  # noqa: E402
+from eval.rivals.rival_common import (VARIANTS, cached_gpap, fit_batch,  # noqa: E402
+                                      prepare_variant, rival_commit, rival_vram_budget,
+                                      run_at_batch, variant_note)
 from eval.rivals.rivals_recurrent import reorder_bench, run_gpap          # noqa: E402
 from eval.rivals.unroll_to_bench import write_unrolled_miter              # noqa: E402
 
@@ -225,32 +227,27 @@ def run_demotic(root, bench_file, key, *, steps, batch, circuit_type, T, lr="15e
             "num_inputs": r.get("num_inputs"), "num_outputs": r.get("num_outputs")}
 
 
-BATCH_LADDER = (1_000_000, 300_000, 100_000, 30_000, 10_000, 3_000)
-
-
-def pick_batch(bench_file, T, budget_bytes=5 << 30):
-    """Largest batch whose unrolled autograd graph (#gates x T x batch x 4B) fits the budget —
-    this box SPILLS to host RAM instead of OOMing, so we must not rely on allocator failure."""
+def pick_batch(bench_file, T, budget_bytes=None):
+    """The batch DEMOTIC is granted: the largest that fits in 0.80 of free VRAM — the same share
+    of the same card GPAP sizes its own K with. See rival_common.fit_batch for why their own
+    `--batch_size` default (10) and demo script (1,000, on c17's six gates) cannot serve as the
+    rule."""
     n_gates = sum(1 for line in open(bench_file)
                   if "=" in line and "DFF" not in line and not line.lstrip().startswith("#"))
-    for b in BATCH_LADDER:
-        if max(n_gates, 1) * T * b * 4 <= budget_bytes:
-            return b
-    return 3_000
+    return fit_batch(max(n_gates, 1) * T, "demotic", budget_bytes)
 
 
 def run_demotic_ladder(root, bench_file, key, *, steps, batch, circuit_type, T,
                        timeout=DEFAULT_TIMEOUT):
-    """run_demotic, stepping down the batch ladder when the driver refuses the size ('device not
-    ready' reproduces at a fixed batch on some models yet passes one rung lower)."""
-    ladder = [b for b in BATCH_LADDER if b <= batch] or [BATCH_LADDER[-1]]
-    r = {"error": "empty ladder"}
-    for b in ladder[:3]:
-        r = run_demotic(root, bench_file, key, steps=steps, batch=b,
-                        circuit_type=circuit_type, T=T, timeout=timeout)
-        if "error" not in r or "device not ready" not in r["error"]:
-            return r
-    return r
+    """run_demotic at its granted batch, stepping DOWN if the driver refuses the size ('device
+    not ready' reproduces at a fixed size on some models yet passes one rung lower). The rungs
+    tried are attached as `batch_sweep`: what parallelism the rival got belongs in the row, since
+    its unique/s is near-proportional to it (c432 1k -> 300k is 258x)."""
+    r, sweep = run_at_batch(
+        lambda b: run_demotic(root, bench_file, key, steps=steps, batch=b,
+                              circuit_type=circuit_type, T=T, timeout=timeout),
+        batch)
+    return dict(r, batch_sweep=sweep) if isinstance(r, dict) else r
 
 
 # ------------------------------------------------------------------ driver
@@ -278,6 +275,9 @@ def main():
                          "decides the comparison — the rival gets the optimized circuit too")
     ap.add_argument("--steps", type=int, default=10, help="their num_steps (their script: 1-100)")
     ap.add_argument("--batch", type=int, default=None, help="their batch (default: fit to VRAM)")
+    ap.add_argument("--gpap-cache", default=None,
+                    help="directory of cached GPAP arms (default: <output dir>/.gpap_cache). "
+                         "GPAP_RIVAL_CACHE=0 disables reuse entirely.")
     ap.add_argument("--seeds", type=int, nargs="+", default=[5, 6, 7],
                     help="GPAP sampling seeds; the row reports the median")
     ap.add_argument("--gpap-n", type=int, default=50_000)
@@ -313,6 +313,9 @@ def main():
            f"{'DEM u/s':>10}{'GPAP u/s~':>11}{'GPAP/s':>11}{'succ%':>7}{'ratio':>10}")
     print(hdr)
     print("-" * len(hdr))
+    # Our arm is the same task whatever the rival is doing; see rival_common.cached_gpap.
+    cache_dir = args.gpap_cache or (os.path.join(os.path.dirname(args.output) or ".",
+                                                 ".gpap_cache") if args.output else None)
     out = []
     done = set()
     if args.resume and args.output and os.path.isfile(args.output):
@@ -399,13 +402,23 @@ def main():
         dem = run_demotic_ladder(args.demotic, rival_file, key, steps=args.steps, batch=batch,
                                  circuit_type=circuit_type, T=T_rival, timeout=args.timeout)
         dem["renamed_wires"] = renamed
-        g = run_gpap(gpap_file, gpap_T, pin_n, gpap_target, args.seeds, args.gpap_n, device,
-                     time_limit=args.gpap_time_limit)
+        task = {"harness": "demotic", "mode": args.mode, "cycles": gpap_T, "pin_outputs": pin_n,
+                "target": gpap_target, "seeds": args.seeds, "n_time": args.gpap_n,
+                "time_limit": args.gpap_time_limit, "portfolio": "circuit"}
+        g, hit = cached_gpap(cache_dir, gpap_file, task,
+                             lambda: run_gpap(gpap_file, gpap_T, pin_n, gpap_target, args.seeds,
+                                              args.gpap_n, device,
+                                              time_limit=args.gpap_time_limit))
+        if hit:
+            print(f"{name:<10}{variant:>6}  [gpap-cache hit — arm not re-run]", flush=True)
         row = {"name": name, "mode": args.mode, "variant": variant, "circuit": vinfo,
                "pin": pin_desc, "cycles": gpap_T,
                "pin_check_ok": (pin_ok if args.mode == "native" else True),
                "p_accept": sim["p_accept"], "p_accept_lt": sim.get("p_accept_lt"),
-               "demotic": dem, "gpap": g, "batch": batch}
+               "demotic": dem, "gpap": g, "batch": batch,
+               # what parallelism the rival was GRANTED, beside its score: the resolved VRAM
+               # budget (same 0.80-of-free rule as GPAP's K) and the rung the climb settled on
+               "vram_budget_bytes": rival_vram_budget()}
         if args.mode == "miter":
             # the miter's own acceptance probability (write_unrolled_miter asserts it equals
             # p_accept) — the evidence that both samplers were given the same task

@@ -163,3 +163,161 @@ def test_vacuous_pins_excluded_only_where_present(tmp_path):
     assert v["has_vac"] and v["gm"] == pytest.approx(100.0)
     d2 = stage(tmp_path, "t", [row(f"i{i}.bench") for i in range(3)])
     assert cms_family(d2, "t")["has_vac"] is False
+
+
+# ------------------------------------------------- the e2e column: who is charged for setup
+
+def timed_row(name, *, sps=1e6, cms_sps=1e4, pre=0.5, wall_total=2.0, **kw):
+    """A cell whose GPAP side spent `pre` of its end-to-end wall PREPARING (parse/construct/ELS/
+    warmup/mining) rather than sampling."""
+    r = row(name, **kw)
+    r["wall_total_s"] = wall_total
+    r["phases"] = {"parse": 0.0, "construct": pre * wall_total, "warmup": 0.0,
+                   "mine": 0.0, "rebuild": 0.0, "recheck": 0.0,
+                   "timed": (1 - pre) * wall_total}
+    # what benchmark.py records: the e2e rate is models/wall_total, so the e2e ratio is the
+    # steady-state one scaled by the fraction of the wall that was actually sampling
+    r["ratio_e2e"] = (sps * (1 - pre)) / cms_sps
+    return r
+
+
+def test_e2e_column_charges_gpap_for_its_own_preprocessing(tmp_path):
+    """CMSGen's rate is samples/subprocess-wall — its parse and setup are already inside it. So a
+    table that scores GPAP on its steady-state sampling rate alone charges one side and not the
+    other; `gm_e2e` must exist beside `gm` and must be lower by exactly the preparation share."""
+    d = stage(tmp_path, "seq-c25-rare",
+              [timed_row("a", pre=0.5), timed_row("b", pre=0.5)])
+    v = cms_family(d, "seq-c25-rare")
+    assert v["gm"] == pytest.approx(100.0)          # 1e6 / 1e4, setup not charged
+    assert v["gm_e2e"] == pytest.approx(50.0)       # half the wall was preparation
+    assert v["pre_frac"] == pytest.approx(0.5)
+    assert v["gm_e2e"] < v["gm"], "the honest column must never read higher than the headline"
+
+
+def test_pre_frac_is_a_median_not_an_average_of_ratios(tmp_path):
+    """One instance whose formula takes seconds to build must not drag the whole family's
+    reported preparation share — the column is a median over cells, like every other spread
+    number in these tables."""
+    rows = [timed_row("a", pre=0.1), timed_row("b", pre=0.1), timed_row("c", pre=0.9)]
+    v = cms_family(stage(tmp_path, "seq-c25-rare", rows), "seq-c25-rare")
+    assert v["pre_frac"] == pytest.approx(0.1)
+
+
+# ------------------------------------------------- the parallelism grant handed to the rivals
+
+def test_batch_is_sized_to_the_same_share_of_the_card_we_take():
+    """A rival's unique/s is near-proportional to the batch we hand it (measured: DEMOTIC c1355
+    1k -> 1M is 564x), so the batch is the parallelism grant, not a detail of their setup. The
+    rule is the one GPAP uses on itself — the largest that fits in 0.80 of free VRAM."""
+    from eval.rivals.rival_common import GRAPH_BYTES, fit_batch
+    budget = 8 << 30
+    # 1000 gates x 25 frames of DEMOTIC graph: budget / (work x bytes-per-row)
+    work = 1000 * 25
+    b = fit_batch(work, "demotic", budget_bytes=budget)
+    assert work * GRAPH_BYTES["demotic"] * b <= budget
+    assert fit_batch(work, "demotic", budget_bytes=budget * 4) > b, "a bigger card must grant more"
+
+
+def test_batch_never_returns_something_that_cannot_run():
+    """A formula so wide that not even the smallest rung fits must still yield a runnable batch —
+    the rival reporting an OOM is a result; the harness handing it 0 is a bug."""
+    from eval.rivals.rival_common import BATCH_LADDER, fit_batch
+    assert fit_batch(10 ** 12, "recurrent", budget_bytes=1 << 20) == BATCH_LADDER[0]
+
+
+def test_run_at_batch_steps_down_when_the_card_refuses_and_records_the_rungs():
+    """'device not ready' reproduces at a fixed size on some models yet passes one rung lower, and
+    the measured VRAM factor is an average — so the driver, not our model, has the last word."""
+    from eval.rivals.rival_common import run_at_batch
+
+    def run(b):
+        return {"error": "CUDA driver error: device not ready"} if b > 10_000 \
+            else {"unique_per_s": float(b)}
+
+    best, sweep = run_at_batch(run, 300_000, log=lambda *_: None)
+    assert "error" not in best and best["unique_per_s"] == 10_000
+    assert any(s.get("error") for s in sweep), "the refusals belong in the recorded sweep"
+    # down to the rung that runs; the upward probe is skipped because 30k already refused
+    assert [s["batch"] for s in sweep] == [300_000, 100_000, 30_000, 10_000]
+
+
+def test_run_at_batch_probes_one_rung_up_because_one_factor_cannot_fit_all_sizes():
+    """Measured, DEMOTIC at batch 300k: peak VRAM per gate-row falls 23.0 B (c432) -> 11.6 B
+    (c3540), so any single factor over-charges one end — at 20 B the model rejects c2670 at 1M,
+    which really fits an L4. One probe upward recovers that; it is bounded to one extra run."""
+    from eval.rivals.rival_common import run_at_batch
+    calls = []
+
+    def run(b):
+        calls.append(b)
+        return {"unique_per_s": float(b)}                # bigger is genuinely better here
+
+    best, sweep = run_at_batch(run, 100_000, log=lambda *_: None)
+    assert best["unique_per_s"] == 300_000, "the under-grant was not recovered"
+    assert calls == [100_000, 300_000], f"probe must be bounded to ONE rung: {calls}"
+
+
+def test_run_at_batch_keeps_the_granted_rung_when_the_bigger_one_spills():
+    """Too big does not always ERROR — Recurrent on s386 runs at 1M and is slower than at 300k.
+    The upward probe must be kept only when it is actually faster."""
+    from eval.rivals.rival_common import run_at_batch
+
+    def run(b):
+        return {"unique_per_s": 900.0 if b == 100_000 else 200.0}   # 300k spills
+
+    best, sweep = run_at_batch(run, 100_000, log=lambda *_: None)
+    assert best["unique_per_s"] == 900.0, "scored the rival on a spilled run"
+    assert [x["batch"] for x in sweep] == [100_000, 300_000]
+
+
+# ------------------------------------------------- mirroring: results only exist once local
+
+def test_mirror_accepts_every_artifact_type_not_just_json(tmp_path):
+    """A rented VM dies with its disk, so a result exists only once mirrored — and the mirror
+    must not silently DROP an artifact because of how it validates it. Validating every file as
+    JSON (which colab_supervisor did until 2026-08-25) discards non-JSON artifacts entirely: the
+    GPAP-arm cache tarball, the one thing that makes a rival-side re-run cheap, never landed."""
+    import json
+    import tarfile
+    from eval.colab.colab_supervisor import _intact
+
+    good = tmp_path / "r.json"
+    good.write_text(json.dumps([{"name": "a"}]))
+    tgz = tmp_path / "gpap_cache.tgz"
+    with tarfile.open(tgz, "w:gz") as t:
+        t.add(good, arcname="r.json")
+    assert _intact(str(good)) and _intact(str(tgz))
+
+
+def test_mirror_rejects_a_download_caught_mid_write(tmp_path):
+    """The check it replaced was there for a reason: a file copied while the VM was writing it
+    reads back truncated, and a truncated result must never replace a good local copy."""
+    import json
+    import tarfile
+    from eval.colab.colab_supervisor import _intact
+
+    src = tmp_path / "r.json"
+    src.write_text(json.dumps([{"name": "a"}]))
+    tgz = tmp_path / "c.tgz"
+    with tarfile.open(tgz, "w:gz") as t:
+        t.add(src, arcname="r.json")
+    (tmp_path / "half.json").write_text('[{"name":')
+    (tmp_path / "half.tgz").write_bytes(tgz.read_bytes()[:20])
+    assert not _intact(str(tmp_path / "half.json"))
+    assert not _intact(str(tmp_path / "half.tgz"))
+
+
+def test_a_timeout_does_not_walk_the_whole_batch_ladder():
+    """A timeout is not a memory refusal. Measured on the L4: HTS's three tseitin cells stepped
+    1M -> 1,000 at the full 300 s cap on every rung, ~40 min per cell to record an error it had
+    after the first run. Their runtime does grow with the batch, so allow two rungs, not eight."""
+    from eval.rivals.rival_common import run_at_batch
+    calls = []
+
+    def run(b):
+        calls.append(b)
+        return {"error": "timeout 300s"}
+
+    best, sweep = run_at_batch(run, 3_000_000, log=lambda *_: None)
+    assert "error" in best
+    assert len(calls) <= 3, f"walked the ladder on a timeout: {calls}"

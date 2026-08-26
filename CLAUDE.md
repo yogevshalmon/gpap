@@ -90,7 +90,12 @@ gpap/
   benchmark.py             # the `gpap bench` suite driver (in-package so it works installed)
 eval/                      # the experiment layer: run_full_eval.sh (staged/resumable terminal
                            #   sweep) + eval_plots.py + rivals_{demotic,recurrent,hts}.py +
-                           #   rivals_setup.sh + check_emission_symmetry.py (RE-DERIVES that
+                           #   rivals_setup.sh + rival_common.py (THE fairness policy: circuit
+                           #   variants, the PARALLELISM GRANT — a rival's unique/s is
+                           #   ~proportional to the batch we hand it, so each gets the largest
+                           #   that fits 0.80 of free VRAM, the same rule K uses — and the
+                           #   on-disk GPAP-arm cache, so a rival-side re-run costs only the
+                           #   rival) + check_emission_symmetry.py (RE-DERIVES that
                            #   no tool is timed while DELIVERING solutions: AST-scans what each
                            #   rival's own timer() wraps, our collect=False, cmsgen --nowrite)
                            #   + barbarik_gpap.py (CM_test, gpap|cmsgen under
@@ -511,6 +516,13 @@ Cross-GPU K-scaling: `eval/colab/colab_sampling_benchmark.py` + `notebooks/gpap_
   ISCAS-85, 5.6× seq-c25, 14.4× seq-c50, 53.7× EPFL; engine advantage 197-631× (geomean 306×). ⚠️ Every column must use the SAME rows — filtering per column
   lets an instance that propagates hard but emits nothing (EPFL `bar`) into the numerator only,
   breaking the identity by 3×. Table 3 of `eval/artifact/paper_tables.py`; figure `propagation_summary.png`.
+- **Preprocessing is INSIDE the honest rate.** `samples_per_s` is the winning config's
+  steady-state throughput and excludes parse + construction + ELS + warmup + MINING (median
+  **20.7%** of GPAP's end-to-end wall, mean 27.4%); `sps_e2e_total` includes them. CMSGen's rate
+  is samples/subprocess-wall, so it already carries ITS setup — comparing against our
+  steady-state number charges one side only, and the L4 suite geomean reads **165.0x that way vs
+  96.7x e2e**. Table 1 prints both (`GPAP/CMSGen` and `e2e`) plus `pre%`; quote `e2e` for a
+  delivered-samples claim. Circuit ENCODING is in neither — it is `t_enc`, an encoder cost.
 - Measurement protocol: [`docs/BENCHMARKING.md`](docs/BENCHMARKING.md).
 
 ## Tests / methodology

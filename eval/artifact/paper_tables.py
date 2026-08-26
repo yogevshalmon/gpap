@@ -33,6 +33,7 @@ import argparse
 import json
 import math
 import os
+import statistics
 import subprocess
 import time
 
@@ -117,6 +118,17 @@ def select_cells(payload):
     return rows, best
 
 
+def _pre_frac(r):
+    """Share of GPAP's end-to-end wall spent BEFORE the clock the headline rate is measured on:
+    parse + engine construction + ELS + warmup + mining + the post-mining rebuild/recheck."""
+    ph = r.get("phases") or {}
+    wt = r.get("wall_total_s")
+    if not wt:
+        return None
+    return sum(ph.get(k, 0.0) for k in
+               ("parse", "construct", "warmup", "mine", "rebuild", "recheck")) / wt
+
+
 def cms_family(d, stem):
     payload = load(os.path.join(d, f"{stem}.json")) if d else None
     if not payload:
@@ -158,6 +170,16 @@ def cms_family(d, stem):
         "cells": len(rows), "inst": len(best),
         "gm_all": gm([r["ratio"] for r in finite.values()]),
         "gm": gm(gm_vals),
+        # The SAME cells, scored on GPAP's end-to-end wall instead of its steady-state rate.
+        # `ratio` divides GPAP's best-config sampling rate by CMSGen's samples/subprocess-wall —
+        # but CMSGen's wall already contains its own parse and setup, so that comparison charges
+        # only one side for getting ready. `ratio_e2e` uses GPAP's wall_total (parse + construct
+        # + ELS + warmup + MINING + the timed run), which is the like-for-like number. Both are
+        # reported: the steady-state one is what a long run converges to once the one-time costs
+        # amortise, and n_time here is small enough that they do not.
+        "gm_e2e": gm([r.get("ratio_e2e") for k, r in finite.items() if k not in drop]),
+        "pre_frac": (statistics.median([_pre_frac(r) for k, r in finite.items()
+                                        if k not in drop and _pre_frac(r) is not None] or [0.0])),
         "free": len(free), "free_names": sorted(free),
         # what the headline would read if the degenerate cells were left in — the size of the
         # error we are avoiding, so it can be quoted in the caveat rather than merely asserted
@@ -400,9 +422,22 @@ def build(args):
          "its own column instead of the geomean.", "",
          "## Table 1 — GPAP vs CMSGen", "",
          "Columns add up: `inst` = geomean instances + CMSGen=0 + GPAP=0 + both=0.", "",
-         "| family | depth | targets | inst | GPAP/CMSGen | wins | CMSGen=0 | GPAP=0 | both=0 |"
-         " no-search |" + (" ref GPU |" if ref else ""),
-         "|---|---|---|---:|---:|---:|---:|---:|---:|---:|" + ("---:|" if ref else "")]
+         "**Two rate columns, and the difference is who is charged for getting ready.** "
+         "`GPAP/CMSGen` divides GPAP's steady-state sampling rate — the winning config's "
+         "measured throughput, the number a long run converges to — by CMSGen's "
+         "samples/subprocess-wall. But CMSGen's wall already contains ITS parse and setup, so "
+         "that column charges only one side. `e2e` re-scores the SAME cells on GPAP's "
+         "`wall_total` (parse + engine construction + ELS + warmup + entailed-clause MINING + "
+         "the timed run), which is the like-for-like number; `pre%` is the median share of "
+         "GPAP's end-to-end wall that preparation takes. Preparation is a real cost at these "
+         "`n_time` values and does not amortise away until the run is much longer — quote `e2e` "
+         "for a delivered-samples claim and the steady-state column only for the "
+         "large-n regime, saying which. (Circuit ENCODING is in neither: it is reported "
+         "per instance as `t_enc` and belongs to the encoder, not the sampler.)", "",
+         "| family | depth | targets | inst | GPAP/CMSGen | e2e | pre% | wins | CMSGen=0 "
+         "| GPAP=0 | both=0 | no-search |" + (" ref GPU |" if ref else ""),
+         "|---|---|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|"
+         + ("---:|" if ref else "")]
     for stem, label, depth, tgt in CMS_FAMILIES:
         v = cms.get(stem)
         if not v:
@@ -416,8 +451,10 @@ def build(args):
         gms = f"{v['gm']:,.1f}x" if v["gm"] else "— (all CMSGen=0)"
         if v["gm"] and v["n_gm"] < 3:
             gms += f" ⚠n={v['n_gm']}"
+        e2e = f"{v['gm_e2e']:,.1f}x" if v.get("gm_e2e") else "—"
         M.append(f"| {label}{mark} | {depth} | {tgt} | {v['inst']} | "
-                 f"{gms} | {v['wins']}/{v['n']} | {v['inf']} | {v['gpap0']} | {v['both0']} "
+                 f"{gms} | {e2e} | {100 * v.get('pre_frac', 0):.0f}% "
+                 f"| {v['wins']}/{v['n']} | {v['inf']} | {v['gpap0']} | {v['both0']} "
                  f"| {v['free']} |{refs}")
     g0 = sorted({n for v in cms.values() if v for n in v["gpap0_names"]})
     b0 = sorted({n for v in cms.values() if v for n in v["both0_names"]})
@@ -448,11 +485,21 @@ def build(args):
           "to a rare reachable pattern (p_accept ~1e-2–1e-6). Recurrent-CircuitSAT is scored on "
           "its own depth-POOLED unique count — solutions satisfying the target at ANY unroll "
           "depth start_point..T, a superset of the fixed-depth task every other row measures "
-          "(the fixed-depth-only count is recorded per row as `unique_at_T`). The rival's batch "
-          "is sized by a fixed 5 GiB autograd-graph budget (`pick_batch`); on easy instances "
-          "their unique count saturates at that batch, so their score is bounded by a knob we "
-          "set — generous timeouts (300 s vs our 60 s) and best-of-batch offset it, but state "
-          "it. Constraint alignment is VERIFIED per row: miter mode asserts p(MITER=1) equals "
+          "(the fixed-depth-only count is recorded per row as `unique_at_T`). **The batch a rival "
+          "is handed is its score**: measured, every one of the three is near-proportional to it "
+          "over the whole range the card will run (HTS 295x from batch 100 to 100k, DEMOTIC "
+          "564x from 1k to 1M), so it is the same knob `K` is for us. Each rival is therefore "
+          "granted the same share of the card GPAP grants itself: the largest batch that fits in "
+          "0.80 of free VRAM, stepping down a rung if the driver refuses the size. The rungs "
+          "tried are recorded per row as `batch_sweep`, the resolved budget as "
+          "`vram_budget_bytes`. Their own defaults cannot serve as the rule — all three "
+          "argparse defaults are `--batch_size 10` and their demo scripts are per-instance "
+          "one-liners spanning 1,000 to 1,000,000 on comparably tiny circuits, which on our "
+          "instances would hand two of the three ~1/300 of their achievable throughput and "
+          "inflate the ratios below by the same factor. "
+          "Rival rows recorded before 2026-08-25 used a fixed 5 GiB budget (and HTS its own "
+          "scripts' batch 100/1000) and are not comparable to rows from the current harness. "
+          "Constraint alignment is VERIFIED per row: miter mode asserts p(MITER=1) equals "
           "the instance's p_accept; native mode asserts bit-identical acceptance words between "
           "their index table on the original file and our reordered pins (`pin_check_ok`). "
           "**No tool is timed while delivering its solutions**: CMSGen runs under the patch's "

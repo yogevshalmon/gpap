@@ -301,10 +301,61 @@ Protocol invariants (each one was a wrong number once):
   instance's p_accept; native mode asserts bit-identical acceptance words between their
   index-table pins on the original file and our reordered pins (`pin_check_ok`; all 10
   recorded ISCAS-85 cells re-verified 2026-08-23).
-- The rivals' batch is sized by a fixed 5 GiB autograd budget (`pick_batch`) — on easy
-  instances their unique count saturates at the batch, so their score is bounded by a knob we
-  set. Offset by the 300 s wall (vs our 60 s) and best-of-batch; a larger-budget rerun is
-  future work, noted in the generated Table 2 caveats.
+- **THE PARALLELISM GRANT — the batch handed to a rival IS its score, so it cannot be a
+  constant.** Measured on an RTX 4080 (2026-08-25), every rival's unique/s is near-proportional
+  to its batch across the whole range the card will run, with `model_runtime` almost flat:
+
+  | rival | instance | batch | unique/s | factor |
+  |---|---|---|---|---|
+  | HTS | b03-c25-rare | 100 → 100,000 | 1 → 294 | **295x** |
+  | Recurrent | s386 T=25 | 10k → 300k | 3.8k → 69.9k | **18.6x** |
+  | DEMOTIC | c432 | 1k → 300k | 2.5k → 654k | **258x** |
+  | DEMOTIC | c1355 | 1k → 1M | 1.2k → 662k | **564x** |
+
+  The batch is the same knob `K` is for us, and GPAP sizes `K` at **0.80 of free VRAM**.
+  **THE RULE (2026-08-25): every rival gets the largest batch that fits in 0.80 of free VRAM** —
+  the same share of the same card, by the same rule, that we grant ourselves
+  (`rival_common.fit_batch`). One rule, one run per cell; if the driver refuses the size
+  ('device not ready' reproduces at a fixed size on some models) `run_at_batch` steps down a rung.
+  Every rung tried is recorded as `batch_sweep`, the resolved budget as `vram_budget_bytes`.
+  ⚠️ **Their own "defaults" cannot serve as that rule, and using them would flatter US.** All
+  three argparse defaults are `--batch_size 10`, a placeholder; their published demo scripts are
+  per-instance one-liners with a 1000x spread on comparably tiny circuits — DEMOTIC 1,000 on
+  c17's six gates, Recurrent 1,000,000 on s27's ten, HTS 100 on a 75-variable CNF. Transplanted
+  onto our instances those hand DEMOTIC ~1/500 and HTS ~1/295 of what their tool actually
+  reaches on the card, inflating our ratios by the same factor.
+  ⚠️ **What was wrong before 2026-08-25**: the circuit rivals' budget was a fixed 5 GiB whatever
+  the card (a fifth of the L4 while GPAP took ~19 GB of it), and HTS ran at batch 100/1000. The
+  new rule reproduces roughly what DEMOTIC and Recurrent already got, so **the correction is
+  concentrated on HTS** — whose recorded geomean is inflated by about the batch factor. Rival
+  rows recorded before that date are NOT comparable to rows from the current harness.
+  **Where our responsibility ends.** None of the three rivals auto-tunes its batch to the card —
+  GPAP does (`compute_k_safe`), they take whatever `--batch_size` they are given. So the fair
+  thing is to hand them the same share of the machine we take, sized from MEASURED peak VRAM so
+  the grant does not push them into a spill, and to step down once if the driver refuses the
+  size (a step-down can only help them). Past that, memory management is the tool's own
+  concern: we are not obliged to hand-tune a rival past what its own share of the card allows,
+  and a refused rung is recorded as what it is. Being strict here is what makes the number
+  reproducible — the alternative is a per-instance knob nobody can re-derive.
+  ⚠️ Size from MEASURED peak VRAM, not the graph formula: `n_gates * T * batch * 4` undercounts
+  by 2-6x, tool-dependent (Recurrent s386@300k: 4.44 GiB estimated, 8.36 measured; DEMOTIC
+  c432@1M: 0.60 vs 2.97; HTS 8.4 B per clause-row). `rival_common.GRAPH_BYTES` carries the
+  measured factors, and they are used AS MEASURED — rounding 1.88 up to 2.0 costs Recurrent a
+  whole ladder rung (300k -> 100k, 3x of its throughput) for nothing.
+- **The rival stage is mostly NOT the rival**: of the 2026-08-23 campaign's ~3.3 h, the three
+  rivals' own subprocesses were 64 min. The rest is our side — the GPAP arm (3 seeds x 18 cells
+  for Recurrent alone), the `start_point` probes, `sim_baseline` — and all of it used to be
+  re-paid whenever a stage re-ran for a RIVAL-side reason. Both are cached now, on disk under
+  `<output dir>/.gpap_cache`: the **GPAP arm** keyed on the sampled file's BYTES + the task + the
+  engine build + the GPU name (anything that could move the number is a miss), and Recurrent's
+  **start_point probe** keyed on the circuit + depth (it is pure, yet each probe pays a full
+  process launch and model build). `GPAP_RIVAL_CACHE=0` disables both. A probe that TIMED OUT is
+  deliberately not cached — that is about the machine, not the circuit. The cache is carried
+  BETWEEN VMs as `gpap_cache.tgz` (`colab_rivals_l4.sh` re-packs it after every stage).
+  ⚠️ `colab_supervisor.pull_results` used to validate EVERY mirrored file as JSON, which silently
+  discarded any non-JSON artifact — the cache tarball was downloaded and deleted on every cycle.
+  It now validates by type (JSON must parse, a tarball must open, anything else must be
+  non-empty) and still rejects a download caught mid-write, which is what the check was for.
 - **EMISSION SYMMETRY — no tool is timed while delivering its solutions.** Ours is the reason
   CMSGen is timed with the patch's `--nowrite` (a stock binary writing every sample cost 8.2x of
   its wall on 27.sk_3_32), so the same has to hold for the GPU rivals or the ratio is partly a
