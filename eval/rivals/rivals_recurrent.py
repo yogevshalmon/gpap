@@ -63,7 +63,10 @@ import time
 REPO_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))  # eval/<sub>/ -> repo
 sys.path.insert(0, REPO_ROOT)
 
-from eval.rivals.rival_common import VARIANTS, prepare_variant, rival_commit, variant_note  # noqa: E402
+from eval.rivals.rival_common import (CACHE_MISS, VARIANTS, cache_peek,  # noqa: E402
+                                      cache_store, cached_gpap, fit_batch, prepare_variant,
+                                      rival_commit, rival_vram_budget, run_at_batch,
+                                      variant_note)
 
 from gpap import paths
 
@@ -216,11 +219,24 @@ def run_recurrent(rival, bench_file, key, T, steps, batch, start_point,
             "batch": batch, "steps": steps, "start_point": start_point}
 
 
-def probe_start_point(rival, bench_file, key, T, max_sp=10, budget=PROBE_BUDGET):
+def _sp_task(T, max_sp):
+    return {"probe": "start_point", "cycles": T, "max_sp": max_sp}
+
+
+def probe_start_point(rival, bench_file, key, T, max_sp=10, budget=PROBE_BUDGET,
+                      cache_dir=None):
     """Their backward() crashes while the pinned output has no gradient path to any input
     (Moore register latency); walk start_point up until a tiny run survives. Bounded twice: each
     probe gets PROBE_TIMEOUT, and the whole search gets `budget` — an instance whose probe never
-    settles must cost minutes, not the afternoon."""
+    settles must cost minutes, not the afternoon.
+
+    CACHED, because it is pure: the answer depends only on the circuit and the unroll depth, yet
+    every probe pays a full process launch and model build (~30 s of a Recurrent run's wall is
+    build, even at --num_steps 1). Uncached, re-running this stage costs up to PROBE_BUDGET per
+    instance before any measurement happens."""
+    hit = cache_peek(cache_dir, bench_file, _sp_task(T, max_sp))
+    if hit is not CACHE_MISS:
+        return hit
     t0 = time.perf_counter()
     for sp in range(max_sp + 1):
         if time.perf_counter() - t0 > budget:
@@ -228,37 +244,42 @@ def probe_start_point(rival, bench_file, key, T, max_sp=10, budget=PROBE_BUDGET)
         r = run_recurrent(rival, bench_file, key, T, steps=1, batch=256, start_point=sp,
                           timeout=PROBE_TIMEOUT)
         if "error" not in r:
-            return sp
+            return _remember_sp(cache_dir, bench_file, T, max_sp, sp)
         if "does not require grad" not in r["error"]:
-            return None if "timeout" in r["error"] else sp  # non-grad failure: report at sp
+            if "timeout" in r["error"]:
+                return None                     # environmental: do NOT cache, it may pass later
+            return _remember_sp(cache_dir, bench_file, T, max_sp, sp)
     return None
 
 
-BATCH_LADDER = (1_000_000, 300_000, 100_000, 30_000, 10_000, 3_000)
+def _remember_sp(cache_dir, bench_file, T, max_sp, sp):
+    """Store a SETTLED probe result. Failures to settle are deliberately not stored: a timeout
+    or a reclaimed VM is about the machine, not the circuit."""
+    if sp is not None:
+        cache_store(cache_dir, bench_file, _sp_task(T, max_sp), sp)
+    return sp
+
 
 
 def run_recurrent_ladder(rival, bench_file, key, T, steps, batch, start_point,
                          timeout=DEFAULT_TIMEOUT):
-    """run_recurrent, stepping down the batch ladder when the WSL2 driver refuses the size
-    ('device not ready' reproduces at a fixed batch on some models yet passes one rung lower)."""
-    ladder = [b for b in BATCH_LADDER if b <= batch]
-    r = {"error": "empty ladder"}
-    for b in ladder[:3]:
-        r = run_recurrent(rival, bench_file, key, T, steps, b, start_point, timeout=timeout)
-        if "error" not in r or "device not ready" not in r["error"]:
-            return r
-    return r
+    """run_recurrent at its granted batch, stepping DOWN if the driver refuses the size. The
+    rungs tried are attached as `batch_sweep`: their unique/s is near-proportional to the batch
+    (s386 T=25: 10k -> 300k is 18.6x, with model_runtime almost flat), so what the rival was
+    granted belongs in the row next to its score."""
+    r, sweep = run_at_batch(
+        lambda b: run_recurrent(rival, bench_file, key, T, steps, b, start_point,
+                                timeout=timeout),
+        batch)
+    return dict(r, batch_sweep=sweep) if isinstance(r, dict) else r
 
 
-def pick_batch(bench_file, T, budget_bytes=5 << 30):
-    """Largest batch whose unrolled autograd graph (#gates x T x batch x 4B) fits the budget —
-    this box SPILLS to host RAM instead of OOMing, so we must not rely on allocator failure."""
-    n_gates = sum(1 for l in open(bench_file)
-                  if "=" in l and "DFF" not in l and not l.lstrip().startswith("#"))
-    for b in (1_000_000, 300_000, 100_000, 30_000, 10_000):
-        if max(n_gates, 1) * T * b * 4 <= budget_bytes:
-            return b
-    return 3_000
+def pick_batch(bench_file, T, budget_bytes=None):
+    """The batch Recurrent-CircuitSAT is granted: the largest that fits in 0.80 of free VRAM,
+    the same share GPAP sizes its own K with (rival_common.fit_batch)."""
+    n_gates = sum(1 for line in open(bench_file)
+                  if "=" in line and "DFF" not in line and not line.lstrip().startswith("#"))
+    return fit_batch(max(n_gates, 1) * T, "recurrent", budget_bytes)
 
 
 def run_gpap(bench_file, T, pin_outputs, target, seeds, n_time, device, time_limit=60.0,
@@ -316,6 +337,9 @@ def main():
                          "rival that only ever saw the unoptimized circuit")
     ap.add_argument("-T", "--cycles", type=int, default=25)
     ap.add_argument("--steps", type=int, default=1, help="their num_steps (script default 1)")
+    ap.add_argument("--gpap-cache", default=None,
+                    help="directory of cached GPAP arms (default: <output dir>/.gpap_cache). "
+                         "GPAP_RIVAL_CACHE=0 disables reuse entirely.")
     ap.add_argument("--seeds", type=int, nargs="+", default=[5, 6, 7])
     ap.add_argument("--gpap-n", type=int, default=50_000)
     ap.add_argument("--target-seed", type=int, default=5, help="rare-pattern selection seed")
@@ -349,6 +373,12 @@ def main():
     print("-" * len(hdr))
     out = []
     done = set()
+    # Re-running this stage for a RIVAL-side reason (a wider batch ladder, a changed timeout) must
+    # not re-pay OUR arm: 3 seeds x 60 s per cell here, and of the 2026-08-23 campaign's ~3.3 h
+    # rival stage only 64 min was the rivals' own subprocesses. Keyed on the sampled file's bytes
+    # + the task + the engine build + the GPU, so anything that could move the number is a miss.
+    cache_dir = args.gpap_cache or (os.path.join(os.path.dirname(args.output) or ".",
+                                                 ".gpap_cache") if args.output else None)
     if args.resume and args.output and os.path.isfile(args.output):
         try:
             out = json.load(open(args.output)) or []
@@ -396,19 +426,29 @@ def main():
             pin_desc = ",".join(f"[{i}]={v}" for i, v in zip(idx, vals))
         sim = sim_baseline(gpap_file, args.cycles, args.target_seed, pin_outputs=pin_n,
                            target=gpap_target)
-        sp = probe_start_point(args.rival, rival_file, key, args.cycles)   # bounded, see above
+        sp = probe_start_point(args.rival, rival_file, key, args.cycles,
+                               cache_dir=cache_dir)                        # bounded, see above
         if sp is None:
             rcs = {"error": "no gradient path at any start_point<=10"}
         else:
             batch = pick_batch(rival_file, args.cycles)
             rcs = run_recurrent_ladder(args.rival, rival_file, key, args.cycles, args.steps,
                                        batch, sp, timeout=args.timeout)
-        g = run_gpap(gpap_file, args.cycles, pin_n, gpap_target, args.seeds, args.gpap_n, device,
-                     time_limit=args.gpap_time_limit)
+        task = {"harness": "recurrent", "mode": "rare" if args.rare else "table",
+                "cycles": args.cycles, "pin_outputs": pin_n, "target": gpap_target,
+                "seeds": args.seeds, "n_time": args.gpap_n,
+                "time_limit": args.gpap_time_limit, "portfolio": "circuit"}
+        g, hit = cached_gpap(cache_dir, gpap_file, task,
+                             lambda: run_gpap(gpap_file, args.cycles, pin_n, gpap_target,
+                                              args.seeds, args.gpap_n, device,
+                                              time_limit=args.gpap_time_limit))
+        if hit:
+            print(f"{name:<10}{variant:>6}  [gpap-cache hit — arm not re-run]", flush=True)
         row = {"name": name, "mode": "rare" if args.rare else "table", "pin": pin_desc,
                "variant": variant, "circuit": vinfo,
                "p_accept": sim["p_accept"], "p_accept_lt": sim.get("p_accept_lt"),
-               "rival_commit": rival_commit(args.rival), "rcs": rcs, "gpap": g}
+               "rival_commit": rival_commit(args.rival), "rcs": rcs, "gpap": g,
+               "vram_budget_bytes": rival_vram_budget()}
         out.append(row)
         if args.output:      # checkpoint after every instance: this stage runs for HOURS, and a
             os.makedirs(os.path.dirname(args.output) or ".", exist_ok=True)   # death at 90% used

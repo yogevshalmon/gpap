@@ -24,6 +24,12 @@ The remote command must be RESUMABLE (`--resume` on the rival harnesses, `--resu
                 rivals_recurrent_rare.json rivals_recurrent_table.json \
         --local-dir .experiments/l4_rivals --done-marker RIVALS_STAGE_COMPLETE
 
+⚠️ **Stop the SESSION before restarting this script.** Killing the supervisor mid-bootstrap and
+relaunching it starts a SECOND bootstrap on the same VM; both `rm -rf /content/gpap` and untar
+into it, one loses the race and writes `/content/bootstrap.fail`, and the run burns a VM
+recovering (observed 2026-08-26 while extending --max-hours). Either wait for the cycle to reach
+'launching', or `colab stop -s <session>` first and let the fresh supervisor build a clean VM.
+
 Console quirks this works around (all hit the hard way, see the colab-cli notes):
 `colab exec` is broken in 0.6.0, so everything goes through `colab console`; the console exits on
 piped EOF, so commands are fire-and-forget and progress is polled separately; tmux line-wraps and
@@ -137,6 +143,30 @@ def push_partials(session, local_dir, remote_dir, files):
             log(f"  pushed {f} ({os.path.getsize(p):,} B)" if rc == 0 else f"  push FAILED {f}")
 
 
+def _intact(path):
+    """Is this download complete? A file copied while the VM was writing it reads back truncated,
+    and a truncated result silently REPLACING a good local copy is the one failure this script
+    exists to prevent. Checked by type: JSON must parse, a tarball must open. Anything else is
+    accepted on being non-empty — note that validating EVERY file as JSON (which this did until
+    2026-08-25) silently discards every non-JSON artifact, e.g. the GPAP-arm cache tarball that
+    makes a rival-side re-run cheap."""
+    import json
+    import tarfile
+    if path.endswith(".json"):
+        try:
+            json.load(open(path))
+            return True
+        except Exception:           # noqa: BLE001
+            return False
+    if path.endswith((".tgz", ".tar.gz")):
+        try:
+            with tarfile.open(path) as t:
+                return bool(t.getmembers())
+        except Exception:           # noqa: BLE001
+            return False
+    return True
+
+
 def pull_results(session, local_dir, remote_dir, files):
     """THE point of this script: get results onto local disk every cycle."""
     os.makedirs(local_dir, exist_ok=True)
@@ -144,16 +174,9 @@ def pull_results(session, local_dir, remote_dir, files):
     for f in files:
         tmp = os.path.join(local_dir, f + ".part")
         rc, _ = run([COLAB, "download", "-s", session, f"{remote_dir}/{f}", tmp], timeout=600)
-        if rc == 0 and os.path.isfile(tmp) and os.path.getsize(tmp) > 0:
-            # only replace a good local copy once the new one parses — a download of a file
-            # mid-write silently yields a truncated read
-            import json
-            try:
-                json.load(open(tmp))
-                os.replace(tmp, os.path.join(local_dir, f))
-                got.append(f)
-            except Exception:       # noqa: BLE001
-                os.remove(tmp)
+        if rc == 0 and os.path.isfile(tmp) and os.path.getsize(tmp) > 0 and _intact(tmp):
+            os.replace(tmp, os.path.join(local_dir, f))
+            got.append(f)
         elif os.path.exists(tmp):
             os.remove(tmp)
     return got

@@ -749,6 +749,28 @@ Sketch/service family), n=10k, SAME per-instance wall cap both sides (cmsgen_sam
 
 ## Measurement methodology (the traps that actually bit)
 
+**Three fairness audits of the GPU head-to-heads, and all three had been flattering US
+(2026-08-24/25, `docs/findings/RIVAL_FAIRNESS_FINDINGS.md`).** Every unexamined default in a
+harness we wrote is a default we chose, so the expected direction of an unaudited error is toward
+our own numbers — it was, three times out of three.
+(1) **EMISSION SYMMETRY**: nobody may be timed while DELIVERING solutions. DEMOTIC/HTS/CMSGen/GPAP
+are clean; Recurrent-CircuitSAT copies per-depth candidates to the host inside its own timed loop,
+measured at 0.7-1.4% of `model_runtime` and left uncorrected because deducting it would RAISE our
+ratio. Re-derive with `eval/rivals/check_emission_symmetry.py`.
+(2) **THE PARALLELISM GRANT — the batch handed to a rival IS its score.** Their unique/s is
+near-proportional to it with `model_runtime` nearly flat (HTS 295× from batch 100 to 100k, DEMOTIC
+c1355 564× from 1k to 1M), so a fixed batch is a silent multiplier. We had given the circuit
+rivals a fixed 5 GiB whatever the card and run HTS at its scripts' 100/1000. **Their own defaults
+cannot be the rule** (all three argparse defaults are `--batch_size 10`; the demo scripts span
+1,000 to 1,000,000 on comparably tiny circuits). The rule is the one `K` uses: 0.80 of free VRAM,
+step down if the driver refuses, probe one rung up and keep it only if it is FASTER — **a static
+model cannot do this alone**, peak VRAM per gate-row falls 23.0 → 11.6 B from c432 to c3540. On
+the L4 all three branches were load-bearing: 92 under-grants recovered, 82 refusals, 18 spills
+caught. Cost: HTS 6,369× → 603×.
+(3) **PREPROCESSING was outside our headline rate and inside CMSGen's own** (its rate is
+samples/subprocess-wall). Parse + construct + ELS + warmup + mining is a median 20.7% of GPAP's
+e2e wall ⇒ suite geomean **165.0× steady-state vs 96.7× e2e**. Table 1 prints both.
+
 **A bigger GPU is worth ~1.8×, not the VRAM ratio — and the batch is not the lever
 (2026-08-03).** Three cards, config pinned, 8 instances: **A100-40GB 1.822× / L4 0.838×** vs the
 RTX 4080 laptop (work rate 1.905/0.838, success 1.006/0.956). The work rate is FLAT in M and lands

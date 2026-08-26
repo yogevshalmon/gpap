@@ -100,6 +100,37 @@ here: run-to-run spread is the size of the effect. We do not deduct it, because 
 worth ~1%, and the correction points **our** way — an uncorrected row under-reports GPAP rather
 than flattering it, which is the right side to err on.
 
+## 4c. Grant the rival the same share of the machine you grant yourself
+
+GPAP sizes its batch `K` at **0.80 of free VRAM**. A GPU rival's batch is the same knob — and
+measured on an RTX 4080 (2026-08-25), every one of the three scores in near-proportion to it,
+with `model_runtime` almost flat, across the whole range the card will run: **HTS 295x from batch
+100 to 100,000; DEMOTIC 564x from 1k to 1M; Recurrent 18.6x from 10k to 300k**. A batch is
+therefore never "their configuration detail"; it is how much of the machine you decided to let
+them use.
+
+So size it by the same rule: **the largest batch that fits in 0.80 of free VRAM**
+(`rival_common.fit_batch`), one run per cell, stepping down a rung if the driver refuses the size.
+Record every rung as `batch_sweep` and the budget as `vram_budget_bytes`.
+
+Their own defaults cannot be that rule, and reaching for them would flatter you: all three
+argparse defaults are `--batch_size 10`, and the published demo scripts are per-instance
+one-liners with a 1000x spread on comparably tiny circuits (DEMOTIC 1,000 on c17; Recurrent
+1,000,000 on s27; HTS 100 on a 75-variable CNF). On our instances those would hand DEMOTIC ~1/500
+and HTS ~1/295 of what their tool actually reaches, inflating our ratios by the same factor. A
+share of the machine is the only quantity that means the same thing for both sides.
+
+**Where your responsibility ends.** A rival that does not auto-tune its batch to the card takes
+whatever it is given, so hand it the same share you take, sized from measured peak VRAM so the
+grant itself does not cause a spill, and step down once if the driver refuses. Past that, memory
+management is the tool's own concern — hand-tuning a rival beyond its share of the card produces
+a number nobody can re-derive, which is worse than being strict.
+
+Two failure modes this fixes, both of which flattered us: a **fixed 5 GiB** budget regardless of
+card (a fifth of a 24 GB L4 while GPAP took ~19 GB of it), and running HTS at **batch 100/1000**,
+~1/295 of the rate it reaches when it gets its share. Size from MEASURED peak VRAM, not the
+graph formula: `n_gates * T * batch * 4` undercounts by **2-6x**, tool-dependent.
+
 ## 5. Benchmark against the competitor's OWN optimized operation
 
 Compare GPU work against CMSGen's actual C++ sampler (or a solver's in-C `process()`), never a naive

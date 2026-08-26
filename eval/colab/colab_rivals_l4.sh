@@ -65,6 +65,17 @@ have() {
     return 0
 }
 
+# The GPAP-arm cache (rival_common.cached_gpap) lives beside the JSONs, so it survives a VM
+# only if it is mirrored like them. Ship it as ONE file the supervisor can carry: unpack whatever
+# a previous VM built, and re-pack after every stage. This is what makes a RIVAL-side re-run
+# cheap — of the 2026-08-23 campaign's ~3.3 h, only 64 min was the rivals' own subprocesses; the
+# rest was our arm, the start_point probes and sim_baseline, all of it identical across re-runs.
+CACHE_TGZ="$OUT/gpap_cache.tgz"
+[ -f "$CACHE_TGZ" ] && tar xzf "$CACHE_TGZ" -C "$OUT" 2>/dev/null && \
+    echo "[cache] restored $(ls "$OUT/.gpap_cache" 2>/dev/null | wc -l) GPAP arm(s)"
+save_cache() { tar czf "$CACHE_TGZ.tmp" -C "$OUT" .gpap_cache 2>/dev/null \
+                   && mv "$CACHE_TGZ.tmp" "$CACHE_TGZ"; }
+
 # ---------------------------------------------------------------------------- 1. DEMOTIC
 # Cheap (median 3.7-15.3 s per run), so it gets BOTH circuit variants.
 if want demotic-native && have 25 "demotic-native"; then
@@ -72,6 +83,7 @@ if want demotic-native && have 25 "demotic-native"; then
     $PY eval/rivals/rivals_demotic.py --mode native $COMB_INSTS --seeds $RSEEDS --steps "$STEPS" \
         --timeout "$TIMEOUT" --circuit-variants raw abc \
         --resume --output "$OUT/rivals_demotic_native.json" 2>&1 | tee -a "$LOGS/rivals.log"
+    save_cache
 fi
 
 if want demotic-miter && have 50 "demotic-miter"; then
@@ -79,6 +91,7 @@ if want demotic-miter && have 50 "demotic-miter"; then
     $PY eval/rivals/rivals_demotic.py --mode miter $SEQ_INSTS -T "$T" --target rare \
         --seeds $RSEEDS --steps "$STEPS" --timeout "$TIMEOUT" --circuit-variants raw abc \
         --resume --output "$OUT/rivals_demotic_miter.json" 2>&1 | tee -a "$LOGS/rivals.log"
+    save_cache
 fi
 
 # ---------------------------------------------------------------------------- 2. HTS
@@ -98,6 +111,7 @@ if want hts && have 40 "hts"; then
     done
     $PY eval/rivals/rivals_hts.py "$HTS_DIR/*.cnf" --timeout "$TIMEOUT" \
         --resume --output "$OUT/rivals_hts.json" 2>&1 | tee -a "$LOGS/rivals.log"
+    save_cache
 fi
 
 # ---------------------------------------------------------------------------- 3. Recurrent
@@ -112,6 +126,7 @@ if want recurrent-rare && have 60 "recurrent-rare"; then
     $PY eval/rivals/rivals_recurrent.py $SEQ_INSTS -T "$T" --rare --seeds $RSEEDS --steps "$STEPS" \
         --timeout "$TIMEOUT" --circuit-variants raw \
         --resume --output "$OUT/rivals_recurrent_rare.json" 2>&1 | tee -a "$LOGS/rivals.log"
+    save_cache
 fi
 
 if want recurrent-table && have 30 "recurrent-table"; then
@@ -119,6 +134,7 @@ if want recurrent-table && have 30 "recurrent-table"; then
     $PY eval/rivals/rivals_recurrent.py $SEQ_INSTS -T "$T" --seeds $RSEEDS --steps "$STEPS" \
         --timeout "$TIMEOUT" --circuit-variants raw \
         --resume --output "$OUT/rivals_recurrent_table.json" 2>&1 | tee -a "$LOGS/rivals.log"
+    save_cache
 fi
 
 banner "ALL DONE"

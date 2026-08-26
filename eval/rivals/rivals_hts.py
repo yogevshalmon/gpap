@@ -39,7 +39,8 @@ from gpap import paths
 REPO_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))  # eval/<sub>/ -> repo
 sys.path.insert(0, REPO_ROOT)
 
-from eval.rivals.rival_common import rival_commit    # noqa: E402
+from eval.rivals.rival_common import (cached_gpap, fit_batch,  # noqa: E402
+                                      rival_commit, rival_vram_budget, run_at_batch)
 
 HTS_DEFAULT = str(paths.src_dir() / "High-Throughput-SAT-Sampler")
 # Per-SUBPROCESS wall cap for the rival, default 300 s = 5x the 60 s sampling budget GPAP gets
@@ -86,6 +87,15 @@ def run_hts(hts_root, cnf, steps, batch, lr="10e0", timeout=DEFAULT_TIMEOUT):
             "wall_s": wall, "steps": steps, "batch": batch}
 
 
+def n_clauses(cnf):
+    """Clause count from the DIMACS header — the work unit HTS's memory scales with (measured
+    8.4 B per clause-row: 11.30 GiB at batch 100k on a 14,505-clause CNF)."""
+    for line in open(cnf):
+        if line.startswith("p cnf"):
+            return int(line.split()[3])
+    return 1
+
+
 def run_gpap(cnf, n_time, device, time_limit=60.0, n_cov=1000):
     """`n_cov` is the OFF-timing quality pass: it COLLECTS models to host RAM and rebuilds them
     in Python, which on a deep unroll costs more wall than the timed run itself (measured 26 s of
@@ -112,8 +122,11 @@ def main():
     ap.add_argument("cnfs", help="glob of CNF instances (same files go to both samplers)")
     ap.add_argument("--hts", default=HTS_DEFAULT)
     ap.add_argument("--steps", type=int, default=10)
-    ap.add_argument("--batch", type=int, nargs="+", default=[100, 1000],
-                    help="HTS batch sizes to try (best result reported)")
+    ap.add_argument("--batch", type=int, nargs="+", default=None,
+                    help="explicit HTS batch sizes to try (best reported). Default: the largest "
+                         "that fits in 0.80 of free VRAM — the same share of the card GPAP "
+                         "sizes its own K with. Their scripts' batch 100 is ~1/295 of the rate "
+                         "their tool reaches on our instances, so it cannot be the rule.")
     ap.add_argument("--gpap-n", type=int, default=50_000)
     ap.add_argument("--n-cov", type=int, default=1000,
                     help="models collected for the distinct-fraction readout "
@@ -125,6 +138,9 @@ def main():
     ap.add_argument("--gpap-time-limit", type=float, default=60.0,
                     help="sampling wall cap for the GPAP side (s)")
     ap.add_argument("--output", default=None)
+    ap.add_argument("--gpap-cache", default=None,
+                    help="directory of cached GPAP arms (default: <output dir>/.gpap_cache). "
+                         "GPAP_RIVAL_CACHE=0 disables reuse entirely.")
     ap.add_argument("--resume", action="store_true",
                     help="keep the rows already in --output and re-run only what is missing "
                          "(a rented VM can be reclaimed mid-stage; see eval/colab/colab_supervisor.py)")
@@ -140,13 +156,18 @@ def main():
     device = (torch.device(args.device) if args.device
               else torch.device("cuda" if torch.cuda.is_available() else "cpu"))
     files = sorted(glob.glob(args.cnfs))
-    print(f"{len(files)} instances | HTS steps={args.steps} batch={args.batch} | "
+    bdesc = (", ".join(f"{b:,}" for b in args.batch) if args.batch
+             else "fit to 0.80 of free VRAM")
+    print(f"{len(files)} instances | HTS steps={args.steps} batch={bdesc} | "
           f"GPAP n_time={args.gpap_n:,} | device={device}")
     hdr = (f"{'instance':<24}{'HTS uniq':>10}{'HTS t':>8}{'HTS u/s':>12}"
            f"{'GPAP u/s~':>13}{'GPAP/s':>13}{'succ%':>7}{'ratio':>14}")
     print(hdr); print("-" * len(hdr))
     out = []
     done = set()
+    # Our arm is the same task whatever the rival is doing; see rival_common.cached_gpap.
+    cache_dir = args.gpap_cache or (os.path.join(os.path.dirname(args.output) or ".",
+                                                 ".gpap_cache") if args.output else None)
     if args.resume and args.output and os.path.isfile(args.output):
         try:
             out = json.load(open(args.output)) or []
@@ -161,16 +182,31 @@ def main():
         name = os.path.basename(cnf)
         if name in done:
             continue
-        best = None
-        for b in args.batch:
-            r = run_hts(args.hts, cnf, args.steps, b, timeout=args.timeout)
-            if "error" not in r and (best is None or r["unique_per_s"] > best["unique_per_s"]):
-                best = r
-            elif "error" in r and best is None:
-                best = r
-        g = run_gpap(cnf, args.gpap_n, device, time_limit=args.gpap_time_limit,
-                     n_cov=args.n_cov)
-        row = {"name": name, "rival_commit": rival_commit(args.hts), "hts": best, "gpap": g}
+        if args.batch:                          # explicit list: measure exactly those
+            best = None
+            for b in args.batch:
+                r = run_hts(args.hts, cnf, args.steps, b, timeout=args.timeout)
+                if "error" not in r and (best is None or r["unique_per_s"] > best["unique_per_s"]):
+                    best = r
+                elif "error" in r and best is None:
+                    best = r
+            sweep = None
+        else:
+            best, sweep = run_at_batch(
+                lambda b: run_hts(args.hts, cnf, args.steps, b, timeout=args.timeout),
+                fit_batch(n_clauses(cnf), "hts"))
+        task = {"harness": "hts", "n_time": args.gpap_n, "time_limit": args.gpap_time_limit,
+                "n_cov": args.n_cov, "portfolio": "circuit"}
+        g, hit = cached_gpap(cache_dir, cnf, task,
+                             lambda: run_gpap(cnf, args.gpap_n, device,
+                                              time_limit=args.gpap_time_limit,
+                                              n_cov=args.n_cov))
+        if hit:
+            print(f"{name[:22]:<24}  [gpap-cache hit — arm not re-run]", flush=True)
+        row = {"name": name, "rival_commit": rival_commit(args.hts), "hts": best, "gpap": g,
+               "vram_budget_bytes": rival_vram_budget()}
+        if sweep:                       # what the rival was actually GRANTED, next to its score
+            row["batch_sweep"] = sweep
         out.append(row)
         if args.output:                       # checkpoint after every instance, not at the end
             os.makedirs(os.path.dirname(args.output) or ".", exist_ok=True)
