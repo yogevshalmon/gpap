@@ -29,7 +29,7 @@ log = logging.getLogger(__name__)
 __all__ = ["sample_file", "sample_clauses",
            "portfolio", "describe_portfolio", "PORTFOLIOS", "SamplingConfig", "VarOrder",
            "Lookahead", "DEFAULT_PORTFOLIO", "CIRCUIT_PORTFOLIO", "SINGLE_PORTFOLIOS",
-           "SOFT_CONFIG"]
+           "SOFT_CONFIG", "soft_warning", "describe_config"]
 
 
 def _support_literals(support):
@@ -55,9 +55,15 @@ MINE_SECONDS = 5.0
 #: free: measured on b04-c25 the uncapped sweep ran 0.40 s vs 0.46 s capped, reported
 #: `exhausted` instead of a truncation, and found a clause the ceiling had cut. 1,000,000 covers
 #: |sup| up to ~700 exhaustively; past that MINE_SECONDS is the real (and correct) bound.
-STAGE1_MAX_TUPLES = {2: 1_000_000, 3: 40_000}
+#: ⚠️ `1: 0` (unbounded) is LOAD-BEARING, not decoration. `mine_entailed` applies a ceiling to
+#: width 1 as well, and a dict with no key 1 falls through to DEFAULT_MAX_TUPLES — which would cap
+#: the backbone fixpoint on the default sampling path, silently, at a fraction of ONE round on a
+#: large unroll. Width 1 is cheap and is the dominant win; only `gpap mine --max-tuples` should be
+#: able to bound it.
+STAGE1_MAX_TUPLES = {1: 0, 2: 1_000_000, 3: 40_000}
 #: Stage 2 — forced wide widths for an instance that is still stuck after the units are in.
-STAGE2_MAX_TUPLES = 2_000_000
+#: A dict for the same reason as stage 1: an int applies to EVERY width, width 1 included.
+STAGE2_MAX_TUPLES = {1: 0, 2: 2_000_000, 3: 2_000_000}
 #: Formulas smaller than this skip mining under `mine="auto"` (`--mine on` forces past it).
 #: Set from measured mining cost at small M, not from a guess: see docs/findings/MINING_FINDINGS.md.
 #: ⚠️ Raising it excludes ABC-encoded CNFs, which are small by construction and where mining pays
@@ -198,6 +204,30 @@ def describe_portfolio(configs) -> str:
     """Human-readable one-line-per-config rendering, for CLI output and results metadata."""
     return "; ".join(c.describe() if isinstance(c, SamplingConfig)
                      else SamplingConfig(*c).describe() for c in configs)
+
+
+def soft_warning() -> str:
+    """THE warning printed whenever the soft config is in a portfolio.
+
+    One string, because both front-ends print it and the two hand-typed copies had already drifted
+    apart in the commit that introduced the second. What it says is a uniformity VERDICT about
+    `SOFT_CONFIG`, which lives here — so it belongs beside it, not in a print layer."""
+    return ("  [warn] --allow-soft: the soft risk-polarity config is in the portfolio. It raises\n"
+            "         success rate on tight circuits but is NOT uniform (Barbarik rejects it 5/5)\n"
+            "         — do not use rows produced by it for a distribution claim.")
+
+
+def describe_config(cfg) -> str:
+    """Render ONE config the way `describe_portfolio` renders each of a portfolio's.
+
+    Takes the raw `(random_var, B, lookahead)` triple that crosses the results JSON (where the
+    enums have decayed to bool/int/str), so the CLI cannot describe the same arm differently from
+    the portfolio banner printed ten lines earlier."""
+    if not cfg:
+        return "?"
+    la = cfg[2] if len(cfg) > 2 else ""
+    return SamplingConfig(VarOrder(int(bool(cfg[0]))), int(cfg[1]),
+                          Lookahead(la or "")).describe()
 
 
 def _core_provenance() -> str:
@@ -344,9 +374,7 @@ def sample_clauses(nv, clauses, support, device, *, simplify=True, els=True, n_t
                          collect=False, lookahead=lookahead)
         bd = (w.get("config_breakdown") or {}).values()
         w["best_success"] = max((c["success_rate"] for c in bd), default=w["success_rate"])
-        s._gen.manual_seed(seed)
-        import random as _r
-        s._pyrng = _r.Random(seed)
+        s.reseed(seed)          # BOTH streams — sampling and the delivery projection
         torch.cuda.synchronize()
         return w
 
@@ -457,17 +485,25 @@ def sample_clauses(nv, clauses, support, device, *, simplify=True, els=True, n_t
     mmc = max(1, min(min_measure_chunks,
                      (max_chunks - (len(configs) if configs else 1)) if max_chunks
                      else min_measure_chunks))
+    # out_cap rides ALONG with the timed run (sampler.sample) instead of re-running the sampler
+    # afterwards: the rows are projected off chunks that execute either way.
     if configs:
         t = smp.sample(n_time, configs=configs,
                        max_chunks=max_chunks, collect=False, lookahead=lookahead,
-                       min_measure_chunks=mmc, max_seconds=time_limit)
+                       min_measure_chunks=mmc, max_seconds=time_limit, out_cap=out_cap)
     else:
         t = smp.sample(n_time, decisions_per_round=b, random_var=random_var,
                        max_chunks=max_chunks, collect=False,
-                       lookahead=lookahead, min_measure_chunks=mmc, max_seconds=time_limit)
+                       lookahead=lookahead, min_measure_chunks=mmc, max_seconds=time_limit,
+                       out_cap=out_cap)
     if device.type == "cuda":
         torch.cuda.synchronize()
-    wall = time.perf_counter() - t0
+    # The projection that fills `--out` runs inside the loop above but is DELIVERY, not sampling:
+    # bill it to phases["output"] and keep it out of `wall`, so every rate below is the same
+    # number the run would have reported without `--out`. (The sampler's own `cfg_stats` wall
+    # already excludes it, but only on the adaptive path — a pinned single config has none.)
+    proj_s = float(t.get("out_project_s") or 0.0)
+    wall = time.perf_counter() - t0 - proj_s
     # Engine provenance for the results JSON: WHICH packed split and WHICH kernel variant actually
     # ran, and at what K. Captured here — after the (possible) post-mining rebuild, before the
     # coverage pass lowers K. This is the evidence that a headline number came from the sum-trick
@@ -496,11 +532,6 @@ def sample_clauses(nv, clauses, support, device, *, simplify=True, els=True, n_t
     # after committing to the winner (construction/warmup amortised). Falls back to the blend if a
     # single non-adaptive config was used (no per-config timing).
     sps_e2e = t["n_models"] / wall if wall > 0 else 0.0
-    # TRUE end-to-end rate (construction + simplify + warmup + MINING + sampling) — the honest
-    # apples-to-apples number vs CMSGen's subprocess wall. The steady-state headline (best_rate_sps)
-    # remains valid for large-N workloads where the one-time costs amortise away.
-    wall_total = time.perf_counter() - t_start
-    sps_e2e_total = t["n_models"] / wall_total if wall_total > 0 else 0.0
     sps = t.get("best_rate_sps") or sps_e2e
     brc = t.get("best_rate_config")
     # Work rates for the SAME config as `sps` (best_rate). Falls back to the whole-run blend for a
@@ -516,21 +547,52 @@ def sample_clauses(nv, clauses, support, device, *, simplify=True, els=True, n_t
         tuned_rv, tuned_b = t["random_var"], t["B"]
         tuned_la = t.get("lookahead", lookahead)
         succ = t["success_rate"]
-    # Sample OUTPUT: collect up to `out_cap` support-projection bit-rows with the winning config —
-    # efficient GPU projection (only the (n, S) bit matrix crosses to host, not full N-var models).
-    # Off the timing path (samples/s already measured). Kept BEFORE the coverage run's K-lowering so
-    # it runs at full throughput K.
+    # Sample OUTPUT: up to `out_cap` support-projection bit-rows from the WINNING config — only
+    # the (n, S) bit matrix ever crosses to host, never full N-var models.
+    # The timed run above already kept them (`out_cap=` -> `out_bits`), so the common case costs
+    # NOTHING here. It used to be a second full sampling pass over the same instance, which (a)
+    # roughly doubled the wall, (b) obeyed no time limit, and (c) delivered `out_cap` rows even
+    # when the timed run had been CUT SHORT — so a capped run reported one model count and then
+    # wrote a larger number of samples. docs/findings/CLI_DELIVERY_FINDINGS.md.
+    # A top-up runs only when the collection came up short of the request, and it is bounded by
+    # what is LEFT of the sampling budget: a run that already spent `time_limit` writes what it
+    # has (short, and said so) rather than silently sampling for another `time_limit`.
     # Always WELL-SHAPED: with out_cap=0, or when nothing was found (UNSAT, 0%-success), this is
     # a (0, S) matrix over the same columns rather than None, so a caller can index it
     # unconditionally. `projection_cols` is the shape alone — the per-column plan is only built
     # when there are rows to fill.
     cols = [v + 1 for v in smp.projection_cols()]
     samples = np.zeros((0, len(cols)), dtype=np.uint8)
-    phases["output"] = 0.0
+    phases["output"] = proj_s
     if out_cap:
-        _to = time.perf_counter()
-        samples, cols = smp.sample_bits(out_cap, config=(tuned_rv, tuned_b, tuned_la))
-        phases["output"] = time.perf_counter() - _to
+        samples = t.get("out_bits", samples)
+        cols = t.get("out_cols", cols)
+        # A file must never claim more than the run produced. The ceiling is what the timed run
+        # DELIVERED, not what was requested: a run cut short by a safety valve now writes what it
+        # has, instead of quietly sampling the rest afterwards and reporting the two numbers side
+        # by side. Bounded by the remaining sampling budget as well, so a spent `--time-limit`
+        # buys no extra sampling at all.
+        want = min(out_cap, t["n_models"])
+        left = None if time_limit is None else max(0.0, time_limit - wall)
+        if len(samples) < want and (left is None or left > 0):
+            _to = time.perf_counter()
+            extra, cols = smp.sample_bits(want - len(samples),
+                                          config=(tuned_rv, tuned_b, tuned_la),
+                                          max_seconds=left)
+            if len(extra):
+                samples = np.concatenate([samples, extra]) if len(samples) else extra
+            phases["output"] += time.perf_counter() - _to
+    # AFTER the output block: these rows are part of what the run DELIVERS, so the end-to-end wall
+    # has to carry their cost. Charging it to `phases` while leaving it out of `wall_total_s` made
+    # the two disagree by exactly the output pass, and inflated the reported e2e rate.
+    wall_total = time.perf_counter() - t_start
+    sps_e2e_total = t["n_models"] / wall_total if wall_total > 0 else 0.0
+    # Everything past this point is a DIAGNOSTIC the caller opted into (--n-cov, --uniformity),
+    # not part of delivering samples. Its wall is reported separately, in `phases_diag`, because
+    # `phases` has to sum to `wall_total_s` and `sps_e2e_total` must not be dragged down by a
+    # readout the user asked for on the side. Charging uniformity to `phases` alone left the two
+    # disagreeing by exactly its cost.
+    phases_diag: dict = {}
     if n_cov:
         # Bound host RAM: this run RECONSTRUCTS every completed row into python lists, so the batch
         # is a hard requirement, not a preference — pin_batch guarantees it, whereas the old
@@ -542,16 +604,18 @@ def sample_clauses(nv, clauses, support, device, *, simplify=True, els=True, n_t
     # the model reconstruction / dedup cost is NOT charged to samples/s — this is a correctness/quality
     # readout ("do we actually emit distinct solutions?"), not a throughput number.
     vc = clauses if (verify_cpu and verify_clauses is None) else verify_clauses
+    _tcov = time.perf_counter()
     c = (smp.sample(n_cov, decisions_per_round=tuned_b, random_var=tuned_rv,
                     max_chunks=cov_chunks, collect=True, verify_clauses=vc,
                     lookahead=tuned_la) if n_cov else {})
+    phases_diag["coverage"] = (time.perf_counter() - _tcov) if n_cov else 0.0
     # Uniformity readout, OPT-IN (default "off": it costs an extra ~2s sampling pass even off the
     # timing path). "fast" = collision/repeat check only (no solver work, gross-skew detector).
     # "exact" adds enumeration + chi-square on small spaces (the sensitive test — subtle bias like
     # b06-c4's TV=0.17 is only visible here). See _uniformity_readout / metrics.py.
     sup1 = [v + 1 for v in (support or range(nv))]
     uni = None
-    phases["uniformity"] = 0.0
+    phases_diag["uniformity"] = 0.0
     if uniformity and uniformity != "off":
         _tu = time.perf_counter()
         try:
@@ -559,7 +623,14 @@ def sample_clauses(nv, clauses, support, device, *, simplify=True, els=True, n_t
                                       mode=uniformity, target=int(n_uni))
         except Exception as e:  # noqa: BLE001 — a diagnostic must never kill the run
             uni = {"mode": "error", "note": f"{type(e).__name__}: {e}"}
-        phases["uniformity"] = time.perf_counter() - _tu
+        phases_diag["uniformity"] = time.perf_counter() - _tu
+    # Was the formula PROVED to have no models? Both detectors are already in hand and neither
+    # reached the caller before: preprocessing returning None (`_unsat_sampler`), and the engine's
+    # construction-time units flush conflicting. Without this an UNSAT instance is reported as
+    # "0 models, success 0%, sound=True" — indistinguishable from a satisfiable instance the
+    # sampler merely failed on, which are opposite facts.
+    unsat = bool((getattr(smp, "_recon", None) or {}).get("unsat")) or bool(
+        smp.engine.flush_conflict)
     del smp
     if device.type == "cuda":
         torch.cuda.empty_cache()
@@ -575,7 +646,8 @@ def sample_clauses(nv, clauses, support, device, *, simplify=True, els=True, n_t
             "sup1": sup1,
             "uniformity": uni,                                # opt-in readout (see metrics.py)
             "sps_e2e_total": sps_e2e_total,                   # incl. construction+simplify+mining
-            "phases": phases,                                 # per-phase seconds of the e2e wall
+            "phases": phases,                                 # DELIVERY phases; these sum to wall_total_s
+            "phases_diag": phases_diag,                       # opt-in readouts, OUTSIDE wall_total_s
             "n_models": t["n_models"],                        # total solutions found in the timed run
             # True when a safety valve (time_limit / zero-progress / explicit max_chunks) stopped
             # the timed run BEFORE it delivered n_time models. Rates stay valid either way.
@@ -601,5 +673,9 @@ def sample_clauses(nv, clauses, support, device, *, simplify=True, els=True, n_t
             # support projections; `cols` = the ORIGINAL variable id of each column; `wire_map` =
             # {var: input@cycle} for a circuit CNF (empty otherwise). See gpap.sampling.output.
             "samples": samples, "cols": cols, "wire_map": _wire_map or {},
+            # How many rows were ASKED for vs kept, so a short file is self-explaining, and which
+            # config produced them (they all come from one — see sampler.sample's out_cap).
+            "out_requested": out_cap, "out_config": t.get("out_config"),
+            "unsat": unsat,                                   # PROVED no models (not merely none found)
             "tuned_rv": tuned_rv, "tuned_b": tuned_b, "tuned_la": tuned_la,
             "config_breakdown": t.get("config_breakdown")}

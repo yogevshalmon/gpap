@@ -154,12 +154,21 @@ pysat re-implementation — the latter inflated a bogus GPU "speedup" 50–100×
 papers, quote **both** paper-CMSGen (footnoted: their CNFs/CPU) and **local** CMSGen on our CNFs
 (ours are ~2–3× faster than the papers' numbers due to DFF variable sharing).
 
-## 6. `--n-time` is a delivery contract
+## 6. `--n-time` is a delivery TARGET — quote the delivered count, never the request
 
-`--n-time N` means deliver N models. The only early exits are `--time-limit` and the zero-progress
-stop, both marked with `<` after the sols count. A delivered-blend rate below the winner's
-steady-state rate is bandit exploration drag, not a bug — the headline `samples_per_s` is the
-best-measured config's steady-state rate.
+`--n-time N` asks for N models, and the run does not stop until it has them. It is not a guarantee
+in either direction, so a table must report what was DELIVERED:
+
+- **it overshoots.** The batch K is the unit of work and a chunk is never abandoned half-done, so
+  a small formula at the 262,144 cap returns ~1e6 models for `-n 100`.
+- **it can fall short.** `--time-limit` and the zero-progress stop both end a run early; both are
+  marked `<` after the sols count and set `chunk_capped` in the JSON.
+
+A delivered-blend rate below the winner's steady-state rate is bandit exploration drag, not a bug
+— the headline `samples_per_s` is the best-measured config's steady-state rate.
+
+`--out` does not extend the run: the file holds `min(-n, --max-samples, models delivered)` rows,
+collected off the timed run's own chunks (docs/findings/CLI_DELIVERY_FINDINGS.md).
 
 ## 7. Result JSON is versioned
 

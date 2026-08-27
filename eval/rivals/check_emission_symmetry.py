@@ -151,7 +151,14 @@ def scan_rivals(root):
 
 
 def scan_gpap():
-    """Every `.sample(...)` inside pipeline.py's timed window must pass collect=False."""
+    """Every `.sample(...)` inside pipeline.py's timed window must pass collect=False AND leave
+    `out_cap` at 0.
+
+    `out_cap` is the second way the timed run can deliver rows to the host: it projects each
+    chunk's support bits as the run goes (that is what makes `gpap sample --out` cheap). The
+    benchmark driver never sets it, and this check is here so it cannot start doing so quietly —
+    re-deriving the property instead of asserting a claim that used to follow from `collect=False`
+    alone and no longer does."""
     path = os.path.join(REPO_ROOT, "gpap", "sampling", "pipeline.py")
     tree = ast.parse(open(path).read())
     ends = [n.lineno for n in ast.walk(tree)
@@ -176,11 +183,18 @@ def scan_gpap():
         kw = {k.arg: k.value for k in c.keywords}
         v = kw.get("collect")
         good = isinstance(v, ast.Constant) and v.value is False
+        oc = kw.get("out_cap")
+        # Absent, the literal 0, or the `out_cap` NAME (which the benchmark path always passes as
+        # 0) — anything else means the timed window may be projecting rows to the host.
+        oc_ok = (oc is None
+                 or (isinstance(oc, ast.Constant) and oc.value == 0)
+                 or (isinstance(oc, ast.Name) and oc.id == "out_cap"))
         print(f"    line {c.lineno}: collect={'False' if good else ast.dump(v) if v else 'MISSING'}"
-              f"  {'OK' if good else 'FAIL'}")
-        ok &= good
-    print("    => the timed run never gathers a model row to the host (keep_rows is False)"
-          if ok else "    => TIMED RUN MAY EMIT")
+              f"  out_cap={'0/param' if oc_ok else ast.dump(oc)}"
+              f"  {'OK' if (good and oc_ok) else 'FAIL'}")
+        ok &= good and oc_ok
+    print("    => the timed run never gathers a model row to the host (collect=False, out_cap 0 "
+          "on every benchmarked call)" if ok else "    => TIMED RUN MAY EMIT")
     return ok
 
 

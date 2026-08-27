@@ -50,7 +50,11 @@ import subprocess
 import sys
 import time
 
-from gpap.cli import CIRCUIT_EXTS, _k_cap_arg   # shared with the `gpap` CLI
+# Shared with the `gpap` CLI — INCLUDING the numeric validators. This module owns its own parser
+# and eval/run_full_eval.sh invokes it as `python -m gpap.benchmark`, so a bound that lived only in
+# gpap/cli.py's wrapper would be absent on exactly the campaign path it was written to protect
+# (`--time-limit 0` here is also the rival subprocess's timeout).
+from gpap.cli import CIRCUIT_EXTS, _NONNEG_INT, _POS_INT, _POS_SECS, _k_cap_arg
 
 SCHEMA = 3          # results-JSON schema version (docs/BENCHMARKING.md §7)
 #   1: original flat rows
@@ -274,9 +278,9 @@ def _build_argparser():
                          "row per (instance, encoder): e.g. --encoders tseitin abc:fast "
                          "(tokens: tseitin | abc[:full|fast|auto] | auto). Default: the single "
                          "--encoder/--abc-opt pair")
-    ap.add_argument("--cycles", type=int, default=25,
+    ap.add_argument("--cycles", type=_POS_INT, default=25,
                     help="unroll depth for circuit inputs (combinational AIGs clamp to 1)")
-    ap.add_argument("--pin-outputs", type=int, default=None,
+    ap.add_argument("--pin-outputs", type=_NONNEG_INT, default=None,
                     help="outputs to pin for circuit inputs (default: all)")
     ap.add_argument("--seed", type=int, default=5, help="conversion + sampling seed")
     ap.add_argument("--seeds", type=int, nargs="+", default=None,
@@ -302,18 +306,18 @@ def _build_argparser():
                          "(random inputs + bit-parallel simulation, no CNF): p_acc column = "
                          "acceptance probability of the pinned target, rej/s = accepted "
                          "samples/s it achieves on this CPU")
-    ap.add_argument("--n-time", type=int, default=50_000,
+    ap.add_argument("--n-time", type=_POS_INT, default=50_000,
                     help="samples to PRODUCE in the timed run (a contract, not a hint). Only the "
                          "safety valves end the run short of this ('<' after sols): --time-limit, "
                          "or zero models after every config was measured (hopeless instance)")
-    ap.add_argument("--time-limit", type=float, default=60.0,
+    ap.add_argument("--time-limit", type=_POS_SECS, default=60.0,
                     help="per-instance sampling wall cap in seconds (the safety valve that bounds "
                          "very-low-success instances; e.g. at 1k samples/s, 200k samples would "
                          "otherwise take 200s)")
-    ap.add_argument("--max-chunks", type=int, default=None,
+    ap.add_argument("--max-chunks", type=_POS_INT, default=None,
                     help="expert knob: hard chunk cap for the timed run (default none — --n-time "
                          "and --time-limit govern)")
-    ap.add_argument("--n-cov", type=int, default=0,
+    ap.add_argument("--n-cov", type=_NONNEG_INT, default=0,
                     help="samples for the QUALITY pass (2-wise coverage + distinct count). 0 (default) "
                          "SKIPS it: the collect run's Python model-reconstruction dominated instance "
                          "wall (measured 26s of 34s on s1196 T=25) while distinct≈100%% on all non-tiny "
@@ -331,7 +335,7 @@ def _build_argparser():
                     help="add the soft risk-polarity config to the portfolio. Higher success on "
                          "tight/deep circuits but NOT uniform (Barbarik rejects it 5/5) — never "
                          "use for a distribution claim")
-    ap.add_argument("--b", type=int, default=8,
+    ap.add_argument("--b", type=_POS_INT, default=8,
                     help="decisions per round (8 is the throughput sweet spot: fewer rounds while "
                          "success barely drops; B>=16 over-constrains and collapses success)")
     ap.add_argument("--k-cap", type=_k_cap_arg, default="auto",
@@ -347,12 +351,12 @@ def _build_argparser():
                          "this to reproduce a run made before it became the default)")
     ap.add_argument("--also-plain", action="store_true", help="also run GPAP without simplification")
     ap.add_argument("--verify-cpu", action="store_true", help="also CPU-verify a few models vs clauses")
-    ap.add_argument("--max-clauses", type=int, default=None,
+    ap.add_argument("--max-clauses", type=_POS_INT, default=None,
                     help="skip any instance whose CNF exceeds this many clauses (recorded as a "
                          "skipped row with the size). The engine itself only rejects formulas "
                          "outside the packed envelope — this is the WALL-TIME guard for a "
                          "sweep: a 50-cycle b15 unroll parses for minutes before it samples")
-    ap.add_argument("--max-vars", type=int, default=None,
+    ap.add_argument("--max-vars", type=_POS_INT, default=None,
                     help="same, on variables (the packed-word envelope caps 2N at 16.7M anyway)")
     ap.add_argument("--scratch", default="/tmp")
     ap.add_argument("--keep-cnf", action="store_true",
@@ -395,7 +399,7 @@ def main(argv=None):
     import numpy as np
     import torch
     from gpap.sampling.metrics import distinct_projections, format_uniformity, two_wise_coverage
-    from gpap.sampling.pipeline import describe_portfolio, portfolio as _portfolio, sample_file
+    from gpap.sampling.pipeline import soft_warning, describe_portfolio, portfolio as _portfolio, sample_file
 
     ap = _build_argparser()
     args = ap.parse_args(argv)
@@ -406,6 +410,8 @@ def main(argv=None):
         print(f"[warn] no instances matched {args.glob!r} — nothing to run "
               f"(is the glob quoted so the shell did not expand it?)", file=sys.stderr)
     portfolio = _portfolio(args.portfolio, allow_soft=args.allow_soft)
+    if args.allow_soft:
+        print(soft_warning())
     if args.twise and args.n_cov == 0:
         args.n_cov = 2000                          # 2-wise needs the collected quality sample
     quality = args.n_cov > 0

@@ -67,7 +67,8 @@ Nothing above mentions a batch size: every entry point sizes itself to the GPU a
 
 `samples` is a numpy `(rows, S)` uint8 bit matrix of support projections — projected on the GPU,
 so only those bits cross the bus, and collected OFF the timing path so `samples_per_s` is
-unaffected. Rows are capped by `max_samples` (default 100,000) and every one is a guaranteed-valid
+unaffected. Rows are capped by `min(n, max_samples, models delivered)` (`max_samples` defaults to
+100,000), so a run cut short by its time limit returns what it produced; every row is a guaranteed-valid
 projection. Pass `full_models=True` for the historical `list[list[int]]` of full DIMACS models
 instead (via the coverage pass — more informative, considerably more expensive).
 
@@ -143,8 +144,11 @@ the implied solution-space floor — no solver work, catches gross bias only). T
 — one row per sample, one bit per support variable (for a `.bench` input, one primary-input
 `wire@cycle` per column, named in the header). The projection is built on the GPU and only the bit
 matrix crosses to host RAM, so a large dump is cheap. Formats via `--out-format`: `bits` (0/1 text,
-default), `npy` (numpy `uint8` array — `numpy.load`), `dimacs` (signed literals). Output is capped at
-`--max-samples` (default 100k; raise for a full dump). `--stats FILE` writes the run's info/stats
+default), `npy` (numpy `uint8` array — `numpy.load`), `dimacs` (signed literals). The rows are
+collected by the timed run itself (~0.4% of a chunk), so `--out` costs almost nothing and never
+samples past `--time-limit`; the file gets `min(-n, --max-samples, models delivered)` rows and the
+run says so when it is short. `--max-samples` (default 100k) is a **ceiling** — it can only lower
+that count, so raise `-n` for a bigger dump. `--stats FILE` writes the run's info/stats
 JSON (rates, phases, mining, soundness) — separate from the samples. In Python the same matrix is
 `info["samples"]` (with `info["cols"]` / `info["wire_map"]`), and `gpap.sampling.write_samples()`
 writes any of the formats.

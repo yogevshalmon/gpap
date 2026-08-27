@@ -134,7 +134,10 @@ def test_pipeline_exact_uniformity_on_tiny_cnf():
     assert not u.get("unsound_projections")
     assert u["n"] >= 20 * u["S"]                   # 5*S floor comfortably met
     assert u["tv"] < 0.35                          # sane distribution over the 2 solutions
-    assert info["phases"]["uniformity"] < 10.0
+    # billed to phases_diag, not phases: the readout is a DIAGNOSTIC the caller opted into, and
+    # `phases` has to sum to wall_total_s (tests/test_cli_contracts.py pins that invariant).
+    assert info["phases_diag"]["uniformity"] < 10.0
+    assert "uniformity" not in info["phases"]
 
 
 @needs_gpu
@@ -145,7 +148,7 @@ def test_pipeline_default_is_off():
                           configs=None, time_limit=10.0, mine=False)
     # the readout is OPT-IN (it costs an extra sampling pass): no uniformity kwarg -> no readout
     assert info["uniformity"] is None
-    assert info["phases"]["uniformity"] == 0.0
+    assert info["phases_diag"]["uniformity"] == 0.0
 
 
 @needs_gpu
