@@ -161,7 +161,7 @@ static gpap_status build(int32_t num_vars, const int32_t *flat, const int32_t *l
              * most 24 bits (the 8|24 envelope's 2N ceiling) and a long clause index is a
              * non-negative int32, so the sign bit is free and unambiguous. It lets the WAVE
              * kernel classify an entry from the value it has already loaded instead of gathering
-             * this segment's occ_mid through a W x W one-hot reduction in its hottest loop.
+             * this segment's occ_mid through an extra shuffle gather in its hottest loop.
              * occ_mid still bounds the scalar loop split, the CLEAN restore and the SOFT scan. */
             const int32_t a = lit_index(lits[0]), b = lit_index(lits[1]);
             f->occ_clauses[(size_t)bin_cur[(size_t)(a ^ 1)]++] = b | GPAP_OCC_BIN_TAG;

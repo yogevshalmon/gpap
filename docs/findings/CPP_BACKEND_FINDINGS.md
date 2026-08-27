@@ -100,7 +100,9 @@ the Python engine could never have reached, and the first genuine performance ar
 **Hand-written CUDA C++ kernels.** The one thing Triton cannot express is a *thread-per-row*
 mapping (32 independent scattered streams per warp instead of one), which is the natural fix for
 the MLP starvation the WAVE kernel exists to work around; a CUDA wave kernel could also replace
-the O(W²) one-hot segment scheduling with shuffles. Both are real, and both are research bets on
+the O(W²) one-hot segment scheduling with shuffles — DONE 2026-08-27 in Triton itself
+(`tl.gather`), so that half of the bet is settled without leaving the toolchain; see
+docs/findings/WAVE_SHUFFLE_FINDINGS.md. The thread-per-row bet remains, on
 a memory-bound kernel that already sits near the scattered-DRAM ceiling on the saturated
 instances. Rewriting would also forfeit the free ROCm path Triton gives us and force a full
 re-validation. Not justified by current evidence.

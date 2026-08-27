@@ -19,7 +19,7 @@ model sets are unchanged — BCP fixpoints are confluent.
 The tag-bit variant (marking binary entries in-place) was considered and rejected: the
 `[bin | long]` split lets `_clean_packed` walk only `[mid, end)`, so the CLEAN restore shrinks
 by the binary share too, and payloads keep full int32 width; in `_wave_propagate` the split
-costs one extra one-hot gather of `mid_v` — the same price as testing a tag bit.
+costs one extra gather of `mid_v` — at the time a W×W one-hot reduction, the same price as testing a tag bit. ⚠️ RE-PRICED 2026-08-27: the schedule is shuffle-based now, so that alternative costs ONE `shfl.sync`, not a shared-memory reduction — see the note at the tag measurement below.
 
 ## The static prize (in-memory Tseitin builds, post-`unit_closure`, seed 5)
 
@@ -209,6 +209,12 @@ same change had introduced, so none was inherited debt:
   an entry from the value it already loaded, dropping both the per-frontier `occ_mid` load and a
   fifth W x W one-hot reduction from the engine's hottest loop. `occ_mid` still bounds the
   scalar loop split, the CLEAN restore and the SOFT scan.
+  ⚠️ **RE-PRICED 2026-08-27**: the wave schedule is shuffle-based now
+  (docs/findings/WAVE_SHUFFLE_FINDINGS.md), so the alternative this tag avoids costs ONE
+  `shfl.sync`, not a ~239-instruction shared-memory reduction — roughly 13x less than the price
+  quoted below. The tag is still cheaper, and it is already paid for, but anyone re-examining
+  whether it earns its 24-bit literal ceiling should re-measure rather than quote the numbers
+  in the table below, which were taken against the one-hot schedule.
 
 **The tag was measured, not assumed** — two full interleaved runs at an identical pin
 (`--k-cap 20000`, same cells, same base control), tagged vs tag-reverted:
