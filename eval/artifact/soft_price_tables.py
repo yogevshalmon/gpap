@@ -33,7 +33,7 @@ import os
 import sys
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
-from eval.artifact.paper_tables import (CMS_FAMILIES, cms_family, gm, load,  # noqa: E402
+from eval.artifact.paper_tables import (CMS_FAMILIES, cms_family, encoders_in, gm, load,  # noqa: E402
                                tex_escape)
 
 
@@ -57,13 +57,20 @@ def soft_won(r):
 
 
 def headline(d, stem):
-    """The published geomean for one stage — literally the paper's number, not a copy of it.
+    """The published geomean for one stage — literally the paper's numbers, not a copy of them.
 
     Reimplementing the exclusions here is the mistake this whole toolchain exists to prevent, and
     a first draft of this file made it anyway.
+
+    Table 1 reports each encoder as its own row (nothing selects between them). This table is one
+    row per STAGE, so what it needs is a single figure: the geomean OVER those per-encoder
+    geomeans. It is context for the soft-vs-safe column, never a headline in its own right.
     """
-    v = cms_family(d, stem)
-    return v["gm"] if v else None
+    payload = load(os.path.join(d, f"{stem}.json")) if d else None
+    if not payload:
+        return None
+    vs = [cms_family(d, stem, e) for e in encoders_in(payload)]
+    return gm([v["gm"] for v in vs if v and v["gm"]])
 
 
 def build(args):
@@ -149,7 +156,12 @@ def build(args):
          "both arms, same machine type, same protocol, same budgets, same encoders. The only "
          "difference is `--allow-soft`, injected through `run_full_eval.sh`'s single `bench` "
          "call so both arms traverse identical code.", "",
-         "`soft` is Barbarik-rejected 5/5 against an exact oracle (median TV 0.63 vs a 0.040 "
+         f"Sources: safe `{args.safe}`, soft `{args.soft}`. **Both arms must come from the SAME "
+          f"campaign** — this table is a GPAP-vs-GPAP pairing, so crossing campaigns would put "
+          f"cross-campaign draw noise into a comparison that has none of the confounds the "
+          f"CMSGen table has.",
+          "",
+          "`soft` is Barbarik-rejected 5/5 against an exact oracle (median TV 0.63 vs a 0.040 "
          "detection floor), so the shipped sampler cannot select it. Ratios below are "
          "**safe / soft**: less than 1.0 means the uniformity-safe default is slower.", "",
          "## Summary", "",

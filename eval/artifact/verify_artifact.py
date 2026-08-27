@@ -61,6 +61,9 @@ def main():
             fail.append(f"unreadable JSON: {p}")
             continue
         stem = os.path.basename(p)[:-5]
+        if not isinstance(d, dict) or "results" not in d:
+            warn.append(f"{p}: not a `gpap bench` stage (no `results`) — skipped, not checked")
+            continue
         rows = [r for r in d.get("results", []) if not r.get("skipped") and not r.get("error")]
         tot_cells += len(rows)
         uns = [r for r in rows if r.get("gpu_sound") is False or r.get("cpu_sound") is False]
@@ -79,13 +82,26 @@ def main():
                         f"without it (this stage predates the cpu provenance fix)")
         inst = {r["name"].split(".")[0] for r in rows}
         fam_inst.setdefault(stem.split("-")[0], {})[stem] = len(inst)
-        # aggregation traps
-        best = {}
-        for r in rows:
-            k = r["name"].split(".")[0]
-            if k not in best or (r.get("ratio") or 0) > (best[k].get("ratio") or 0):
-                best[k] = r
-        finite = [r["ratio"] for k, r in best.items()
+        # ---- CMSGen's sample count must be EXACT where it is published -----------------------
+        # A killed CMSGen reports its last --statsevery multiple, so `cms_n_samples: 0` can mean
+        # "fewer than 1000 in the budget" rather than "none". On the 2026-08-23 campaign that
+        # was 174 of 357 rows, 81 of them recorded as zeros and counted as our wins; one of them
+        # (b14/abc:fast) really delivers 941 samples, i.e. an ~10-25x LOSS published as an
+        # infinite win. The patch's --maxtime makes CMSGen stop itself and print an exact final
+        # count (`cms_count_exact`), so a floored count is now a defect, not a fact of life.
+        floored = [r for r in rows
+                   if r.get("cms_count_exact") is False or
+                   (r.get("cms_count_exact") is None and r.get("cms_timed_out"))]
+        if floored:
+            zeros = [r for r in floored if not (r.get("cms_n_samples") or 0)]
+            msg = (f"{stem}: {len(floored)} row(s) carry a FLOORED CMSGen count (killed between "
+                   f"--statsevery lines), {len(zeros)} of them recorded as an exact 0")
+            (fail if zeros else warn).append(
+                msg + " — re-run with a --maxtime-capable cmsgen (scripts/build_cmsgen.sh)")
+        # ---- aggregation traps. One cell per (instance, encoder): there is no best-of ---------
+        best = {(r["name"].split(".")[0], r.get("enc_key") or r.get("encoder")): r
+                for r in rows}
+        finite = [r["ratio"] for (k, _e), r in best.items()
                   if r.get("ratio") and math.isfinite(r["ratio"])
                   and k not in VACUOUS_PINS]
         if 0 < len(finite) < 3:
@@ -96,9 +112,9 @@ def main():
         # dropping the ones WE could not is the single easiest way to publish a flattering table
         # by accident; it is exactly what the first version of paper_tables.py did, because a
         # GPAP-zero row carries ratio == 0.0 and fell through every branch.
-        g0 = [k for k, r in best.items()
+        g0 = [f"{k}/{e or '-'}" for (k, e), r in best.items()
               if (r.get("cms_n_samples") or 0) > 0 and not (r.get("n_models") or 0)]
-        b0 = [k for k, r in best.items()
+        b0 = [f"{k}/{e or '-'}" for (k, e), r in best.items()
               if not (r.get("cms_n_samples") or 0) and not (r.get("n_models") or 0)]
         if g0:
             warn.append(f"{stem}: GPAP emitted NOTHING on {len(g0)} instance(s) that CMSGen "
@@ -110,8 +126,8 @@ def main():
 
         # ZERO-SEARCH cells: samples emitted with no decisions and no implications means the
         # support is free after propagation, so the ratio measures the instance. Worse, the
-        # best-encoder rule PREFERS them, because they carry the family's highest ratio.
-        free = [k for k, r in best.items()
+        # cell is about the instance, not the sampler.
+        free = [f"{k}/{e or '-'}" for (k, e), r in best.items()
                 if (r.get("n_models") or 0) > 0 and not (r.get("decisions_per_s") or 0)
                 and not (r.get("implications_per_s") or 0)]
         if free:
@@ -132,16 +148,13 @@ def main():
         d = load(p)
         if not d:
             continue
+        if not isinstance(d, dict) or "results" not in d:
+            continue
         stem = os.path.basename(p)[:-5]
-        best = {}
-        for r in d.get("results", []):
-            if r.get("skipped") or r.get("error"):
-                continue
-            k = r["name"].split(".")[0]
-            if k not in best or (r.get("ratio") or 0) > (best[k].get("ratio") or 0):
-                best[k] = r
+        best = {(r["name"].split(".")[0], r.get("enc_key") or r.get("encoder")): r
+                for r in d.get("results", []) if not r.get("skipped") and not r.get("error")}
         quad = []
-        for k, r in best.items():
+        for (k, _e), r in best.items():
             if k in VACUOUS_PINS:
                 continue
             a, b = r.get("implications_per_s"), r.get("cms_implications_per_s")

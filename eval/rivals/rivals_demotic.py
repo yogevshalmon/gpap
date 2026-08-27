@@ -50,7 +50,7 @@ sys.path.insert(0, REPO_ROOT)
 
 from eval.rivals.rival_common import (VARIANTS, cached_gpap, fit_batch,  # noqa: E402
                                       prepare_variant, rival_commit, rival_vram_budget,
-                                      run_at_batch, variant_note)
+                                      resolve_steps, run_at_batch, variant_note)
 from eval.rivals.rivals_recurrent import reorder_bench, run_gpap          # noqa: E402
 from eval.rivals.unroll_to_bench import write_unrolled_miter              # noqa: E402
 
@@ -273,7 +273,9 @@ def main():
                          "(ABC-optimized sequential AIG, written back as .bench and "
                          "equivalence-checked). Pass both to show the encoder is not what "
                          "decides the comparison — the rival gets the optimized circuit too")
-    ap.add_argument("--steps", type=int, default=10, help="their num_steps (their script: 1-100)")
+    ap.add_argument("--steps", default="auto",
+                    help="their num_steps: 'auto' (default) = the value their own artifacts "
+                         "specify, see rival_common.RIVAL_STEPS; or an explicit number")
     ap.add_argument("--batch", type=int, default=None, help="their batch (default: fit to VRAM)")
     ap.add_argument("--gpap-cache", default=None,
                     help="directory of cached GPAP arms (default: <output dir>/.gpap_cache). "
@@ -303,12 +305,13 @@ def main():
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     bench_dir = args.bench_dir or (BENCH_COMB if (args.mode == "native" and
                                                  args.circuit_type == "comb") else BENCH_SEQ)
+    steps, steps_src = resolve_steps("demotic", args.steps)
     tmp = tempfile.mkdtemp(prefix="rivals_demotic_")
     mode_txt = ("their target table" if args.mode == "native"
                 else f"OUR {args.target} fixed-T instance as a miter")
     print(f"{len(args.names)} instances | mode: {args.mode} ({mode_txt}) | "
           f"T={args.cycles if args.mode == 'miter' or args.circuit_type == 'seq' else 1} "
-          f"steps={args.steps} | GPAP median of seeds {args.seeds}")
+          f"steps={steps} ({steps_src}) | GPAP median of seeds {args.seeds}")
     hdr = (f"{'instance':<10}{'circ':>6}{'pin':>14}{'p_acc':>10}{'DEM uniq':>10}{'t':>8}"
            f"{'DEM u/s':>10}{'GPAP u/s~':>11}{'GPAP/s':>11}{'succ%':>7}{'ratio':>10}")
     print(hdr)
@@ -337,7 +340,7 @@ def main():
             return
         os.makedirs(os.path.dirname(args.output) or ".", exist_ok=True)
         json.dump({"mode": args.mode, "circuit_type": args.circuit_type, "cycles": args.cycles,
-                   "target": args.target, "steps": args.steps,
+                   "target": args.target, "steps": steps, "steps_source": steps_src,
                    "circuit_variants": list(args.circuit_variants),
                    "rival_commit": rival_commit(args.demotic), "rows": out},
                   open(args.output, "w"), indent=1)
@@ -399,9 +402,10 @@ def main():
         renamed = sanitize_bench(rival_file, rival_safe)
         rival_file = rival_safe
         batch = args.batch or pick_batch(rival_file, T_rival)
-        dem = run_demotic_ladder(args.demotic, rival_file, key, steps=args.steps, batch=batch,
+        dem = run_demotic_ladder(args.demotic, rival_file, key, steps=steps, batch=batch,
                                  circuit_type=circuit_type, T=T_rival, timeout=args.timeout)
         dem["renamed_wires"] = renamed
+        dem["steps_source"] = steps_src
         task = {"harness": "demotic", "mode": args.mode, "cycles": gpap_T, "pin_outputs": pin_n,
                 "target": gpap_target, "seeds": args.seeds, "n_time": args.gpap_n,
                 "time_limit": args.gpap_time_limit, "portfolio": "circuit"}

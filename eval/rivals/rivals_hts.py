@@ -40,7 +40,8 @@ REPO_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))
 sys.path.insert(0, REPO_ROOT)
 
 from eval.rivals.rival_common import (cached_gpap, fit_batch,  # noqa: E402
-                                      rival_commit, rival_vram_budget, run_at_batch)
+                                      resolve_steps, rival_commit, rival_vram_budget,
+                                      run_at_batch)
 
 HTS_DEFAULT = str(paths.src_dir() / "High-Throughput-SAT-Sampler")
 # Per-SUBPROCESS wall cap for the rival, default 300 s = 5x the 60 s sampling budget GPAP gets
@@ -84,7 +85,7 @@ def run_hts(hts_root, cnf, steps, batch, lr="10e0", timeout=DEFAULT_TIMEOUT):
     uniq = int(float(r["num_unique_solutions"]))
     rt = float(r["model_runtime"])
     return {"unique": uniq, "runtime_s": rt, "unique_per_s": uniq / rt if rt else 0.0,
-            "wall_s": wall, "steps": steps, "batch": batch}
+            "wall_s": wall, "steps": steps, "batch": batch}    # steps_source added by main
 
 
 def n_clauses(cnf):
@@ -121,7 +122,9 @@ def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("cnfs", help="glob of CNF instances (same files go to both samplers)")
     ap.add_argument("--hts", default=HTS_DEFAULT)
-    ap.add_argument("--steps", type=int, default=10)
+    ap.add_argument("--steps", default="auto",
+                    help="their num_steps: 'auto' (default) = the value their own artifacts "
+                         "specify, see rival_common.RIVAL_STEPS; or an explicit number")
     ap.add_argument("--batch", type=int, nargs="+", default=None,
                     help="explicit HTS batch sizes to try (best reported). Default: the largest "
                          "that fits in 0.80 of free VRAM — the same share of the card GPAP "
@@ -155,10 +158,11 @@ def main():
     import torch
     device = (torch.device(args.device) if args.device
               else torch.device("cuda" if torch.cuda.is_available() else "cpu"))
+    steps, steps_src = resolve_steps("hts", args.steps)
     files = sorted(glob.glob(args.cnfs))
     bdesc = (", ".join(f"{b:,}" for b in args.batch) if args.batch
              else "fit to 0.80 of free VRAM")
-    print(f"{len(files)} instances | HTS steps={args.steps} batch={bdesc} | "
+    print(f"{len(files)} instances | HTS steps={steps} ({steps_src}) batch={bdesc} | "
           f"GPAP n_time={args.gpap_n:,} | device={device}")
     hdr = (f"{'instance':<24}{'HTS uniq':>10}{'HTS t':>8}{'HTS u/s':>12}"
            f"{'GPAP u/s~':>13}{'GPAP/s':>13}{'succ%':>7}{'ratio':>14}")
@@ -185,7 +189,7 @@ def main():
         if args.batch:                          # explicit list: measure exactly those
             best = None
             for b in args.batch:
-                r = run_hts(args.hts, cnf, args.steps, b, timeout=args.timeout)
+                r = run_hts(args.hts, cnf, steps, b, timeout=args.timeout)
                 if "error" not in r and (best is None or r["unique_per_s"] > best["unique_per_s"]):
                     best = r
                 elif "error" in r and best is None:
@@ -193,8 +197,10 @@ def main():
             sweep = None
         else:
             best, sweep = run_at_batch(
-                lambda b: run_hts(args.hts, cnf, args.steps, b, timeout=args.timeout),
+                lambda b: run_hts(args.hts, cnf, steps, b, timeout=args.timeout),
                 fit_batch(n_clauses(cnf), "hts"))
+        if best is not None:
+            best["steps_source"] = steps_src
         task = {"harness": "hts", "n_time": args.gpap_n, "time_limit": args.gpap_time_limit,
                 "n_cov": args.n_cov, "portfolio": "circuit"}
         g, hit = cached_gpap(cache_dir, cnf, task,

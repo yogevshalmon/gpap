@@ -33,7 +33,10 @@ COMB_INSTS="${COMB_INSTS:-c432 c499 c880 c1355 c1908 c2670 c3540 c5315 c6288 c75
 # against were produced at median-of-3, and matching the protocol exactly is worth more than the
 # extra circuit-variant axis it costs (which is why Recurrent gets `raw` only below).
 RSEEDS="${RSEEDS:-5 6 7}"
-STEPS="${STEPS:-10}"
+# 'auto' = each rival at the num_steps ITS OWN artifacts specify (rival_common.RIVAL_STEPS).
+# Pinning one value for all three taxed two of them: the 2026-08-23 campaign ran 10 everywhere,
+# which costs DEMOTIC 2.6x and Recurrent 8.5x (both saturate their batch on the first step).
+STEPS="${STEPS:-auto}"
 TIMEOUT="${TIMEOUT:-300}"
 T="${T:-25}"
 
@@ -46,7 +49,7 @@ T="${T:-25}"
 # --resume retries ERROR rows and a rival timeout fails again identically (~300 s each) --
 # measured: 3 HTS timeouts ate ~15 min of every rebuilt VM before the later stages could start.
 # Set STAGES to skip what is already done, e.g. STAGES="recurrent-rare recurrent-table".
-STAGES="${STAGES:-demotic-native demotic-miter hts recurrent-rare recurrent-table}"
+STAGES="${STAGES:-demotic-native demotic-miter hts recurrent-rare recurrent-table steps-calib}"
 want() { case " $STAGES " in *" $1 "*) return 0 ;; *) echo "[skip] $1 (not in STAGES)"; return 1 ;; esac; }
 
 DEADLINE_H="${DEADLINE_H:-24}"
@@ -109,7 +112,7 @@ if want hts && have 40 "hts"; then
                 >/dev/null 2>&1 || echo "[warn] could not build $enc CNF for $inst"
         done
     done
-    $PY eval/rivals/rivals_hts.py "$HTS_DIR/*.cnf" --timeout "$TIMEOUT" \
+    $PY eval/rivals/rivals_hts.py "$HTS_DIR/*.cnf" --timeout "$TIMEOUT" --steps "$STEPS" \
         --resume --output "$OUT/rivals_hts.json" 2>&1 | tee -a "$LOGS/rivals.log"
     save_cache
 fi
@@ -134,6 +137,20 @@ if want recurrent-table && have 30 "recurrent-table"; then
     $PY eval/rivals/rivals_recurrent.py $SEQ_INSTS -T "$T" --seeds $RSEEDS --steps "$STEPS" \
         --timeout "$TIMEOUT" --circuit-variants raw \
         --resume --output "$OUT/rivals_recurrent_table.json" 2>&1 | tee -a "$LOGS/rivals.log"
+    save_cache
+fi
+
+# ------------------------------------------------------- 4. the num_steps tie-break, on THIS card
+# EVIDENCE, not configuration. RIVAL_STEPS pins one of the two values each tool itself ships,
+# choosing the one better for the rival; that choice was first measured on an RTX 4080. This
+# re-derives it here so the campaign carries its own proof instead of importing one. A FLIP is
+# printed and recorded, never acted on automatically. Last, because it needs the HTS CNFs and
+# because nothing else depends on it.
+if want steps-calib && have 15 "steps-calib"; then
+    banner "num_steps tie-break (each tool's own two values)"
+    $PY eval/rivals/steps_calibration.py --timeout "$TIMEOUT" \
+        --hts-cnfs "$OUT/hts_cnf/*.cnf" \
+        --out "$OUT/rivals_steps_calibration.json" 2>&1 | tee -a "$LOGS/rivals.log"
     save_cache
 fi
 

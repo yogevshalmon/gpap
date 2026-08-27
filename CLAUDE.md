@@ -455,6 +455,16 @@ gpap bench 'benchmarks/circuits/bench/seq/*.bench' --encoders tseitin abc:fast -
   `--statsevery` also gives CMSGen's own props/decisions ⇒ the `Cdec/s`/`Cimpl/s` columns.
   ⚠️ **Ratios recorded before the driver timed the patched binary include that handicap**
   (docs/BENCHMARKING.md §4b).
+  ⚠️ **`--maxtime` is what makes a budgeted CMSGen count REAL.** `--statsevery` prints every
+  N samples, so a run KILLED on the budget reports the last multiple of N: on the 2026-08-23
+  campaign all 174 timed-out rows were multiples of 1000 and **81 read as a clean 0 that scored
+  as our win** (one re-measured cell delivers 941 samples — a ~10-25× loss published as an
+  infinite win). `--maxtime` makes CMSGen stop itself and exit through its normal path, printing
+  a `final=1` line with an exact count — and its work counters even where it emits nothing, which
+  used to drop those cells out of Table 3 entirely. `cms_count_exact` per row; `verify_artifact`
+  FAILS a floored zero. It bounds the SAMPLING wall (what GPAP's `--time-limit` bounds), so
+  `cms_sps` (sampling wall) pairs with our steady state and `cms_sps_e2e` (subprocess wall) with
+  our `wall_total` — each column charges both sides or neither. RIVAL_FAIRNESS_FINDINGS.md §7.
 
 **Full experimental sweep** — [`docs/EVAL_RUNBOOK.md`](docs/EVAL_RUNBOOK.md). Terminal-driven
 (Colab reaps idle notebook cells), staged and resumable:
@@ -469,6 +479,17 @@ skipped/errored instance — read it before quoting a geomean).
 Rival harnesses: `eval/rivals/rivals_demotic.py` (`--mode native` = their ISCAS-85 pins, `--mode miter`
 = our rare-target instance as a single-output miter; sanitizes wire names + BUFF→BUF because
 DEMOTIC exec's generated Python), `eval/rivals/rivals_recurrent.py`, `eval/rivals/rivals_hts.py`.
+⚠️ **Rival knobs come from the RIVAL, or from a stated rule — never from us.** The batch is
+granted (0.80 of free VRAM, `fit_batch`); `--num_steps` is taken from the tool's own artifacts
+(`RIVAL_STEPS`: DEMOTIC 1, Recurrent 1 — their run scripts; HTS 10 — its argparse default, since
+its script's 5 is far worse for it), and where a tool ships two values the tie-break goes to the
+one better FOR THE RIVAL. Pinning 10 for all three, as the drivers did until 2026-08-26, taxed
+Recurrent 8.5× and DEMOTIC 2.6× (both saturate their batch on the first step: Recurrent 2,198,776
+unique at steps=1 vs 2,134,454 at steps=10, 14.3 s vs 118.0 s) while under-granting HTS, which
+genuinely needs the descent. NOT swept-and-best-of, on purpose — that invites "why stop at 20?".
+`eval/rivals/steps_calibration.py` re-derives the tie-break on the campaign's own card.
+⚠️ **Rival rows recorded on or before 2026-08-26 used the pinned 10 and are superseded.**
+
 **Same circuit on both sides** (`--circuit-variants raw abc`, eval/rivals/rival_common.py): the
 circuit-level rivals unroll `.bench` themselves, so an ABC-encoded GPAP arm must not face a rival
 holding the raw circuit — `abc_backend.simplify_bench_abc` ABC-optimizes the SEQUENTIAL AIG and
@@ -506,7 +527,23 @@ Cross-GPU K-scaling: `eval/colab/colab_sampling_benchmark.py` + `notebooks/gpap_
   zeros as our wins and drops ours entirely (38 of theirs shown as wins, 14 of ours invisible).
   Report
   `CMSGen=0 / GPAP=0 / both=0` as columns that SUM with the geomean's instances to the instance
-  count — a reader must be able to add them up.
+  count — a reader must be able to add them up. ⚠️ **And they must actually sum**: the degeneracy
+  screens (vacuous pins, zero-search) used to be applied only to the geomean, leaving those cells
+  inside `inst` and inside `wins`, so the printed invariant was FALSE on 6 of 7 families. Screen
+  FIRST, then bucket; the invariant is `inst = n_gm + CMSGen=0 + GPAP=0 + both=0 + no-search +
+  vacuous`, pinned by `test_every_instance_is_counted_exactly_once`. A zero-search cell can also
+  be a CMSGen-zero cell (EPFL `ctrl` under ABC), so screening after bucketing published it as an
+  outright win.
+- **NO best-of-encoders selection — one table row per (family, encoder).** `select_cells` used to
+  keep the encoder with the highest `ratio`, which makes the published statistic its own argmax
+  key and lets the RIVAL's number pick which of our runs is reported (measured: seq-c25-rare
+  84.3→66.7×, seq-c25-random 333.8→250.8×, i.e. 1.24-1.33× on the flagship families; a wash
+  pooled). The mechanism is that ABC helps CMSGen more than us on some instances, so maximising
+  the quotient awards a shared input-preprocessing gain to one side. Reporting both encoders
+  removes the question, and keeps the encoder A/B visible — it is not monotone (ABC unlocks b14
+  at a rare pin, collapses b13's). `eval_plots.py` selects on `gpap_sps` where it must select at
+  all; `slide_tables.py`/`soft_price_tables.py` import the paper's function. §8/§9 of
+  docs/findings/RIVAL_FAIRNESS_FINDINGS.md.
 - **Propagation rate isolates the engine from the sampler**: GPAP holds ~1e9
   implications/s on EVERY family (geomean 1.07e9, spread 1.41× over the 9 families with n>=3,
   occupancy-bound) vs CMSGen's 1.7-5.4e6 (its

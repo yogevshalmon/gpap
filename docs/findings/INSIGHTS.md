@@ -749,10 +749,10 @@ Sketch/service family), n=10k, SAME per-instance wall cap both sides (cmsgen_sam
 
 ## Measurement methodology (the traps that actually bit)
 
-**Three fairness audits of the GPU head-to-heads, and all three had been flattering US
-(2026-08-24/25, `docs/findings/RIVAL_FAIRNESS_FINDINGS.md`).** Every unexamined default in a
+**Seven fairness audits of the GPU head-to-heads, and all seven had been flattering US
+(2026-08-24/26, `docs/findings/RIVAL_FAIRNESS_FINDINGS.md`).** Every unexamined default in a
 harness we wrote is a default we chose, so the expected direction of an unaudited error is toward
-our own numbers — it was, three times out of three.
+our own numbers — it was, seven times out of seven.
 (1) **EMISSION SYMMETRY**: nobody may be timed while DELIVERING solutions. DEMOTIC/HTS/CMSGen/GPAP
 are clean; Recurrent-CircuitSAT copies per-depth candidates to the host inside its own timed loop,
 measured at 0.7-1.4% of `model_runtime` and left uncorrected because deducting it would RAISE our
@@ -769,7 +769,33 @@ the L4 all three branches were load-bearing: 92 under-grants recovered, 82 refus
 caught. Cost: HTS 6,369× → 603×.
 (3) **PREPROCESSING was outside our headline rate and inside CMSGen's own** (its rate is
 samples/subprocess-wall). Parse + construct + ELS + warmup + mining is a median 20.7% of GPAP's
-e2e wall ⇒ suite geomean **165.0× steady-state vs 96.7× e2e**. Table 1 prints both.
+e2e wall ⇒ suite geomean **165.0× steady-state vs 96.7× e2e**. Table 1 prints both, and since
+2026-08-26 each column charges BOTH sides the same way (`cms_sps` is now per CMSGen's own
+sampling wall, `cms_sps_e2e` per subprocess wall).
+(4) **`num_steps` was the batch problem on the knob nobody looked at.** The drivers pinned
+`--num_steps 10` for all three rivals — a value WE chose. Measured, that taxes **Recurrent 8.50×**
+and **DEMOTIC 2.61×**, because both SATURATE their batch on the very first gradient step
+(Recurrent: 2,198,776 unique at steps=1 vs 2,134,454 at steps=10, for 14.3 s against 118.0 s),
+while HTS is the opposite and finds nothing below 10. The rule: **each rival runs at the value its
+OWN artifacts specify**, tie-broken in the RIVAL's favour when a tool ships two
+(`rival_common.RIVAL_STEPS` = DEMOTIC 1, Recurrent 1, HTS 10). Deliberately NOT swept-and-best-of:
+a batch is a share of the machine and must be granted, a step count is an author-chosen setting,
+and tuning past what they publish invites "why stop at 20?". Local re-measurement moves DEMOTIC's
+c432 cell 4.6× → ~1.1× and turns Recurrent's s386 "their table" cell into a **0.2× LOSS**.
+(5) **CMSGen's sample count was FLOORED to the `--statsevery` cadence.** A run killed on its
+budget reports the last multiple of 1000: 174 of 357 rows on the L4 campaign, **81 of them a clean
+`0` scored as our win**, one of which really delivers 941 samples (a ~10-25× loss published as an
+infinite win). Fixed in the patch with `--maxtime`, which makes CMSGen stop itself and exit
+through its normal path with an exact `final=1` count — and with its work counters, which on
+zero-sample cells used to be missing entirely, silently dropping those instances out of the
+propagation table.
+(6) **The published encoder cell was chosen by `argmax(ratio)`** — the published statistic as its
+own argmax key, letting the RIVAL's number pick which of our runs is reported (1.24-1.33× on the
+sequential families; a wash pooled). Fixed by removing the selection: one table row per
+(family, encoder).
+(7) **`wins`/`inst` were counted over a different row set than the geomean**, so the printed
+"columns add up" invariant was FALSE on 6 of 7 families. Screen the degenerate cells FIRST, then
+bucket.
 
 **A bigger GPU is worth ~1.8×, not the VRAM ratio — and the batch is not the lever
 (2026-08-03).** Three cards, config pinned, 8 instances: **A100-40GB 1.822× / L4 0.838×** vs the

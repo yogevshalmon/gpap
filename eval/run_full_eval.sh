@@ -180,7 +180,9 @@ stage_rivals() {
     # measured on an ABC-optimized circuit they are handed the same optimized circuit (written
     # back as a primitive-gate .bench and equivalence-checked) — never raw-vs-optimized.
     local cvars="${RIVAL_VARIANTS:-raw abc}"
-    local rsteps="${RIVAL_STEPS:-10}"
+    # 'auto' = each rival at the num_steps its own artifacts specify; see
+    # eval/rivals/rival_common.py::RIVAL_STEPS for the values and the measurement behind them.
+    local rsteps="${RIVAL_STEPS:-auto}"
     # Rival subprocess cap: 300 s = 5x the 60 s sampling budget GPAP gets, because the rival's
     # wall includes the PyTorch model build that its OWN metric excludes. NOT 60 s: measured on
     # this suite, 18/18 Recurrent-CircuitSAT runs exceed 60 s (median 165 s), so that cap would
@@ -230,7 +232,7 @@ stage_rivals() {
                     >/dev/null 2>&1 || echo "[warn] could not build $enc CNF for $inst"
             done
         done
-        "$PY" eval/rivals/rivals_hts.py "$hts_dir/*.cnf" --timeout "$rto" \
+        "$PY" eval/rivals/rivals_hts.py "$hts_dir/*.cnf" --timeout "$rto" --steps "$rsteps" \
             --output "$OUT/rivals_hts.json" 2>&1 | tee -a "$LOGS/rivals.log"
     else
         echo "[skip] HTS not installed (eval/rivals/rivals_setup.sh)"

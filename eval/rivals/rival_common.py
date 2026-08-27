@@ -267,6 +267,47 @@ def fit_batch(work_units, tool, budget_bytes=None, ladder=BATCH_LADDER):
     return ladder[0]
 
 
+# --------------------------------------------------------------------------- gradient steps
+# `--num_steps` is the rivals' OTHER first-order knob (gradient-descent steps per batch), and
+# unlike the batch it is not a share of the machine — it is a tool setting with an author-chosen
+# value, so the fair thing is to use theirs rather than to tune it.
+#
+# THE RULE: run each rival at the value its OWN artifacts specify. Where a tool ships two (an
+# argparse default and a demo script that overrides it), take the one that is better FOR THE
+# RIVAL — a tie-break that can only ever move a ratio against us, and that never reaches for a
+# value the authors do not themselves use. Resolved ONCE by measurement (RTX 4080, at each
+# rival's granted batch; re-verified per campaign by eval/rivals/steps_calibration.py):
+#
+#   DEMOTIC    c432 @300k       steps=1  1,698,654 u/s   vs  steps=10    650,006  -> 1  (x2.61)
+#   Recurrent  s386 @100k       steps=1    153,726 u/s   vs  steps=10     18,081  -> 1  (x8.50)
+#   HTS        b03-c25-rare@30k steps=5          5 u/s   vs  steps=10        183  -> 10 (x36)
+#
+# The mechanism is visible in the counts, not just the rates: DEMOTIC and Recurrent SATURATE
+# their batch on the first step (Recurrent finds 2,198,776 unique at steps=1 and 2,134,454 at
+# steps=10 — every later step is pure cost), while HTS genuinely needs the descent on our CNFs
+# and finds nothing at 5. One global value cannot be right for both, which is why this is
+# per tool. The campaign to 2026-08-26 pinned 10 everywhere, taxing DEMOTIC 2.6x and Recurrent
+# 8.5x; docs/findings/RIVAL_FAIRNESS_FINDINGS.md carries the full table.
+RIVAL_STEPS = {
+    # tool:      (steps, where the value comes from,                  the other value we rejected)
+    "demotic":   (1,  "their script/run_sampler_comb.sh", 10),
+    "recurrent": (1,  "their script/run_sampler_seq.sh", 10),
+    "hts":       (10, "their src/pytorch/flags.py default", 5),
+}
+
+
+def resolve_steps(tool, requested="auto"):
+    """(steps, provenance) for a rival. `requested` is a number, or "auto" for the tool's own.
+
+    Recorded in every row as `steps` / `steps_source`, so a table can state which setting each
+    rival ran at instead of implying they all ran at one.
+    """
+    steps, src, other = RIVAL_STEPS[tool]
+    if requested in (None, "auto", "-1"):
+        return steps, f"author default ({src}; their other value {other} is worse for them)"
+    return int(requested), "explicit --steps"
+
+
 def _one_line(err):
     """A rival's error field can be a traceback tail; the sweep only needs the reason."""
     if not err:

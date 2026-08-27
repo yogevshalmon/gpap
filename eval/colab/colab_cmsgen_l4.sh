@@ -35,6 +35,14 @@ if ! "$CMSGEN" --help 2>&1 | grep -q -- --nowrite; then
     echo "        emission (~88% of its wall on 27.sk_3_32) and every ratio would be inflated." >&2
     exit 1
 fi
+if ! "$CMSGEN" --help 2>&1 | grep -q -- --maxtime; then
+    echo "[FATAL] cmsgen predates --maxtime. Without it the harness must KILL it on the budget," >&2
+    echo "        and the surviving count is the last --statsevery multiple: 174 of the 357 rows" >&2
+    echo "        of the 2026-08-23 campaign were floored that way, 81 of them to a '0' that was" >&2
+    echo "        scored as our win. Rebuild: scripts/build_cmsgen.sh (it force-rebuilds a stale" >&2
+    echo "        binary now). See docs/findings/RIVAL_FAIRNESS_FINDINGS.md §7." >&2
+    exit 1
+fi
 
 for stage in sk comb seq epfl hwmcc; do
     echo; echo "########## STAGE $stage  $(date -Is)"

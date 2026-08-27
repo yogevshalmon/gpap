@@ -63,8 +63,9 @@ SCHEMA = 3          # results-JSON schema version (docs/BENCHMARKING.md §7)
 
 _GPAP_STATS_RE = re.compile(
     r"c gpap-stats samples=(\d+) props=(\d+) decisions=(\d+) conflicts=(\d+) "
-    r"cpu_s=([0-9.]+) wall_s=([0-9.]+)")
+    r"cpu_s=([0-9.]+) wall_s=([0-9.]+)(?: final=([01]))?")
 _nowrite_cache: dict = {}
+_maxtime_cache: dict = {}
 
 
 def cmsgen_supports_nowrite(cmsgen_bin: str) -> bool:
@@ -76,23 +77,40 @@ def cmsgen_supports_nowrite(cmsgen_bin: str) -> bool:
         except Exception:  # noqa: BLE001 — a missing/unrunnable binary is handled by the caller
             txt = ""
         _nowrite_cache[cmsgen_bin] = "--nowrite" in txt and "--statsevery" in txt
+        _maxtime_cache[cmsgen_bin] = "--maxtime" in txt
     return _nowrite_cache[cmsgen_bin]
 
 
-def _parse_cms_stats(text: str) -> dict | None:
-    """Last `c gpap-stats` line of a (possibly killed) CMSGen run -> counters dict.
+def cmsgen_supports_maxtime(cmsgen_bin: str) -> bool:
+    """True iff this binary can enforce its own sampling deadline (--maxtime). Cached.
 
-    The patched binary flushes one line every --statsevery samples, so a run killed on the time
-    budget still reports the counters it had reached — the same 'produce what you can in the
-    budget' accounting the sample count uses."""
+    Added to the patch after the count-flooring finding; an older patched binary has --nowrite
+    and --statsevery but not this, so the two capabilities are probed separately rather than
+    assumed together."""
+    if cmsgen_bin not in _maxtime_cache:
+        cmsgen_supports_nowrite(cmsgen_bin)                     # fills both caches
+    return _maxtime_cache.get(cmsgen_bin, False)
+
+
+def _parse_cms_stats(text: str) -> dict | None:
+    """Last `c gpap-stats` line of a CMSGen run -> counters dict.
+
+    `final` is True when that line is the one printed AFTER the sampling loop, which is the only
+    one carrying an exact count. The cadence lines are printed every --statsevery samples, so a
+    run that is KILLED reports the last multiple of the cadence and silently drops everything
+    since — measured on the 2026-08-23 L4 campaign, all 174 killed runs reported an exact
+    multiple of 1000 and 81 of them reported 0, i.e. "CMSGen sampled nothing" meant "CMSGen
+    sampled fewer than 1000". `--maxtime` (below) exists so that never happens; `final` is how a
+    caller proves it did not."""
     last = None
     for m in _GPAP_STATS_RE.finditer(text or ""):
         last = m
     if last is None:
         return None
-    n, props, decs, confl, cpu_s, wall_s = last.groups()
+    n, props, decs, confl, cpu_s, wall_s, final = last.groups()
     return {"samples": int(n), "props": int(props), "decisions": int(decs),
-            "conflicts": int(confl), "cpu_s": float(cpu_s), "wall_s": float(wall_s)}
+            "conflicts": int(confl), "cpu_s": float(cpu_s), "wall_s": float(wall_s),
+            "final": final == "1"}
 
 
 def cmsgen_run(path, cmsgen_bin, n, scratch, *, keep=None, timeout=60.0, write=True,
@@ -109,15 +127,26 @@ def cmsgen_run(path, cmsgen_bin, n, scratch, *, keep=None, timeout=60.0, write=T
     essential on low-RAM hosts (a 12 GB Colab): retaining all `n` full models is `n × N` Python
     ints (~8-9 GB at n=50k, N=5k) and OOM-kills the session. None = keep all.
 
-    `timeout` caps CMSGen's wall per instance (the driver passes its --time-limit, so both
-    samplers get the SAME per-instance budget). On timeout, whatever CMSGen produced before the
-    kill still counts — rate = samples/wall, honest for a 'produce what you can in the budget'
-    comparison — instead of scoring a hard instance as 0."""
+    `timeout` is the SAMPLING budget, the same quantity GPAP's --time-limit bounds (parse and
+    construction sit outside both). A patched binary enforces it itself via `--maxtime` and exits
+    through its normal path, so the final counters are exact; the subprocess timeout is only a
+    backstop for the phases the deadline does not cover (parsing) and therefore allows a grace
+    margin on top. On a stock binary there is no deadline flag, so the subprocess kill IS the
+    budget and the counters are floored to the last `--statsevery` line.
+
+    Two rates are returned, and they differ only in who is charged for getting ready:
+    `samples_per_s` over the SAMPLING wall (CMSGen's steady state, the like-for-like partner of
+    GPAP's `samples_per_s`) and `samples_per_s_e2e` over the whole subprocess wall, parse
+    included (the partner of GPAP's `sps_e2e_total`). Scoring CMSGen's steady state on its
+    subprocess wall while scoring GPAP's on its sampling wall charges one side twice."""
     out = os.path.join(scratch, "cms_" + os.path.basename(path) + ".txt")
     cmd = [cmsgen_bin, "--samples", str(n)]
     patched = cmsgen_supports_nowrite(cmsgen_bin)
+    deadline = patched and cmsgen_supports_maxtime(cmsgen_bin) and timeout
     if patched:
         cmd += ["--statsevery", str(stats_every)]
+    if deadline:
+        cmd += ["--maxtime", f"{timeout:g}"]
     if seed is not None:
         cmd += ["-s", str(seed)]
     if write or not patched:
@@ -128,8 +157,12 @@ def cmsgen_run(path, cmsgen_bin, n, scratch, *, keep=None, timeout=60.0, write=T
     t0 = time.perf_counter()
     timed_out = False
     stdout = ""
+    # With --maxtime, CMSGen stops itself after `timeout` seconds of SAMPLING; the subprocess
+    # cap must therefore leave room for the phases the deadline does not cover (reading a
+    # million-clause CNF), or the backstop would fire first and put us back on a floored count.
+    hard = timeout + max(30.0, 0.5 * timeout) if deadline else timeout
     try:
-        p = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout)
+        p = subprocess.run(cmd, capture_output=True, text=True, timeout=hard)
         stdout = (p.stdout or "") + (p.stderr or "")
     except subprocess.TimeoutExpired as e:
         timed_out = True                        # partial output still carries the counters
@@ -157,16 +190,29 @@ def cmsgen_run(path, cmsgen_bin, n, scratch, *, keep=None, timeout=60.0, write=T
             pass
     elif stats:
         count = stats["samples"]
-    r = {"samples_per_s": (count / dt if dt else 0.0), "models": models, "n_samples": count,
-         "wall_s": dt, "timed_out": timed_out,
+    # The SAMPLING wall: CMSGen's own measurement of its generation loop, which starts after it
+    # has read the CNF. That is the wall GPAP's steady-state rate is measured on, so it is the
+    # one the headline ratio must use; `dt` (the whole subprocess) is the e2e partner.
+    samp_wall = stats["wall_s"] if (stats and stats.get("wall_s")) else dt
+    r = {"samples_per_s": (count / samp_wall if samp_wall else 0.0),
+         "samples_per_s_e2e": (count / dt if dt else 0.0),
+         "models": models, "n_samples": count,
+         "wall_s": dt, "sampling_wall_s": samp_wall, "timed_out": timed_out,
+         # The count is exact only when CMSGen printed the post-loop line: either it finished, or
+         # its own --maxtime stopped it. A kill leaves the last cadence multiple instead.
+         "count_exact": bool(stats and stats.get("final")) and not timed_out,
+         "budget_stop": "c gpap-maxtime" in stdout,
          "mode": "write" if (write or not patched) else "nowrite", "patched": patched}
     if stats:
-        # CMSGen's own counters over the same wall -> the CPU numbers our dec/s and impl/s face.
-        # implications = propagations - decisions (same definition as the GPAP columns).
+        # CMSGen's own counters over its own sampling wall -> the CPU numbers our dec/s and
+        # impl/s face. implications = propagations - decisions (same definition as the GPAP
+        # columns). Same wall as `samples_per_s`, so Table 3's identity
+        # (samples/s ratio = impl/s ratio / impl-per-sample ratio) stays exact.
         r["stats"] = stats
-        r["decisions_per_s"] = stats["decisions"] / dt if dt else 0.0
-        r["props_per_s"] = stats["props"] / dt if dt else 0.0
-        r["implications_per_s"] = max(0, stats["props"] - stats["decisions"]) / dt if dt else 0.0
+        w = samp_wall
+        r["decisions_per_s"] = stats["decisions"] / w if w else 0.0
+        r["props_per_s"] = stats["props"] / w if w else 0.0
+        r["implications_per_s"] = max(0, stats["props"] - stats["decisions"]) / w if w else 0.0
         r["conflicts"] = stats["conflicts"]
     return r
 
@@ -674,9 +720,17 @@ def _run_one(path0, row, args, device, portfolio, mine, quality,
                            seed=args.cmsgen_seed)
         cmodels = timed.get("models") or []
         row["cms_mode"] = timed["mode"]
-        row["cms_sps"] = timed["samples_per_s"]
+        row["cms_sps"] = timed["samples_per_s"]                 # over CMSGen's SAMPLING wall
+        row["cms_sps_e2e"] = timed.get("samples_per_s_e2e")     # over its whole subprocess wall
         row["cms_n_samples"] = timed["n_samples"]
         row["cms_timed_out"] = timed.get("timed_out")
+        # True = the count is CMSGen's own final number, not the last --statsevery multiple
+        # before a kill. A False here means `cms_n_samples` is a LOWER BOUND, so it must never
+        # be published as an exact zero (verify_artifact fails the stage on it).
+        row["cms_count_exact"] = timed.get("count_exact")
+        row["cms_budget_stop"] = timed.get("budget_stop")
+        row["cms_wall_s"] = timed.get("wall_s")
+        row["cms_sampling_wall_s"] = timed.get("sampling_wall_s")
         row["cms_decisions_per_s"] = timed.get("decisions_per_s")
         row["cms_implications_per_s"] = timed.get("implications_per_s")
         row["cms_props_per_s"] = timed.get("props_per_s")
@@ -698,9 +752,14 @@ def _run_one(path0, row, args, device, portfolio, mine, quality,
         elif not patched:
             row["cms_sps_write"] = timed["samples_per_s"]   # stock: the timed run IS write-mode
         gsps, crate = g["samples_per_s"], row["cms_sps"]
+        ce2e = row.get("cms_sps_e2e") or 0.0
+        # The two ratios pair LIKE WITH LIKE: steady state against steady state, and end-to-end
+        # against end-to-end. Both sides' preparation is either in or out; charging GPAP for its
+        # parse while CMSGen's rate was scored on a wall containing its own parse (the earlier
+        # `ratio_e2e`) moved only one side of the fraction.
         # ratio: inf = GPAP-only, 0 = CMSGen-only, None = neither produced in the budget
         row["ratio"] = (gsps / crate) if crate else (float("inf") if gsps else None)
-        row["ratio_e2e"] = ((((g.get("sps_e2e_total") or 0) / crate) if crate
+        row["ratio_e2e"] = ((((g.get("sps_e2e_total") or 0) / ce2e) if ce2e
                              else (float("inf") if gsps else None)))
         if quality and cmodels:
             cd, cn = distinct_projections(cmodels[:args.n_cov], sup1)

@@ -65,8 +65,8 @@ sys.path.insert(0, REPO_ROOT)
 
 from eval.rivals.rival_common import (CACHE_MISS, VARIANTS, cache_peek,  # noqa: E402
                                       cache_store, cached_gpap, fit_batch, prepare_variant,
-                                      rival_commit, rival_vram_budget, run_at_batch,
-                                      variant_note)
+                                      resolve_steps, rival_commit, rival_vram_budget,
+                                      run_at_batch, variant_note)
 
 from gpap import paths
 
@@ -336,7 +336,9 @@ def main():
                          "checked) — so an ABC-encoded GPAP arm is never compared against a "
                          "rival that only ever saw the unoptimized circuit")
     ap.add_argument("-T", "--cycles", type=int, default=25)
-    ap.add_argument("--steps", type=int, default=1, help="their num_steps (script default 1)")
+    ap.add_argument("--steps", default="auto",
+                    help="their num_steps: 'auto' (default) = the value their own artifacts "
+                         "specify, see rival_common.RIVAL_STEPS; or an explicit number")
     ap.add_argument("--gpap-cache", default=None,
                     help="directory of cached GPAP arms (default: <output dir>/.gpap_cache). "
                          "GPAP_RIVAL_CACHE=0 disables reuse entirely.")
@@ -363,9 +365,10 @@ def main():
     import torch
     from gpap.circuits.simulate import sim_baseline
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    steps, steps_src = resolve_steps("recurrent", args.steps)
     tmp = tempfile.mkdtemp(prefix="rivals_recurrent_")
     mode = "rare(fixed-T pattern, MITER)" if args.rare else "their target table"
-    print(f"{len(args.names)} instances | T={args.cycles} steps={args.steps} | mode: {mode} | "
+    print(f"{len(args.names)} instances | T={args.cycles} steps={steps} ({steps_src}) | mode: {mode} | "
           f"GPAP median of seeds {args.seeds}")
     hdr = (f"{'instance':<10}{'circ':>6}{'pin':>12}{'p_acc':>10}{'RCS uniq':>11}{'@T':>9}"
            f"{'t':>7}{'RCS u/s':>10}{'GPAP u/s~':>11}{'succ%':>7}{'ratio':>10}")
@@ -432,8 +435,9 @@ def main():
             rcs = {"error": "no gradient path at any start_point<=10"}
         else:
             batch = pick_batch(rival_file, args.cycles)
-            rcs = run_recurrent_ladder(args.rival, rival_file, key, args.cycles, args.steps,
+            rcs = run_recurrent_ladder(args.rival, rival_file, key, args.cycles, steps,
                                        batch, sp, timeout=args.timeout)
+            rcs["steps_source"] = steps_src
         task = {"harness": "recurrent", "mode": "rare" if args.rare else "table",
                 "cycles": args.cycles, "pin_outputs": pin_n, "target": gpap_target,
                 "seeds": args.seeds, "n_time": args.gpap_n,

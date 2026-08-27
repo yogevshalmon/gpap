@@ -22,6 +22,7 @@ The remote command must be RESUMABLE (`--resume` on the rival harnesses, `--resu
         --remote-dir /content/gpap/.experiments/full_eval/nvidia-l4 \
         --files rivals_demotic_native.json rivals_demotic_miter.json rivals_hts.json \
                 rivals_recurrent_rare.json rivals_recurrent_table.json \
+                rivals_steps_calibration.json \
         --local-dir .experiments/l4_rivals --done-marker RIVALS_STAGE_COMPLETE
 
 ⚠️ **Stop the SESSION before restarting this script.** Killing the supervisor mid-bootstrap and

@@ -240,14 +240,30 @@ DIMACS assignment. On `27.sk_3_32`, 50k samples: **0.42 s generating vs 3.6 s wi
 `--samplefile`** — 373 MB of output, ~88% of its wall. Comparing GPAP-without-emission to
 CMSGen-with-emission measures file I/O, not sampling.
 
-The in-repo patch adds two off-by-default flags to upstream CMSGen:
+The in-repo patch adds three off-by-default flags to upstream CMSGen:
 
 - `--nowrite` — generate, emit nothing. This is the timed run the ratio uses.
 - `--statsevery N` — a flushed, parseable line with CryptoMiniSat's own propagation/decision/
   conflict counters, so the `Cdec/s` and `Cimpl/s` columns are the CPU sampler's real work rates
   and survive a run killed on the time budget.
+- `--maxtime N` — **CMSGen stops itself at the budget and exits normally**, printing a final
+  `... final=1` stats line with an EXACT count. Without it the harness has to kill the process,
+  and what survives is the last `--statsevery` multiple: on the 2026-08-23 campaign that floored
+  all 174 timed-out rows to a multiple of 1000, **81 of them to a clean `0` that was then scored
+  as an outright GPAP win** (one re-measured cell really delivers 941 samples in the budget — a
+  ~10-25x loss published as an infinite win). It also recovers CMSGen's work counters on cells
+  where it never reaches its first cadence line, which used to drop those instances out of the
+  propagation table entirely. Every row records `cms_count_exact`; `verify_artifact.py` FAILS a
+  stage that publishes a floored zero. See docs/findings/RIVAL_FAIRNESS_FINDINGS.md §7.
 
-The driver auto-detects both. With a **stock** binary it falls back to the samplefile run and
+`--maxtime` bounds the SAMPLING wall — the same quantity GPAP's `--time-limit` bounds — so the
+subprocess kill remains only as a backstop for parsing, with a grace margin. Both rate columns
+then pair like with like: `cms_sps` (samples per CMSGen's own sampling wall) against GPAP's
+steady-state rate, and `cms_sps_e2e` (per subprocess wall, parse included) against GPAP's
+`wall_total`.
+
+The driver auto-detects all three (`--maxtime` separately, since a binary patched before
+2026-08-26 has the other two without it). With a **stock** binary it falls back to the samplefile run and
 marks the row `cms_mode="write"` (and prints a warning) rather than folding the handicap into the
 ratio silently. When the quality pass needs actual samples, a *separate* write-mode run provides
 them and its rate is reported as `cms_sps_write` — the emission-cost appendix, never the headline.
@@ -337,6 +353,26 @@ Protocol invariants (each one was a wrong number once):
   concern: we are not obliged to hand-tune a rival past what its own share of the card allows,
   and a refused rung is recorded as what it is. Being strict here is what makes the number
   reproducible — the alternative is a per-instance knob nobody can re-derive.
+- **THE STEP COUNT IS THEIRS, NOT OURS.** `--num_steps` is the rivals' other first-order knob,
+  and the sweep drivers used to pin it at 10 for all three. Measured (RTX 4080, at each rival's
+  granted batch), that pin taxed **Recurrent 8.50x** (s386: 18.1k -> 153.7k unique/s at steps=1)
+  and **DEMOTIC 2.61x** (c432: 650k -> 1.70M), because both SATURATE their batch on the very
+  first step — Recurrent finds 2,198,776 unique at steps=1 against 2,134,454 at steps=10, for
+  14.3 s of runtime against 118.0 s. HTS is the opposite: it finds 0 / 33 / 1,850 / 6,664 unique
+  at steps 1 / 5 / 10 / 20, so a low value cripples it.
+  **THE RULE (2026-08-26): each rival runs at the `num_steps` its OWN artifacts specify**
+  (`rival_common.RIVAL_STEPS`, `--steps auto`, the default). Where a tool ships two — an argparse
+  default and a different value in its demo script — take the one better FOR THE RIVAL: DEMOTIC 1
+  and Recurrent 1 (their `script/run_sampler_*.sh`), HTS 10 (its `flags.py` default, since its own
+  script's 5 is far worse for it). Recorded per row as `steps` / `steps_source`, and re-derived on
+  the campaign's card by `eval/rivals/steps_calibration.py` (the `steps-calib` stage).
+  ⚠️ We deliberately do NOT sweep it and keep the best, the way the batch ladder does: a batch is
+  a share of the machine and must be granted, a step count is an author-chosen tool setting, and
+  tuning past what the authors publish invites "why did you stop at 20?". HTS's optimum on our
+  instances is ≥20 and we run it at 10 — its own default, and NOT its best.
+  ⚠️ **Rival rows recorded on or before 2026-08-26 used the pinned 10 and are superseded.**
+  Local re-measurement moves DEMOTIC's c432 cell from 4.6x to ~1.1x and turns Recurrent's s386
+  "their table" cell into a 0.2x LOSS. See docs/findings/RIVAL_FAIRNESS_FINDINGS.md §6.
   ⚠️ Size from MEASURED peak VRAM, not the graph formula: `n_gates * T * batch * 4` undercounts
   by 2-6x, tool-dependent (Recurrent s386@300k: 4.44 GiB estimated, 8.36 measured; DEMOTIC
   c432@1M: 0.60 vs 2.97; HTS 8.4 B per clause-row). `rival_common.GRAPH_BYTES` carries the
