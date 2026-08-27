@@ -64,11 +64,18 @@ def complete_mask(ab_ptr, pm_ptr, act_ptr, out_ptr, NW, BLOCK: tl.constexpr):
 
 
 @triton.jit
-def sound_rows(st_ptr, rows_ptr, M, bad_ptr, SHIFT: tl.constexpr, BLOCK: tl.constexpr):
-    """Per selected row i: bad[i] = 1 iff SOME clause has sat_count == 0. grid = (n_rows,).
+def sound_rows(st_ptr, ab_ptr, rows_ptr, M, NW, pairs_ptr, n_pairs, bad_ptr,
+               SHIFT: tl.constexpr, BLOCK: tl.constexpr):
+    """Per selected row i: bad[i] = 1 iff SOME clause is EMPTIED (every literal falsified).
+    grid = (n_rows,).
 
-    At a FULLY-assigned row, non-falsified <=> TRUE, so `all sat_count > 0` <=> satisfied.
-    Testing on device retires the old (rows, M) host transfer and its slice budget entirely."""
+    LONG (len>=3) clauses have a packed word: emptied <=> sat_count == 0 (M = num_long here).
+    Binary and unit clauses have NO per-row word — they are checked from the assignment BITMAP
+    through `pairs_ptr`, (n_pairs, 2) literal-index pairs holding every binary clause plus each
+    unit clause u as the degenerate pair (u, u): emptied <=> both literals' negations are set.
+    At a FULLY-assigned row, non-falsified <=> TRUE, so "no clause emptied" <=> satisfied —
+    the same soundness contract as before, now covering every clause kind independently of the
+    propagate kernels' own bookkeeping."""
     r = tl.load(rows_ptr + tl.program_id(0)).to(tl.int64)
     SAT_MASK: tl.constexpr = (1 << SHIFT) - 1
     offs = tl.arange(0, BLOCK)
@@ -79,6 +86,17 @@ def sound_rows(st_ptr, rows_ptr, M, bad_ptr, SHIFT: tl.constexpr, BLOCK: tl.cons
         st = tl.load(st_ptr + r * M + i + offs, mask=m, other=1)
         bad = bad | ((st & SAT_MASK) == 0)
         i += BLOCK
+    j = 0
+    while j < n_pairs:
+        m = (j + offs) < n_pairs
+        a = tl.load(pairs_ptr + 2 * (j + offs), mask=m, other=0)
+        b = tl.load(pairs_ptr + 2 * (j + offs) + 1, mask=m, other=0)
+        wa = tl.load(ab_ptr + r * NW + ((a ^ 1) >> 5), mask=m, other=0)
+        wb = tl.load(ab_ptr + r * NW + ((b ^ 1) >> 5), mask=m, other=0)
+        fa = (wa >> ((a ^ 1) & 31)) & 1
+        fb = (wb >> ((b ^ 1) & 31)) & 1
+        bad = bad | (m & ((fa & fb) != 0))
+        j += BLOCK
     tl.store(bad_ptr + tl.program_id(0), (tl.sum(bad.to(tl.int32), 0) > 0).to(tl.int8))
 
 

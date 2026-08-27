@@ -137,8 +137,12 @@ extern "C" gpap_status gpap_check_sound(gpap_engine *e, int32_t slot, int32_t ma
     GPAP_TRY(e->staging_b.reserve((size_t)n));
     Kernel k;
     GPAP_TRY(e->kernels.get("sound_rows.s" + std::to_string(e->shift), &k));
-    int32_t M = e->num_clauses;
-    GPAP_TRY(launch(k, (unsigned)n, 1, {&e->packed.ptr, &s.rows.ptr, &M, &e->staging_b.ptr}));
+    /* Long clauses are checked against their packed words; binary + unit clauses against the
+     * bitmap through the (n_pairs, 2) pair list (see helpers.py::sound_rows). */
+    int32_t M = e->num_long, NW = e->nw, NP = e->n_pairs;
+    GPAP_TRY(launch(k, (unsigned)n, 1,
+                    {&e->packed.ptr, &e->abits.ptr, &s.rows.ptr, &M, &NW, &e->pair_check.ptr,
+                     &NP, &e->staging_b.ptr}));
     return reduce_flags(e, e->staging_b, n, n_unsound_out);
 }
 
@@ -229,33 +233,63 @@ extern "C" gpap_status gpap_num_propagated(gpap_engine *e, int32_t *out_host) {
 
 extern "C" gpap_status gpap_sat_rows(gpap_engine *e, const int32_t *rows, int32_t n_rows,
                                      int32_t *out_host) {
+    /* (n, M_TOTAL) in the ORIGINAL clause order. Long clauses read their packed word's count
+     * field; binary and unit clauses have no per-row word, so their non-falsified count is
+     * synthesized from the row's assignment bitmap — identical values (a packed word also
+     * counts non-falsified literals), with no per-row state behind them. */
     if (!e || !rows || !out_host || n_rows < 0) return GPAP_ERR_ARG;
     GPAP_TRY(gpap::engine_reject_if_packed_is_baseline(e, "gpap_sat_rows"));
     GPAP_TRY(engine_use_ctx(e));
-    const int32_t M = e->num_clauses;
+    const int32_t M = e->num_clauses, ML = e->num_long;
     const uint32_t sat_mask = (uint32_t)((1u << e->shift) - 1);
+    /* The bitmap is only read to synthesize binary/unit counts, so a formula made entirely of
+     * length>=3 clauses must not pay for it: that copy is per ROW, and this runs over a whole
+     * chunk from gpap_check_sets. */
+    const bool need_bits = e->n_pairs > 0;
+    std::vector<int32_t> lw((size_t)ML);
+    std::vector<uint32_t> aw((size_t)(need_bits ? e->nw : 0));
     for (int32_t i = 0; i < n_rows; ++i) {
         if (rows[i] < 0 || rows[i] >= e->K) return GPAP_ERR_ARG;
+        if (ML)
+            GPAP_CU(cuMemcpyDtoH(lw.data(), e->packed.ptr + (size_t)rows[i] * ML * sizeof(int32_t),
+                                 (size_t)ML * sizeof(int32_t)));
+        if (need_bits)
+            GPAP_CU(cuMemcpyDtoH(aw.data(), e->abits.ptr + (size_t)rows[i] * e->nw * sizeof(int32_t),
+                                 (size_t)e->nw * sizeof(int32_t)));
+        auto not_falsified = [&](int32_t li) -> int32_t {
+            const int32_t neg = li ^ 1;
+            return (int32_t)(1u - ((aw[(size_t)(neg >> 5)] >> (neg & 31)) & 1u));
+        };
         int32_t *dst = out_host + (size_t)i * M;
-        GPAP_CU(cuMemcpyDtoH(dst, e->packed.ptr + (size_t)rows[i] * M * sizeof(int32_t),
-                             (size_t)M * sizeof(int32_t)));
-        for (int32_t c = 0; c < M; ++c) dst[c] = (int32_t)((uint32_t)dst[c] & sat_mask);
+        for (int32_t c = 0; c < M; ++c) {
+            const int32_t src = e->sat_src_host[(size_t)c];   /* THE kind/slot map, not a cursor */
+            if (src >= 0) {
+                dst[c] = (int32_t)((uint32_t)lw[(size_t)src] & sat_mask);
+            } else {
+                const int32_t p = -src - 1;                   /* merged pair index */
+                dst[c] = not_falsified(e->pair_host[(size_t)(2 * p)]);
+                if (p < e->num_bin)                           /* a unit's pair is (u, u) */
+                    dst[c] += not_falsified(e->pair_host[(size_t)(2 * p + 1)]);
+            }
+        }
     }
     return GPAP_OK;
 }
 
 extern "C" gpap_status gpap_packed_rows(gpap_engine *e, const int32_t *rows, int32_t n_rows,
                                         int32_t *out_host) {
-    /* RAW words, sum field included — gpap_sat_rows above masks it off, which would hide sum
-     * corruption from the CLEAN-mode identity gate (tests/test_clean_mode.py). */
+    /* RAW words, sum field included, (n, num_long) — the packed state's true width: only
+     * length>=3 clauses have words. gpap_sat_rows above masks the sum off, which would hide
+     * sum corruption from the CLEAN-mode identity gate (tests/test_clean_mode.py). */
     if (!e || !rows || !out_host || n_rows < 0) return GPAP_ERR_ARG;
     GPAP_TRY(engine_use_ctx(e));
-    const int32_t M = e->num_clauses;
+    const int32_t M = e->num_long;
     for (int32_t i = 0; i < n_rows; ++i) {
         if (rows[i] < 0 || rows[i] >= e->K) return GPAP_ERR_ARG;
-        GPAP_CU(cuMemcpyDtoH(out_host + (size_t)i * M,
-                             e->packed.ptr + (size_t)rows[i] * M * sizeof(int32_t),
-                             (size_t)M * sizeof(int32_t)));
+        if (M)
+            GPAP_CU(cuMemcpyDtoH(out_host + (size_t)i * M,
+                                 e->packed.ptr + (size_t)rows[i] * M * sizeof(int32_t),
+                                 (size_t)M * sizeof(int32_t)));
     }
     return GPAP_OK;
 }

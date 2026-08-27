@@ -72,6 +72,11 @@ extern "C" int32_t gpap_trail_cap(int32_t num_vars, int32_t decisions_per_round)
     return num_vars + std::max(decisions_per_round, floor_b) + 8;
 }
 
+/* `M` here is the STATE clause count — clauses of length >= 3, `gpap_formula_info.num_long` —
+ * because only those have a packed word per row. Binary clauses are implication edges in the
+ * shared occ CSR and unit clauses live in the flush cache's bitmap: zero per-row bytes. Feeding
+ * total num_clauses over-charges ~4-10x of the first term on circuit CNFs (65-82% of their
+ * clauses are binary) and was exactly the kind of phantom charge the HISTORY note above bans. */
 extern "C" int64_t gpap_row_bytes(int32_t M, int32_t N, int32_t trail_cap) {
     if (trail_cap <= 0) trail_cap = gpap_trail_cap(N, 0);
     const int64_t words = (2ll * N + 31) / 32;          /* assignment bitmap, int32 words */

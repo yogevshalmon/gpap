@@ -16,7 +16,16 @@ Runtime deps of the library: `libcuda` alone. CUDA is required; there is no CPU 
 
 - **Negated occurrence lists** (CSR, int32): `occ[l]` = clauses where `~l` appears. Setting `l`
   TRUE falsifies `~l` in exactly those clauses.
-- **ONE packed int32 clause word, batched over K rows**: low `SHIFT` bits = `sat_count`
+- **Clauses are SEGREGATED BY LENGTH — only len ≥ 3 carries per-row state** (`num_long`, 10-23%
+  of M on circuit CNFs). **Binary clauses are IMPLICATION EDGES in occ** (payload = the OTHER
+  literal, the prefix of each segment, split at `occ_mid[l]`): their whole propagation is the ONE
+  bitmap `atomic_or` of the forced push (64-75% of circuit occ entries take it). Units live in
+  the flush bitmap. Fixpoints/models unchanged (confluence); K ×2.2-2.3 where the analytic bound
+  binds; reset/CLEAN-restore/probe-init shrink 4-10×; `sound_rows` checks bins+units via a
+  device pair list. Measured: same-K kernels 1.42×, e2e 1.36× (4080), b12-c50 `gpap mine` 1.52×;
+  docs/findings/BINARY_OCC_FINDINGS.md. `sat_rows` keeps (n, M_total) by bitmap synthesis;
+  `packed_rows` is (n, num_long).
+- **ONE packed int32 clause word per LONG clause, batched over K rows**: low `SHIFT` bits = `sat_count`
   (non-falsified literals; `==0` conflict, `==1` unit), high bits = **SUM of surviving literal
   indices mod 2^(32-SHIFT)** — at `sat_count == 1` the field **is** the forced literal (every
   removal exact mod 2^F, one literal < 2^F). Update per falsified literal is ONE subtraction
@@ -231,9 +240,11 @@ kernels are the only path — the oracle is `tests/reference_bcp.py`).
   coverage run, and a colab K-sweep that mismeasured its own x-axis. `pin_batch` states a bound
   that holds regardless. Gated by tests/test_k_cap.py.
 - **ONE batch model**: `K` is `compute_k_safe`, which binds `gpap_row_bytes` — the
-  engine's EXACT per-chunk allocation list (4M packed + 4·ceil(2N/32) bitmap + 4·trail_cap +
-  flags/counters/masks), verified against measured VRAM at 1.00x and by a least-squares fit
-  (4.00·M + 4.25·N + 285). `K_fused` and its 0.6 budget are GONE: the boost only ever existed to
+  engine's EXACT per-chunk allocation list (4·**M_long** packed — the len≥3 STATE clauses only,
+  never total M — + 4·ceil(2N/32) bitmap + 4·trail_cap + flags/counters/masks), verified against
+  measured VRAM (cuMemGetInfo deltas: 1.00x on b03-c25, 1.04x on b12-c50 — multi-GB alloc
+  rounding). On circuit CNFs the TRAIL term now dominates per-row bytes; its N bound is the
+  soundness proof, not a knob. `K_fused` and its 0.6 budget are GONE: the boost only ever existed to
   undo a per-row model that was 1.57x over (it charged a phantom sat array, a byte-per-literal
   assignment and deleted PyTorch scatter temporaries, while omitting the trail). ⚠️ **`trail_cap`
   used to be sized by the width of the last apply and only ever grew**, so the construction units
@@ -345,8 +356,9 @@ with the flags above. Validation and per-instance numbers: docs/findings/MINING_
   total pre-sampling overhead, which is the useful thing to bound.
 - **`--mine on` FORCES past `MINE_MIN_CLAUSES`**; `auto` respects it. Gated by
   tests/test_mining.py::TestMiningPipelineDefaults.
-- **KEEP-IF-IT-HELPS**: mined clauses are sound but enlarge M, and `K ~ budget/4M`, so a bigger
-  formula buys a SMALLER batch. `K x M` is ~constant ⇒ chunk wall is ~constant ⇒ **models per chunk
+- **KEEP-IF-IT-HELPS**: mined clauses of width ≥ 3 enlarge `num_long`, and `K ~ budget/4M_long`,
+  so a bigger formula buys a SMALLER batch — **but mined width-2 clauses are K-FREE** (they join
+  the binary implication list, zero per-row state), so the proxy naturally keeps more of them. `K x M` is ~constant ⇒ chunk wall is ~constant ⇒ **models per chunk
   = `K x success`** is the throughput proxy, and both terms are already in hand (no extra GPU
   work). If it does not beat the pre-mining sampler the clauses are dropped and the original is
   rebuilt. It is a PROXY (warmup pins K<=1024), and it deliberately keeps the clauses when the

@@ -16,6 +16,12 @@ Design — one program per batch row, sequential trail, atomics only WITHIN a ro
   * GPU-wide parallelism comes from the K programs (thousands to hundreds of thousands), which
     saturates the SMs; per-row work is uniform on the target formulas, so warps stay balanced.
 
+CLAUSES ARE SEGREGATED BY LENGTH (cpp/src/formula.cpp): only length>=3 clauses have a packed
+word — M in these kernels is num_long. Length-2 clauses are IMPLICATION EDGES in the occ list
+(payload = the other literal, the binary prefix of each segment, split at occ_mid[l]): their
+whole propagation is one bitmap push, zero per-row state. Length-1 clauses live in the flush
+cache's bitmap. ~65-75% of occ entries on circuit CNFs take the binary path.
+
 BOTH row states are single words updated by ONE op whose old value is the detection logic:
 
   * PACKED clause state — ONE int32 word per (row, clause), `SHIFT` selects the field split
@@ -61,10 +67,16 @@ import triton
 import triton.language as tl
 
 @triton.jit
-def _propagate(st_row, ab_row, trail_row, occ_off_ptr, occ_cls_ptr,
+def _propagate(st_row, ab_row, trail_row, occ_off_ptr, occ_mid_ptr, occ_cls_ptr,
                head, tail, conflict, nops, TRAIL_CAP, SHIFT: tl.constexpr):
     """Pop literals off the trail and BCP to fixpoint (or conflict) on the packed row.
     Inlined by both kernels; returns the updated (head, tail, conflict, nops).
+
+    Each occ[lit] segment is [BINARY | LONG] (split at occ_mid[lit]). A binary entry's payload
+    IS the forced literal — the clause (~lit | payload) just lost ~lit — so the whole update is
+    the bitmap push below, with no clause word anywhere. Long entries keep the packed-word
+    decrement. Binaries run FIRST: cheap fail-fast, and BCP confluence makes the order
+    unobservable on surviving rows.
 
     The assignment is a BITMAP (int32 words, bit l = literal l TRUE): l and l^1 always
     share a word (2v / 2v+1), so ONE load answers duplicate + contradiction at once."""
@@ -75,10 +87,26 @@ def _propagate(st_row, ab_row, trail_row, occ_off_ptr, occ_cls_ptr,
         head += 1
         neg = lit ^ 1
         start = tl.load(occ_off_ptr + lit)
+        mid = tl.load(occ_mid_ptr + lit)
         end = tl.load(occ_off_ptr + lit + 1)
         nops += end - start
         o = start
-        while (o < end) & (conflict == 0):
+        while (o < mid) & (conflict == 0):          # binary prefix: payload = forced literal
+            forced = tl.load(occ_cls_ptr + o) & 0x7FFFFFFF     # strip the binary tag bit
+            w = tl.load(ab_row + (forced >> 5))
+            bit = 1 << (forced & 31)
+            if (w & bit) == 0:
+                if (w & (1 << ((forced ^ 1) & 31))) != 0:
+                    conflict = 1                    # both literals falsified: clause empty
+                elif tail < TRAIL_CAP:
+                    tl.store(ab_row + (forced >> 5), w | bit)
+                    tl.store(trail_row + tail, forced)
+                    tail += 1
+                else:                               # structurally unreachable (cap >= N+B)
+                    conflict = 1
+            o += 1
+        o = mid
+        while (o < end) & (conflict == 0):          # long suffix: packed clause words
             c = tl.load(occ_cls_ptr + o).to(tl.int64)
             st = tl.load(st_row + c) - 1 - (neg << SHIFT)
             tl.store(st_row + c, st)
@@ -102,7 +130,7 @@ def _propagate(st_row, ab_row, trail_row, occ_off_ptr, occ_cls_ptr,
     return head, tail, conflict, nops
 
 @triton.jit
-def _wave_propagate(st_row, ab_row, trail_row, occ_off_ptr, occ_cls_ptr,
+def _wave_propagate(st_row, ab_row, trail_row, occ_off_ptr, occ_mid_ptr, occ_cls_ptr,
                     head, tail, conflict, nops, TRAIL_CAP,
                     SHIFT: tl.constexpr, W: tl.constexpr):
     """Warp-wide wavefront BCP (selected by WAVE=1): pop up to W trail literals at once,
@@ -123,6 +151,9 @@ def _wave_propagate(st_row, ab_row, trail_row, occ_off_ptr, occ_cls_ptr,
       old WxW in-warp dedup), old bit(l^1) set -> contradiction (conflict). Two lanes
       forcing l and ~l in the SAME step serialize in the L2 atomic unit, so exactly one
       of them sees the other's bit: race-free with zero extra loads.
+
+    `occ_mid_ptr` is unused here — the binary/long split is read from the payload tag — but stays
+    in the signature so both propagate variants take the same arguments.
 
     Propagation ORDER differs from the scalar kernel, but BCP fixpoints are confluent:
     non-conflicted rows reach the IDENTICAL fixpoint (bit-identical models — the
@@ -155,14 +186,26 @@ def _wave_propagate(st_row, ab_row, trail_row, occ_off_ptr, occ_cls_ptr,
             base_v = tl.sum(tl.where(oneh, s_v[None, :], 0), 1)
             mneg_v = tl.sum(tl.where(oneh, neg_v[None, :], 0), 1)
             o_v = base_v + (t_v - excl_v)
-            c_v = tl.load(occ_cls_ptr + o_v, mask=act, other=0).to(tl.int64)
-            # ---- ONE atomic per entry: st -= 1 + (mneg << SHIFT); old value = detection
-            old_v = tl.atomic_add(st_row + c_v, -(1 + (mneg_v << SHIFT)), mask=act)
+            pay_v = tl.load(occ_cls_ptr + o_v, mask=act, other=0)
+            # A TAGGED (negative) payload is a BINARY entry: it IS the forced literal and there
+            # is no clause word, so it goes STRAIGHT to the push block below. Reading the tag off
+            # the value already loaded costs nothing; gathering this segment's occ_mid instead
+            # would be a fifth W x W one-hot reduction in the hottest loop of the engine.
+            binm = act & (pay_v < 0)
+            lngm = act & (pay_v >= 0)
+            c_v = pay_v.to(tl.int64)
+            # ---- ONE atomic per LONG entry: st -= 1 + (mneg << SHIFT); old value = detection
+            old_v = tl.atomic_add(st_row + c_v, -(1 + (mneg_v << SHIFT)), mask=lngm)
             oldsat_v = old_v & SAT_MASK
-            stride_conf = tl.sum((act & (oldsat_v == 1)).to(tl.int32), 0)
-            # ---- unit pushes: ONE atomic_or per forced literal; old word = dedup+contra
-            fm = act & (oldsat_v == 2)
-            forced_v = tl.where(fm, ((old_v >> SHIFT) - mneg_v) & SUM_MASK, 0)
+            stride_conf = tl.sum((lngm & (oldsat_v == 1)).to(tl.int32), 0)
+            # ---- forced pushes: ONE atomic_or per literal; old word = dedup+contra.
+            #      Binary lanes join the long-unit lanes here; a binary conflict IS a
+            #      contradiction push (both polarities), race-free by the same L2
+            #      serialization argument as ever.
+            fm = binm | (lngm & (oldsat_v == 2))
+            forced_v = tl.where(
+                fm, tl.where(binm, pay_v & 0x7FFFFFFF,
+                             ((old_v >> SHIFT) - mneg_v) & SUM_MASK), 0)
             bit_v = 1 << (forced_v & 31)
             oldw_v = tl.atomic_or(ab_row + (forced_v >> 5), bit_v, mask=fm)
             contra_v = fm & ((oldw_v & (1 << ((forced_v ^ 1) & 31))) != 0)
@@ -183,8 +226,9 @@ def _bcp_fixpoint_kernel(
     active_ptr,    # (K,)    int8 view of bool
     conflict_ptr,  # (K,)    int8 view of bool
     dec_ptr,       # (K, B)  int64 literal indices, -1 = padding
-    occ_off_ptr,   # (2N+1,) int32 CSR offsets  (occ[l] = clauses where ~l appears)
-    occ_cls_ptr,   # (total,) int32 CSR clause indices
+    occ_off_ptr,   # (2N+1,) int32 CSR offsets  (occ[l] = entries where ~l appears)
+    occ_mid_ptr,   # (2N,)   int32 end of the binary prefix of occ[l]
+    occ_cls_ptr,   # (total,) int32 payload: other literal (binary) | long clause id (long)
     trail_ptr,     # (K, TRAIL_CAP) int32 workspace
     nprops_ptr,    # (K,) int32 out: literals set TRUE this call (seeds + forced)
     nops_ptr,      # (K,) int32 out: occ entries processed
@@ -221,11 +265,11 @@ def _bcp_fixpoint_kernel(
 
         if WAVE:
             head, tail, conflict, nops = _wave_propagate(
-                st_row, ab_row, trail_row, occ_off_ptr, occ_cls_ptr,
+                st_row, ab_row, trail_row, occ_off_ptr, occ_mid_ptr, occ_cls_ptr,
                 head, tail, conflict, nops, TRAIL_CAP, SHIFT, W)
         else:
             head, tail, conflict, nops = _propagate(
-                st_row, ab_row, trail_row, occ_off_ptr, occ_cls_ptr,
+                st_row, ab_row, trail_row, occ_off_ptr, occ_mid_ptr, occ_cls_ptr,
                 head, tail, conflict, nops, TRAIL_CAP, SHIFT)
 
         if conflict != 0:
@@ -236,11 +280,40 @@ def _bcp_fixpoint_kernel(
         tl.store(ndecs_ptr + k, ndecs)
 
 @triton.jit
+def _risk(st_row, ab_row, occ_off_ptr, occ_mid_ptr, occ_cls_ptr, lit, SHIFT: tl.constexpr):
+    """SOFT conflict-avoidance risk of setting `lit` TRUE: the weighted cost of the clauses it
+    falsifies, over occ[lit]. ONE definition of the weights, called once per polarity.
+
+    BINARY entries are scored EXACTLY from the bitmap — other literal TRUE => satisfied (0),
+    FALSE => this would empty the clause (1e6), free => this would force it (4) — which is
+    sharper than a sat_count read, since a count cannot see satisfaction. LONG entries keep the
+    packed-word weights: w(1)=1e6 (would empty), w(2)=4 (forces a unit), w(3)=1."""
+    SAT_MASK: tl.constexpr = (1 << SHIFT) - 1
+    r = lit * 0
+    o = tl.load(occ_off_ptr + lit)
+    mid = tl.load(occ_mid_ptr + lit)
+    end = tl.load(occ_off_ptr + lit + 1)
+    while o < mid:
+        oth = tl.load(occ_cls_ptr + o) & 0x7FFFFFFF
+        w = tl.load(ab_row + (oth >> 5))
+        sat = (w >> (oth & 31)) & 1
+        fal = (w >> ((oth ^ 1) & 31)) & 1
+        r += tl.where(sat != 0, 0, tl.where(fal != 0, 1000000, 4))
+        o += 1
+    o = mid
+    while o < end:
+        c = tl.load(occ_cls_ptr + o).to(tl.int64)
+        sc = tl.load(st_row + c) & SAT_MASK
+        r += tl.where(sc == 1, 1000000, tl.where(sc == 2, 4, tl.where(sc == 3, 1, 0)))
+        o += 1
+    return r
+
+@triton.jit
 def _bcp_trajectory_kernel(
     st_ptr, ab_ptr, active_ptr, conflict_ptr,
     order_ptr,                            # (P,) int32 var indices: the decision order (support
                                           #   first, then completion vars; a per-chunk permutation)
-    occ_off_ptr, occ_cls_ptr,
+    occ_off_ptr, occ_mid_ptr, occ_cls_ptr,
     trail_ptr, nrounds_ptr, nops_ptr, nprops_ptr, ndecs_ptr,   # (K,·) workspace / outputs
     M, NW, P, NSUP, B, TRAIL_CAP, MAX_ROUNDS, seed,
     SOFT: tl.constexpr,                   # 1 = "soft": in-kernel soft risk-polarity (see below)
@@ -322,29 +395,13 @@ def _bcp_trajectory_kernel(
                     h = (h ^ (h >> 27)) * -7723592293110705685
                     pol = ((h >> 13) & 1).to(tl.int32)
                     if SOFT:
-                        # soft conflict-avoidance polarity AT FUSED SPEED: risk of setting
-                        # lit TRUE = sum of w(sat_count) over occ[lit] (clauses lit falsifies):
-                        # w(1)=1e6 (would empty), w(2)=4 (forces a unit), w(3)=1. Pick the
-                        # lower-risk polarity; hash bit breaks ties.
-                        r0 = nops * 0                       # risk of lit = 2v (v TRUE)
-                        r1 = nops * 0                       # risk of lit = 2v+1 (v FALSE)
-                        s0 = tl.load(occ_off_ptr + 2 * v)
-                        e0 = tl.load(occ_off_ptr + 2 * v + 1)
-                        o0 = s0
-                        while o0 < e0:
-                            c0 = tl.load(occ_cls_ptr + o0).to(tl.int64)
-                            sc0 = tl.load(st_row + c0) & SAT_MASK
-                            r0 += tl.where(sc0 == 1, 1000000,
-                                           tl.where(sc0 == 2, 4, tl.where(sc0 == 3, 1, 0)))
-                            o0 += 1
-                        e1 = tl.load(occ_off_ptr + 2 * v + 2)
-                        o1 = e0
-                        while o1 < e1:
-                            c1 = tl.load(occ_cls_ptr + o1).to(tl.int64)
-                            sc1 = tl.load(st_row + c1) & SAT_MASK
-                            r1 += tl.where(sc1 == 1, 1000000,
-                                           tl.where(sc1 == 2, 4, tl.where(sc1 == 3, 1, 0)))
-                            o1 += 1
+                        # Pick the lower-risk polarity; the hash bit breaks ties. Weights and the
+                        # binary/long split both live in _risk, so the two polarities can never
+                        # be scored on different scales.
+                        r0 = _risk(st_row, ab_row, occ_off_ptr, occ_mid_ptr, occ_cls_ptr,
+                                   2 * v, SHIFT)
+                        r1 = _risk(st_row, ab_row, occ_off_ptr, occ_mid_ptr, occ_cls_ptr,
+                                   2 * v + 1, SHIFT)
                         # ε-greedy (25% hash-forced random): pure risk-argmin is
                         # row-DETERMINISTIC when risks never tie — all K trajectories
                         # replicate ONE path (measured: c1355 collapsed to 70 distinct
@@ -363,11 +420,11 @@ def _bcp_trajectory_kernel(
             # --- propagate to fixpoint ---
             if WAVE:
                 head, tail, conflict, nops = _wave_propagate(
-                    st_row, ab_row, trail_row, occ_off_ptr, occ_cls_ptr,
+                    st_row, ab_row, trail_row, occ_off_ptr, occ_mid_ptr, occ_cls_ptr,
                     head, tail, conflict, nops, TRAIL_CAP, SHIFT, W)
             else:
                 head, tail, conflict, nops = _propagate(
-                    st_row, ab_row, trail_row, occ_off_ptr, occ_cls_ptr,
+                    st_row, ab_row, trail_row, occ_off_ptr, occ_mid_ptr, occ_cls_ptr,
                     head, tail, conflict, nops, TRAIL_CAP, SHIFT)
 
         if conflict != 0:
@@ -379,7 +436,7 @@ def _bcp_trajectory_kernel(
         tl.store(ndecs_ptr + k, decs)     # decisions only (implications = nprops - ndecs)
 
 @triton.jit
-def _clean_packed(st_row, init_ptr, trail_row, occ_off_ptr, occ_cls_ptr, tail, M,
+def _clean_packed(st_row, init_ptr, trail_row, occ_off_ptr, occ_mid_ptr, occ_cls_ptr, tail, M,
                   W: tl.constexpr):
     """Rewrite every packed word this row can have touched back to the baseline row
     (`init_ptr` = the post-units-flush packed state) — the CLEAN-mode tail.
@@ -390,6 +447,10 @@ def _clean_packed(st_row, init_ptr, trail_row, occ_off_ptr, occ_cls_ptr, tail, M
     stop only shrinks the damage). Every store writes the baseline value, so over-covering
     (trail tails never propagated, occ words never reached, two trail literals sharing a
     clause) rewrites baseline over baseline: idempotent, no atomics, benign lane races.
+
+    Only the LONG sub-ranges [occ_mid[l], occ_off[l+1]) are walked: binary entries never touch
+    a packed word, so the restore shrinks by the binary share of the occ — and M here is
+    num_long, the packed row's true width (init_ptr is num_long-sized).
 
     DEEP-ROW GUARD: scattered 4-byte stores pull 32-byte sectors (~8x amplification), so a row
     whose total occ work exceeds M/8 streams its WHOLE row from baseline instead — that row
@@ -404,7 +465,7 @@ def _clean_packed(st_row, init_ptr, trail_row, occ_off_ptr, occ_cls_ptr, tail, M
     while t < tail:
         m = t + lanes < tail
         lit_v = tl.load(trail_row + t + lanes, mask=m, other=0)
-        s_v = tl.load(occ_off_ptr + lit_v, mask=m, other=0)
+        s_v = tl.load(occ_mid_ptr + lit_v, mask=m, other=0)
         e_v = tl.load(occ_off_ptr + lit_v + 1, mask=m, other=0)
         total += tl.sum(tl.where(m, e_v - s_v, 0), 0)
         t += W
@@ -422,7 +483,7 @@ def _clean_packed(st_row, init_ptr, trail_row, occ_off_ptr, occ_cls_ptr, tail, M
             f = tl.minimum(tail - t, W)
             lm = lanes < f
             lit_v = tl.load(trail_row + t + lanes, mask=lm, other=0)
-            s_v = tl.load(occ_off_ptr + lit_v, mask=lm, other=0)
+            s_v = tl.load(occ_mid_ptr + lit_v, mask=lm, other=0)
             e_v = tl.load(occ_off_ptr + lit_v + 1, mask=lm, other=0)
             len_v = tl.where(lm, e_v - s_v, 0)
             cum_v = tl.cumsum(len_v, 0)
@@ -444,7 +505,7 @@ def _clean_packed(st_row, init_ptr, trail_row, occ_off_ptr, occ_cls_ptr, tail, M
 
 @triton.jit
 def _bcp_fixpoint_clean_kernel(
-    st_ptr, ab_ptr, active_ptr, conflict_ptr, dec_ptr, occ_off_ptr, occ_cls_ptr,
+    st_ptr, ab_ptr, active_ptr, conflict_ptr, dec_ptr, occ_off_ptr, occ_mid_ptr, occ_cls_ptr,
     init_ptr,      # (M,) int32 packed_flushed — the baseline the clean tail restores
     trail_ptr, nprops_ptr, nops_ptr, ndecs_ptr,
     M, NW, B, TRAIL_CAP,
@@ -490,11 +551,11 @@ def _bcp_fixpoint_clean_kernel(
 
         if WAVE:
             head, tail, conflict, nops = _wave_propagate(
-                st_row, ab_row, trail_row, occ_off_ptr, occ_cls_ptr,
+                st_row, ab_row, trail_row, occ_off_ptr, occ_mid_ptr, occ_cls_ptr,
                 head, tail, conflict, nops, TRAIL_CAP, SHIFT, W)
         else:
             head, tail, conflict, nops = _propagate(
-                st_row, ab_row, trail_row, occ_off_ptr, occ_cls_ptr,
+                st_row, ab_row, trail_row, occ_off_ptr, occ_mid_ptr, occ_cls_ptr,
                 head, tail, conflict, nops, TRAIL_CAP, SHIFT)
 
         if conflict != 0:
@@ -504,4 +565,5 @@ def _bcp_fixpoint_clean_kernel(
         tl.store(nops_ptr + k, nops)
         tl.store(ndecs_ptr + k, ndecs)
 
-        _clean_packed(st_row, init_ptr, trail_row, occ_off_ptr, occ_cls_ptr, tail, M, W)
+        _clean_packed(st_row, init_ptr, trail_row, occ_off_ptr, occ_mid_ptr, occ_cls_ptr,
+                      tail, M, W)

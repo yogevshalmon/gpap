@@ -83,6 +83,9 @@ class GPUSampler:
         # The engine core (the ONLY execution path — raises off-CUDA / without libgpap;
         # field split 16|16 or 8|24 picked per formula, see gpap.engine).
         self.engine = BCPEngine(formula)
+        # K is charged per STATE clause (length >= 3): binaries are occ implication edges and
+        # units live in the flush bitmap — neither costs per-row bytes (see gpap_row_bytes).
+        self.M_state = self.engine.num_long
         # Shape comes from the engine core (free) — never a reduction over a (M,) tensor.
         self._max_cls = formula.max_clause_len or 1
         self._total_lits = formula.total_lits
@@ -103,7 +106,7 @@ class GPUSampler:
         # for them is: the old per-row model charged for a separate sat array, a byte-per-literal
         # assignment and PyTorch-era scatter temporaries that no longer exist, while omitting the
         # trail, which made it 1.57x over. The boost was a correction factor for a wrong model.
-        self.K = compute_k_safe(self.M, self.N, gpu_mem_available(device), cap=k_cap,
+        self.K = compute_k_safe(self.M_state, self.N, gpu_mem_available(device), cap=k_cap,
                                 decisions_per_round=SOUND_B_FLOOR)
         self._K_init = self.K
         # PIN the propagate kernel to the batch the chunks will actually run, rather than letting

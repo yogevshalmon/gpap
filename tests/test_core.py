@@ -58,8 +58,11 @@ def test_formula_structures_match_the_reference_builder():
 
         assert cf.info.num_vars == f.num_vars
         assert cf.info.num_clauses == f.num_clauses
-        off, cls_ = cf.occ()
+        assert cf.info.num_bin == f.num_bin
+        assert cf.info.num_long == f.num_long
+        off, mid, cls_ = cf.occ()
         np.testing.assert_array_equal(off, f.occ_offsets)
+        np.testing.assert_array_equal(mid, f.occ_mid)
         np.testing.assert_array_equal(cls_, f.occ_clauses)
         sizes, lsum = cf.clause_arrays()
         np.testing.assert_array_equal(sizes, f.clause_sizes)

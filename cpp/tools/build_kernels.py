@@ -43,9 +43,11 @@ WAVE_W = 32
 
 _PTR_I32, _PTR_I8, _PTR_I64 = "*i32:16", "*i8:16", "*i64:16"
 
-_FIX_PTRS = [_PTR_I32, _PTR_I32, _PTR_I8, _PTR_I8, _PTR_I64] + [_PTR_I32] * 6
-_FIX_CLEAN_PTRS = _FIX_PTRS[:7] + [_PTR_I32] + _FIX_PTRS[7:]   # + init_ptr after occ_cls
-_TRAJ_PTRS = [_PTR_I32, _PTR_I32, _PTR_I8, _PTR_I8] + [_PTR_I32] * 8
+# pointer tails: occ_off, occ_mid, occ_cls, trail, nprops, nops, ndecs (+ nrounds/order for
+# the trajectory kernel) — occ_mid is the binary/long split of each occ segment.
+_FIX_PTRS = [_PTR_I32, _PTR_I32, _PTR_I8, _PTR_I8, _PTR_I64] + [_PTR_I32] * 7
+_FIX_CLEAN_PTRS = _FIX_PTRS[:8] + [_PTR_I32] + _FIX_PTRS[8:]   # + init_ptr after occ_cls
+_TRAJ_PTRS = [_PTR_I32, _PTR_I32, _PTR_I8, _PTR_I8] + [_PTR_I32] * 9
 
 
 def kernel_specs():
@@ -78,8 +80,10 @@ def kernel_specs():
         ("sum_i32_acc", "helpers", "sum_i32_acc", [_PTR_I32, "i32", _PTR_I64, 1024], 1),
     ]
     for shift in SHIFTS:
+        # sound_rows(st, ab, rows, M, NW, pairs, n_pairs, bad, SHIFT, BLOCK)
         out.append((f"sound_rows.s{shift}", "helpers", "sound_rows",
-                    [_PTR_I32, _PTR_I32, "i32", _PTR_I8, shift, 1024], 4))
+                    [_PTR_I32, _PTR_I32, _PTR_I32, "i32", "i32", _PTR_I32, "i32", _PTR_I8,
+                     shift, 1024], 4))
     for shift in SHIFTS:
         for wave in (0, 1):
             # _bcp_fixpoint_clean_kernel(... occ_cls, INIT, trail ... M, NW, B, TRAIL_CAP,

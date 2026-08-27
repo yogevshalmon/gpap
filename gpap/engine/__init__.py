@@ -10,8 +10,13 @@ compiled ahead of time into the library) over a packed int32 clause state — lo
 (every removal exact mod 2^F, so at sat_count==1 the field IS the forced literal; the sum form
 makes the update a single atomic_add in the warp-parallel WAVE kernel).
 Field split per formula: 16|16 for 2N <= 65535, 8|24 ("wide") for 2N <= 0xFFFFFF with clause
-len <= 255; anything larger is rejected. Setting literal l TRUE updates exactly the clauses in
+len <= 255; anything larger is rejected. Setting literal l TRUE updates exactly the entries in
 occ[l] (CSR occurrence lists of the NEGATED literal). No clause scanning, ever.
+
+ONLY length >= 3 clauses carry that packed word: binary clauses are implication EDGES inside occ
+(payload = the other literal — one bitmap push, zero per-row state) and unit clauses live in the
+construction flush's bitmap. Same fixpoints (BCP confluence), ~4-10x less per-row state on
+circuit CNFs.
 
 REQUIREMENTS: CUDA + libgpap (`core_available()`; build it with scripts/build_core.sh). There
 is NO CPU execution path. Triton is needed only to BUILD the library, never to run it;

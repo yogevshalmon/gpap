@@ -61,6 +61,11 @@ typedef struct {
     int32_t shift;            /* packed field split: 16 (16|16) or 8 (8|24 "wide") */
     int32_t has_empty_clause; /* 1 => formula is trivially UNSAT */
     int64_t total_lits;
+    /* Clause-length segregation (num_clauses = units + num_bin + num_long). Only the LONG
+     * (length >= 3) clauses carry a packed word and per-row engine state; length-2 clauses are
+     * implication edges in the occurrence list and length-1 clauses live in the flush cache. */
+    int32_t num_bin;          /* length-2 clauses */
+    int32_t num_long;         /* length >= 3 clauses (the packed-word list) */
 } gpap_formula_info;
 
 /* Literal convention on this ABI: DIMACS signed literals (+v / -v, 1-based). The 2N internal
@@ -72,15 +77,23 @@ gpap_status gpap_formula_from_clauses(int32_t num_vars, const int32_t *flat_lits
 void gpap_formula_info_get(const gpap_formula *f, gpap_formula_info *out);
 void gpap_formula_free(gpap_formula *f);
 
-/* Read-back of the built structures (for tests / inspection). Pass NULL to query sizes. */
-gpap_status gpap_formula_occ(const gpap_formula *f, int32_t *offsets_out, int32_t *clauses_out,
-                             int32_t *n_offsets, int64_t *n_clauses);
+/* Read-back of the built structures (for tests / inspection). Pass NULL to query sizes.
+ * occ entry payloads are SPLIT by kind: within occ[l], entries below gpap_formula_occ_mid()[l]
+ * are BINARY (payload = the other literal's 2N index) and entries at or above it are LONG
+ * (payload = the length>=3 clause's index in 0..num_long-1). Unit clauses have no occ entry.
+ * A BINARY payload additionally carries GPAP_OCC_BIN_TAG (the sign bit), so an entry can be
+ * classified from its value alone; mask it off to recover the literal index.
+ * `mid_out` receives that split point per literal; it is (2N,) = n_offsets - 1 entries, so it
+ * needs no size query of its own. Any out pointer may be NULL. */
+gpap_status gpap_formula_occ(const gpap_formula *f, int32_t *offsets_out, int32_t *mid_out,
+                             int32_t *clauses_out, int32_t *n_offsets, int64_t *n_clauses);
 gpap_status gpap_formula_clause_arrays(const gpap_formula *f, int32_t *sizes_out,
                                        int32_t *lit_sum_out);
 
 /* The clauses back out as FLAT DIMACS literals (clause c = the next clause_sizes[c] entries;
- * sizes from gpap_formula_clause_arrays). Rebuilt from the occ CSR, so within-clause order is
- * ascending by literal index, not input order. `n_lits` (may be NULL) receives total_lits;
+ * sizes from gpap_formula_clause_arrays), in the ORIGINAL input clause order. Within-clause
+ * order is ascending by literal index, not input order (long clauses are rebuilt by inverting
+ * the occ CSR; binary pairs and units come from their side lists). `n_lits` (may be NULL) receives total_lits;
  * lits_out NULL = query only. This is what lets a host-side consumer (simplification, mining,
  * re-emission) get Python/C++ clause lists from THE parser instead of shipping a second one. */
 gpap_status gpap_formula_clauses(const gpap_formula *f, int32_t *lits_out, int64_t *n_lits);
@@ -120,7 +133,9 @@ gpap_mode gpap_engine_mode(const gpap_engine *e);
 int32_t gpap_engine_shift(const gpap_engine *e);
 int32_t gpap_engine_k(const gpap_engine *e);
 int32_t gpap_engine_num_vars(const gpap_engine *e);
-int32_t gpap_engine_num_clauses(const gpap_engine *e);
+int32_t gpap_engine_num_clauses(const gpap_engine *e);   /* TOTAL clauses (unit + bin + long) */
+int32_t gpap_engine_num_long(const gpap_engine *e);      /* packed-word clauses: the per-row
+                                                            state width, gpap_packed_rows' M */
 
 /* Restore K rows to the cached post-units-flush state (allocations reused when K matches).
  * Also RESOLVES GPAP_MODE_AUTO for this K, which is why the choice lives here and not in a
@@ -316,6 +331,9 @@ gpap_status gpap_pair_mask_create(gpap_engine *e, const int32_t *vars, int32_t n
  * a caller can hold "fully assigned" and "support complete" at once (slot 2 is a scratch slot
  * for ad-hoc readout). Returns the row count. */
 #define GPAP_SLOTS 3
+
+/* Sign bit set on BINARY occurrence payloads (see gpap_formula_occ). */
+#define GPAP_OCC_BIN_TAG ((int32_t)0x80000000)
 gpap_status gpap_select_complete(gpap_engine *e, int32_t mask_id, int32_t slot,
                                  int32_t *count_out);
 /* Ascending row indices of a selection. Writes min(selection count, capacity) entries — pass the
@@ -344,11 +362,15 @@ gpap_status gpap_assignment_rows(gpap_engine *e, int32_t slot, int8_t *out_host,
 gpap_status gpap_flags(gpap_engine *e, int8_t *active_out, int8_t *conflict_out);
 /* (K,) int32 unit-propagation implications of the last launch (assigned minus decisions). */
 gpap_status gpap_num_propagated(gpap_engine *e, int32_t *out_host);
-/* (rows, M) int32 sat_count values for `n_rows` explicit row indices — inspection/tests. */
+/* (rows, M) int32 sat_count (= non-falsified literal count) per ORIGINAL clause, for `n_rows`
+ * explicit row indices — inspection/tests. Long clauses read their packed word; binary and unit
+ * clauses are synthesized from the row's assignment bitmap (identical values on non-conflicted
+ * rows; conflicted rows' long-clause fields stay propagation-order-dependent, as ever). */
 gpap_status gpap_sat_rows(gpap_engine *e, const int32_t *rows, int32_t n_rows, int32_t *out_host);
 
-/* RAW packed words (sat_count | sum << SHIFT), unmasked — gpap_sat_rows keeps only the count
- * field. Tests/debugging: this is the CLEAN-mode identity gate's readout. */
+/* (rows, num_long) RAW packed words (sat_count | sum << SHIFT), unmasked, LONG clauses only —
+ * binary/unit clauses have no per-row words. Tests/debugging: this is the CLEAN-mode identity
+ * gate's readout (gpap_engine_num_long gives the row width). */
 gpap_status gpap_packed_rows(gpap_engine *e, const int32_t *rows, int32_t n_rows,
                              int32_t *out_host);
 

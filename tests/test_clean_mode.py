@@ -112,9 +112,15 @@ def test_state_identity_fuzz(mode, shift):
 @pytest.mark.parametrize("mode", ["scalar", "wave"])
 def test_deep_row_guard_streams_exactly(mode):
     """An implication chain where one probe assigns EVERY variable pushes the clean tail past
-    the M/8 threshold into the stream-the-row arm — which must restore just as exactly."""
+    the M/8 threshold into the stream-the-row arm — which must restore just as exactly.
+
+    The chain is TERNARY (-v | -v | v+1): a plain binary chain would segregate into implication
+    edges with no packed words at all (that case is test_pure_binary_formula_is_stateless), and
+    this test exists to exercise the LONG-clause restore. The duplicate literal makes each
+    falsification decrement twice, so the chain still forces v+1 exactly as (-v | v+1) does —
+    and each deep probe walks 2(nv-1) long occ entries against M/8 = (nv-1)/8."""
     nv = 400
-    clauses = [[-(v), v + 1] for v in range(1, nv)]          # 1 => 2 => ... => nv
+    clauses = [[-(v), -(v), v + 1] for v in range(1, nv)]    # 1 => 2 => ... => nv, len-3 links
     f = _core.Formula.from_clauses(nv, clauses)
     eng = _core.Engine(f, mode=mode)
     eng.reset(4)
@@ -155,6 +161,46 @@ def test_k_shrink_grow_bookkeeping():
     assert (eng.packed_rows(np.arange(64)) == baseline64).all()
 
 
+@pytest.mark.parametrize("mode", ["scalar", "wave"])
+def test_pure_binary_formula_is_stateless(mode):
+    """A formula of ONLY <=2-literal clauses has num_long == 0: no packed words, no broadcast,
+    nothing for CLEAN to restore — yet propagation, flags, counters, the sat_rows synthesis and
+    reset-lite must all behave exactly as on any other formula."""
+    from tests.reference_bcp import lit_idx, ref_bcp
+
+    nv = 40
+    clauses = [[-(v), v + 1] for v in range(1, nv)] + [[1, 2]]   # binary chain + one extra edge
+    f = _core.Formula.from_clauses(nv, clauses)
+    assert (f.info.num_bin, f.info.num_long) == (nv, 0)
+    eng = _core.Engine(f, mode=mode)
+    twin = _core.Engine(f, mode=mode)
+    eng.reset(4)
+    twin.reset(4)
+    assert eng.packed_rows(np.arange(4)).shape == (4, 0)
+
+    d = np.array([[0], [2 * (nv - 1) + 1], [-1], [1]], dtype=np.int64)   # +1, -nv, pad, -1
+    eng.apply_clean(d)
+    twin.apply(d)
+    ea, ec = eng.flags()
+    ta, tc = twin.flags()
+    assert (ea == ta).all() and (ec == tc).all()
+    assert (eng.num_propagated() == twin.num_propagated()).all()
+    assert eng.num_propagated()[0] == nv - 1, "the whole chain propagated through the edges"
+    for i, dec in enumerate([[1], [-nv], [], [-1]]):
+        exp_conflict, _ = ref_bcp(clauses, [lit_idx(x) for x in dec])
+        assert bool(ec[i]) == exp_conflict
+
+    # sat_rows synthesizes every count from the bitmap (there are no words to read): on the
+    # fully-propagated chain row every clause has exactly one non-falsified (= TRUE) literal,
+    # except (1|2) which keeps both.
+    sat = twin.sat_rows(np.array([0], dtype=np.int32))
+    assert sat.shape == (1, nv)
+    assert sat[0].tolist() == [1] * (nv - 1) + [2]
+
+    eng.reset(4)
+    assert eng.reset_stats()[1] >= 1, "reset-lite must fire with nothing to broadcast"
+
+
 def test_plain_apply_and_trajectory_invalidate():
     """A plain apply and a trajectory both dirty without a restorable record: the next reset
     must be FULL, and the state after it must again be the baseline."""
@@ -185,7 +231,7 @@ def test_recache_moves_the_baseline():
     """assume_units-style recache: the baseline itself changes, so the claim is dropped AND the
     next clean cycle restores to the NEW baseline."""
     nv = 8
-    clauses = [[-1, 2], [-2, 3], [3, 4], [-3, -5]]
+    clauses = [[-1, 2], [-2, 3], [3, 4, 6], [-3, -5]]
     f = _core.Formula.from_clauses(nv, clauses)
     eng = _core.Engine(f)
     eng.reset(1)
@@ -195,7 +241,8 @@ def test_recache_moves_the_baseline():
     full, lite = eng.reset_stats()
     assert lite == 0, "reset after recache must be a full broadcast"
     new_baseline = eng.packed_rows(np.arange(6))
-    eng.apply_clean(np.array([[2 * 5]] * 6, dtype=np.int64))   # probe x6 on the new baseline
+    # probe ~x6 on the new baseline: falsifies +6 in (3|4|6), the one packed word here
+    eng.apply_clean(np.array([[2 * 5 + 1]] * 6, dtype=np.int64))
     assert (eng.packed_rows(np.arange(6)) == new_baseline).all()
     eng.reset(6)
     assert eng.reset_stats()[1] == 1
@@ -206,7 +253,7 @@ def test_gpap_clean_env_disables(monkeypatch):
     (differs from baseline) and no reset ever goes lite — the A/B lever."""
     monkeypatch.setenv("GPAP_CLEAN", "0")
     nv = 8
-    clauses = [[-1, 2], [-2, 3], [1, 4]]
+    clauses = [[-1, -1, 2], [-2, -2, 3], [1, 4]]     # ternary links: the dirt lands in WORDS
     f = _core.Formula.from_clauses(nv, clauses)
     eng = _core.Engine(f)
     eng.reset(4)
