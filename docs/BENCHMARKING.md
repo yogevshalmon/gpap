@@ -83,6 +83,22 @@ marks any row it had to measure the old way as `cms_mode="write"`. The patch's `
 also exports CryptoMiniSat's own propagation/decision counters, which is where the `Cdec/s` /
 `Cimpl/s` columns come from. **Ratios published before 2026-07-27 include the emission handicap.**
 
+The patch also carries **`--maxtime N`**, and it must be used for any budgeted run: without it
+the harness kills CMSGen at the deadline and the surviving count is the last `--statsevery`
+multiple. On the 2026-08-23 campaign that floored all 174 timed-out rows to a multiple of 1000
+and **81 of them to a clean `0`, each scored as an outright GPAP win** — one re-measured cell
+really delivers 941 samples in the budget. With `--maxtime` CMSGen stops itself and prints an
+exact `final=1` count (and its work counters even on cells where it emits nothing, which used to
+drop those instances out of the propagation table). Rows carry `cms_count_exact`;
+`verify_artifact.py` FAILS a stage that publishes a floored zero. **Any CMSGen number recorded
+before 2026-08-26 is a lower bound, not a measurement.**
+
+`--maxtime` bounds CMSGen's SAMPLING wall, the same quantity GPAP's `--time-limit` bounds, so the
+two rate columns pair like with like: `cms_sps` (per sampling wall) against GPAP's steady-state
+rate, `cms_sps_e2e` (per subprocess wall, parse included) against GPAP's `wall_total`. The older
+definition divided GPAP's steady state by CMSGen's subprocess wall — one side charged for setup,
+the other not.
+
 The same rule binds the GPU rivals, and it is CHECKED rather than assumed:
 `python eval/rivals/check_emission_symmetry.py --results <campaign>` AST-scans the function each
 rival's own `timer(...)` wraps for host transfers and IO, asserts every `.sample()` in our timed

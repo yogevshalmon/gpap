@@ -32,12 +32,21 @@ else
 fi
 BIN_DIR="$PREFIX/bin"
 
+# An already-built binary is reused — EXCEPT when it predates a flag the harness now depends on.
+# The binary is cached across VMs in the Colab sweeps, so a stale one would silently reintroduce
+# the floored sample counts (docs/findings/RIVAL_FAIRNESS_FINDINGS.md §7): a run killed on its
+# budget reports the last --statsevery multiple, which read as a clean 0 on 81 cells of the
+# 2026-08-23 campaign. Rebuild rather than reuse.
 if [ -x "$BIN" ] && [ "${GPAP_CMSGEN_FORCE:-0}" != "1" ]; then
-    echo "cmsgen already built: $BIN"
-    "$BIN" --help 2>&1 | grep -q -- --nowrite \
-        && echo "  (GPAP eval patch present: --nowrite / --statsevery available)" \
-        || echo "  (stock build: no --nowrite; rerun with GPAP_CMSGEN_FORCE=1 to apply the patch)"
-    exit 0
+    if [ "$STOCK" != "1" ] && ! "$BIN" --help 2>&1 | grep -q -- --maxtime; then
+        echo "cmsgen at $BIN predates --maxtime (its counts would be floored) — rebuilding"
+    else
+        echo "cmsgen already built: $BIN"
+        "$BIN" --help 2>&1 | grep -q -- --nowrite \
+            && echo "  (GPAP eval patch present: --nowrite / --statsevery / --maxtime)" \
+            || echo "  (stock build: no --nowrite; rerun with GPAP_CMSGEN_FORCE=1 for the patch)"
+        exit 0
+    fi
 fi
 
 for tool in git cmake make g++; do
@@ -79,6 +88,7 @@ echo "installed: $BIN"
 "$BIN" --help 2>&1 | head -1
 if [ "$STOCK" != "1" ]; then
     "$BIN" --help 2>&1 | grep -q -- --nowrite \
-        && echo "GPAP eval patch active (--nowrite / --statsevery)" \
-        || { echo "ERROR: patched build lacks --nowrite" >&2; exit 1; }
+        && "$BIN" --help 2>&1 | grep -q -- --maxtime \
+        && echo "GPAP eval patch active (--nowrite / --statsevery / --maxtime)" \
+        || { echo "ERROR: patched build lacks --nowrite or --maxtime" >&2; exit 1; }
 fi

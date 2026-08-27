@@ -86,12 +86,22 @@ def test_row_key_separates_encoder_target_and_depth():
 # --------------------------------------------------------------------- CMSGen accounting
 
 def test_parse_cms_stats_takes_the_LAST_flushed_line():
-    txt = ("c gpap-stats samples=1000 props=10 decisions=5 conflicts=1 cpu_s=0.1 wall_s=0.2\n"
+    txt = ("c gpap-stats samples=1000 props=10 decisions=5 conflicts=1 cpu_s=0.1 wall_s=0.2 "
+           "final=0\n"
            "c noise\n"
-           "c gpap-stats samples=2000 props=40 decisions=9 conflicts=3 cpu_s=0.3 wall_s=0.4\n")
+           "c gpap-stats samples=2000 props=40 decisions=9 conflicts=3 cpu_s=0.3 wall_s=0.4 "
+           "final=1\n")
     s = _parse_cms_stats(txt)
     assert s == {"samples": 2000, "props": 40, "decisions": 9, "conflicts": 3,
-                 "cpu_s": 0.3, "wall_s": 0.4}
+                 "cpu_s": 0.3, "wall_s": 0.4, "final": True}
+
+
+def test_parse_cms_stats_reads_a_pre_maxtime_line_as_not_final():
+    """The `final=` field post-dates the deadline flag, so a line without it must still parse —
+    as NOT exact, which is the safe reading (that binary's counts really are floored)."""
+    s = _parse_cms_stats("c gpap-stats samples=7000 props=1 decisions=1 conflicts=0 "
+                         "cpu_s=0.1 wall_s=0.2\n")
+    assert s["samples"] == 7000 and s["final"] is False
 
 
 def test_parse_cms_stats_none_on_stock_output():
@@ -113,30 +123,53 @@ def test_dimacs_header(tmp_path):
 _FAKE_CMSGEN = textwrap.dedent("""
     import sys, time
     args = sys.argv[1:]
+    MAXTIME = __MAXTIME__
     if "--help" in args:
-        print("usage: cmsgen [--samples VAR] [--samplefile VAR] [--nowrite] [--statsevery VAR]")
+        print("usage: cmsgen [--samples VAR] [--samplefile VAR] [--nowrite] "
+              "[--statsevery VAR]" + (" [--maxtime VAR]" if MAXTIME else ""))
         sys.exit(0)
     n = int(args[args.index("--samples") + 1])
     out = args[args.index("--samplefile") + 1] if "--samplefile" in args else None
+    budget = float(args[args.index("--maxtime") + 1]) if "--maxtime" in args else 0.0
+    RATE = 20000.0                      # fake samples per second, so a budget is meaningful
+    stop = int(budget * RATE) if budget else n
+    n = min(n, stop)
+    def line(i, final):
+        print(f"c gpap-stats samples={i} props={i*10} decisions={i*3} conflicts={i//100} "
+              f"cpu_s={i/1e5:.4f} wall_s={i/1e5:.4f} final={1 if final else 0}", flush=True)
     if out:
         with open(out, "w") as f:
             for i in range(n):
                 f.write("1 -2 3 0\\n")
     for i in range(1000, n + 1, 1000):
-        print(f"c gpap-stats samples={i} props={i*10} decisions={i*3} conflicts={i//100} "
-              f"cpu_s={i/1e5:.4f} wall_s={i/1e5:.4f}", flush=True)
+        line(i, False)
+    if MAXTIME:                          # the post-loop line: only this one is exact
+        line(n, True)
     print("c Finished generating all %d samples" % n)
 """)
 
 
-@pytest.fixture()
-def fake_cmsgen(tmp_path):
-    p = tmp_path / "fake_cmsgen.py"
-    p.write_text(_FAKE_CMSGEN)
-    sh = tmp_path / "cmsgen"
+def _fake_bin(tmp_path, name, maxtime):
+    p = tmp_path / f"{name}.py"
+    # str.replace, not str.format: the fake's body is full of f-strings and would fight it
+    p.write_text(_FAKE_CMSGEN.replace("__MAXTIME__", repr(bool(maxtime))))
+    sh = tmp_path / name
     sh.write_text(f'#!/bin/sh\nexec "{sys.executable}" "{p}" "$@"\n')
     sh.chmod(0o755)
     return str(sh)
+
+
+@pytest.fixture()
+def fake_cmsgen(tmp_path):
+    """The current patched binary: --nowrite, --statsevery AND --maxtime."""
+    return _fake_bin(tmp_path, "cmsgen", True)
+
+
+@pytest.fixture()
+def fake_cmsgen_no_maxtime(tmp_path):
+    """A patched binary from BEFORE the deadline flag — the two capabilities are probed
+    separately, and this one's counts are floored to the --statsevery cadence when killed."""
+    return _fake_bin(tmp_path, "cmsgen_old", False)
 
 
 def test_cmsgen_supports_nowrite_detects_the_patch(fake_cmsgen):
@@ -151,9 +184,17 @@ def test_cmsgen_run_nowrite_counts_from_the_stats_line(fake_cmsgen, tmp_path):
     assert r["mode"] == "nowrite" and r["patched"] is True
     assert r["n_samples"] == 5000 and r["models"] == []
     assert r["samples_per_s"] > 0
-    # implications = propagations - decisions, the same definition as the GPAP column
+    # implications = propagations - decisions, the same definition as the GPAP column, over
+    # CMSGen's own SAMPLING wall — the same denominator samples_per_s uses, which is what keeps
+    # the propagation identity (samples/s ratio = impl/s ratio / impl-per-sample ratio) exact.
     assert r["implications_per_s"] == pytest.approx(
-        (5000 * 10 - 5000 * 3) / r["wall_s"], rel=1e-6)
+        (5000 * 10 - 5000 * 3) / r["sampling_wall_s"], rel=1e-6)
+    assert r["count_exact"] is True                    # the run finished; the count is CMSGen's
+    # The two rates differ ONLY in the wall they divide by: CMSGen's own sampling clock, and the
+    # whole subprocess. Table 1 pairs the first with GPAP's steady state and the second with its
+    # wall_total, so that neither column charges one side for getting ready and not the other.
+    assert r["samples_per_s"] == pytest.approx(5000 / r["sampling_wall_s"], rel=1e-9)
+    assert r["samples_per_s_e2e"] == pytest.approx(5000 / r["wall_s"], rel=1e-9)
 
 
 def test_cmsgen_run_write_mode_parses_models_and_removes_the_file(fake_cmsgen, tmp_path):
@@ -168,7 +209,10 @@ def test_cmsgen_run_write_mode_parses_models_and_removes_the_file(fake_cmsgen, t
 
 
 def test_cmsgen_run_timeout_keeps_partial_progress(fake_cmsgen, tmp_path, monkeypatch):
-    """A killed CMSGen must still score what it produced — otherwise a hard instance reads 0."""
+    """A killed CMSGen must still score what it produced — otherwise a hard instance reads 0.
+
+    It must ALSO say that the count is not exact: a kill lands between two --statsevery lines,
+    so what survives is the last multiple of the cadence."""
     cnf = tmp_path / "f.cnf"
     cnf.write_text("p cnf 3 1\n1 2 3 0\n")
     real_run = subprocess.run
@@ -181,6 +225,35 @@ def test_cmsgen_run_timeout_keeps_partial_progress(fake_cmsgen, tmp_path, monkey
     r = cmsgen_run(str(cnf), fake_cmsgen, 3000, str(tmp_path), write=False, timeout=0.01)
     assert r["timed_out"] is True
     assert r["n_samples"] == 3000 and r["samples_per_s"] > 0
+    assert r["count_exact"] is False
+
+
+def test_maxtime_makes_the_count_exact_instead_of_a_cadence_multiple(fake_cmsgen, tmp_path):
+    """THE flooring regression. The 2026-08-23 campaign killed CMSGen on its budget and kept the
+    last `--statsevery` line, so every one of its 174 timed-out counts was a multiple of 1000
+    and 81 read as a clean zero. With the deadline enforced by CMSGen itself the final count is
+    its own, and lands wherever the budget lands."""
+    cnf = tmp_path / "f.cnf"
+    cnf.write_text("p cnf 3 1\n1 2 3 0\n")
+    r = cmsgen_run(str(cnf), fake_cmsgen, 10_000_000, str(tmp_path), write=False, timeout=0.3)
+    assert r["timed_out"] is False and r["count_exact"] is True
+    assert r["n_samples"] == 6000                       # 0.3 s x the fake's 20k/s
+    r2 = cmsgen_run(str(cnf), fake_cmsgen, 10_000_000, str(tmp_path), write=False, timeout=0.317)
+    assert r2["n_samples"] == 6340 and r2["n_samples"] % 1000                # not a multiple
+
+
+def test_maxtime_capability_is_probed_separately_from_nowrite(fake_cmsgen,
+                                                              fake_cmsgen_no_maxtime, tmp_path):
+    """An older patched binary has --nowrite but no deadline; it must still run, and its counts
+    must be marked non-exact so verify_artifact can refuse to publish them as zeros."""
+    from gpap.benchmark import cmsgen_supports_maxtime
+    assert cmsgen_supports_nowrite(fake_cmsgen_no_maxtime) is True
+    assert cmsgen_supports_maxtime(fake_cmsgen_no_maxtime) is False
+    assert cmsgen_supports_maxtime(fake_cmsgen) is True
+    cnf = tmp_path / "f.cnf"
+    cnf.write_text("p cnf 3 1\n1 2 3 0\n")
+    r = cmsgen_run(str(cnf), fake_cmsgen_no_maxtime, 3000, str(tmp_path), write=False)
+    assert r["n_samples"] == 3000 and r["count_exact"] is False
 
 
 def test_cmsgen_run_missing_binary_is_an_error_row_not_a_crash(tmp_path):

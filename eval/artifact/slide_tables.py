@@ -22,7 +22,7 @@ import sys
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
 from eval.artifact.paper_tables import (cms_family, prop_rates,  # noqa: E402
-                               rival_family)
+                               rival_family, stage_encoders)
 
 # (stem, human label) in the order they should appear
 CMS_STAGES = [
@@ -58,13 +58,13 @@ def fmt(x, suffix=r"$\times$"):
     return f"${x:,.1f}$" + suffix
 
 
-def cms_stage(d, stem):
-    """Thin adapter over paper_tables.cms_family — the slide's `gm` IS the paper's headline."""
-    v = cms_family(d, stem)
-    if v:
-        v["vac"] = v["has_vac"]
-        v["gm_novac"] = v["gm"]            # the paper's `gm` already applies every exclusion
-    return v
+def cms_stage(d, stem, enc):
+    """Thin adapter over paper_tables.cms_family — the slide's `gm` IS the paper's headline.
+
+    Keyed by (family, encoder) exactly as the paper is: there is no best-of-encoders rule to
+    reproduce, because selecting the encoder by the published ratio would let CMSGen's number
+    choose which of our runs the deck shows."""
+    return cms_family(d, stem, enc)     # the paper's `gm` already applies every exclusion
 
 
 def rival_stage(d, stem, key):
@@ -82,7 +82,8 @@ def main():
     ap.add_argument("--out", required=True)
     args = ap.parse_args()
 
-    cms = {s: cms_stage(args.cmsgen, s) for s, _, _ in CMS_STAGES}
+    fam_encs = [(s, e) for s, _, _ in CMS_STAGES for e in stage_encoders(args.cmsgen, s)]
+    cms = {(s, e): cms_stage(args.cmsgen, s, e) for s, e in fam_encs}
     riv = {s: rival_stage(args.rivals, s, k) for s, k, _, _ in RIVAL_STAGES}
     payload = next((json.load(open(os.path.join(args.cmsgen, f"{s}.json")))
                     for s, _, _ in CMS_STAGES
@@ -91,7 +92,9 @@ def main():
     cpu = payload.get("cpu") or {}
     cpu_s = f"{cpu.get('model', 'not recorded')}"
     total_cells = sum(v["cells"] for v in cms.values() if v)
-    total_inst = sum(v["inst"] for v in cms.values() if v)
+    # `inst` is a per-STAGE count and would be double-counted by a sum over encoders
+    total_inst = sum(next(v for (st, _e), v in cms.items() if st == stem and v)["inst"]
+                     for stem in {st for (st, _e), v in cms.items() if v})
     n_skip = sum(v["skipped"] for v in cms.values() if v)
     n_err = sum(v["errors"] for v in cms.values() if v)
 
@@ -103,34 +106,36 @@ def main():
     # ---------------------------------------------------------------- frame 1: vs CMSGen
     a(r"\begin{frame}{Appendix: every CMSGen family measured on the L4}")
     a(r"  \centering \scriptsize")
-    a(r"  \begin{tabular}{@{}llrrrrrr@{}}")
+    a(r"  \begin{tabular}{@{}lllrrrrrr@{}}")
     a(r"    \toprule")
-    a(r"    family & targets & inst & \textbf{GPAP$/$CMSGen} & wins & C$=$0 & G$=$0 & both \\")
+    a(r"    family & targets & enc & inst & \textbf{GPAP$/$CMSGen} & wins & C$=$0 & G$=$0 "
+      r"& both \\")
     a(r"    \midrule")
     # A stage that ran out of budget mid-family must not look like a complete one. The family's
     # own maximum instance count is the expected size; anything short of it is marked.
     expected = {}
-    for stem, _, _ in CMS_STAGES:
-        v = cms.get(stem)
+    for (stem, _e), v in cms.items():
         if v:
             fam = stem.split("-")[0]
             expected[fam] = max(expected.get(fam, 0), v["inst"])
     partial = []
     for stem, label, tgt in CMS_STAGES:
-        v = cms.get(stem)
-        if not v:
-            continue
-        tgtx = r"\keyw{rare}" if tgt == "rare" else tgt
-        exp = expected.get(stem.split("-")[0], v["inst"])
-        mark = ""
-        if v["inst"] < exp:
-            mark = r"$^{\dagger}$"
-            partial.append(f"{stem} ({v['inst']}/{exp})")
-        g = fmt(v["gm"])
-        if v["gm"] and v["n_gm"] < 3:
-            g += r"$^{\ddagger}$"
-        a(f"    {label} & {tgtx} & {v['inst']}{mark} & {g} & "
-          f"{v['wins']}/{v['n']} & {v['inf']} & {v['gpap0']} & {v['both0']} \\\\")
+        for enc in stage_encoders(args.cmsgen, stem):
+            v = cms.get((stem, enc))
+            if not v:
+                continue
+            tgtx = r"\keyw{rare}" if tgt == "rare" else tgt
+            exp = expected.get(stem.split("-")[0], v["inst"])
+            mark = ""
+            if v["inst"] < exp:
+                mark = r"$^{\dagger}$"
+                partial.append(f"{stem} ({v['inst']}/{exp})")
+            g = fmt(v["gm"])
+            if v["gm"] and v["n_gm"] < 3:
+                g += r"$^{\ddagger}$"
+            a(f"    {label} & {tgtx} & {(enc or '---').replace('_', chr(92) + '_')} & "
+              f"{v['inst']}{mark} & {g} & "
+              f"{v['wins']}/{v['n']} & {v['inf']} & {v['gpap0']} & {v['both0']} \\\\")
     a(r"    \bottomrule")
     a(r"  \end{tabular}")
     a(r"  \\[0.7em]")
@@ -153,32 +158,33 @@ def main():
     # ------------------------------------------------- frame 2: the engine, isolated
     # Placed BEFORE the rival frame: it explains where the sampling ratios in frame 1
     # come from, so the reader meets the mechanism before the next comparison.
-    prop = {s: prop_rates(args.cmsgen, s) for s, _, _ in CMS_STAGES}
+    prop = {(s, e): prop_rates(args.cmsgen, s, e) for s, e in fam_encs}
     if any(prop.values()):
         a(r"\begin{frame}{Appendix: the engine, isolated from the sampler}")
         a(r"  \centering \scriptsize")
-        a(r"  \begin{tabular}{@{}llrrrrrr@{}}")
+        a(r"  \begin{tabular}{@{}lllrrrrrr@{}}")
         a(r"    \toprule")
-        a(r"    & & & \multicolumn{2}{c}{implications$/$s} & "
+        a(r"    & & & & \multicolumn{2}{c}{implications$/$s} & "
           r"\multicolumn{2}{c}{implications$/$sample} & \textbf{sampling} \\")
-        a(r"    \cmidrule(lr){4-5}\cmidrule(lr){6-7}\cmidrule(lr){8-8}")
-        a(r"    family & targets & $n$ & GPAP & CMSGen & GPAP & CMSGen "
+        a(r"    \cmidrule(lr){5-6}\cmidrule(lr){7-8}\cmidrule(lr){9-9}")
+        a(r"    family & targets & enc & $n$ & GPAP & CMSGen & GPAP & CMSGen "
           r"& \textbf{GPAP$/$CMSGen} \\")
         a(r"    \midrule")
         for stem, label, tgt in CMS_STAGES:
-            v = prop.get(stem)
-            if not v:
-                continue
-            tgtx = r"\keyw{rare}" if tgt == "rare" else tgt
-            # The published sampling ratio, taken from the SAME source as the first appendix
-            # frame — so the two tables cannot disagree. Read across the row: a flat engine
-            # advantage, divided by how much propagation each sample wastes, gives this column.
-            cv = cms.get(stem)
-            net = fmt(cv["gm"]) if cv and cv.get("gm") else "---"
-            a(f"    {label} & {tgtx} & {v['n']} & "
-              f"${v['gpap'] / 1e9:.2f}\\!\\times\\!10^{{9}}$ & "
-              f"${v['cms'] / 1e6:.2f}\\!\\times\\!10^{{6}}$ & "
-              f"{v['gper']:,.0f} & {v['cper']:,.0f} & \\textbf{{{net}}} \\\\")
+            for enc in stage_encoders(args.cmsgen, stem):
+                v = prop.get((stem, enc))
+                if not v:
+                    continue
+                tgtx = r"\keyw{rare}" if tgt == "rare" else tgt
+                # The published sampling ratio, taken from the SAME source as the first appendix
+                # frame — so the two tables cannot disagree. Read across the row: a flat engine
+                # advantage, divided by how much propagation each sample wastes, gives this one.
+                cv = cms.get((stem, enc))
+                net = fmt(cv["gm"]) if cv and cv.get("gm") else "---"
+                a(f"    {label} & {tgtx} & {(enc or '---').replace('_', chr(92) + '_')} & "
+                  f"{v['n']} & ${v['gpap'] / 1e9:.2f}\\!\\times\\!10^{{9}}$ & "
+                  f"${v['cms'] / 1e6:.2f}\\!\\times\\!10^{{6}}$ & "
+                  f"{v['gper']:,.0f} & {v['cper']:,.0f} & \\textbf{{{net}}} \\\\")
         a(r"    \bottomrule")
         a(r"  \end{tabular}")
         a(r"  \\[0.7em]")
@@ -288,9 +294,9 @@ def main():
     with open(args.out, "w") as fh:
         fh.write("\n".join(L) + "\n")
     print(f"wrote {args.out}  ({len(L)} lines)")
-    for stem, v in cms.items():
+    for (stem, enc), v in cms.items():
         if v:
-            print(f"  {stem:<20} {v['inst']:>3} inst  gm={fmt(v['gm'])}  novac={fmt(v['gm_novac'])}"
+            print(f"  {stem + '/' + (enc or '-'):<28} {v['inst']:>3} inst  gm={fmt(v['gm'])}"
                   f"  wins={v['wins']}/{v['n']}  cmsgen-zero={v['inf']}")
 
 

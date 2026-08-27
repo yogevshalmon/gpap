@@ -497,10 +497,16 @@ def write_summary(stages, out_dir, src_dir):
         n_err = sum(1 for r in allr if r.get("error"))
         encs = payload.get("encoders") or []
         gm_row = _gm([r.get("ratio") for r in rows])
+        # One row per instance, chosen by OUR rate — the configuration a user would ship, and
+        # the same rule fig_vs_cmsgen uses. Never by `ratio`: that is the published statistic,
+        # so keying the argmax on it lets CMSGen's number pick which of our runs is reported
+        # (measured: 1.24-1.33x on the sequential families). The paper's tables go further and
+        # report each encoder as its own row, selecting nothing — see paper_tables.select_cells;
+        # this summary keeps a per-instance view because the figures are per-instance.
         best = {}
         for r in rows:
             k = r["name"]
-            if k not in best or (r.get("ratio") or 0) > (best[k].get("ratio") or 0):
+            if k not in best or (r.get("gpap_sps") or 0) > (best[k].get("gpap_sps") or 0):
                 best[k] = r
         gm = _gm([r.get("ratio") for r in best.values()])
         # `clean` = the paper's rule: drop vacuous pins AND cells that sampled without searching

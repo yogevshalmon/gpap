@@ -22,10 +22,20 @@ comparison can be made on equal terms:
                   (SATSolver::get_sum_propagations/decisions/conflicts) — the CPU numbers that
                   GPAP's impl/s and dec/s columns are compared against.
 
+  --maxtime N     Stop sampling after N seconds and exit NORMALLY through the same code path a
+                  completed run takes, so the final `c gpap-stats ... final=1` line is printed
+                  with an EXACT sample count. Without it a harness enforcing a per-instance time
+                  budget has to kill the process, and everything sampled since the last
+                  --statsevery line is lost: MEASURED on the 2026-08-23 L4 campaign, all 174
+                  killed CMSGen runs reported a count that was an exact multiple of 1000 (the
+                  cadence), 81 of them 0 — i.e. "CMSGen sampled nothing" really meant "CMSGen
+                  sampled fewer than 1000". The budget is armed per solve() call (CMS resets
+                  conf.maxTime on return) and measures the SAMPLING loop, not parsing.
+
 Apply with:  git apply /path/to/cmsgen_gpap_eval.patch   (scripts/build_cmsgen.sh does it)
 
 diff --git a/src/main.cpp b/src/main.cpp
-index b10e6ad..dca797d 100644
+index b10e6ad..fa1e503 100644
 --- a/src/main.cpp
 +++ b/src/main.cpp
 @@ -20,6 +20,7 @@ OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN
@@ -36,7 +46,7 @@ index b10e6ad..dca797d 100644
  #include <ctime>
  #include <cstring>
  #include <errno.h>
-@@ -209,20 +210,33 @@ void Main::add_supported_options() {
+@@ -209,20 +210,40 @@ void Main::add_supported_options() {
      program.add_argument("--samplefile")
          .action([&](const auto& a) {resultFilename = a;})
          .help("Write sample(s) to this file");
@@ -50,6 +60,13 @@ index b10e6ad..dca797d 100644
 +        .default_value(1000)
 +        .help("Print a machine-parseable 'c gpap-stats' line (cumulative samples/propagations/"
 +              "decisions/conflicts + elapsed) every N samples; 0 = only at the end");
++    program.add_argument("--maxtime")
++        .action([&](const auto& a) {max_time_s = std::atof(a.c_str());})
++        .default_value(0.0)
++        .help("Stop sampling after N seconds and exit NORMALLY, printing the final "
++              "'c gpap-stats ... final=1' line; 0 = no limit. Without it a harness enforcing a "
++              "time budget must kill the process, and the last --statsevery lines' worth of "
++              "samples are lost from the count");
      program.add_argument("file").remaining().help("input CNF file");
  }
  /* clang-format on */
@@ -79,13 +96,15 @@ index b10e6ad..dca797d 100644
      }
      conf.polarity_mode = PolarityMode::polarmode_weighted;
      conf.restartType = Restart::fixed;
-@@ -303,8 +317,12 @@ int Main::solve() {
+@@ -303,8 +324,14 @@ int Main::solve() {
  
      lbool ret = multi_solutions();
      //printResultFunc(&cout, false, ret);
 -    assert(resultfile);
 -    printResultFunc(resultfile, true, ret);
-+    if (!nowrite) {
++    //l_Undef = the --maxtime deadline stopped the loop. printResultFunc asserts a decided
++    //result, and there is no last sample to write in that case, so skip it.
++    if (!nowrite && ret != l_Undef) {
 +        assert(resultfile);
 +        printResultFunc(resultfile, true, ret);
 +    } else if (ret == l_False) {
@@ -94,14 +113,17 @@ index b10e6ad..dca797d 100644
      if (ret == l_True) {
          cout << "c Finished generating all " << max_nr_of_solutions << " samples" << endl;
      }
-@@ -313,8 +331,28 @@ int Main::solve() {
+@@ -313,17 +340,64 @@ int Main::solve() {
      return correctReturnValue(ret);
  }
  
-+void Main::print_gpap_stats(uint64_t n_samples, double wall_s)
++void Main::print_gpap_stats(uint64_t n_samples, double wall_s, bool final_line)
 +{
 +    //One machine-parseable line, flushed (endl) so a harness that KILLS this process on its
-+    //time budget still sees every line printed before the kill.
++    //time budget still sees every line printed before the kill. `final=1` marks the line
++    //emitted after the sampling loop: only that one carries an EXACT sample count, so a
++    //harness can tell "CMSGen finished/stopped cleanly with n samples" from "CMSGen was killed
++    //somewhere after its n-th cadence line" instead of silently publishing a floored count.
 +    cout
 +    << "c gpap-stats"
 +    << " samples=" << n_samples
@@ -110,6 +132,7 @@ index b10e6ad..dca797d 100644
 +    << " conflicts=" << solver->get_sum_conflicts()
 +    << " cpu_s=" << std::fixed << std::setprecision(4) << cpuTime()
 +    << " wall_s=" << std::fixed << std::setprecision(4) << wall_s
++    << " final=" << (final_line ? 1 : 0)
 +    << endl;
 +}
 +
@@ -123,14 +146,34 @@ index b10e6ad..dca797d 100644
 +    };
      unsigned long current_nr_of_solutions = 0;
      lbool ret = l_True;
++    bool hit_deadline = false;
      while(current_nr_of_solutions < max_nr_of_solutions && ret == l_True) {
-@@ -323,7 +361,13 @@ lbool Main::multi_solutions() {
-         if (ret == l_True && current_nr_of_solutions < max_nr_of_solutions) {
++        if (max_time_s > 0) {
++            const double left = max_time_s - wall();
++            if (left <= 0) { hit_deadline = true; break; }
++            //Solver::solve() resets conf.maxTime when it returns, so the budget is re-armed
++            //every iteration. This is what makes the reported count EXACT under a time budget:
++            //the solver returns l_Undef at the deadline and falls out to the final stats line
++            //below, instead of being killed between two cadence lines. (The solver compares
++            //against CPU time while this loop measures wall, so a heavily swapping host can
++            //overrun slightly — a harness should still keep a kill as a backstop.)
++            solver->set_max_time(left);
++        }
+         ret = solver->solve(NULL, only_sampling_solution);
+-        current_nr_of_solutions++;
+-        if (ret == l_True && current_nr_of_solutions < max_nr_of_solutions) {
++        if (ret != l_True) {
++            //l_Undef here can only be the deadline: no conflict budget is ever set.
++            hit_deadline = (ret == l_Undef);
++            break;                              //l_False = the formula is exhausted/unsat
++        }
++        current_nr_of_solutions++;              //count SOLUTIONS, not solve() calls
++        if (current_nr_of_solutions < max_nr_of_solutions) {
              //printResultFunc(&cout, false, ret);
              if (resultfile) printResultFunc(resultfile, true, ret);
 -            if (current_nr_of_solutions % 10 == 0) {
 +            if (stats_every && current_nr_of_solutions % stats_every == 0) {
-+                print_gpap_stats(current_nr_of_solutions, wall());
++                print_gpap_stats(current_nr_of_solutions, wall(), false);
 +            }
 +            //The every-10 console line is a flush per 10 samples: kept for the default
 +            //(file-writing) mode so stock behaviour is unchanged, suppressed in --nowrite
@@ -139,26 +182,32 @@ index b10e6ad..dca797d 100644
                  cout
                  << "c Number of samples found until now: "
                  << std::setw(6) << current_nr_of_solutions
-@@ -331,6 +375,7 @@ lbool Main::multi_solutions() {
+@@ -331,6 +405,12 @@ lbool Main::multi_solutions() {
              }
          }
      }
-+    print_gpap_stats(current_nr_of_solutions, wall());
++    print_gpap_stats(current_nr_of_solutions, wall(), true);
++    if (hit_deadline) {
++        cout << "c gpap-maxtime reached after " << std::fixed << std::setprecision(4)
++             << wall() << "s" << endl;
++        return l_Undef;
++    }
      return ret;
  }
  
 diff --git a/src/main.h b/src/main.h
-index 279a96b..375736d 100644
+index 279a96b..4d9426e 100644
 --- a/src/main.h
 +++ b/src/main.h
-@@ -93,6 +93,11 @@ class Main: public MainCommon
+@@ -93,6 +93,12 @@ class Main: public MainCommon
          string fileToRead;
          std::ofstream* resultfile = NULL;
  
 +        //GPAP eval harness (see gpap scripts/cmsgen_gpap_eval.patch)
 +        bool nowrite = false;             //--nowrite: generate samples, emit none
 +        uint32_t stats_every = 1000;      //--statsevery: 'c gpap-stats' line cadence
-+        void print_gpap_stats(uint64_t n_samples, double wall_s);
++        double max_time_s = 0.0;          //--maxtime: sampling budget in seconds, 0 = unlimited
++        void print_gpap_stats(uint64_t n_samples, double wall_s, bool final_line);
 +
          //Drat checker
          bool clause_ID_needed = false;

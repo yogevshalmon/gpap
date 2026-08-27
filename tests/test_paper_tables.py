@@ -11,11 +11,13 @@ diff rather than a silently different geomean months later.
 import json
 import os
 import sys
+from pathlib import Path
 
 import pytest
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-from eval.artifact.paper_tables import cms_family, prop_rates, rival_family, zero_search  # noqa: E402
+from eval.artifact.paper_tables import (cms_family, encoders_in, prop_rates,  # noqa: E402
+                                        rival_family, zero_search)
 
 
 def row(name, enc="tseitin", *, models=1000, cms=1000, sps=1e6, cms_sps=1e4,
@@ -52,7 +54,7 @@ def test_zero_ledger_is_symmetric_and_sums(tmp_path):
         row("ourzero.bench", models=0, sps=0),              # WE are silent  -> our loss
         row("bothzero.bench", models=0, sps=0, cms=0, cms_sps=0),
     ])
-    v = cms_family(d, "s")
+    v = cms_family(d, "s", "tseitin")
     assert (v["inf"], v["gpap0"], v["both0"]) == (1, 1, 1)
     assert v["gpap0_names"] == ["ourzero"] and v["both0_names"] == ["bothzero"]
     # the ledger must balance: geomean instances + each zero bucket == instance count
@@ -64,7 +66,7 @@ def test_zero_ledger_is_symmetric_and_sums(tmp_path):
 def test_gpap_zero_is_not_silently_a_win(tmp_path):
     """A stage where we fail everywhere must not report a flattering geomean."""
     d = stage(tmp_path, "s", [row(f"i{i}.bench", models=0, sps=0) for i in range(4)])
-    v = cms_family(d, "s")
+    v = cms_family(d, "s", "tseitin")
     assert v["gpap0"] == 4 and v["wins"] == 0 and v["gm"] is None
 
 
@@ -77,24 +79,52 @@ def test_zero_search_detected_and_excluded(tmp_path):
     free = row("free.bench", sps=1e9, dec=0, impl=0)        # 100,000x, and entirely degenerate
     assert zero_search(free) and not zero_search(row("ok.bench"))
     d = stage(tmp_path, "s", [free] + [row(f"i{i}.bench") for i in range(3)])
-    v = cms_family(d, "s")
+    v = cms_family(d, "s", "tseitin")
     assert v["free"] == 1 and v["free_names"] == ["free"]
     assert v["gm"] == pytest.approx(100.0)                   # the three honest cells only
     assert v["gm_withfree"] > v["gm"]                        # and we report what it would inflate to
 
 
-def test_best_encoder_rule_picks_the_degenerate_cell(tmp_path):
-    """Regression for the mechanism, not just the symptom: on EPFL `ctrl` the Tseitin encoding
-    samples at 2.0M/s with succ 0.07 while ABC collapses the output cone to succ 1.0 at 240M/s,
-    so selecting the best encoder per instance HANDS the headline the zero-search cell."""
+def test_encoders_are_separate_rows_and_neither_selects_the_other(tmp_path):
+    """No best-of-encoders rule. It used to pick, per instance, the encoder with the highest
+    `ratio` — making the published statistic its own argmax key, so CMSGen's number chose which
+    of our runs was reported (measured: 1.24-1.33x on the sequential families). It also actively
+    preferred degenerate cells: on EPFL `ctrl` Tseitin samples at 2.0M/s with succ 0.07 while ABC
+    collapses the output cone to succ 1.0 at 240M/s with no search at all, and the argmax took
+    the second. Each encoder is now its own row, screened on its own merits."""
     d = stage(tmp_path, "s", [
         row("ctrl.aig", "tseitin", sps=2e6),
         row("ctrl.aig", "abc:fast", sps=2.4e8, dec=0, impl=0),
         row("a.aig"), row("b.aig"), row("c.aig"),
+        row("a.aig", "abc:fast"), row("b.aig", "abc:fast"), row("c.aig", "abc:fast"),
     ])
-    v = cms_family(d, "s")
-    assert v["free"] == 1, "the selected cell for ctrl must be recognised as zero-search"
-    assert v["gm"] == pytest.approx(100.0)
+    assert encoders_in(json.loads((Path(d) / "s.json").read_text())) == ["tseitin", "abc:fast"]
+    ts, abc = cms_family(d, "s", "tseitin"), cms_family(d, "s", "abc:fast")
+    assert ts["free"] == 0 and ts["n_gm"] == 4        # tseitin's ctrl really does search
+    assert abc["free"] == 1 and abc["n_gm"] == 3      # abc's ctrl is the free hypercube
+    # tseitin keeps its ctrl (ratio 200 against the others' 100); abc drops its degenerate one
+    assert ts["gm"] == pytest.approx((200 * 100 ** 3) ** 0.25)
+    assert abc["gm"] == pytest.approx(100.0)
+
+
+def test_every_instance_is_counted_exactly_once(tmp_path):
+    """`inst` = n_gm + CMSGen=0 + GPAP=0 + both=0 + no-search + vacuous, printed under Table 1.
+    It was FALSE on 6 of 7 families: the degenerate cells were dropped from the geomean but left
+    inside `inst` and inside `wins`, so a reader adding the columns up came out short."""
+    d = stage(tmp_path, "seq-c25-rare", [
+        row("a.bench"), row("b.bench"),                       # 2 in the geomean
+        row("c.bench", cms=0, cms_sps=0),                     # CMSGen=0
+        row("d.bench", models=0, sps=0),                      # GPAP=0
+        row("e.bench", models=0, sps=0, cms=0, cms_sps=0),    # both=0
+        row("f.bench", dec=0, impl=0),                        # no-search
+        row("b02.bench", sps=1e8),                            # vacuous pin
+    ])
+    v = cms_family(d, "seq-c25-rare", "tseitin")
+    assert v["inst"] == 7
+    assert v["n_gm"] + v["inf"] + v["gpap0"] + v["both0"] + v["free"] + v["vac"] == v["inst"]
+    # and the win count is over the same rows, not over the pre-screen set
+    assert v["n"] == v["n_gm"] + v["inf"] + v["gpap0"] == 4
+    assert v["wins"] == 3                                     # a, b, and the CMSGen-zero
 
 
 # --------------------------------------------------------------------- the propagation identity
@@ -105,7 +135,7 @@ def test_propagation_identity_closes(tmp_path):
     rows = [row(f"i{i}.bench", sps=10.0 ** (5 + i), impl=1e9, cms_impl=2e6 * (i + 1))
             for i in range(4)]
     d = stage(tmp_path, "s", rows)
-    p, v = prop_rates(d, "s"), cms_family(d, "s")
+    p, v = prop_rates(d, "s", "tseitin"), cms_family(d, "s", "tseitin")
     assert abs((p["ratio"] / p["work"]) / v["gm"] - 1.0) < 0.01
 
 
@@ -114,7 +144,7 @@ def test_propagation_columns_share_one_row_set(tmp_path):
     implications ratio while being absent from work-per-sample."""
     d = stage(tmp_path, "s", [row(f"i{i}.bench") for i in range(3)]
               + [row("bar.aig", models=0, sps=0, impl=1e9)])
-    p, v = prop_rates(d, "s"), cms_family(d, "s")
+    p, v = prop_rates(d, "s", "tseitin"), cms_family(d, "s", "tseitin")
     assert p["n"] == 3, "the zero-emitting instance has no work-per-sample and must be excluded"
     assert abs((p["ratio"] / p["work"]) / v["gm"] - 1.0) < 0.01
 
@@ -159,10 +189,10 @@ def test_rival_retry_row_replaces_rather_than_appends(tmp_path):
 def test_vacuous_pins_excluded_only_where_present(tmp_path):
     d = stage(tmp_path, "s", [row("b02.bench", sps=1e8)]          # tautological pin, huge ratio
               + [row(f"i{i}.bench") for i in range(3)])
-    v = cms_family(d, "s")
+    v = cms_family(d, "s", "tseitin")
     assert v["has_vac"] and v["gm"] == pytest.approx(100.0)
     d2 = stage(tmp_path, "t", [row(f"i{i}.bench") for i in range(3)])
-    assert cms_family(d2, "t")["has_vac"] is False
+    assert cms_family(d2, "t", "tseitin")["has_vac"] is False
 
 
 # ------------------------------------------------- the e2e column: who is charged for setup
@@ -187,7 +217,7 @@ def test_e2e_column_charges_gpap_for_its_own_preprocessing(tmp_path):
     other; `gm_e2e` must exist beside `gm` and must be lower by exactly the preparation share."""
     d = stage(tmp_path, "seq-c25-rare",
               [timed_row("a", pre=0.5), timed_row("b", pre=0.5)])
-    v = cms_family(d, "seq-c25-rare")
+    v = cms_family(d, "seq-c25-rare", "tseitin")
     assert v["gm"] == pytest.approx(100.0)          # 1e6 / 1e4, setup not charged
     assert v["gm_e2e"] == pytest.approx(50.0)       # half the wall was preparation
     assert v["pre_frac"] == pytest.approx(0.5)
@@ -199,7 +229,7 @@ def test_pre_frac_is_a_median_not_an_average_of_ratios(tmp_path):
     reported preparation share — the column is a median over cells, like every other spread
     number in these tables."""
     rows = [timed_row("a", pre=0.1), timed_row("b", pre=0.1), timed_row("c", pre=0.9)]
-    v = cms_family(stage(tmp_path, "seq-c25-rare", rows), "seq-c25-rare")
+    v = cms_family(stage(tmp_path, "seq-c25-rare", rows), "seq-c25-rare", "tseitin")
     assert v["pre_frac"] == pytest.approx(0.1)
 
 

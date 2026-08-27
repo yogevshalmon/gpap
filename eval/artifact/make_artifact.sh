@@ -17,7 +17,12 @@
 # second, so this works both straight after a sweep and long after the results were moved out.
 set -uo pipefail
 
-REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+# This file lives in eval/artifact/, so the repo root is TWO levels up. It was `..` — the same
+# off-by-one the eval/ reorganisation left in eleven other files, missed here because nothing
+# had run the packager since. With it wrong, $RESULTS pointed inside the repo, every dataset
+# came back "no source found", and `cd "$REPO_ROOT"` landed in eval/ so the table copies and
+# the verifier path were wrong too.
+REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 cd "$REPO_ROOT"
 PY="${PYTHON:-$REPO_ROOT/.venv/bin/python}"
 [ -x "$PY" ] || PY="$(command -v python3)"
@@ -39,18 +44,52 @@ echo "results root: $RESULTS"
 echo "output      : $OUT"
 
 # --- the data ---------------------------------------------------------------------------------
+# A CAMPAIGN is one dated directory holding every arm measured together (the layout since
+# 2026-08-23). When one is given — or found — it is the ONLY source: mixing arms across campaigns
+# is how a table ends up describing two different protocols at once.
+#
+# ⚠️ This used to prefer `$PRIOR`, the most recent already-archived copy, ahead of any fresh run
+# directory. With an August archive on disk that silently packaged 20-day-old data for EVERY arm
+# — including rival rows measured under the old fixed-5-GiB batch grant — while printing `[ok]`
+# for each one. A packager that ships the wrong data quietly is worse than one that fails.
+CAMPAIGN="${GPAP_CAMPAIGN:-}"
+if [ -z "$CAMPAIGN" ]; then
+    CAMPAIGN="$(ls -d "$RESULTS"/l4_campaign_* "$REPO_ROOT"/.experiments/l4_campaign_* \
+                2>/dev/null | sort | tail -1)"
+fi
+[ -n "$CAMPAIGN" ] && echo "campaign    : $CAMPAIGN" || echo "campaign    : none found (legacy layout)"
+
+# How stale a source may be before the packager refuses. A sweep is re-run precisely because the
+# protocol changed, so silently shipping the previous one defeats the point.
+MAX_AGE_DAYS="${GPAP_ARTIFACT_MAX_AGE_DAYS:-14}"
+STALE=0
+# Datasets whose age is the POINT: a prior campaign kept for comparison, or a reference sweep on
+# another card. Named explicitly rather than exempted by a blanket flag, so adding a stale arm
+# stays a deliberate act.
+ARCHIVAL=" uniformity_prior_campaign gpap_vs_cmsgen_4080_reference "
+
 # find_src <dest-name> <candidate...> -> first candidate that exists
 copy() {  # copy <dest-name> <candidate-src>...
     local dest="$1"; shift
     local src=""
-    for c in "$@"; do [ -e "$c" ] && { src="$c"; break; }; done
+    # A campaign directory always wins, whatever the caller listed.
+    if [ -n "$CAMPAIGN" ] && [ -e "$CAMPAIGN/$dest" ]; then
+        src="$CAMPAIGN/$dest"
+    else
+        for c in "$@"; do [ -e "$c" ] && { src="$c"; break; }; done
+    fi
     [ -n "$src" ] || { echo "  [skip] $dest (no source found)"; return; }
+    local age=$(( ( $(date +%s) - $(stat -c %Y "$src" 2>/dev/null || echo 0) ) / 86400 ))
+    if [ "$age" -gt "$MAX_AGE_DAYS" ] && [[ "$ARCHIVAL" != *" $dest "* ]]; then
+        echo "  [STALE] $dest  <- $src  (${age}d old, limit ${MAX_AGE_DAYS}d)"
+        STALE=$((STALE + 1))
+    fi
     mkdir -p "$STAGE/$dest"
     # JSON + the summary markdown/plots; never the multi-GB converted CNFs
     rsync -a --exclude 'cnf/' --exclude 'hts_cnf/' --exclude 'stage/' --exclude '*.cnf' \
           --exclude '*.bench' "$src"/ "$STAGE/$dest"/ 2>/dev/null \
       || cp -r "$src"/. "$STAGE/$dest"/
-    echo "  [ok]   $dest  <- $src"
+    echo "  [ok]   $dest  <- $src  (${age}d old)"
 }
 # Prefer the most recent already-archived copy, since raw run dirs get cleaned.
 PRIOR="$(ls -d "$RESULTS"/gpap_experiments_l4_* 2>/dev/null | grep -v '\.tar\.gz$' | sort | tail -1)"
@@ -63,13 +102,25 @@ copy uniformity_l4              "$PRIOR/uniformity_l4"              "$REPO_ROOT/
 copy uniformity_prior_campaign  "$PRIOR/uniformity_prior_campaign"  "$REPO_ROOT/.experiments/fuzz"
 copy gpap_vs_cmsgen_4080_reference "$PRIOR/gpap_vs_cmsgen_4080_reference" \
      "$REPO_ROOT/.experiments/full_eval/nvidia-geforce-rtx-4080-laptop-gpu"
+# The WAVE-vs-SCALAR kernel A/B (docs/paper/KERNEL_AB.md + kernel_ab.tex are generated from it).
+# It had a paper table but was never packaged, so the archive could not regenerate that table.
+copy kernel_ab_l4               "$PRIOR/kernel_ab_l4"               "$REPO_ROOT/.experiments/kernel_ab_l4"
+
 # The uniformity-PRICE arm: the same matrix with --allow-soft (eval/colab/colab_cmsgen_soft_l4.sh).
 copy gpap_vs_cmsgen_l4_softarm  "${SOFT_RUN_DIR:-$RESULTS/cmsgen_soft_l4}" \
      "$PRIOR/gpap_vs_cmsgen_l4_softarm" "$REPO_ROOT/.experiments/full_eval/nvidia-l4-soft"
 
+if [ "$STALE" -gt 0 ]; then
+    echo
+    echo "[FATAL] $STALE dataset(s) older than ${MAX_AGE_DAYS} days — refusing to package." >&2
+    echo "        Point GPAP_CAMPAIGN at the campaign you mean, or raise" >&2
+    echo "        GPAP_ARTIFACT_MAX_AGE_DAYS if the age is genuinely intended." >&2
+    exit 1
+fi
+
 # --- generated tables -------------------------------------------------------------------------
 mkdir -p "$STAGE/tables"
-for f in RESULTS.md tables.tex SOFT_PRICE.md soft_price.tex; do
+for f in RESULTS.md tables.tex SOFT_PRICE.md soft_price.tex KERNEL_AB.md kernel_ab.tex; do
     cp -f "$REPO_ROOT/docs/paper/$f" "$STAGE/tables/" 2>/dev/null || true
 done
 cp -f "$REPO_ROOT/docs/findings/L4_EVAL_FINDINGS.md" "$STAGE/" 2>/dev/null || true
@@ -108,6 +159,7 @@ VERDICT="$(tail -1 "$STAGE/VERIFICATION.txt")"
   echo '| `uniformity_l4/` | exact-oracle uniformity campaign + the `soft` throughput price |'
   echo '| `uniformity_prior_campaign/` | the earlier uniformity rounds (4080) |'
   echo '| `gpap_vs_cmsgen_4080_reference/` | the RTX 4080 laptop reference sweep |'
+  echo '| `kernel_ab_l4/` | WAVE vs SCALAR propagate, forced-kernel A/B at pinned K |'
   echo '| `tables/` | the paper tables, generated from the JSONs above |'
   echo
   echo "## Regenerating every table from this data"
@@ -120,6 +172,8 @@ VERDICT="$(tail -1 "$STAGE/VERIFICATION.txt")"
   echo "    --out-md RESULTS.md --out-tex tables.tex"
   echo "eval/artifact/soft_price_tables.py --safe gpap_vs_cmsgen_l4 --soft gpap_vs_cmsgen_l4_softarm \\"
   echo "    --out-md SOFT_PRICE.md --out-tex soft_price.tex"
+  echo "eval/artifact/kernel_ab_tables.py kernel_ab_l4/kernel_ab.json \\"
+  echo "    --out-md KERNEL_AB.md --out-tex kernel_ab.tex"
   echo "eval/artifact/verify_artifact.py gpap_vs_cmsgen_l4 --rivals gpap_vs_gpu_rivals_l4"
   echo '```'
   echo
