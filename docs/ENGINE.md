@@ -127,7 +127,7 @@ flowchart LR
     end
     subgraph WAVE["_wave_propagate  (W lanes, atomics)"]
       direction TB
-      W1["pop ≤W literals<br/>flatten their occ segments<br/>(cumsum + one-hot schedule)"] --> W2["W clause updates / step:<br/>atomic_add(−(1+(¬l≪SHIFT)))"]
+      W1["pop ≤W literals<br/>flatten their occ segments<br/>(cumsum + shuffle lower_bound)"] --> W2["W clause updates / step:<br/>atomic_add(−(1+(¬l≪SHIFT)))"]
       W2 --> W3{"old sat_count<br/>(per lane)"}
       W3 -->|==1| WC[conflict this lane]
       W3 -->|==2| W4["forced = (old_sum−¬l) AND MASK<br/>atomic_or bit → old word = dup/contra<br/>cumsum-compact survivors to trail"]
@@ -203,13 +203,17 @@ flowchart TD
     C -->|no, DRAM-saturated| E["SCALAR<br/>num_warps = 1"]
 ```
 
-- **Auto-dispatch** trades one number: below ~30× the GPU's resident-warp count the rows can't fill
-  the memory pipeline on their own, so WAVE's extra in-flight requests win; above it, scalar's
-  zero-atomic path is already at the ceiling. The threshold is device-derived (`resident =
-  SM_count × max_threads_per_SM / 32`) so it transfers across GPUs.
-- **Lane width `W`** (`GPAP_WAVE_W`, default 32): `W>32` spreads the wave tensors over `W/32` **real**
-  warps (`num_warps`), but the cross-warp reduction sync per step dominated — measured worse — so
-  W=32 / one warp is the default.
+- **Auto-dispatch keys off `M`, the CLAUSE COUNT** (`gpap_dispatch_wave(M, batch, device)` in
+  `cpp/src/calibrate.cpp`): WAVE when `M >= 2048`, or when `batch <= resident_warps` (too few rows
+  for scalar to fill the card either way); scalar otherwise. ⚠️ It used to read
+  `batch < 30× resident_warps`, which was a PROXY for M and broke when the batch-sizing collapse
+  put mid-size formulas on the batch cap — **do not reintroduce a batch-only rule** (CLAUDE.md
+  carries the measurement). The threshold predates the 2026-08-27 shuffle schedule, which sped up
+  WAVE only, so the true crossover has moved DOWN — re-derive it with `eval/kernel_ab.py`.
+- **Lane width `W`**: an AOT constant (`WAVE_W` in `cpp/tools/build_kernels.py`, default 32),
+  power-of-two only — NOT a runtime env knob. `W>32` over `W/32` **real** warps (`num_warps`) lost
+  to cross-warp reduction sync, and W=64 as ILP inside one warp measured 0.918× — both dead ends
+  are recorded in docs/findings/WAVE_SHUFFLE_FINDINGS.md.
 
 ---
 

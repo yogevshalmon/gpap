@@ -310,8 +310,17 @@ kernels are the only path — the oracle is `tests/reference_bcp.py`).
   1.01× below 2k clauses → 1.33× (2k–20k) → 1.48× (20k–100k) → 1.64× (>100k)**; the rule picked
   the faster kernel on 77/93, every miss in the M≈0.5–9k tie band. docs/findings/KERNEL_AB_FINDINGS.md.
   Session total vs the pre-wave baseline: b14 5.7×, b12 2.8×, b04 1.8×, b03 1.5×. `GPAP_KERNEL=scalar|wave`
-  forces; W via `GPAP_WAVE_W` (32 best; W>32 spreads over W/32 real warps via num_warps —
-  measured 2-5× WORSE, cross-warp reduction sync dominates). The trajectory kernel's
+  forces; W is the AOT constant `WAVE_W` in `cpp/tools/build_kernels.py`, power-of-two only
+  (32 best; BOTH ways of raising it measured out — over W/32 REAL warps, and as ILP within one
+  warp). **The wave lane→segment schedule is SHUFFLE-BASED since 2026-08-27**: a `tl.gather`
+  lower_bound (`_seg_lookup`) replaced the W×W one-hot reductions, which lowered through SHARED
+  memory with barriers — the kernel now uses ZERO shared memory. **Same-K geomean 1.80× on wave
+  cells; the ~1e9 impl/s plateau moves to 1.05-2.41e9** ⇒ EVERY pre-2026-08-27 wave rate in this
+  file and in the campaigns is superseded, including the propagation-rate ground rule below.
+  `_wave_propagate` changed and scalar `_propagate` did not, so the M≈0.5-9k tie band's true
+  crossover moved DOWN — re-derive it at the next kernel_ab campaign, do not guess. Builds need
+  Triton ≥ 3.2 (`tl.gather`); runtime still `libcuda` alone.
+  docs/findings/WAVE_SHUFFLE_FINDINGS.md. The trajectory kernel's
   **decision scan** is warp-wide in WAVE only (bit-identical picks; +12-19% there; in scalar
   the bitmap made the serial scan L1-cheap and the screen LOSES; `GPAP_VSCAN=0` disables;
   SOFT path stays scalar).
@@ -565,6 +574,7 @@ Cross-GPU K-scaling: `eval/colab/colab_sampling_benchmark.py` + `notebooks/gpap_
   ISCAS-85, 5.6× seq-c25, 14.4× seq-c50, 53.7× EPFL; engine advantage 197-631× (geomean 306×). ⚠️ Every column must use the SAME rows — filtering per column
   lets an instance that propagates hard but emits nothing (EPFL `bar`) into the numerator only,
   breaking the identity by 3×. Table 3 of `eval/artifact/paper_tables.py`; figure `propagation_summary.png`.
+  ⚠️ **The impl/s magnitudes here are the PRE-shuffle-schedule engine (campaign 20260827) and are SUPERSEDED**: the 2026-08-27 wave rewrite moved the plateau to 1.05-2.41e9 on the 4080, so the engine-advantage figures are up to ~2.4× LOW. The IDENTITY and the rejection-cost split are structural and still hold — it is the numbers that must be re-measured before they are quoted.
 - **Preprocessing is INSIDE the honest rate.** `samples_per_s` is the winning config's
   steady-state throughput and excludes parse + construction + ELS + warmup + MINING (median
   **20.7%** of GPAP's end-to-end wall, mean 27.4%); `sps_e2e_total` includes them. CMSGen's rate

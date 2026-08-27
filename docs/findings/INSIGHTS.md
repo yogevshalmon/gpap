@@ -367,6 +367,7 @@ STACKED with the same-day K-calibrator retune (see the entry above), the combine
 vs the pre-wave scalar baseline at production settings: b14 695→2,726 att/s (**3.9×**), b12
 17.8k→25.9k (**1.45×**), b04 44.4k→53.8k (**1.21×**), b03 unchanged (~0.95-1.05×, saturated).
 Remaining traffic lever: clause renumbering for sector locality (≤50% headroom, measured).
+⚠️ SUPERSEDED IN PART (later entries): the CAS retry loop became the sum-trick `atomic_add`, the W×W in-warp dedup was deleted with the assignment bitmap, the K-based dispatch rule became the M-based one, and on 2026-08-27 the cumsum+one-hot lane→segment schedule became a shuffle-gather lower_bound (1.80× same-K, docs/findings/WAVE_SHUFFLE_FINDINGS.md). The 3.06×/1.31× figures are the 2026-07-13 measurement against the pre-wave scalar baseline and are kept as the record of THAT step.
 
 **Pure-PyTorch BCP is structurally latency-bound; the fused Triton kernel is the fix
 (2026-07-02).** The Python round loop pays launch+sync+`torch.unique` per BCP round (measured

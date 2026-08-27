@@ -24,7 +24,7 @@ dependencies = [
 # Triton compiles the GPU kernels AHEAD OF TIME into libgpap (scripts/build_core.sh); the
 # shipped library links libcuda alone, so nothing here is needed to RUN the engine. It ships
 # with torch on Linux/Colab, so this extra is usually already satisfied.
-build = ["triton>=3.0"]       # rebuilding cpp/kernels/*.py into cubins
+build = ["triton>=3.2"]       # rebuilding cpp/kernels/*.py into cubins (>=3.2: tl.gather)
 # `--uniformity exact` enumerates the projected solution space with a SAT solver; everything
 # else parses and runs without python-sat (the DIMACS parser is the core's — gpap.engine
 # .read_dimacs). The `.dev0` in the specifier is LOAD-BEARING: python-sat publishes only

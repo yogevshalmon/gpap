@@ -130,6 +130,39 @@ def _propagate(st_row, ab_row, trail_row, occ_off_ptr, occ_mid_ptr, occ_cls_ptr,
     return head, tail, conflict, nops
 
 @triton.jit
+def _seg_lookup(cum_v, adj_v, t_v, lanes, W: tl.constexpr):
+    """Map each lane's flattened index `t` to (segment, occ offset) for a frontier chunk.
+
+    `cum_v` is the INCLUSIVE prefix sum of the segment lengths and `adj_v = s_v - (cum_v -
+    len_v)` the per-segment offset correction, so entry `t` of segment `j` lives at occ index
+    `adj_j + t`. Returns `(seg_v, o_v)`.
+
+    The segment is `#{j: cum_j <= t}`, computed as a branchless lower_bound: log2(W) `tl.gather`
+    probes, each ONE `shfl.sync`. It replaced a W x W compare-reduce plus three one-hot gathers,
+    which Triton lowers through SHARED MEMORY with barriers (~13x the PTX instructions; the
+    kernel now uses none) — docs/findings/WAVE_SHUFFLE_FINDINGS.md.
+
+    IN RANGE by construction: an ACTIVE lane has `t < T <= cum_{f-1}`, so `seg <= f-1 <= W-1`
+    and the classic sum-of-steps-(W-1) ladder suffices; every probe index is `<= W-2` (the
+    running `seg` is `<= W-2s` entering the step-s round). Duplicate `cum` values (empty
+    segments) resolve past them, exactly as the count-of-<= did. Inactive lanes saturate at
+    `W-1` — still in range, and their result is masked off by every caller.
+
+    W must be a power of two; `tl.arange` above already rejects anything else."""
+    seg_v = lanes * 0
+    step = W // 2
+    while step >= 1:
+        # `step` is a constexpr, but triton's frontend still EMITS this loop (visit_While has no
+        # static-condition path) — the constant trip count is fully unrolled by MLIR/LLVM, which
+        # is what makes the schedule log2(W) shuffles with zero shared memory. That is an
+        # OPTIMIZER outcome, not a structural guarantee: if W or this body changes, re-dump the
+        # PTX and check for `shfl.sync` with no `.shared` / `bar.sync` before trusting the cost.
+        probe_v = tl.gather(cum_v, seg_v + (step - 1), 0)
+        seg_v += tl.where(probe_v <= t_v, step, 0)
+        step //= 2
+    return seg_v, t_v + tl.gather(adj_v, seg_v, 0)
+
+@triton.jit
 def _wave_propagate(st_row, ab_row, trail_row, occ_off_ptr, occ_mid_ptr, occ_cls_ptr,
                     head, tail, conflict, nops, TRAIL_CAP,
                     SHIFT: tl.constexpr, W: tl.constexpr):
@@ -173,31 +206,26 @@ def _wave_propagate(st_row, ab_row, trail_row, occ_off_ptr, occ_mid_ptr, occ_cls
         len_v = tl.where(lm, e_v - s_v, 0)
         cum_v = tl.cumsum(len_v, 0)                       # inclusive prefix sum
         T = tl.max(cum_v, 0)                              # total occ entries this chunk
+        adj_v = s_v - (cum_v - len_v)                     # occ offset of entry t in seg j = adj_j + t
         head += f
         nops += T
         t0 = f * 0
         while (t0 < T) & (conflict == 0):
             t_v = t0 + lanes
             act = t_v < T
-            # lane -> (segment, offset): seg = #{j: cum_j <= t}; one-hot gathers seg attrs
-            seg_v = tl.sum((cum_v[None, :] <= t_v[:, None]).to(tl.int32), 1)
-            oneh = lanes[None, :] == seg_v[:, None]
-            excl_v = tl.sum(tl.where(oneh, (cum_v - len_v)[None, :], 0), 1)
-            base_v = tl.sum(tl.where(oneh, s_v[None, :], 0), 1)
-            mneg_v = tl.sum(tl.where(oneh, neg_v[None, :], 0), 1)
-            o_v = base_v + (t_v - excl_v)
+            seg_v, o_v = _seg_lookup(cum_v, adj_v, t_v, lanes, W)
+            mneg_v = tl.gather(neg_v, seg_v, 0)
             pay_v = tl.load(occ_cls_ptr + o_v, mask=act, other=0)
             # A TAGGED (negative) payload is a BINARY entry: it IS the forced literal and there
             # is no clause word, so it goes STRAIGHT to the push block below. Reading the tag off
             # the value already loaded costs nothing; gathering this segment's occ_mid instead
-            # would be a fifth W x W one-hot reduction in the hottest loop of the engine.
+            # would be a third shuffle gather in the hottest loop of the engine.
             binm = act & (pay_v < 0)
             lngm = act & (pay_v >= 0)
             c_v = pay_v.to(tl.int64)
             # ---- ONE atomic per LONG entry: st -= 1 + (mneg << SHIFT); old value = detection
             old_v = tl.atomic_add(st_row + c_v, -(1 + (mneg_v << SHIFT)), mask=lngm)
             oldsat_v = old_v & SAT_MASK
-            stride_conf = tl.sum((lngm & (oldsat_v == 1)).to(tl.int32), 0)
             # ---- forced pushes: ONE atomic_or per literal; old word = dedup+contra.
             #      Binary lanes join the long-unit lanes here; a binary conflict IS a
             #      contradiction push (both polarities), race-free by the same L2
@@ -209,13 +237,13 @@ def _wave_propagate(st_row, ab_row, trail_row, occ_off_ptr, occ_mid_ptr, occ_cls
             bit_v = 1 << (forced_v & 31)
             oldw_v = tl.atomic_or(ab_row + (forced_v >> 5), bit_v, mask=fm)
             contra_v = fm & ((oldw_v & (1 << ((forced_v ^ 1) & 31))) != 0)
-            stride_conf += tl.sum(contra_v.to(tl.int32), 0)
+            conf_v = contra_v | (lngm & (oldsat_v == 1))   # pushed both polarities | emptied a clause
             keep = fm & ((oldw_v & bit_v) == 0) & ~contra_v
             k32 = keep.to(tl.int32)
             pos_v = tail + tl.cumsum(k32, 0) - k32
             tl.store(trail_row + pos_v, forced_v, mask=keep)
             tail += tl.sum(k32, 0)
-            conflict = conflict | (stride_conf > 0)
+            conflict = conflict | (tl.sum(conf_v.to(tl.int32), 0) > 0)
             t0 += W
     return head, tail, conflict, nops
 
@@ -329,7 +357,6 @@ def _bcp_trajectory_kernel(
     must never straddle the phase boundary: phase 1 must reach fixpoint over the support before
     any completion var is decided (else the group decides variables that propagation would have
     determined, and conflicts explode — measured 100%->0% on b07 when straddled)."""
-    SAT_MASK: tl.constexpr = (1 << SHIFT) - 1
     k = tl.program_id(0).to(tl.int64)
     if tl.load(active_ptr + k) != 0:
         st_row = st_ptr + k * M
@@ -488,16 +515,13 @@ def _clean_packed(st_row, init_ptr, trail_row, occ_off_ptr, occ_mid_ptr, occ_cls
             len_v = tl.where(lm, e_v - s_v, 0)
             cum_v = tl.cumsum(len_v, 0)
             T = tl.max(cum_v, 0)
+            adj_v = s_v - (cum_v - len_v)
             t += f
             t0 = f * 0
             while t0 < T:
                 t_v = t0 + lanes
                 act = t_v < T
-                seg_v = tl.sum((cum_v[None, :] <= t_v[:, None]).to(tl.int32), 1)
-                oneh = lanes[None, :] == seg_v[:, None]
-                excl_v = tl.sum(tl.where(oneh, (cum_v - len_v)[None, :], 0), 1)
-                base_v = tl.sum(tl.where(oneh, s_v[None, :], 0), 1)
-                o_v = base_v + (t_v - excl_v)
+                _, o_v = _seg_lookup(cum_v, adj_v, t_v, lanes, W)
                 c_v = tl.load(occ_cls_ptr + o_v, mask=act, other=0).to(tl.int64)
                 v = tl.load(init_ptr + c_v, mask=act, other=0)
                 tl.store(st_row + c_v, v, mask=act)

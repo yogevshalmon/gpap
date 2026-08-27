@@ -37,8 +37,11 @@ import triton.backends                                           # noqa: E402
 
 # Field splits the engine supports (see gpap.engine.bcp_engine.PACKED_SPLITS).
 SHIFTS = (16, 8)
-# Wavefront lane width: 32 only. W>32 spreads the wave tensors over W/32 real warps and measured
-# 2-5x WORSE (cross-warp reduction sync per step) — see docs/findings/INSIGHTS.md.
+# Wavefront lane width: 32 only, and W must be a power of two (tl.arange enforces it). BOTH
+# ways of raising it are measured out: over W/32 REAL warps (num_warps>1) it was 2-5x WORSE —
+# cross-warp reduction sync per step, docs/findings/INSIGHTS.md — and since every BCP spec below
+# pins num_warps=1, raising W here instead gives W/32 elements per lane (ILP), which measured
+# 0.918x at W=64 (docs/findings/WAVE_SHUFFLE_FINDINGS.md).
 WAVE_W = 32
 
 _PTR_I32, _PTR_I8, _PTR_I64 = "*i32:16", "*i8:16", "*i64:16"
@@ -48,6 +51,16 @@ _PTR_I32, _PTR_I8, _PTR_I64 = "*i32:16", "*i8:16", "*i64:16"
 _FIX_PTRS = [_PTR_I32, _PTR_I32, _PTR_I8, _PTR_I8, _PTR_I64] + [_PTR_I32] * 7
 _FIX_CLEAN_PTRS = _FIX_PTRS[:8] + [_PTR_I32] + _FIX_PTRS[8:]   # + init_ptr after occ_cls
 _TRAJ_PTRS = [_PTR_I32, _PTR_I32, _PTR_I8, _PTR_I8] + [_PTR_I32] * 9
+
+
+def _require_triton_gather():
+    """The WAVE schedule uses tl.gather (triton >= 3.2). Check BEFORE compiling: this script
+    overwrites cpp/src/generated/gpap_kernels.c, so failing part-way through the specializations
+    leaves the tree in a worse state than not starting."""
+    if not hasattr(triton.language, "gather"):
+        raise SystemExit(
+            f"error: triton {triton.__version__} has no tl.gather; the WAVE kernels need >= 3.2.\n"
+            f"       pip install -U 'triton>=3.2'")
 
 
 def kernel_specs():
@@ -180,6 +193,7 @@ def main() -> int:
                     help="sm arch to build for (e.g. 89). Default: the local GPU's.")
     ap.add_argument("--out", type=Path, default=REPO / "cpp" / "src" / "generated")
     args = ap.parse_args()
+    _require_triton_gather()
 
     if args.arch is None:
         target = triton.runtime.driver.active.get_current_target()
