@@ -13,6 +13,10 @@ is cheap). Three formats:
 """
 import numpy as np
 
+#: Peak host bytes one `write_dimacs` block may materialise. Blocking by bytes rather than by a
+#: fixed row count is what keeps the peak independent of the support width.
+_BLOCK_BYTES = 32 << 20
+
 
 def col_labels(cols_1based, wire_map=None):
     """Human labels for each output column: the wire name (`input@cycle`) when a `wire_map`
@@ -47,12 +51,41 @@ def write_npy(path, matrix):
 
 def write_dimacs(path, matrix, cols_1based):
     """Signed-literal lines (CMSGen convention): `+v` where the column bit is 1, `-v` where 0, `0`
-    terminated. `cols_1based` gives each column's variable number."""
+    terminated. `cols_1based` gives each column's variable number.
+
+    Each column has only TWO possible tokens (`+v` and `-v`), so both are rendered ONCE and the
+    rows become a gather over that table — no per-row Python formatting. The obvious per-row loop
+    is many times slower than the `bits` writer, which made the one tool-compatible format the
+    one nobody could afford to ask for.
+
+    The fields are space-padded to a common width so the gather has a fixed stride. That costs
+    file size, and the cost is set by the WIDEST column id, so a support mixing short and long
+    variable numbers pays more than a uniform one (the padding is whitespace, which every DIMACS
+    reader treats as a separator). Worth it here — the format is already several times the `bits`
+    one, and the alternative was a writer too slow to use. Numbers: docs/findings/CLI_DELIVERY_FINDINGS.md."""
     cols = np.asarray(cols_1based, dtype=np.int64)
+    n, S = matrix.shape
+    # tok[0, j] = "-vj", tok[1, j] = "vj", space-padded to a common width so the render is a
+    # fixed-stride byte gather.
+    w = max((len(f"-{v}") for v in cols.tolist()), default=1) + 1
+    blob = "".join(f"{sign}{v}".ljust(w) for sign in ("-", "") for v in cols.tolist())
+    table = np.frombuffer(blob.encode(), dtype=np.uint8).reshape(2, S, w)
+    tail = np.frombuffer(b"0\n", dtype=np.uint8)
+    # Block by BYTES, not rows: a fixed row count makes the peak scale with S, so a wide-support
+    # dump would allocate gigabytes where the row-at-a-time loop it replaced used O(S).
+    rows = max(1, _BLOCK_BYTES // max(1, S * w + tail.size))
+    cidx = np.arange(S)
     with open(path, "wb") as f:
-        for row in matrix:
-            lits = np.where(row.astype(bool), cols, -cols)
-            f.write((" ".join(map(str, lits.tolist())) + " 0\n").encode())
+        for lo in range(0, n, rows):
+            # `!= 0` and not the raw values: this is an INDEX into a length-2 table now, where the
+            # writer it replaced did `row.astype(bool)`. Any nonzero has always meant TRUE here,
+            # and a public writer must not start raising IndexError on a caller's 0/255 mask.
+            blk = matrix[lo:lo + rows] != 0
+            body = table[blk.astype(np.uint8), cidx]              # (rows, S, w) uint8
+            out = np.empty((body.shape[0], S * w + tail.size), dtype=np.uint8)
+            out[:, :S * w] = body.reshape(body.shape[0], S * w)
+            out[:, S * w:] = tail
+            f.write(memoryview(out))
 
 
 def write_samples(path, matrix, cols_1based, *, fmt="bits", wire_map=None, meta=None):

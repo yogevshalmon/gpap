@@ -907,9 +907,14 @@ gives ~3× fewer vars), so like-for-like write-ups must quote BOTH paper-CMSGen 
 and local-CMSGen ratios. Recurrent's "this work" row is variable-length 1–50 sampling on 8×V100;
 DEMOTIC is single V100.
 
-**`--n-time` is a delivery CONTRACT** ("when I say 200000 I want 200000"): the run samples until
+**`--n-time` is a delivery TARGET** ("when I say 200000 I want 200000"): the run samples until
 n_time models are delivered; the only outs are `--time-limit` and the zero-progress stop, both
 marked `<`. Delivered-blend rate < winner steady-state rate is exploration drag, not a bug.
+⚠️ **Not a guarantee in EITHER direction, so quote the delivered count**: the batch is the unit of
+work, so a run also OVERSHOOTS to the end of a chunk (~1e6 models for `-n 100` on a small formula
+at the cap). 2026-08-27: `--out` no longer extends the run to fill the request either — it holds
+`min(-n, --max-samples, delivered)` rows, taken off the timed run's chunks
+(docs/findings/CLI_DELIVERY_FINDINGS.md).
 
 ## Retired application directions (all three axes of the killer-app rule must be green:
 many independent sets + SHALLOW propagation + no CPU incremental shortcut)

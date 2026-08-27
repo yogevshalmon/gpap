@@ -28,6 +28,7 @@ import itertools
 import logging
 import time
 from dataclasses import dataclass, field
+from typing import NamedTuple
 
 import numpy as np
 
@@ -68,6 +69,11 @@ class MiningResult:
     #: look identical in `by_width` and mean opposite things.
     candidates: dict[int, int] = field(default_factory=dict)
     probed: dict[int, int] = field(default_factory=dict)
+    #: sweeps run per width. 1 for every width >= 2; width 1 is iterated to a FIXPOINT, so its
+    #: `candidates`/`probed` are SUMS over this many rounds and are NOT comparable to the pool
+    #: size — the pool shrinks each round, and proving convergence always costs one final round
+    #: that finds nothing. Without this the totals read as an impossible over-count of the pool.
+    rounds: dict[int, int] = field(default_factory=dict)
     #: BCP implications the engine derived across every sweep. The hardware-work metric: unlike
     #: clauses/s it does not depend on how many clauses happened to be entailed, so it is what to
     #: compare across instances, GPUs or engine changes.
@@ -88,10 +94,16 @@ class MiningResult:
         return [c for c in self.clauses if len(c) == 1]
 
     def summary(self) -> str:
+        """One line: what was proven, how much was probed, how fast.
+
+        The probed count is a plain total; it is deliberately NOT printed as a fraction of the
+        candidate space. Summing `candidates` across widths adds a width-1 count that is itself a
+        sum over fixpoint rounds to a width-2 count of C(P,2), which produced lines like
+        a ratio of two incomparable things. Per-width coverage is exact and belongs per width
+        (see `candidates` / `probed` / `rounds`)."""
         parts = [f"{n} of width {k}" for k, n in sorted(self.by_width.items()) if n]
         done = sum(self.probed.values())
-        cand = sum(self.candidates.values())
-        cover = (f", probed {done:,} of {cand:,} candidates" if cand else "")
+        cover = (f", probed {done:,} tuple(s)" if done else "")
         rate = (f" ({self.implications_per_s / 1e9:.2f}G implications/s)"
                 if self.implications else "")
         return (", ".join(parts) or "nothing") + cover + f" in {self.seconds:.2f}s" + rate
@@ -104,7 +116,8 @@ DROP_LEVELS = ("none", "subsumed", "derivable")
 def mine_entailed(num_vars: int, clauses: list, device, *, pool: list | None = None,
                   widths=DEFAULT_WIDTHS, seconds: float | None = 5.0,
                   max_tuples: "int | dict[int, int]" = DEFAULT_MAX_TUPLES,
-                  min_units_for_wide: int = 0, drop: str = "subsumed") -> MiningResult:
+                  min_units_for_wide: int = 0, drop: str = "subsumed",
+                  on_plan=None) -> MiningResult:
     """Mine entailed clauses of the given `widths` and return them.
 
     `pool`: DIMACS LITERALS to combine at widths >= 2, and the natural knob — the interesting
@@ -132,6 +145,12 @@ def mine_entailed(num_vars: int, clauses: list, device, *, pool: list | None = N
                    propagation, and GPAP's own sampler is propagation-bound — keeping them is
                    measured at +29-43% end-to-end. Drop them for a consumer that wants a minimal
                    formula (a CDCL preprocessor), not for one that wants speed.
+
+    `on_plan`: called as on_plan(width, candidates, ceiling) for each width BEFORE any probing,
+      so a front-end can show what a sweep is about to cost while it is still cheap to abort.
+      It lives here because the count needs a built engine: a caller doing this for itself had to
+      construct a second `LiteralProbe` over the same formula and throw it away to obtain numbers
+      this one already has for free.
 
     Width 1 is iterated to a FIXPOINT: each proven unit narrows the formula, which can expose
     further failed literals. Later widths run once, on the narrowed formula.
@@ -170,6 +189,13 @@ def mine_entailed(num_vars: int, clauses: list, device, *, pool: list | None = N
     probe = None
     try:
         probe = LiteralProbe(num_vars, clauses, device)
+        if on_plan is not None:
+            # UPPER BOUNDS, and exact only for the first width run: width 1's proven units narrow
+            # the formula, so a later width sees a smaller free pool than counted here. Width 1's
+            # own count is ONE round of its fixpoint, not the total it will probe.
+            for width in sorted(widths):
+                on_plan(width, probe.count(pool if width > 1 else None, width),
+                        _ceiling(max_tuples, width))
         for width in sorted(widths):
             if probe.unsat:
                 res.skipped[width] = "formula is unsat"
@@ -180,20 +206,29 @@ def mine_entailed(num_vars: int, clauses: list, device, *, pool: list | None = N
             if width > 1 and res.by_width.get(1, 0) < min_units_for_wide:
                 res.skipped[width] = "too few units at width 1"
                 continue
-            seen = [0, 0]
             # The subsumption reference is the formula REDUCED by the baseline the probe is about
             # to run on, so it is rebuilt whenever that baseline moves — which `assume` (inside the
             # width-1 fixpoint) and a formula rebuild both do. Width 1 never consults it (its
             # clauses provably cannot be subsumed, see `keep`), so it does not pay for the pass.
             if width > 1:
                 sub.rebuild(current, num_vars, probe.assigned_literals())
-            found, exhausted = (_mine_units(probe, budget, keep, seen) if width == 1 else
-                                _mine_width(probe, width, pool, budget,
-                                            _ceiling(max_tuples, width), keep, res))
-            res.by_width[width] = found
-            res.exhausted[width] = exhausted
-            if width == 1:
-                res.candidates[1], res.probed[1] = seen[0], seen[1]
+            ceil_w = _ceiling(max_tuples, width)
+            w = (_mine_units(probe, budget, keep, ceil_w) if width == 1 else
+                 _mine_width(probe, width, pool, budget, ceil_w, keep))
+            found = w.found
+            res.by_width[width] = w.found
+            res.exhausted[width] = w.exhausted
+            res.candidates[width], res.probed[width] = w.candidates, w.probed
+            res.rounds[width] = w.rounds
+            if not w.exhausted:
+                # ONE message for both widths, from the probe's OWN stop reason. Asserting
+                # "(max_tuples)" here named a bound that may never have been the binding one:
+                # width 1 is just as often cut by the shared wall-clock deadline, and a user told
+                # to raise a budget they had already set to unbounded has been sent nowhere.
+                res.skipped[width] = (
+                    f"probed {w.probed:,} of {w.candidates:,} candidates "
+                    f"({w.stopped or 'incomplete'}) — clauses found are still entailed, but this "
+                    f"width was NOT searched exhaustively")
             # Each width STRENGTHENS the formula the next one probes: a clause proven at width 2
             # can make a width-3 assumption conflict that would not have conflicted without it.
             # Units are folded in place by `assume`; wider clauses need the formula rebuilt, which
@@ -329,17 +364,47 @@ def _ceiling(max_tuples, width: int) -> int:
     return int(max_tuples)
 
 
+class _WidthResult(NamedTuple):
+    """What one width's sweep did — the SAME shape from both workers, so the caller records it
+    once. `_mine_units` used to report through a positional `seen` list and drop `stopped`
+    entirely, which is how the caller ended up asserting a stop reason it had not been told."""
+
+    found: int
+    exhausted: bool
+    candidates: int
+    probed: int
+    rounds: int
+    stopped: str
+
+
 def _mine_units(probe: LiteralProbe, budget: ProbeBudget, keep,
-                seen: list) -> tuple[int, bool]:
-    """Width 1, to a fixpoint: a proven unit can expose further failed literals."""
+                max_tuples: int = 0) -> _WidthResult:
+    """Width 1, to a fixpoint: a proven unit can expose further failed literals.
+
+    `max_tuples` is the width's WHOLE budget, spent ACROSS the fixpoint's rounds — the pool
+    shrinks each round, so a per-round ceiling would let a many-round sweep spend an unbounded
+    multiple of it. 0 = unbounded. This used to be hardcoded to 0 with no way to reach it, so the
+    CLI printed an over-budget warning for a bound that could not fire.
+    ⚠️ A caller passing a per-width DICT must give width 1 an explicit `0`: the fallback is
+    DEFAULT_MAX_TUPLES, which would cap the backbone fixpoint (see pipeline.STAGE1_MAX_TUPLES)."""
     found, exhausted = 0, True
+    cand = done = rounds = 0
+    stopped = ""
+    left = int(max_tuples)
     while not probe.unsat:
         if probe.free_literals().size == 0:
             break
-        r = probe.probe(size=1, budget=_budget_with(budget, 0))   # None = every free literal
+        if max_tuples > 0 and left <= 0:
+            exhausted = False                 # budget spent mid-fixpoint: NOT a proof of absence
+            stopped = stopped or "max_tuples"
+            break
+        r = probe.probe(size=1, budget=_budget_with(budget, left))  # pool None = every free literal
         exhausted = exhausted and r.exhausted
-        seen[0] = seen[0] + r.total
-        seen[1] = seen[1] + r.probed
+        stopped = stopped or r.stopped
+        cand += r.total
+        done += r.probed
+        rounds += 1
+        left -= r.probed
         fresh = []
         for lits in r.conflicting:
             unit = -int(lits[0])                             # assuming l conflicts => ~l holds
@@ -349,11 +414,11 @@ def _mine_units(probe: LiteralProbe, budget: ProbeBudget, keep,
         if not fresh or not r.exhausted:
             break
         probe.assume(fresh)                                  # narrow, then look again
-    return found, exhausted
+    return _WidthResult(found, exhausted, cand, done, rounds, stopped)
 
 
 def _mine_width(probe: LiteralProbe, width: int, pool, budget: ProbeBudget, max_tuples: int,
-                keep, res: MiningResult) -> tuple[int, bool]:
+                keep) -> _WidthResult:
     """One width >= 2 over the pool's still-free literals."""
     # The pool is DIMACS LITERALS. Restricted to the ones still free, because a settled literal
     # cannot teach anything: TRUE makes the probe a no-op, FALSE makes it conflict for a reason
@@ -365,7 +430,7 @@ def _mine_width(probe: LiteralProbe, width: int, pool, budget: ProbeBudget, max_
         cand = np.asarray([int(x) for x in pool], dtype=np.int32)
         lits = cand[np.isin(np.abs(cand), free_vars)]
     if lits.size < width:
-        return 0, True
+        return _WidthResult(0, True, 0, 0, 1, "")
     # COUNT FIRST, then decide. The ceiling has to be checked against an exact count computed
     # WITHOUT generating anything: `combinations` below materializes C(P,k) tuples, so a ceiling
     # applied to its output cannot protect against the very case it exists for. At pool=None and
@@ -384,16 +449,10 @@ def _mine_width(probe: LiteralProbe, width: int, pool, budget: ProbeBudget, max_
     # just the formula's existing binary clauses, a vanishing fraction. `keep()` already rejects a
     # re-derived clause, so correctness never depended on it.
     r = probe.probe(lits, width, budget=_budget_with(budget, max_tuples))
-    res.candidates[width] = r.total
-    res.probed[width] = r.probed
     found = 0
     for row in r.conflicting:
         found += keep(tuple(sorted(-int(x) for x in row)))
-    if not r.exhausted:
-        res.skipped[width] = (f"probed {r.probed:,} of {r.total:,} candidates "
-                              f"({r.stopped or 'incomplete'}) — clauses found are still entailed, "
-                              f"but this width was NOT searched exhaustively")
-    return found, r.exhausted
+    return _WidthResult(found, r.exhausted, r.total, r.probed, 1, r.stopped)
 
 
 def _release(device) -> None:

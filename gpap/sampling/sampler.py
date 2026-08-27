@@ -90,9 +90,18 @@ class GPUSampler:
         self._max_cls = formula.max_clause_len or 1
         self._total_lits = formula.total_lits
         # RNG + state must exist before K calibration (the probe chunk in _calibrate_k uses _gen).
+        # TWO streams, deliberately. `_gen` drives SAMPLING (the per-chunk var permutation and the
+        # trajectory seed); `_proj_gen` drives DELIVERY (the don't-care bits `_project` fills in).
+        # They must not share: `_project` now runs inside the timed chunk loop when a caller asks
+        # for output rows, and on a shared generator each of its draws would shift every later
+        # chunk's permutation and seed — making `--out` change which models a run finds, at the
+        # same --seed. Split, output collection is stream-neutral by construction.
         self._gen = torch.Generator(device=device)
+        self._proj_gen = torch.Generator(device=device)
         if seed is not None:
             self._gen.manual_seed(seed)
+        self._proj_gen.manual_seed((seed if seed is not None else 0) ^ 0x5EED_0117)
+        self._seed = seed
         import random as _random
         self._pyrng = _random.Random(seed)
         self.support: list[int] | None = None   # 0-based independent-support vars (from `c ind`)
@@ -487,20 +496,40 @@ class GPUSampler:
         rm = plan["rgroup"] >= 0
         if plan["n_groups"] and rm.any():
             # torch RNG keeps the don't-care draw stream identical to the historical engine
-            bits = torch.randint(0, 2, (n, plan["n_groups"]), generator=self._gen,
-                                 device=self.device).to(torch.uint8).cpu().numpy()
+            # uint8 straight out of randint: the int64 default allocated 8x the bytes on device
+            # for a tensor that is cast to uint8 on the very next call, inside the chunk loop.
+            bits = torch.randint(0, 2, (n, plan["n_groups"]), generator=self._proj_gen,
+                                 dtype=torch.uint8, device=self.device).cpu().numpy()
             proj[:, rm] = bits[:, plan["rgroup"][rm]] ^ plan["flip"][rm]
         return proj
 
+    def reseed(self, seed: int) -> None:
+        """Restore BOTH RNG streams to a known point (see `_gen` / `_proj_gen`).
+
+        The warmup calls this so the timed run is deterministic from `seed` alone. It exists as a
+        method because there are two streams to restore and a caller that reseeds only the one it
+        knows about silently loses that determinism for the other."""
+        self._gen.manual_seed(seed)
+        self._proj_gen.manual_seed(seed ^ 0x5EED_0117)
+        import random as _random
+        self._pyrng = _random.Random(seed)
+
     @torch.inference_mode()
     def sample_bits(self, n_target: int, *, config=(True, 8, False),
-                    max_chunks: "int | None" = None):
+                    max_chunks: "int | None" = None, max_seconds: "float | None" = None):
         """Collect up to `n_target` support-projection bit-rows efficiently. Only the small
         (n, S) bit matrix crosses to host RAM per chunk (not full N-var models), so a big output
         is cheap. Returns (matrix, cols_1based): matrix is a numpy uint8 (got, S) array of 0/1,
         cols_1based lists the ORIGINAL variable id of each column. Sound: every row is a valid
         support projection (forced pinned, compacted vars from a real model, don't-cares free,
-        ELS-equivalent vars kept equal via shared random groups)."""
+        ELS-equivalent vars kept equal via shared random groups).
+
+        `max_seconds` bounds the wall (checked between chunks), like `sample`'s. It is not
+        optional in spirit: this is a SAMPLING loop, so without it a `--time-limit`ed run keeps
+        sampling here long after its budget was spent. Prefer `sample(out_cap=...)`, which takes
+        these rows off chunks the timed run executes anyway; this entry point remains for topping
+        up a short collection and for callers with no timed run.
+        """
         rv, B, la = config[0], max(1, config[1]), (config[2] if len(config) > 2 else False)
         plan = self._build_projection_plan()
         support_mask = None
@@ -510,8 +539,11 @@ class GPUSampler:
         K = self.batch_size
         mats: list = []
         got = chunk = 0
+        t0 = time.perf_counter()
         while got < n_target:
             if max_chunks is not None and chunk >= max_chunks:
+                break
+            if max_seconds is not None and time.perf_counter() - t0 > max_seconds:
                 break
             chunk += 1
             n_done, _, _ = self._run_chunk(K, B, rv, support_mask, True, la)
@@ -543,6 +575,7 @@ class GPUSampler:
         configs: "list[tuple[bool, int]] | None" = None,
         min_measure_chunks: int = 1,
         max_seconds: "float | None" = None,
+        out_cap: int = 0,
     ) -> dict:
         """Draw at least `n_target` valid models.
 
@@ -576,6 +609,16 @@ class GPUSampler:
         is how a MEASUREMENT pins the algorithm (see pipeline.SINGLE_PORTFOLIOS).
         `config_breakdown` reports each config's models/chunks/throughput. Overrides
         random_var/decisions_per_round when set.
+
+        `out_cap` > 0 also KEEPS up to that many support-projection bit-rows as the run goes, in
+        `out_bits` / `out_cols` — the rows a caller writes to a file. One `_project` per chunk, on
+        chunks this run executes anyway, against the second full sampling pass a post-hoc
+        collection costs. Rows are bucketed PER CONFIG and only the winning config's are returned,
+        so the emitted set comes from ONE sampler rather than a mixture of the bandit's arms (a
+        mixture is a uniformity question, not a delivery one). Its wall is accumulated separately
+        as `out_project_s` and excluded from every rate — the per-config stamp alone was not
+        enough, because a pinned single config has no per-config wall at all.
+        Measurements: docs/findings/CLI_DELIVERY_FINDINGS.md.
         """
         if isinstance(random_var, str):
             raise ValueError(f"random_var={random_var!r} is not a mode: pass a bool. Per-formula "
@@ -617,6 +660,11 @@ class GPUSampler:
         # the winner ~2x and diverging across GPUs.
         cfg_stats = {c: {"models": 0, "attempts": 0, "wall": 0.0, "chunks": 0,
                          "decs": 0, "props": 0} for c in plan}
+        # Output rows kept per config (see `out_cap`): each config stops collecting at out_cap, so
+        # the peak is bounded by |plan| x out_cap x S bytes.
+        cfg_bits: "dict[tuple, list]" = {c: [] for c in plan}
+        cfg_bits_n = {c: 0 for c in plan}
+        proj_s = 0.0                       # delivery wall, excluded from every reported rate
         models: list[list[int]] = []
         attempts = 0
         n_models = 0
@@ -692,6 +740,21 @@ class GPUSampler:
                     # row): the old path shipped a (rows, M) int32 slice to the host, which on
                     # b05-c50 reached ~3.3 GB and forced the K budget to keep silent headroom.
                     gpu_unsound += self.engine.check_sound(slot=0, max_rows=4096)
+                have = cfg_bits_n[cfg]
+                if out_cap and n_done and have < out_cap:
+                    # AFTER the cfg_stats wall stamp, and separately accumulated into `proj_s`,
+                    # which the caller subtracts from every RATE. The stamp alone was not enough:
+                    # it is only taken `if adaptive`, so a single-config portfolio — the pinned
+                    # mode a MEASUREMENT uses — has no per-config wall at all and falls back to a
+                    # blend that would have carried the delivery cost.
+                    _tp = time.perf_counter()
+                    take = min(n_done, out_cap - have)
+                    # _project(take), never _project(n_done)[:take]: the gather, the host buffer
+                    # and the RNG draw are all sized by the argument, and a numpy slice is a VIEW
+                    # that would pin the whole discarded chunk for the rest of the run.
+                    cfg_bits[cfg].append(self._project(take))
+                    cfg_bits_n[cfg] = have + take
+                    proj_s += time.perf_counter() - _tp
                 if n_done and keep_rows:
                     # Gather just the variables' TRUE bits — (n, N), half of what the full
                     # (n, 2N) assignment would cost, and no polarity slice on the host.
@@ -716,7 +779,9 @@ class GPUSampler:
                     if collect:
                         models.extend(out_rows)
         self._sync()
-        elapsed = time.perf_counter() - t0
+        # `elapsed` is SAMPLING wall: the output projection is delivery and is billed separately
+        # (`out_project_s`), so a caller asking for rows cannot move samples/s, dec/s or impl/s.
+        elapsed = time.perf_counter() - t0 - proj_s
         bcp_rounds = self.engine.launches - bcp_r0             # kernel launches over this run (delta)
         bcp_ops = self.engine.ops_total() - bcp_o0
         bcp_props = self.engine.props_total() - bcp_p0
@@ -755,6 +820,7 @@ class GPUSampler:
             out["models"] = models
         if verify_clauses is not None:
             out["all_valid"] = all_valid
+        best_cfg = plan[0]
         if configs is not None:
             def _rate(s):
                 return (s["models"] / s["wall"]) if s["wall"] > 0 else 0.0
@@ -770,6 +836,7 @@ class GPUSampler:
             # measured, not a config whose single cold-start chunk happened to clock fast.
             brc, brs = max(cfg_stats.items(),
                            key=lambda kv: (kv[1]["chunks"] >= min_measure_chunks, _rate(kv[1])))
+            best_cfg = brc
             out["best_rate_config"] = [bool(brc[0]), brc[1], brc[2]]
             out["best_rate_sps"] = _rate(brs) if brs["wall"] > 0 else None
             out["best_rate_success"] = (brs["models"] / brs["attempts"]) if brs["attempts"] else 0.0
@@ -797,6 +864,22 @@ class GPUSampler:
                     "implications_per_s": ((s["props"] - s["decs"]) / s["wall"]) if s["wall"] > 0 else None,
                 } for c, s in cfg_stats.items()
             }
+        if out_cap:
+            # The WINNING config's rows only (see `out_cap`). Always well-shaped — a run that
+            # completed nothing returns (0, S) over the same columns, so a caller can write it
+            # unconditionally instead of branching on None.
+            mats = cfg_bits.get(best_cfg) or []
+            if mats:
+                out["out_bits"] = np.concatenate(mats)
+                out["out_cols"] = self._build_projection_plan()["cols_1based"]   # already cached
+            else:
+                # Nothing was collected, so nothing built the plan — and the shape alone does not
+                # need it (`projection_cols` exists precisely so zero rows do not pay for it).
+                cols = [v + 1 for v in self.projection_cols()]
+                out["out_bits"] = np.zeros((0, len(cols)), dtype=np.uint8)
+                out["out_cols"] = cols
+            out["out_config"] = [bool(best_cfg[0]), best_cfg[1], best_cfg[2]]
+            out["out_project_s"] = proj_s
         return out
 
 

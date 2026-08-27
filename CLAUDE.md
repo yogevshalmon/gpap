@@ -141,7 +141,18 @@ in `docs/findings/`. Do not put a dated measurement or a card name back into a s
    and C++ faces probe the same candidates in the same order. Literals are DIMACS on both.
    **`max_tuples` is a WORK BUDGET**: a width with more candidates probes that many and reports
    `exhausted=False` — the clauses found are entailed regardless, so partial results are kept
-   (`refuse_over_max` opts into the all-or-nothing behaviour). It is checked against
+   (`refuse_over_max` opts into the all-or-nothing behaviour). ⚠️ **It binds at width 1 too**, spent
+   ACROSS that width's fixpoint rounds — `_mine_units` used to hardcode the ceiling to 0
+   (unbounded) with no way to reach it, while the plan line warned it had been exceeded.
+   ⚠️ **Width 1's `candidates`/`probed` are SUMS over `rounds[1]` fixpoint rounds** and are NOT
+   comparable to the pool size (the pool shrinks each round, and proving convergence always costs
+   one final round that finds nothing).
+   Report `rounds` with them, and never sum `candidates` ACROSS widths — that divides a fixpoint
+   sum by a C(P,2). ⚠️ **A per-width DICT must give width 1 an explicit `0`** (see
+   `pipeline.STAGE1_MAX_TUPLES`): the fallback is `DEFAULT_MAX_TUPLES`, which would silently cap
+   the backbone on the DEFAULT sampling path. The non-exhaustive reason comes from the probe's own
+   `stopped`, never asserted — width 1 is as often cut by the deadline as by the ceiling.
+   docs/findings/CLI_DELIVERY_FINDINGS.md. It is checked against
    `gpap_probe_count` BEFORE anything is generated; it used to be compared against an
    already-materialized enumeration, which cannot protect against the case it exists for — at
    width 3 over a circuit's free literals that array is ~1e11 tuples (~2 TB) and the process was
@@ -451,6 +462,22 @@ Sample output = compact support projections (1 bit/support var; GPU-projected so
 matrix leaves the device). `--out-format bits|npy|dimacs`, `--max-samples` cap (default 100k),
 `--stats` for the info JSON. Sound: every row extends to a full model (test_output.py). Circuit
 CNFs embed a `c wire <var> <input@cycle>` map (bench.py) so output columns are named by wire.
+⚠️ **The rows are COLLECTED BY THE TIMED RUN** (`sample(out_cap=…)` → `out_bits`), not by a pass
+after it: one `_project` per chunk, a fraction of a percent of the chunk it rides on. It used to
+be a SECOND full sampling pass, which (a) obeyed no `--time-limit`, (b) sat outside `wall_total_s`
+while being stamped into `phases`, and (c) fetched the full `--max-samples`/`-n` request even when
+the timed run had been CUT SHORT — so a capped run reported one model count and then wrote a
+larger number of samples. A file now holds `min(-n, --max-samples, delivered)` rows and the CLI
+says why when it is short. ⚠️ Rows are bucketed **PER CONFIG and only the winner's are returned**,
+so the emitted set stays ONE sampler rather than a mixture of the bandit's arms (a mixture is a
+uniformity question, and this was a delivery change). ⚠️ **DELIVERY AND SAMPLING MUST NOT SHARE A
+RANDOM STREAM**: `_project` fills don't-care columns from `_proj_gen`, NOT the `_gen` that drives
+the per-chunk permutation and trajectory seed — the first version of this shared them, and `--out`
+silently changed which models a run found at the same `--seed` (invisible to the no-change gate,
+which runs without `--out`). Its wall is `out_project_s`, excluded from every rate — the
+per-config stamp alone is not enough, since a PINNED single config has no per-config wall.
+⚠️ `phases` sums to `wall_total_s`; the opt-in readouts (`--n-cov`, `--uniformity`) are billed to
+`phases_diag`, OUTSIDE it. docs/findings/CLI_DELIVERY_FINDINGS.md.
 
 Benchmark suite driver (`gpap/benchmark.py`, schema-3 JSON; thin table over
 `gpap.sampling.pipeline`; the glob may mix CNFs with circuits — .bench/.aig/.aag are converted
@@ -530,7 +557,13 @@ Cross-GPU K-scaling: `eval/colab/colab_sampling_benchmark.py` + `notebooks/gpap_
   Barbarik-rejected 5/5, so a throughput bandit must not be able to choose it for a
   user who asked for a sampler. It stays reachable: regime-dependence rule, it still wins
   tight/deep circuits on success rate.
-- `--n-time` is a delivery contract; safety valves are `--time-limit` + the zero-progress stop.
+- `--n-time` is a delivery TARGET, not a guarantee in either direction: the batch K is the unit of
+  work, so a run overshoots to the end of a chunk (a small formula at the 262,144 cap delivers
+  ~1e6 models for `-n 100`) and can fall short when a safety valve fires — `--time-limit`, the
+  zero-progress stop
+  (both flagged by `chunk_capped` / the CLI's `<`). Quote the DELIVERED count, never the request.
+  `--time-limit 0` = no cap on `gpap sample`; `gpap bench` refuses 0, since there the same flag is
+  also the rival subprocess's timeout and the two readings do not reconcile.
 - **VACUOUS-PIN instances**: at T=25 the last-cycle outputs of `b02`, `b05`, `b07`, `s526` are
   CONSTANT for every input sequence ⇒ pinning them is a tautology and "sampling" is a free
   hypercube over |PI|·T bits (any sampler gets ~100% success; ABC collapses the whole output cone,
