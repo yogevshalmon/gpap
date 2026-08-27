@@ -4,8 +4,10 @@
  *
  * Literal indexing (the 2N scheme): +v -> 2(v-1), -v -> 2(v-1)+1, negation l ^ 1.
  * occ[l] = the clauses where ~l appears, so setting l TRUE falsifies a literal in exactly
- * those clauses. Within a literal's list, clause indices stay ASCENDING (the Python build used
- * a stable argsort; a counting-sort fill in clause order reproduces it exactly).
+ * those clauses. Clauses are SEGREGATED BY LENGTH (see gpap_internal.hpp): binary entries come
+ * first in every occ segment with the OTHER LITERAL as payload, long (>=3) entries follow with
+ * the re-indexed long clause id; unit clauses have no occ entry at all. Within each kind's
+ * sub-range, order stays clause-ASCENDING (a counting-sort fill in clause order).
  */
 #include "gpap_internal.hpp"
 
@@ -24,6 +26,12 @@ using gpap::set_error;
 
 static inline int32_t lit_index(int32_t ext) {
     return 2 * (std::abs(ext) - 1) + (ext > 0 ? 0 : 1);
+}
+
+/* The inverse: 2N literal index -> signed DIMACS literal. */
+static inline int32_t to_dimacs(int32_t li) {
+    const int32_t v = (li >> 1) + 1;
+    return (li & 1) ? -v : v;
 }
 
 extern "C" gpap_status gpap_packed_envelope(int32_t num_vars, int32_t max_clause_len,
@@ -81,7 +89,9 @@ static gpap_status build(int32_t num_vars, const int32_t *flat, const int32_t *l
     }
     f->num_clauses = (int32_t)keep_len.size();
     /* The occurrence CSR indexes with int32; past 2^31 literal slots its offsets would wrap
-     * into silent corruption, so refuse rather than build something subtly wrong. */
+     * into silent corruption, so refuse rather than build something subtly wrong. Checked against
+     * total_lits, which now OVER-counts the CSR (unit clauses contribute no occ entry) — the
+     * conservative direction, and the bound that also protects the flat clause read-back. */
     if (f->total_lits > 0x7FFFFFFFll) {
         set_error("formula too large: %lld literal occurrences exceeds the int32 CSR limit",
                   (long long)f->total_lits);
@@ -98,11 +108,16 @@ static gpap_status build(int32_t num_vars, const int32_t *flat, const int32_t *l
     const int64_t num_lits = 2ll * num_vars;
     f->clause_sizes.resize(M);
     f->lit_sum.resize(M);
-    f->packed_init.resize(M);
     f->occ_offsets.assign(num_lits + 1, 0);
-    f->occ_clauses.resize(f->total_lits);
+    f->occ_mid.assign((size_t)num_lits, 0);
 
-    /* Pass 2: clause counters + occurrence histogram (of the NEGATED literal). */
+    /* Pass 2: clause counters + per-literal occurrence histograms of the NEGATED literal,
+     * SPLIT BY CLAUSE KIND (see the struct comment in gpap_internal.hpp). Length-1 clauses get
+     * NO occ entry: the construction flush asserts them into the baseline bitmap, and any later
+     * contradicting push is caught there — observationally identical to the old per-word path.
+     * Length-2 clauses become implication edges (payload = the other literal); only length>=3
+     * clauses will carry a packed word. */
+    std::vector<int32_t> bin_cnt((size_t)num_lits, 0);
     for (int32_t c = 0; c < M; ++c) {
         const int32_t n = keep_len[c];
         const int32_t *lits = keep_ptr[c];
@@ -115,30 +130,65 @@ static gpap_status build(int32_t num_vars, const int32_t *flat, const int32_t *l
                 return GPAP_ERR_ARG;
             }
             sum += (uint32_t)li;
-            f->occ_offsets[(li ^ 1) + 1] += 1;
+            if (n == 2)
+                bin_cnt[(size_t)(li ^ 1)] += 1;
+            else if (gpap::is_long_clause(n))
+                f->occ_offsets[(li ^ 1) + 1] += 1;
         }
         f->clause_sizes[c] = n;
         f->lit_sum[c] = (int32_t)sum;             /* exact bit pattern mod 2^32 */
     }
+    /* occ_offsets[l+1] currently holds l's LONG count; fold the binary count in, prefix-sum,
+     * and mark each segment's binary/long split point. */
+    for (int64_t l = 0; l < num_lits; ++l) f->occ_offsets[l + 1] += bin_cnt[(size_t)l];
     for (int64_t l = 0; l < num_lits; ++l) f->occ_offsets[l + 1] += f->occ_offsets[l];
+    for (int64_t l = 0; l < num_lits; ++l)
+        f->occ_mid[(size_t)l] = f->occ_offsets[l] + bin_cnt[(size_t)l];
+    f->occ_clauses.resize((size_t)f->occ_offsets[num_lits]);
 
-    /* Pass 3: counting-sort fill, clause-ascending within each literal's list. */
-    std::vector<int32_t> cursor(f->occ_offsets.begin(), f->occ_offsets.end() - 1);
+    /* Pass 3: counting-sort fill, clause-ascending within each kind's sub-range, plus the
+     * per-kind side lists (all aligned with the original clause order by construction). */
+    std::vector<int32_t> bin_cur(f->occ_offsets.begin(), f->occ_offsets.end() - 1);
+    std::vector<int32_t> long_cur(f->occ_mid.begin(), f->occ_mid.end());
+    int32_t long_id = 0;
     for (int32_t c = 0; c < M; ++c) {
+        const int32_t n = keep_len[c];
         const int32_t *lits = keep_ptr[c];
-        for (int32_t i = 0; i < keep_len[c]; ++i)
-            f->occ_clauses[cursor[lit_index(lits[i]) ^ 1]++] = c;
+        if (n == 1) {
+            f->unit_lits.push_back(lit_index(lits[0]));
+        } else if (n == 2) {
+            /* Binary payloads carry GPAP_OCC_BIN_TAG (the sign bit): a literal index needs at
+             * most 24 bits (the 8|24 envelope's 2N ceiling) and a long clause index is a
+             * non-negative int32, so the sign bit is free and unambiguous. It lets the WAVE
+             * kernel classify an entry from the value it has already loaded instead of gathering
+             * this segment's occ_mid through a W x W one-hot reduction in its hottest loop.
+             * occ_mid still bounds the scalar loop split, the CLEAN restore and the SOFT scan. */
+            const int32_t a = lit_index(lits[0]), b = lit_index(lits[1]);
+            f->occ_clauses[(size_t)bin_cur[(size_t)(a ^ 1)]++] = b | GPAP_OCC_BIN_TAG;
+            f->occ_clauses[(size_t)bin_cur[(size_t)(b ^ 1)]++] = a | GPAP_OCC_BIN_TAG;
+            f->bin_pairs.push_back(a < b ? a : b);
+            f->bin_pairs.push_back(a < b ? b : a);
+        } else {
+            for (int32_t i = 0; i < n; ++i)
+                f->occ_clauses[(size_t)long_cur[(size_t)(lit_index(lits[i]) ^ 1)]++] = long_id;
+            ++long_id;
+        }
+    }
+    f->num_long = long_id;
+    f->num_bin = (int32_t)(f->bin_pairs.size() / 2);
+
+    /* THE kind/slot map (see gpap_internal.hpp). One cursor walk, here, once — the readout and
+     * the flat clause read-back index it instead of each re-deriving the same ordering rule. */
+    f->sat_src.resize((size_t)M);
+    for (int32_t c = 0, li = 0, bi = 0, ui = 0; c < M; ++c) {
+        const int32_t n = f->clause_sizes[(size_t)c];
+        if (gpap::is_long_clause(n)) f->sat_src[(size_t)c] = li++;
+        else if (n == 2) f->sat_src[(size_t)c] = -(bi++) - 1;
+        else f->sat_src[(size_t)c] = -(f->num_bin + ui++) - 1;
     }
 
-    /* Packed initial word + the formula's own unit clauses (asserted by the flush). */
-    const uint32_t sum_mask =
-        f->shift ? (uint32_t)((1ull << (32 - f->shift)) - 1) : 0u;
-    for (int32_t c = 0; c < M; ++c) {
-        if (f->shift)
-            f->packed_init[c] = (int32_t)((uint32_t)f->clause_sizes[c] |
-                                          (((uint32_t)f->lit_sum[c] & sum_mask) << f->shift));
-        if (f->clause_sizes[c] == 1) f->unit_lits.push_back(f->lit_sum[c]);
-    }
+    /* Packed initial word — LONG clauses only (binary/unit clauses have no per-row state). */
+    gpap::pack_long_init(f, f->shift, f->packed_init);
     *out = f;
     return GPAP_OK;
 }
@@ -308,18 +358,23 @@ extern "C" void gpap_formula_info_get(const gpap_formula *f, gpap_formula_info *
     out->shift = f->shift;
     out->has_empty_clause = f->has_empty_clause;
     out->total_lits = f->total_lits;
+    out->num_bin = f->num_bin;
+    out->num_long = f->num_long;
 }
 
 extern "C" void gpap_formula_free(gpap_formula *f) { delete f; }
 
 extern "C" gpap_status gpap_formula_occ(const gpap_formula *f, int32_t *offsets_out,
-                                        int32_t *clauses_out, int32_t *n_offsets,
-                                        int64_t *n_clauses) {
+                                        int32_t *mid_out, int32_t *clauses_out,
+                                        int32_t *n_offsets, int64_t *n_clauses) {
     if (!f) return GPAP_ERR_ARG;
+    /* mid is (2N,) = n_offsets - 1, so it needs no size of its own. */
     if (n_offsets) *n_offsets = (int32_t)f->occ_offsets.size();
     if (n_clauses) *n_clauses = (int64_t)f->occ_clauses.size();
     if (offsets_out)
         memcpy(offsets_out, f->occ_offsets.data(), f->occ_offsets.size() * sizeof(int32_t));
+    if (mid_out && !f->occ_mid.empty())
+        memcpy(mid_out, f->occ_mid.data(), f->occ_mid.size() * sizeof(int32_t));
     if (clauses_out)
         memcpy(clauses_out, f->occ_clauses.data(), f->occ_clauses.size() * sizeof(int32_t));
     return GPAP_OK;
@@ -340,22 +395,37 @@ extern "C" gpap_status gpap_formula_clauses(const gpap_formula *f, int32_t *lits
     if (!f) return GPAP_ERR_ARG;
     if (n_lits) *n_lits = f->total_lits;
     if (!lits_out) return GPAP_OK;
-    /* Rebuilt by INVERTING the occ CSR: occ[l] lists the clauses where ~l appears, so every
-     * entry (l, c) says clause c contains the literal l^1. Duplicate literals in the input are
-     * preserved (each contributed an entry); within-clause ORDER comes back ascending by
-     * literal index, not input order — the builder retains no input order, and no consumer of
-     * a clause is order-sensitive (the engine's structures are sums and sets). */
-    std::vector<int64_t> cursor(static_cast<size_t>(f->num_clauses) + 1, 0);
-    for (int32_t c = 0; c < f->num_clauses; ++c)
-        cursor[static_cast<size_t>(c) + 1] = cursor[c] + f->clause_sizes[static_cast<size_t>(c)];
+    /* Reconstructed in the ORIGINAL clause order from the per-kind lists, which are aligned
+     * with clause_sizes by construction. LONG clauses come back by INVERTING the long occ
+     * sub-ranges: every entry (l, j) says long clause j contains the literal l^1, so duplicate
+     * literals are preserved and within-clause order is ascending by literal index — exactly
+     * the pre-segregation behaviour. Binary pairs are stored sorted and units are single
+     * literals, so both properties hold for them trivially. */
+    std::vector<int64_t> long_pos(static_cast<size_t>(f->num_long), 0);  /* long id -> write pos */
+    int64_t pos = 0;
+    for (int32_t c = 0; c < f->num_clauses; ++c) {
+        const int32_t n = f->clause_sizes[static_cast<size_t>(c)];
+        const int32_t src = f->sat_src[static_cast<size_t>(c)];
+        if (src >= 0) {                            /* long: filled by the occ inversion below */
+            long_pos[static_cast<size_t>(src)] = pos;
+        } else {
+            const int32_t p = -src - 1;            /* merged pair index */
+            if (p < f->num_bin)
+                for (int i = 0; i < 2; ++i)
+                    lits_out[pos + i] = to_dimacs(f->bin_pairs[static_cast<size_t>(2 * p + i)]);
+            else
+                lits_out[pos] = to_dimacs(
+                    f->unit_lits[static_cast<size_t>(p - f->num_bin)]);
+        }
+        pos += n;
+    }
     const int64_t num_lits = 2ll * f->num_vars;
     for (int64_t l = 0; l < num_lits; ++l) {
         const int64_t in_clause = l ^ 1;                       /* the literal the clause holds */
-        const int32_t v = static_cast<int32_t>(in_clause >> 1) + 1;
-        const int32_t dimacs = (in_clause & 1) ? -v : v;
-        for (int32_t k = f->occ_offsets[static_cast<size_t>(l)];
+        const int32_t dimacs = to_dimacs(static_cast<int32_t>(in_clause));
+        for (int32_t k = f->occ_mid[static_cast<size_t>(l)];
              k < f->occ_offsets[static_cast<size_t>(l) + 1]; ++k)
-            lits_out[cursor[static_cast<size_t>(f->occ_clauses[static_cast<size_t>(k)])]++] =
+            lits_out[long_pos[static_cast<size_t>(f->occ_clauses[static_cast<size_t>(k)])]++] =
                 dimacs;
     }
     return GPAP_OK;

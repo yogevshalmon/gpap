@@ -91,6 +91,12 @@ struct DevBuf {
 
 /* ------------------------------------------------------------------ formula */
 
+/* A clause carries a packed word (and per-row state) iff it has at least this many literals;
+ * shorter ones are implication edges / flush-cache facts. THE definition — the builder, the
+ * off-split repack and the readout synthesis all test through it. */
+constexpr int32_t kMinLongLen = 3;
+inline bool is_long_clause(int32_t n) { return n >= kMinLongLen; }
+
 /* Packed-word envelopes: (SHIFT, max 2N, max clause length). The sum field must hold any
  * literal index and the count field any clause length; anything outside both is rejected. */
 struct PackedSplit {
@@ -100,22 +106,59 @@ extern const PackedSplit kPackedSplits[2];
 
 }  // namespace gpap
 
-/* Host-side formula: built once, uploaded by the engine. */
+/* Host-side formula: built once, uploaded by the engine.
+ *
+ * Clauses are SEGREGATED BY LENGTH — only length >= 3 ("long") clauses carry a packed word
+ * and per-row state:
+ *   len == 0  ->  has_empty_clause (dropped from M as before)
+ *   len == 1  ->  unit_lits ONLY: no occ entry, no packed word. The construction flush asserts
+ *                 them into the baseline bitmap, and the bitmap detects any later ~u push —
+ *                 observationally identical to the old per-word path, at zero state.
+ *   len == 2  ->  IMPLICATION EDGES: two occ entries whose payload is THE OTHER LITERAL
+ *                 (clause (~l | b) appears in occ[l] with payload b). Zero per-row state;
+ *                 propagation is one bitmap push. bin_pairs keeps the pairs for readout,
+ *                 reconstruction and the soundness check.
+ *   len >= 3  ->  re-indexed 0..num_long-1: packed word + occ entries whose payload is the
+ *                 LONG clause index.
+ * Within each occ[l] segment the binary entries come FIRST — occ_mid[l] is the split point —
+ * and both sub-ranges stay clause-ascending. clause_sizes / lit_sum keep ALL M kept clauses in
+ * the original input order (accessors reconstruct in that order; the per-kind sub-lists are
+ * aligned with it by construction). */
 struct gpap_formula {
     int32_t num_vars = 0;
-    int32_t num_clauses = 0;
+    int32_t num_clauses = 0;           /* M: ALL kept clauses (unit + binary + long) */
+    int32_t num_bin = 0;               /* length-2 clauses (implication edges) */
+    int32_t num_long = 0;              /* length>=3 clauses (the packed-word list) */
     int32_t max_clause_len = 0;
     int32_t shift = 0;
     int32_t has_empty_clause = 0;
-    int64_t total_lits = 0;
-    std::vector<int32_t> occ_offsets;  /* (2N+1) CSR: occ[l] = clauses where ~l appears */
-    std::vector<int32_t> occ_clauses;  /* (total_lits) ascending clause index per literal */
-    std::vector<int32_t> clause_sizes; /* (M) */
+    int64_t total_lits = 0;            /* sum of kept clause lengths (occ has fewer entries:
+                                          unit clauses contribute none) */
+    std::vector<int32_t> occ_offsets;  /* (2N+1) CSR: occ[l] = entries where ~l appears */
+    std::vector<int32_t> occ_mid;      /* (2N) end of the binary prefix of occ[l] */
+    std::vector<int32_t> occ_clauses;  /* payload: other literal (< occ_mid[l]) or long
+                                          clause index (>= occ_mid[l]); ascending per kind */
+    std::vector<int32_t> clause_sizes; /* (M) original order, all kept clauses */
     std::vector<int32_t> lit_sum;      /* (M) sum of literal indices, exact mod 2^32 */
-    std::vector<int32_t> packed_init;  /* (M) size | ((sum & mask) << shift) */
+    std::vector<int32_t> packed_init;  /* (num_long) size | ((sum & mask) << shift) */
+    std::vector<int32_t> bin_pairs;    /* (2*num_bin) sorted literal-index pairs, input order */
+    /* (M) THE clause -> per-kind slot map, and the only place the "k-th clause of kind K in input
+     * order occupies slot k" rule is written down. >= 0 : index into the long/packed list.
+     * < 0 : -(p+1) where p indexes the merged pair list [binaries..., units-as-(u,u)...], so
+     * p < num_bin is a binary clause and p >= num_bin a unit. Every consumer INDEXES this;
+     * nobody re-walks the clauses with their own cursors. */
+    std::vector<int32_t> sat_src;
     std::vector<int32_t> unit_lits;    /* literal indices of the formula's own unit clauses */
     std::vector<int32_t> support;      /* 0-based vars from `c ind` header lines (may be empty) */
 };
+
+namespace gpap {
+/* Build the (num_long,) packed init words for `shift`: size | ((lit_sum & mask) << shift), long
+ * clauses only, in the same dense re-index the occ payloads use. ONE definition of the packed
+ * layout — gpap_formula's own build and gpap_engine_create's force_shift repack both call it, so
+ * a change to the split or to kMinLongLen cannot land in one and miss the other. */
+inline void pack_long_init(const gpap_formula *f, int32_t shift, std::vector<int32_t> &out);
+}  // namespace gpap
 
 /* One row selection (see gpap_select_complete): a device row mask plus, lazily, the ascending
  * list of selected row indices that the readout kernels index through. */
@@ -130,6 +173,8 @@ struct Selection {
 struct gpap_engine {
     /* shape */
     int32_t num_vars = 0, num_clauses = 0, nw = 0, shift = 16;
+    int32_t num_long = 0;              /* packed-word (state) clauses; num_clauses stays TOTAL */
+    int32_t n_pairs = 0;               /* soundness pair list: binaries + units as (u,u) */
     int32_t K = 0, trail_cap = 0;
     int64_t total_lits = 0;
     int32_t max_clause_len = 0;
@@ -165,7 +210,15 @@ struct gpap_engine {
     gpap::KernelCache kernels;
 
     /* formula-resident (never rebuilt) */
-    gpap::DevBuf occ_off, occ_cls, packed_init, packed_flushed, abits_flushed;
+    gpap::DevBuf occ_off, occ_mid, occ_cls, packed_init, packed_flushed, abits_flushed;
+    gpap::DevBuf pair_check;           /* (2*n_pairs) int32 — sound_rows' binary/unit pass */
+
+    /* Host side of the original-order readout synthesis (gpap_sat_rows): the engine does not
+     * retain the formula, and binary/unit sat counts come from the BITMAP. `pair_host` is the
+     * SAME list staged into pair_check above (moved, not copied); `sat_src_host` is the
+     * formula's kind/slot map. */
+    std::vector<int32_t> sat_src_host, pair_host;
+    int32_t num_bin = 0;               /* pair indices below this are binary clauses */
 
     /* per-chunk row state */
     gpap::DevBuf packed, abits, active, conflict, trail;
@@ -180,5 +233,20 @@ struct gpap_engine {
 
     ~gpap_engine();
 };
+
+namespace gpap {
+inline void pack_long_init(const gpap_formula *f, int32_t shift, std::vector<int32_t> &out) {
+    out.assign((size_t)f->num_long, 0);
+    if (!shift) return;                      /* outside every envelope: no packed representation */
+    const uint32_t mask = (uint32_t)((1ull << (32 - shift)) - 1);
+    int32_t j = 0;
+    for (int32_t c = 0; c < f->num_clauses; ++c) {
+        const int32_t n = f->clause_sizes[(size_t)c];
+        if (!is_long_clause(n)) continue;
+        out[(size_t)j++] = (int32_t)((uint32_t)n |
+                                     (((uint32_t)f->lit_sum[(size_t)c] & mask) << shift));
+    }
+}
+}  // namespace gpap
 
 #endif /* GPAP_INTERNAL_HPP */

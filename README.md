@@ -240,11 +240,14 @@ python examples/check_assumptions.py      # AssumptionChecker: a hand-checkable 
 Instead of a clause matrix, GPAP keeps:
 
 1. **Negated occurrence lists** (CSR): `occ[l]` = clauses where `~l` appears. Setting `l` TRUE
-   falsifies `~l` in exactly those clauses.
-2. **Two per-clause counters**, batched over K assumption sets:
-   - `sat_count (K, M)` — remaining non-falsified literals (init = clause size). Decrement on
-     falsification. `== 0` ⇒ conflict, `== 1` ⇒ unit.
-   - `lit_sum (K, M)` — running sum of non-falsified literal *indices*.
+   falsifies `~l` in exactly those clauses. **Binary clauses live ONLY here**, as implication
+   edges (payload = the other literal, the prefix of each segment): their whole propagation is
+   one bitmap push, zero per-row state. Unit clauses live in the flush cache's bitmap.
+2. **Two per-clause counters for the length ≥ 3 clauses** (`M_long`, 10–23% of M on circuit
+   CNFs), batched over K assumption sets:
+   - `sat_count (K, M_long)` — remaining non-falsified literals (init = clause size). Decrement
+     on falsification. `== 0` ⇒ conflict, `== 1` ⇒ unit.
+   - `lit_sum (K, M_long)` — running sum of non-falsified literal *indices*.
 3. **The sum trick**: when `sat_count == 1`, the surviving literal's index **is** `lit_sum`. No
    scan, no gather — pure arithmetic. The kernels pack both counters into ONE 32-bit word, which
    makes the whole clause update a single `atomic_add` whose return value *is* the conflict/unit

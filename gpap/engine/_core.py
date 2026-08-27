@@ -95,7 +95,8 @@ def available() -> bool:
 
 class FormulaInfo(ctypes.Structure):
     _fields_ = [("num_vars", c_int32), ("num_clauses", c_int32), ("max_clause_len", c_int32),
-                ("shift", c_int32), ("has_empty_clause", c_int32), ("total_lits", c_int64)]
+                ("shift", c_int32), ("has_empty_clause", c_int32), ("total_lits", c_int64),
+                ("num_bin", c_int32), ("num_long", c_int32)]
 
 
 class EngineOptions(ctypes.Structure):
@@ -136,7 +137,7 @@ def _declare(lib: ctypes.CDLL) -> None:
         ("gpap_formula_from_clauses", [c_int32, _I32P, _I32P, c_int32, POINTER(c_void_p)], c_int),
         ("gpap_formula_info_get", [c_void_p, POINTER(FormulaInfo)], None),
         ("gpap_formula_free", [c_void_p], None),
-        ("gpap_formula_occ", [c_void_p, _I32P, _I32P, _I32P, _I64P], c_int),
+        ("gpap_formula_occ", [c_void_p, _I32P, _I32P, _I32P, _I32P, _I64P], c_int),
         ("gpap_formula_clause_arrays", [c_void_p, _I32P, _I32P], c_int),
         ("gpap_formula_clauses", [c_void_p, _I32P, _I64P], c_int),
         ("gpap_formula_support", [c_void_p, _I32P, _I32P], c_int),
@@ -149,6 +150,7 @@ def _declare(lib: ctypes.CDLL) -> None:
         ("gpap_engine_k", [c_void_p], c_int32),
         ("gpap_engine_num_vars", [c_void_p], c_int32),
         ("gpap_engine_num_clauses", [c_void_p], c_int32),
+        ("gpap_engine_num_long", [c_void_p], c_int32),
         ("gpap_engine_reset", [c_void_p, c_int32], c_int),
         ("gpap_engine_apply", [c_void_p, _I64P, c_int32], c_int),
         ("gpap_engine_apply_dev", [c_void_p, c_size_t, c_int32], c_int),
@@ -366,16 +368,21 @@ class Formula:
     def handle(self):
         return self._h
 
-    def occ(self) -> "tuple[np.ndarray, np.ndarray]":
-        """(offsets, clauses) of the negated-occurrence CSR — inspection / tests."""
+    def occ(self) -> "tuple[np.ndarray, np.ndarray, np.ndarray]":
+        """(offsets, mid, entries) of the negated-occurrence CSR — inspection / tests. Entries of
+        occ[l] below mid[l] are BINARY (payload = the other literal's 2N index); entries at or
+        above it are LONG (payload = the length>=3 clause's index, 0..num_long-1). Units have
+        none. `mid` is (2N,), so it rides the same call rather than a second size query."""
         lib = load()
         n_off, n_cls = c_int32(0), c_int64(0)
-        check(lib.gpap_formula_occ(self._h, None, None, byref(n_off), byref(n_cls)), "occ sizes")
+        check(lib.gpap_formula_occ(self._h, None, None, None, byref(n_off), byref(n_cls)),
+              "occ sizes")
         off = np.empty(n_off.value, dtype=np.int32)
+        mid = np.empty(max(n_off.value - 1, 0), dtype=np.int32)
         cls_ = np.empty(n_cls.value, dtype=np.int32)
-        check(lib.gpap_formula_occ(self._h, _p(off, c_int32), _p(cls_, c_int32), None, None),
-              "occ read")
-        return off, cls_
+        check(lib.gpap_formula_occ(self._h, _p(off, c_int32), _p(mid, c_int32),
+                                   _p(cls_, c_int32), None, None), "occ read")
+        return off, mid, cls_
 
     def support(self) -> np.ndarray:
         """Independent support from the file's `c ind` lines (0-based, ascending); empty when
@@ -465,6 +472,16 @@ class Engine:
     @property
     def num_clauses(self) -> int:
         return int(self._f.info.num_clauses)
+
+    @property
+    def num_long(self) -> int:
+        """Packed-word (length >= 3) clauses: the per-row state width, packed_rows' M.
+
+        Read from the formula struct like `num_vars` / `num_clauses` above — this face always
+        holds its formula. The ABI's gpap_engine_num_long() exists for a C consumer that freed
+        the formula and kept the engine; going through it here would be an FFI round trip per
+        packed_rows() call for a value already in hand."""
+        return int(self._f.info.num_long)
 
     @property
     def shift(self) -> int:
@@ -751,10 +768,11 @@ class Engine:
         return out
 
     def packed_rows(self, rows) -> np.ndarray:
-        """RAW packed words (sat_count | sum << SHIFT) for the given rows — sat_rows masks the
-        sum field off, which would hide sum corruption from the CLEAN-mode identity gate."""
+        """RAW packed words (sat_count | sum << SHIFT) for the given rows, (n, num_long) — only
+        length>=3 clauses have words. sat_rows masks the sum field off, which would hide sum
+        corruption from the CLEAN-mode identity gate."""
         r = i32(rows)
-        out = np.empty((r.size, self.num_clauses), dtype=np.int32)
+        out = np.empty((r.size, self.num_long), dtype=np.int32)
         check(load().gpap_packed_rows(self._h, _p(r, c_int32), r.size, _p(out, c_int32)),
               "packed rows")
         return out

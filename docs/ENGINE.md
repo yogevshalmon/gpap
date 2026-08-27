@@ -20,7 +20,7 @@ in the WAVE kernel each update is one `atomic`, and the atomic's *return value* 
 
 | State | One word holds | Update is | Old value tells you |
 |-------|----------------|-----------|---------------------|
-| **Clause** `(K,M)` int32 | `sat_count` \| `Σ surviving lit-indices (mod 2^F)` | `atomic_add(−(1+(¬l≪SHIFT)))` | `cnt==1`→emptied (conflict); `cnt==2`→now unit, forced lit `= (old_sum−¬l) & MASK` |
+| **Clause** `(K,M_long)` int32 | `sat_count` \| `Σ surviving lit-indices (mod 2^F)` | `atomic_add(−(1+(¬l≪SHIFT)))` | `cnt==1`→emptied (conflict); `cnt==2`→now unit, forced lit `= (old_sum−¬l) & MASK` |
 | **Assignment** `(K,⌈2N/32⌉)` int32 bitmap | bit `l` = literal `l` is TRUE | `atomic_or(1≪(l&31))` | old bit `l`→duplicate; old bit `l^1`→contradiction |
 
 Because `l` and `l^1` (a variable's two polarities, `2v` and `2v+1`) always land in the **same
@@ -55,6 +55,25 @@ is a single subtraction, `st -= 1 + (¬l << SHIFT)`:
 
 Formulas outside both envelopes are **rejected** at construction — there is no unpacked fallback.
 
+### Clause-length segregation: only length ≥ 3 clauses have a word at all
+
+`M_long` above is the count of clauses of length ≥ 3 — on circuit CNFs only **10–23%** of M.
+The rest carry **zero per-row state**:
+
+- **Binary clauses are implication edges.** Clause `(~l | b)` lives in `occ[l]` with payload
+  `b` (the binary prefix of each segment, split at `occ_mid[l]`): falsifying `~l` forces `b`,
+  and the whole update is the ONE bitmap `atomic_or` of the forced-literal push — whose return
+  value already answers duplicate / contradiction race-free. 64–75% of occ entries on circuit
+  CNFs take this path.
+- **Unit clauses live in the flush cache's bitmap**: the construction flush asserts them once;
+  any later contradicting push hits the bitmap. No occ entry, no word.
+
+Consequences: per-row bytes drop `4M → 4M_long` (K grows ~2.3× where the analytic bound binds),
+the reset broadcast / CLEAN restore / probe init shrink by the same factor, and `sound_rows`
+checks binaries+units against the bitmap through a shared `(n_pairs, 2)` pair list. Fixpoints,
+conflicts and model sets are unchanged (BCP confluence). Numbers:
+`docs/findings/BINARY_OCC_FINDINGS.md`.
+
 ---
 
 ## 2. Lifecycle & dataflow
@@ -62,7 +81,7 @@ Formulas outside both envelopes are **rejected** at construction — there is no
 ```mermaid
 flowchart TD
     F[CnfFormula<br/>clauses, 2N literal-index scheme] --> OCC[occ CSR int32<br/>occ&#91;l&#93; = clauses where ~l appears]
-    F --> INIT["packed_init (M,) int32<br/>sat_count | (Σ lit &lt;&lt; SHIFT)"]
+    F --> INIT["packed_init (M_long,) int32<br/>sat_count | (Σ lit &lt;&lt; SHIFT)<br/>len≥3 clauses only"]
     OCC --> ENG[BCPEngine.__init__]
     INIT --> ENG
     ENG --> FLUSH["_build_flush_cache()<br/>reset(1) + assert unit clauses + BCP<br/>ONE fixpoint launch at K=1"]

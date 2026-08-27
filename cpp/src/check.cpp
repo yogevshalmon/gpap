@@ -27,7 +27,7 @@ extern "C" int64_t gpap_check_chunk_size(gpap_engine *e, int64_t n_sets, int64_t
     /* The engine's own per-row state — the shared exact model, with THIS engine's real trail
      * cap — plus the (chunk, L) int64 decision matrix this entry point allocates and the
      * sampler's path never does. Read against LIVE free memory each call. */
-    const int64_t per_row = gpap_row_bytes(e->num_clauses, e->num_vars, e->trail_cap) +
+    const int64_t per_row = gpap_row_bytes(e->num_long, e->num_vars, e->trail_cap) +
                             8ll * std::max<int64_t>(max_lits, 1);
     const int64_t budget = gpap_mem_available(e->device_ordinal, 0.80);
     int64_t k = per_row > 0 ? budget / per_row : 1;

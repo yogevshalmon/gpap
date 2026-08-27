@@ -69,11 +69,15 @@ def _mine_score(smp, warm) -> float:
     """Models a chunk is expected to yield — batch rows x completion rate.
 
     THE proxy for "did mining pay?", and it costs no extra GPU work: both terms are already in
-    hand. K is sized as ~budget/row_bytes with row_bytes ~ 4M, so `K x M` is roughly the memory
-    budget WHATEVER the formula is — a chunk therefore costs about the same wall before and after
-    mining, and what actually moves is how many rows fit and how many of them complete. Mined
-    clauses push those two OPPOSITE ways (more clauses => smaller K, stronger propagation =>
-    higher success), which is exactly the trade the caller has to adjudicate.
+    hand. K is sized as ~budget/row_bytes with row_bytes ~ 4*M_long (the len>=3 STATE clauses;
+    binaries are occ implication edges and cost no per-row state), so `K x M_long` is roughly the
+    memory budget WHATEVER the formula is — a chunk therefore costs about the same wall before
+    and after mining, and what actually moves is how many rows fit and how many of them complete.
+    Mined clauses of width >= 3 push those two OPPOSITE ways (more state clauses => smaller K,
+    stronger propagation => higher success); **mined width-1/2 clauses are K-FREE** (units fold
+    into the flush, binaries into the implication list), so for them the proxy reduces to "did
+    success improve" — the gate needs no retuning, `smp.K` on the rebuilt sampler already
+    charges only its num_long.
 
     ⚠️ A PROXY, not a measurement. The warmup pins K to a small batch, so its success rate is read
     at a batch the timed run will not use; and holding chunk wall constant ignores that a longer
@@ -410,10 +414,11 @@ def sample_clauses(nv, clauses, support, device, *, simplify=True, els=True, n_t
                         mi.by_width[width] = mi.by_width.get(width, 0) + n
                     mi.seconds += mi2.seconds
                 # KEEP THE CLAUSES ONLY IF THEY HELP. Mined clauses are always
-                # sound, but they enlarge the formula, and K is sized as budget/row_bytes with
-                # row_bytes ~ 4M — so a bigger M buys a SMALLER batch. Since K x M is then roughly
-                # constant, a chunk costs about the same either way and models-per-chunk
-                # `K x success` is the throughput proxy, readable with no extra GPU work. Compare
+                # sound, but width>=3 ones enlarge num_long, and K is sized as budget/row_bytes
+                # with row_bytes ~ 4*M_long — so a bigger STATE formula buys a SMALLER batch
+                # (width-1/2 finds are K-free). Since K x M_long is then roughly constant, a
+                # chunk costs about the same either way and models-per-chunk `K x success` is
+                # the throughput proxy, readable with no extra GPU work. Compare
                 # it against the pre-mining sampler and revert when mining did not pay. This is
                 # what turns "mining helps on average" into "mining never hurts": on an
                 # instance that already completes there is no success left to win, and the batch
@@ -479,7 +484,9 @@ def sample_clauses(nv, clauses, support, device, *, simplify=True, els=True, n_t
                    # (see GPUSampler.batch_size) and are kept for provenance.
                    "batch": smp.batch_size,
                    "K": smp.K, "k_cap": k_cap,
-                   "N_eff": smp.N, "M_eff": smp.M,
+                   # M_eff = ALL clauses; m_long = the len>=3 STATE clauses the K model charges
+                   # (binaries are occ implication edges, units live in the flush bitmap).
+                   "N_eff": smp.N, "M_eff": smp.M, "m_long": smp.M_state,
                    "core": _core_provenance(),
                    "max_clause_len": smp.formula.max_clause_len if smp.M else 0}
     # Headline throughput = the best-THROUGHPUT config's steady-state rate (best_rate_sps), NOT the

@@ -37,15 +37,29 @@ class TestLiteralIndexing:
 
 class TestReferenceOccurrenceLists:
     def test_basic_construction(self):
+        # SIMPLE segregates as: clause 0 (~1|2) BIN pair (1,2); clause 1 (1|~2|3) LONG id 0;
+        # clause 2 (~1|~2) BIN pair (1,3); clause 3 (~3) UNIT lit 5 -> NO occ entry.
         f = ReferenceFormula.from_clauses(3, SIMPLE)
+        assert (f.num_bin, f.num_long) == (2, 1)
+        assert f.bin_pairs == [(1, 2), (1, 3)]
+        assert f.unit_lits == [5]
 
-        # occ[l] = clauses where ~l appears
-        assert f.occ(0).tolist() == [0, 2]      # pos x1 -> clauses holding -1
-        assert f.occ(1).tolist() == [1]         # neg x1 -> clauses holding +1
-        assert f.occ(2).tolist() == [1, 2]      # pos x2 -> clauses holding -2
-        assert f.occ(3).tolist() == [0]         # neg x2 -> clauses holding +2
-        assert f.occ(4).tolist() == [3]         # pos x3 -> clauses holding -3
-        assert f.occ(5).tolist() == [1]         # neg x3 -> clauses holding +3
+        # binary prefix: payload = the OTHER literal setting l TRUE forces
+        assert f.occ_bin(0).tolist() == [2, 3]  # x1 TRUE: clause 0 forces x2, clause 2 forces ~x2
+        assert f.occ_bin(3).tolist() == [1]     # x2 FALSE: clause 0 forces ~x1
+        assert f.occ_bin(2).tolist() == [1]     # x2 TRUE: clause 2 forces ~x1
+        # long suffix: payload = the long clause's re-index
+        assert f.occ_long(1).tolist() == [0]    # x1 FALSE falsifies +1 in long clause 0
+        assert f.occ_long(2).tolist() == [0]    # x2 TRUE falsifies -2 in long clause 0
+        assert f.occ_long(5).tolist() == [0]    # x3 FALSE falsifies +3 in long clause 0
+        # the unit clause (~3) contributes NO entry: occ[4] is empty
+        assert f.occ(4).tolist() == []
+        # RAW storage carries the binary tag (the sign bit) so a kernel can classify an entry
+        # from the value it already loaded; occ_bin() above is the masked view.
+        from tests.reference_formula import BIN_TAG
+        assert f.occ(0).tolist() == [2 | BIN_TAG, 3 | BIN_TAG]
+        assert all(x < 0 for x in f.occ(0).tolist())      # binaries tagged
+        assert all(x >= 0 for x in f.occ_long(1).tolist())  # long clause ids are not
 
 
 class TestReferenceFormula:

@@ -9,6 +9,23 @@ Do **not** re-litigate these without new evidence (a new GPU class or a new regi
 
 ## Engine & memory model
 
+**BINARY CLAUSES ARE IMPLICATION EDGES, NOT COUNTED CLAUSES — only len >= 3 carries per-row
+state (2026-08-27).** ~80% of a circuit CNF's clauses are binary (Tseitin AND-gates emit 2 per
+3), and each was paying a packed word per row: broadcast at reset, atomic_add per
+falsification, restored by CLEAN, charged to K. Segregated (occ payload = the other literal,
+binary prefix per segment at `occ_mid[l]`; units live in the flush bitmap), a binary
+propagation is the ONE bitmap atomic_or of the forced push — 64-75% of occ entries take it —
+and per-row state drops to the 10-23% of M that is len >= 3. Measured on the 4080, interleaved
+best-of-3: **same-K kernels-only 1.42x geomean** (b03 1.43 / s1196 1.51 / b12-c25 1.33),
+free-K e2e 1.36x, `gpap mine` on b12-c50 **1.52x**; K grows 2.03-2.33x (exactly the row-model
+prediction), VRAM model re-verified at 1.00x, kill-switch clean, model counts bit-identical at
+pinned K (b12's first "mismatch" was a WALL-terminated gate cell — a no-change-gate cell must
+be COUNT-terminated or it compares speed, not determinism). Mined width-2 clauses are now
+K-free, and the TRAIL term (4N/row) newly dominates per-row bytes on big-N unrolls — its N
+bound is the soundness proof, not a knob. Details: BINARY_OCC_FINDINGS.md. ⚠️ Rates recorded
+before this change are not comparable to new ones; the 20260827 L4 campaign is the pre-binary
+baseline.
+
 **A single 30s sampling run cannot tell you which of two builds is faster, because the config
 BANDIT is a coin flip at that budget (2026-08-18).** Reported on hwmcc17 6s215rb0 c25 abc:fast,
 where main read 691 samples/s and the post-K-collapse branch 617 (0.893x) — both on the SAME kernel

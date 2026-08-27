@@ -9,9 +9,10 @@
  * docs/findings/CPP_BACKEND_FINDINGS.md §4 and the state-arena follow-up in
  * docs/plans/CPP_CORE_PLAN.md §8.
  *
- * State layout, unchanged from the Python engine:
- *   packed  (K, M)  int32  low SHIFT bits = sat_count, high bits = modular literal sum
- *   abits   (K, NW) int32  bit l = literal l is TRUE (l and l^1 share a word)
+ * State layout (M_long = clauses of length >= 3; binary clauses are implication edges in the
+ * occ list with NO per-row state, unit clauses live in the flush cache — see formula.cpp):
+ *   packed  (K, M_long) int32  low SHIFT bits = sat_count, high bits = modular literal sum
+ *   abits   (K, NW)     int32  bit l = literal l is TRUE (l and l^1 share a word)
  *   active / conflict (K,) int8
  * The post-units-flush state is computed ONCE at construction and broadcast-restored by
  * reset(K) — no per-chunk unit flush.
@@ -56,6 +57,7 @@ gpap_status fill_flags(gpap_engine *e, DevBuf &buf, int32_t value, int32_t n) {
 }
 
 gpap_status broadcast_rows(gpap_engine *e, DevBuf &dst, DevBuf &src, int32_t n_cols, int32_t K) {
+    if (n_cols <= 0 || K <= 0) return GPAP_OK;   /* num_long == 0 is legal (pure <=2-CNF) */
     Kernel k;
     GPAP_TRY(e->kernels.get("bcast_rows", &k));
     return launch(k, (unsigned)K, ceil_div(n_cols, 1024), {&dst.ptr, &src.ptr, &n_cols});
@@ -106,7 +108,7 @@ static gpap_status build_flush_cache(gpap_engine *e, const gpap_formula *f) {
      * cached and broadcast-restored by every reset(K). An empty clause (or contradictory
      * units) conflicts the flush itself — reset() then marks every row conflicted. */
     GPAP_TRY(gpap_engine_reset(e, 1));
-    GPAP_TRY(broadcast_rows(e, e->packed, e->packed_init, e->num_clauses, 1));
+    GPAP_TRY(broadcast_rows(e, e->packed, e->packed_init, e->num_long, 1));
     GPAP_TRY(e->abits.zero());
     GPAP_TRY(fill_flags(e, e->active, e->has_empty_clause ? 0 : 1, 1));
     GPAP_TRY(fill_flags(e, e->conflict, e->has_empty_clause ? 1 : 0, 1));
@@ -115,10 +117,12 @@ static gpap_status build_flush_cache(gpap_engine *e, const gpap_formula *f) {
         std::vector<int64_t> units(f->unit_lits.begin(), f->unit_lits.end());
         GPAP_TRY(gpap_engine_apply(e, units.data(), (int32_t)units.size()));
     }
-    GPAP_TRY(e->packed_flushed.reserve((size_t)e->num_clauses * sizeof(int32_t)));
+    if (e->num_long) {
+        GPAP_TRY(e->packed_flushed.reserve((size_t)e->num_long * sizeof(int32_t)));
+        GPAP_CU(cuMemcpyDtoD(e->packed_flushed.ptr, e->packed.ptr,
+                             (size_t)e->num_long * sizeof(int32_t)));
+    }
     GPAP_TRY(e->abits_flushed.reserve((size_t)e->nw * sizeof(int32_t)));
-    GPAP_CU(cuMemcpyDtoD(e->packed_flushed.ptr, e->packed.ptr,
-                         (size_t)e->num_clauses * sizeof(int32_t)));
     GPAP_CU(cuMemcpyDtoD(e->abits_flushed.ptr, e->abits.ptr, (size_t)e->nw * sizeof(int32_t)));
     int8_t conflict0 = 0;
     GPAP_CU(cuMemcpyDtoH(&conflict0, e->conflict.ptr, 1));
@@ -172,6 +176,7 @@ extern "C" gpap_status gpap_engine_create(const gpap_formula *f, const gpap_engi
         }
         e->num_vars = f->num_vars;
         e->num_clauses = f->num_clauses;
+        e->num_long = f->num_long;
         e->shift = o.force_shift ? o.force_shift : f->shift;
         e->total_lits = f->total_lits;
         e->max_clause_len = f->max_clause_len;
@@ -192,20 +197,38 @@ extern "C" gpap_status gpap_engine_create(const gpap_formula *f, const gpap_engi
 
         st = stage(e->occ_off, f->occ_offsets.data(), f->occ_offsets.size() * sizeof(int32_t));
         if (st != GPAP_OK) break;
+        st = stage(e->occ_mid, f->occ_mid.data(), f->occ_mid.size() * sizeof(int32_t));
+        if (st != GPAP_OK) break;
         st = stage(e->occ_cls, f->occ_clauses.data(), f->occ_clauses.size() * sizeof(int32_t));
         if (st != GPAP_OK) break;
         if (e->shift == f->shift) {
             st = stage(e->packed_init, f->packed_init.data(),
                        f->packed_init.size() * sizeof(int32_t));
-        } else {   /* pinned to the other split: re-pack from clause_sizes + lit_sum */
-            std::vector<int32_t> pk((size_t)f->num_clauses);
-            const uint32_t mask = (uint32_t)((1ull << (32 - e->shift)) - 1);
-            for (int32_t c = 0; c < f->num_clauses; ++c)
-                pk[(size_t)c] = (int32_t)((uint32_t)f->clause_sizes[(size_t)c] |
-                                          (((uint32_t)f->lit_sum[(size_t)c] & mask) << e->shift));
+        } else {   /* pinned to the other split: re-pack the LONG clauses from sizes + sums */
+            std::vector<int32_t> pk;
+            gpap::pack_long_init(f, e->shift, pk);
             st = stage(e->packed_init, pk.data(), pk.size() * sizeof(int32_t));
         }
         if (st != GPAP_OK) break;
+        /* Soundness pair list: every binary clause + every unit u as the degenerate pair
+         * (u, u) — sound_rows checks "both negations set" per pair against the bitmap, since
+         * none of these clauses has a packed word any more. */
+        {
+            std::vector<int32_t> pairs;
+            pairs.reserve(f->bin_pairs.size() + 2 * f->unit_lits.size());
+            pairs.insert(pairs.end(), f->bin_pairs.begin(), f->bin_pairs.end());
+            for (int32_t u : f->unit_lits) {
+                pairs.push_back(u);
+                pairs.push_back(u);
+            }
+            e->n_pairs = (int32_t)(pairs.size() / 2);
+            st = stage(e->pair_check, pairs.data(), pairs.size() * sizeof(int32_t));
+            if (st != GPAP_OK) break;
+            e->pair_host = std::move(pairs);   /* the SAME list, not a second copy */
+        }
+        /* Host side of gpap_sat_rows' original-order synthesis (the engine outlives f). */
+        e->num_bin = f->num_bin;
+        e->sat_src_host = f->sat_src;
         st = e->acc_ops.reserve(8);
         if (st == GPAP_OK) st = e->acc_props.reserve(8);
         if (st == GPAP_OK) st = e->acc_decs.reserve(8);
@@ -249,6 +272,11 @@ extern "C" int32_t gpap_engine_num_vars(const gpap_engine *e) { return e ? e->nu
 extern "C" int32_t gpap_engine_num_clauses(const gpap_engine *e) {
     return e ? e->num_clauses : 0;
 }
+/* Engine-side, like gpap_engine_num_vars/num_clauses above: the engine copies what it needs at
+ * create time, so a C consumer may gpap_formula_free() and keep the engine — and then this is the
+ * only way to size a gpap_packed_rows buffer. (Python holds its formula, so gpap/engine/_core.py
+ * reads gpap_formula_info.num_long directly instead, matching its sibling properties.) */
+extern "C" int32_t gpap_engine_num_long(const gpap_engine *e) { return e ? e->num_long : 0; }
 extern "C" int gpap_engine_flush_conflict(const gpap_engine *e) { return e ? e->flush_conflict : 0; }
 
 /* ------------------------------------------------------------------ reset */
@@ -275,7 +303,7 @@ static inline int32_t trail_cap_for(int32_t num_vars, int32_t B) {
 static gpap_status ensure_state(gpap_engine *e, int32_t K, int32_t B) {
     const int32_t cap = trail_cap_for(e->num_vars, B);
     if (cap > e->trail_cap) e->trail_cap = cap;
-    GPAP_TRY(e->packed.reserve((size_t)K * e->num_clauses * sizeof(int32_t)));
+    GPAP_TRY(e->packed.reserve((size_t)K * e->num_long * sizeof(int32_t)));
     GPAP_TRY(e->abits.reserve((size_t)K * e->nw * sizeof(int32_t)));
     GPAP_TRY(e->active.reserve((size_t)K));
     GPAP_TRY(e->conflict.reserve((size_t)K));
@@ -310,7 +338,7 @@ extern "C" gpap_status gpap_engine_reset(gpap_engine *e, int32_t K) {
          * still skipped some broadcasts would contaminate the measurement it exists for. */
         e->resets_lite++;
     } else {
-        GPAP_TRY(broadcast_rows(e, e->packed, e->packed_flushed, e->num_clauses, K));
+        GPAP_TRY(broadcast_rows(e, e->packed, e->packed_flushed, e->num_long, K));
         if (K > e->packed_clean_rows) e->packed_clean_rows = K;
         e->resets_full++;
     }
@@ -338,8 +366,9 @@ extern "C" gpap_status gpap_engine_recache_flush(gpap_engine *e) {
     }
     GPAP_TRY(use_ctx(e));
     e->packed_clean_rows = 0;                       /* the baseline itself is moving */
-    GPAP_CU(cuMemcpyDtoD(e->packed_flushed.ptr, e->packed.ptr,
-                         (size_t)e->num_clauses * sizeof(int32_t)));
+    if (e->num_long)
+        GPAP_CU(cuMemcpyDtoD(e->packed_flushed.ptr, e->packed.ptr,
+                             (size_t)e->num_long * sizeof(int32_t)));
     GPAP_CU(cuMemcpyDtoD(e->abits_flushed.ptr, e->abits.ptr, (size_t)e->nw * sizeof(int32_t)));
     int8_t c0 = 0;
     GPAP_CU(cuMemcpyDtoH(&c0, e->conflict.ptr, 1));
@@ -375,9 +404,9 @@ static gpap_status apply_dev_common(gpap_engine *e, uintptr_t decisions_dev, int
                             std::to_string(e->mode == GPAP_MODE_WAVE ? 1 : 0);
     GPAP_TRY(e->kernels.get(key, &k));
     CUdeviceptr dec = (CUdeviceptr)decisions_dev;
-    int32_t M = e->num_clauses, NW = e->nw, B = L, cap = e->trail_cap;
+    int32_t M = e->num_long, NW = e->nw, B = L, cap = e->trail_cap;
     std::vector<void *> args = {&e->packed.ptr, &e->abits.ptr, &e->active.ptr, &e->conflict.ptr,
-                                &dec, &e->occ_off.ptr, &e->occ_cls.ptr};
+                                &dec, &e->occ_off.ptr, &e->occ_mid.ptr, &e->occ_cls.ptr};
     if (clean) args.push_back(&e->packed_flushed.ptr);   /* init_ptr: what the tail restores */
     for (void *p : {(void *)&e->trail.ptr, (void *)&e->nprops.ptr, (void *)&e->nops.ptr,
                     (void *)&e->ndecs.ptr, (void *)&M, (void *)&NW, (void *)&B, (void *)&cap})
@@ -442,11 +471,12 @@ extern "C" gpap_status gpap_engine_trajectory_dev(gpap_engine *e, uintptr_t orde
     GPAP_TRY(e->kernels.get(traj_key(e->shift, e->mode == GPAP_MODE_WAVE ? 1 : 0,
                                      e->vscan ? 1 : 0, soft ? 1 : 0), &k));
     CUdeviceptr order = (CUdeviceptr)order_dev;
-    int32_t M = e->num_clauses, NW = e->nw, cap = e->trail_cap, max_rounds = 1 << 30;
+    int32_t M = e->num_long, NW = e->nw, cap = e->trail_cap, max_rounds = 1 << 30;
     int64_t seed64 = seed;
     GPAP_TRY(launch(k, (unsigned)e->K, 1,
                     {&e->packed.ptr, &e->abits.ptr, &e->active.ptr, &e->conflict.ptr, &order,
-                     &e->occ_off.ptr, &e->occ_cls.ptr, &e->trail.ptr, &e->nrounds.ptr,
+                     &e->occ_off.ptr, &e->occ_mid.ptr, &e->occ_cls.ptr, &e->trail.ptr,
+                     &e->nrounds.ptr,
                      &e->nops.ptr, &e->nprops.ptr, &e->ndecs.ptr, &M, &NW, &P, &n_support, &B,
                      &cap, &max_rounds, &seed64}));
     e->launches++;

@@ -6,8 +6,10 @@ the Python face of it — argument marshalling and the torch-friendly accessors 
 `gpap.engine._core` (a ctypes binding to the C ABI in `cpp/include/gpap/gpap.h`).
 
 State layout (identical to the C core, see docs/ENGINE.md):
-  * packed clause word (K, M) int32 — low SHIFT bits = sat_count, high bits = the modular SUM
-    of the surviving literal indices; at sat_count == 1 that field IS the forced literal;
+  * packed clause word (K, num_long) int32 — LENGTH >= 3 clauses only (binaries are occ
+    implication edges, units live in the flush bitmap; neither costs per-row state) — low SHIFT
+    bits = sat_count, high bits = the modular SUM of the surviving literal indices; at
+    sat_count == 1 that field IS the forced literal;
   * assignment BITMAP (K, ceil(2N/32)) int32 — bit l set = literal l TRUE (l and ~l share a
     word, which is what makes the kernels' one-atomic dedup/contradiction work);
   * the post-units-flush cache, computed ONCE at construction and broadcast-restored by
@@ -166,6 +168,12 @@ class BCPEngine:
     @property
     def num_clauses(self) -> int:
         return self._core.num_clauses
+
+    @property
+    def num_long(self) -> int:
+        """STATE (length >= 3) clauses — what one row's packed words cost; feed THIS to the
+        K model, not num_clauses (binaries/units carry no per-row state)."""
+        return self._core.num_long
 
     @property
     def device(self) -> torch.device:

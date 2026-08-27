@@ -630,7 +630,10 @@ class Sampler {
          * gpap_compute_k_safe reads cap<=0 as "no cap", which is what the negative case wants. */
         const std::int32_t cap = o.k_cap == 0 ? gpap_default_k_cap(o.device) : o.k_cap;
         const std::int64_t free_bytes = gpap_mem_available(o.device, kMemFraction);
-        return gpap_compute_k_safe(info.num_clauses, info.num_vars, free_bytes, cap, o.batch);
+        /* num_long: only length>=3 clauses carry per-row state — binaries are implication
+         * edges and units live in the flush bitmap, so charging total M would waste ~2.3x
+         * of the batch on circuit CNFs. */
+        return gpap_compute_k_safe(info.num_long, info.num_vars, free_bytes, cap, o.batch);
     }
 
     /** One chunk: reshuffle within each phase, run K trajectories, count the models. */
