@@ -284,7 +284,9 @@ def test_config_breakdown_keys_stay_legacy_formatted():
     smp = GPUSampler.from_clauses(4, [[1, 2], [-1, 3], [-2, -3], [2, 3, 4]], DEV, k_cap=256,
                                   seed=1)
     r = smp.sample(300, configs=portfolio("default"), collect=False, max_chunks=9)
-    for k in (r.get("config_breakdown") or {}):
+    bd = r.get("config_breakdown")
+    assert bd, "no config_breakdown to check — `or {}` would have passed vacuously"
+    for k in bd:
         assert k.startswith("rv=True,") or k.startswith("rv=False,"), k
 
 

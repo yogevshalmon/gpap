@@ -160,8 +160,10 @@ def test_circuit_distinct_fraction(circuit_cnfs):
     nv, clauses, support = _inst(circuit_cnfs, "b03-c10")
     smp = _collecting_sampler(nv, clauses, support, k_cap=1024, simplify=True)
     out = smp.sample(2000, configs=[(True, 8, False)], max_chunks=4, collect=True)
-    if out["n_models"] >= 200:
-        assert out["n_distinct"] / out["n_models"] > 0.9
+    # assert the PRECONDITION rather than hiding behind it: `if n_models >= 200` alone means a
+    # regression that stops the sampler producing anything passes this test silently.
+    assert out["n_models"] >= 200, "produced too few models to judge distinctness"
+    assert out["n_distinct"] / out["n_models"] > 0.9
 
 
 # --------------------------------------------------------------------------- deep cascade (slow)

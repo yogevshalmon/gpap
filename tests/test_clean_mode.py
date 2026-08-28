@@ -324,9 +324,7 @@ class TestCleanModeGuards:
         f = _core.Formula.from_clauses(6, [[1, 2], [-1, 3]])
         e = _core.Engine(f)
         e.reset(4)
-        if rows == 4:
-            return
-        d = np.zeros((rows, 1), dtype=np.int64)
+        d = np.zeros((rows, 1), dtype=np.int64)      # parametrized 1/3/8, never the sized 4
         for fn in (e.apply, e.apply_clean):
             with pytest.raises(ValueError, match="rows but the engine is sized"):
                 fn(d)

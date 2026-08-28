@@ -73,6 +73,20 @@ def test_missing_input_and_output_dir_fail_before_any_work(tmp_path, monkeypatch
 
 # ------------------------------------------------------------------ mining budget + accounting
 
+def test_the_default_mining_path_never_caps_width_1():
+    """`mine_entailed` applies a ceiling to width 1 too — which is what `gpap mine --max-tuples`
+    asks for, and a hazard everywhere else: the per-width lookup falls back to DEFAULT_MAX_TUPLES,
+    so a dict without a key for width 1 silently truncates the backbone fixpoint on the DEFAULT
+    sampling path, at a fraction of one round on a large unroll. No flag, no warning, and fewer
+    mined units. Found by mutation: removing the `1: 0` survived the entire suite."""
+    from gpap.mining import _ceiling
+    from gpap.sampling.pipeline import STAGE1_MAX_TUPLES, STAGE2_MAX_TUPLES
+    for name, budget in (("STAGE1", STAGE1_MAX_TUPLES), ("STAGE2", STAGE2_MAX_TUPLES)):
+        assert _ceiling(budget, 1) == 0, (
+            f"{name} caps width 1 at {_ceiling(budget, 1):,} — the backbone must stay unbounded; "
+            f"give it an explicit `1: 0`")
+
+
 @needs_gpu
 def test_max_tuples_binds_at_width_1(tmp_path):
     """It was hardcoded to unbounded, while the plan line warned the ceiling was exceeded."""
@@ -118,6 +132,21 @@ def test_never_writes_more_samples_than_models_delivered(tmp_path, capsys):
     n_models = int(txt.split(" models in")[0].split()[-1].rstrip("<").replace(",", ""))
     assert len(rows) <= n_models
     assert len(rows) <= 300
+
+
+@needs_gpu
+def test_delivery_delivers_what_it_collected(tmp_path):
+    """The LOWER bound, which the upper-bound test above cannot see.
+
+    Found by mutation: silently dropping half of every collected block survived the whole suite,
+    because every existing assertion was of the form `rows <= something`. A delivery path that
+    quietly under-delivers is exactly as wrong as one that over-delivers, and reads as success."""
+    from gpap.sampling.pipeline import sample_file
+    info = sample_file(_cnf(tmp_path, SMALL), torch.device("cuda"), n_time=4000, out_cap=1500,
+                       k_cap=64, seed=5, time_limit=60.0, mine=False)
+    assert not info["chunk_capped"], "precondition: the run met its target, so nothing was cut"
+    assert info["n_models"] >= 1500
+    assert len(info["samples"]) == 1500, "asked for 1,500 deliverable rows and got fewer"
 
 
 @needs_gpu
@@ -192,18 +221,26 @@ def test_zero_models_on_a_satisfiable_formula_says_why(tmp_path, capsys, monkeyp
 
 # ------------------------------------------------------------------ writers
 
-def test_dimacs_writer_matches_the_reference_tokens(tmp_path):
-    """Vectorised for speed (3.70 s -> 0.60 s at 50k x 900); it must stay token-identical."""
+@pytest.mark.parametrize("n,c,dtype,scale", [
+    (7, 5, np.uint8, 1),
+    (5000, 11, np.uint8, 1),          # crosses the block boundary
+    (500, 37, np.int32, 1),           # a caller's own int array
+    (300, 11, np.uint8, 255),         # NONZERO-IS-TRUE: a 0/255 mask, not a 0/1 one
+])
+def test_dimacs_writer_matches_the_reference_tokens(tmp_path, n, c, dtype, scale):
+    """Vectorised, and it must stay token-identical to the row loop it replaced — INCLUDING that
+    loop's coercion. The vectorised form indexes a length-2 table with the matrix values, so any
+    value outside {0,1} became an IndexError where `row.astype(bool)` had accepted it; `!= 0`
+    restores it. Found by mutation: dropping the `!= 0` survived a suite that only fed 0/1."""
     from gpap.sampling.output import write_dimacs
-    rng = np.random.default_rng(0)
-    for n, c in ((7, 5), (5000, 11)):                    # crosses the 4096-row block boundary
-        m = (rng.random((n, c)) > 0.5).astype(np.uint8)
-        cols = sorted(rng.choice(np.arange(1, 9999), c, replace=False).tolist())
-        p = str(tmp_path / "d.cnf")
-        write_dimacs(p, m, cols)
-        got = [ln.split() for ln in open(p)]
-        want = [[str(v if b else -v) for v, b in zip(cols, row)] + ["0"] for row in m]
-        assert got == want
+    rng = np.random.default_rng(n)
+    m = ((rng.random((n, c)) > 0.5).astype(dtype)) * scale
+    cols = sorted(rng.choice(np.arange(1, 9999), c, replace=False).tolist())
+    p = str(tmp_path / "d.cnf")
+    write_dimacs(p, m, cols)
+    got = [ln.split() for ln in open(p)]
+    want = [[str(v if b else -v) for v, b in zip(cols, row)] + ["0"] for row in m]
+    assert got == want
 
 
 def test_bench_forwards_every_flag_it_declares(tmp_path, monkeypatch):

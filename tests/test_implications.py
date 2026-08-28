@@ -43,11 +43,16 @@ def models(num_vars, clauses):
     return out
 
 
-def random_cnf(rng, num_vars, n_clauses):
+def random_cnf(rng, num_vars, n_clauses, lo=1):
+    """Random 1-3 literal clauses over variables `lo..num_vars`.
+
+    `lo` exists so a test can PLANT a structure (an equivalence, a failed literal) on the
+    variables below it and know the noise cannot settle it — a planted property that the noise
+    can propagate away is a property the test silently stops checking."""
     cls = []
     for _ in range(n_clauses):
         w = rng.randint(1, 3)
-        c = list({rng.choice([1, -1]) * rng.randint(1, num_vars) for _ in range(w)})
+        c = list({rng.choice([1, -1]) * rng.randint(lo, num_vars) for _ in range(w)})
         if c:
             cls.append(c)
     return cls
@@ -96,30 +101,51 @@ class TestSoundness:
 
     @pytest.mark.parametrize("seed", range(25))
     def test_failed_literals_are_in_no_model(self, seed):
+        """A PLANTED failed literal: `nv` forces both polarities of `nv-1`, so it is in no model.
+
+        Random CNFs of this size almost never contain one — measured 2 failed literals across 20
+        SAT instances, i.e. 18 of them asserted nothing. The plant makes every run test the
+        property; the random tail still varies what surrounds it."""
         rng = random.Random(seed + 100)
-        nv = rng.randint(3, 7)
-        cls = random_cnf(rng, nv, rng.randint(3, 10))
+        nv = rng.randint(5, 9)
+        f, w = nv, nv - 1              # planted: f forces w and -w; the noise stays off both
+        cls = [[-f, w], [-f, -w]] + random_cnf(rng, nv, rng.randint(3, 10), lo=1)
+        cls = [c for c in cls if all(abs(x) < w for x in c)] + [[-f, w], [-f, -w]]
         ms = models(nv, cls)
         if not ms:
             pytest.skip("unsat")
         imp = implications(nv, cls, DEV)
-        for l in imp.failed.tolist():
+        failed = imp.failed.tolist()
+        assert f in failed, f"planted failed literal {f} was not detected"
+        for l in failed:
             assert all(int(l) not in asg for asg in ms), f"{l} is failed but appears in a model"
 
     @pytest.mark.parametrize("seed", range(25))
     def test_equivalent_literals_agree_in_every_model(self, seed):
-        """The property that licenses substitution: the model SET is preserved."""
+        """The property that licenses substitution: the model SET is preserved.
+
+        ⚠️ A PLANTED equivalence, not a bare random CNF. Measured: over 19 SAT random formulas of
+        this shape the sweep produced ZERO equivalence classes, so the loop body never ran and the
+        test executed no assertion at all — it passed with `equivalence_classes` stubbed to return
+        `[]`. Planting `2k-1 <-> 2k` guarantees the property is actually exercised, and the
+        coverage assertion below keeps it that way if the generator ever drifts."""
         rng = random.Random(seed + 200)
-        nv = rng.randint(3, 7)
-        cls = random_cnf(rng, nv, rng.randint(3, 10))
+        nv = rng.randint(5, 9)
+        a, b = 1, 2                    # planted: 1 <-> 2; the noise lives on 3..nv and cannot
+        cls = [[-a, b], [a, -b]] + random_cnf(rng, nv, rng.randint(3, 10), lo=3)
         ms = models(nv, cls)
         if not ms:
             pytest.skip("unsat")
         imp = implications(nv, cls, DEV)
-        for cl in equivalence_classes(imp):
-            for a, b in itertools.combinations(cl, 2):
+        classes = equivalence_classes(imp)
+        assert classes, "no equivalence class found on a formula that plants one — vacuous run"
+        checked = 0
+        for cl in classes:
+            for x, y in itertools.combinations(cl, 2):
                 for asg in ms:
-                    assert (a in asg) == (b in asg), f"{a} == {b} fails in {sorted(asg)}"
+                    assert (x in asg) == (y in asg), f"{x} == {y} fails in {sorted(asg)}"
+                    checked += 1
+        assert checked, "the property was never evaluated"
 
     @pytest.mark.parametrize("seed", range(15))
     def test_hyper_binary_clauses_are_entailed(self, seed):
