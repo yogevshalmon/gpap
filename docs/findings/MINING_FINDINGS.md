@@ -446,6 +446,12 @@ sampler completes NOTHING in the warmup, the clauses are kept regardless — the
 be worse than, and mining is the only thing that has ever converted those (b12-c25/abc: 516 ->
 20,031 models).
 
+Since 2026-08-27 mined width-2 clauses are **K-free** — binary clauses are implication edges with
+no per-row state ([BINARY_OCC_FINDINGS.md](BINARY_OCC_FINDINGS.md)) — so the proxy naturally keeps
+more of them; it retunes itself, because `smp.K` on the rebuilt sampler already charges only
+`num_long` (measured: 6s215rb0's gain rose 1.43 → 2.44 and texasparsesysp3 flipped from revert to
+keep, with no constant touched).
+
 ## FUTURE WORK — what is deliberately not built (2026-08-20)
 
 Mining is now a bounded few seconds of a sampling run, sound, and self-limiting. Everything below
@@ -455,7 +461,7 @@ was investigated far enough to size it and then parked, so the shipping path sta
 |---|---|---|
 | **Transitive reduction** | the real HBR filter, over the binary implication graph | needs the BIG as a separate structure; the propagation relation cannot answer it (see the k-JOBS section). Would make `implications.hyper_binary` usable as a preprocessor output rather than an analysis product |
 | **Aggressive `derivable`** | one covered direction is enough | same reason — correct only on a symmetric relation. Ours is conservative: 1.6-2.7x fewer clauses dropped, never unsound |
-| **Trail-superset restore** | kill the per-chunk state broadcast (41-94% of probe wall) | designed and bounded above; the SAMPLER sits on the losing side of the crossover, so it only pays for probing, which is now a few seconds |
+| ~~**Trail-superset restore**~~ | kill the per-chunk state broadcast (41-94% of probe wall) | **SHIPPED 2026-08-21 as CLEAN mode**, fused into the probe launch (`docs/plans/RESET_RESTORE_PLAN.md` §9). The SAMPLER stays on the broadcast: it sits on the losing side of the crossover |
 | **Chunked closure** | sweep a pool larger than VRAM instead of refusing it | nothing in the pipeline hits the limit; `implications` refuses loudly |
 | **Closure-based ELS** | strictly stronger equivalences than the sampler's binary-clause edges (1.11-1.32x more vars) | a behaviour change to the shipping sampler, so it needs its own uniformity gate |
 | **`hyper_binary` size guard** | the output is ~1000x the formula (b03-c25: 14M clauses vs M=14,505) | documented instead; it is an analysis product and nothing ships on it |

@@ -1,176 +1,161 @@
 # Benchmarking GPAP — the measurement protocol
 
-These are the measurement traps that have actually bitten this project. Follow them before quoting
-any number, and cite [`docs/findings/INSIGHTS.md`](findings/INSIGHTS.md) for the underlying findings.
+Every rule below was, at some point, a wrong number in this project. Follow them before quoting
+anything; the measurements that established them are in
+[`findings/INSIGHTS.md`](findings/INSIGHTS.md) ("Measurement methodology") and in the findings
+files each section links.
 
-## 1. Check the power state FIRST
+## 1. Check the power state first
 
-`gpap info` (or `nvidia-smi -q -d POWER` + SM clocks under load). This box class has shown a **40 W
-cap** (default 80 W) and a **battery clock profile** (~1.6 GHz vs 3.1 GHz max), each of which
-uniformly ~halves every rate. Idle clocks read ~210 MHz and are meaningless — read clocks *during* a
-run. **Ratios in one power state are valid; absolute numbers across states or GPUs are not.**
+`gpap info` reports the device and warns about a power cap. Laptop GPUs run under power caps and
+battery clock profiles that uniformly halve every rate (this project's reference box has been
+measured at 40 W against an 80 W default). Idle clocks are meaningless — read SM clocks
+**during** a run. Ratios measured in one power state are valid; absolute numbers across states or
+GPUs are not.
 
-## 1b. Clocks move DURING a run — never compare rates across runs
+### 1b. Clocks move *during* a run, so rates from different runs are not comparable
 
-The power state is not a constant you check once. Sampled every 3 s through a full `seq` sweep on
-the 4080 laptop, the SM clock **while the GPU was >90% busy** ranged **615–1710 MHz** (mean 1373),
-and between rows it sat at 2190 MHz. Same box, same run, same power source: a **2.8× spread**.
-Clock and draw are not even monotonic together (1245 MHz at 96 W, 2190 MHz at 39 W) — occupancy
-and the CPU/GPU shared power budget both move it, so the instance mix ahead of a row changes the
-clock that row is measured at.
+Sampled every 3 s through a full sweep on the reference laptop, the SM clock while >90% busy
+ranged **615–1710 MHz** — a 2.8× spread within one run, on mains power, and not monotone with
+draw: the instance mix ahead of a row changes the clock that row is measured at. So a
+few-percent difference between two runs on different days is not resolvable, and a GPAP-only
+sweep is not comparable to a GPAP+CMSGen sweep either (CMSGen's CPU stretch is a GPU idle stretch).
 
-Consequence: **a few-percent difference between two runs on different days, or between two
-differently-composed sweeps, is not resolvable on this hardware.** A GPAP-only sweep and a
-GPAP+CMSGen sweep are not comparable at that resolution either — CMSGen's CPU-only stretch is
-also a GPU idle stretch.
+What is valid: **interleaved A/Bs in one session** with the arm order alternated between rounds
+(`scripts/perf_ab_trees.py` does this across two checkouts); **model counts**, which are
+clock-independent (§3); and ratios within one sweep. Every kernel change in this repository was
+gated that way, never on a before/after sweep.
 
-What IS valid:
-- **Interleaved A/B in the same session**, alternating the arm order between rounds so neither
-  arm systematically gets the cooler slot.
-- **Model counts**, which are clock-independent (see §3) — the port gate uses these, not rates.
-- Ratios *within* one sweep, where both sides met the same clock.
+## 2. The box spills, it does not OOM
 
-This is why the C++-core port was gated on model counts and on interleaved A/Bs (which showed
-1.013× at the kernel level and 1.028× at the sampler level), not on a before/after sweep.
+On WSL2/WDDM an oversized batch migrates to host RAM over PCIe and throughput collapses silently —
+no `OutOfMemoryError`. Never probe for the largest K that "works", and validate every change to
+batch sizing under an `nvidia-smi` kill-switch (`used > ~11 GB of 12 → pkill`). If it trips, the
+sizing is wrong: revert.
 
-## 2. The box SPILLS, it does not OOM — use the kill-switch, never an OOM probe
+## 3. The no-change gate, and what counts as a verdict
 
-On WSL2/WDDM, oversizing K makes tensors migrate to shared host RAM over PCIe (~12 GB/s vs
-~200 GB/s VRAM) and throughput collapses silently — no `OutOfMemoryError`. So:
+The sampler is seeded, so same-seed repeats replay identical trajectories and measure **timing**
+noise only. Any change to portfolio membership or chunk count shifts RNG consumption, and on
+low-success instances per-instance rates then swing ±20–40% either way; a "consistent 0.81×" can
+be pure draw luck.
 
-- Never OOM-probe for max K; it won't crash, it'll thrash.
-- Validate **every** K-sizing change under an nvidia-smi kill-switch:
-  `used > ~11 GB (of 12) → pkill`. If it trips, the K is bad — **revert**.
-- (This is exactly how the Phase-4 K_fused eng_hold "fix" was caught spilling b05-c50 and reverted.)
+**A pure refactor is gated on identical model counts**, not on rates:
 
-## 3. Same-seed repeats measure TIMING noise only — not DRAW noise
+- pin the batch **below both arms' analytic bounds** (`--k-cap 20000` on the reference box; the
+  shipped cap does not pin K once the memory model differs between arms) and `pin_batch`;
+- one config, no bandit (`--portfolio b8|b1|s1`), fixed seed;
+- **count-terminated** (`-n`), never wall-terminated — a cell that stops on `--time-limit`
+  compares speed, not determinism;
+- mining off, or like-for-like — mining is wall-budgeted, so a faster arm mines a different
+  formula;
+- ⇒ identical model counts and success rates, plus model-set hashes on small instances.
 
-The sampler pins its seed, so N repeats replay identical trajectories: a "consistent 0.81×" can be
-pure draw luck. Worse, changing portfolio membership shifts RNG consumption, so every chunk's
-trajectories change and per-instance rates swing ±20–40% on low-success instances.
+**A throughput verdict** needs one of: an interleaved same-session A/B (§1b) at pinned config,
+best-of-N per arm; or a multi-seed (5+) fixed-config shootout comparing medians
+(`gpap bench --seeds 5 6 7`). Never compare two builds on one free-bandit run — at a 30 s budget
+the config bandit is a coin flip (1–2 mis-picks in 8 seeds), so the arms may simply have chosen
+different configs. `implications_per_s` is bandit-independent engine work and the right
+cross-build number when pinning is impossible.
 
-**Arbiter for a real A/B verdict** — one of:
-- a **multi-seed (5+) fixed-config shootout**, comparing MEDIANS; or
-- a **deterministic same-seed single-config A/B** where the model COUNTS (and, on small instances,
-  the model-set hash) must match bit-identically.
+## 4. Throughput is measured with nothing leaving the GPU
 
-This repo's no-change gate uses the second form (see the pinned-gate script pattern in the refactor
-experiments): fixed K, `K_fused` pinned to K, single config, seed 5 ⇒ bit-identical counts.
-Like-for-like only: if the compared row **mined**, compare against a mined baseline.
+The timed run is `collect=False`: models stay on the device, and the per-chunk soundness check is
+the only readout inside the window. Everything that delivers samples — the bit projection that
+`--out` writes, `distinct_projections`, the coverage and uniformity readouts — runs off the timing
+path and is billed separately (`out_project_s`, `phases_diag`). Rivals report **unique**
+solutions/s; `unique_sps_est = raw × distinct_frac` is computed the same way, off the path.
+`distinct_frac ≈ 1.0` on every non-tiny space; on tiny circuit spaces the count is the honest
+number (b06-c5 has 64 solutions in total).
 
-## 4. Report unique-solutions/s OFF the timing path
+### 4b. Charge both samplers for the same deliverable
 
-Competitors (DEMOTIC / HTS / Recurrent CircuitSAT) report **unique** solutions/s. Folding
-reconstruction + dedup into the timed run understates GPU throughput up to 10× (Python delivery,
-not sampling, is the bottleneck). So:
+Stock CMSGen writes every sample as a full N-variable assignment, and on wide formulas that costs
+more than the sampling (27.sk_3_32, 50k samples: 0.42 s of generation becomes 3.6 s with the
+file). Comparing GPAP-without-emission against CMSGen-with-emission measures file I/O. Build
+CMSGen with `scripts/build_cmsgen.sh`, which applies `scripts/cmsgen_gpap_eval.patch`:
 
-- The timed run stays `collect=False` (pure GPU generation rate).
-- `distinct_projections()` runs on a **separate** coverage sample; `unique_sps_est = raw × distinct_frac`.
-- `distinct_frac ≈ 1.0` on all non-tiny spaces; the count matters on tiny circuit spaces (e.g.
-  b06-c5 has only 64 distinct solutions total — a raw rate overstates distinct delivery ~2500×).
+| flag | why it exists |
+|---|---|
+| `--nowrite` | generate, emit nothing — the timed run |
+| `--statsevery N` | CMSGen's own propagation/decision counters, flushed (the `Cdec/s` / `Cimpl/s` columns) |
+| `--maxtime N` | CMSGen stops **itself** at the budget and prints an exact `final=1` count. Without it a killed run reports the last `--statsevery` multiple: 81 cells of one campaign read a floored `0` that scored as our win |
 
-## 4b. Charge both samplers for the SAME deliverable — CMSGen's emission is not free
+`gpap bench` detects the flags, times the `--nowrite` run, records `cms_count_exact`, and marks
+a stock binary's row `cms_mode="write"` rather than hiding the handicap. The rate columns pair
+like with like: `cms_sps` (per CMSGen's own sampling wall) against GPAP's steady-state rate,
+`cms_sps_e2e` (per subprocess wall) against `wall_total`. The GPU rivals are held to the same
+rule, and it is re-derived rather than assumed: `eval/rivals/check_emission_symmetry.py`
+AST-scans what each rival's own timer wraps. Evidence, and the one documented exception
+(Recurrent-CircuitSAT, ~1%, left uncorrected because correcting it would raise our number):
+[`findings/RIVAL_FAIRNESS_FINDINGS.md`](findings/RIVAL_FAIRNESS_FINDINGS.md) §1, §7.
 
-GPAP's timed run emits nothing (§4). Stock CMSGen formats and writes every sample as a full
-N-variable DIMACS assignment, and on wide formulas that costs more than the sampling:
-**`27.sk_3_32`, 50k samples — 0.42 s generating vs 3.6 s with `--samplefile`** (373 MB written;
-`--samplefile /dev/null` still costs 3.3 s, so it is ostream formatting, not disk). A
-GPAP-without-emission vs CMSGen-with-emission ratio measures file I/O.
+### 4c. Grant a rival the same share of the machine you take
 
-So: build CMSGen with `scripts/build_cmsgen.sh` (upstream + `scripts/cmsgen_gpap_eval.patch`) and
-let `gpap bench` use its `--nowrite` for the timed run — it detects the flag automatically, and
-marks any row it had to measure the old way as `cms_mode="write"`. The patch's `--statsevery`
-also exports CryptoMiniSat's own propagation/decision counters, which is where the `Cdec/s` /
-`Cimpl/s` columns come from. **Ratios published before 2026-07-27 include the emission handicap.**
+A GPU rival's batch is the same knob K is for us, and its unique/s is near-proportional to it
+(HTS 295× from batch 100 to 100,000; DEMOTIC 564× from 1k to 1M), so a batch is never "their
+configuration detail". The rule: **the largest batch that fits 0.80 of free VRAM** — the share
+GPAP takes — sized from measured peak memory, stepping down a rung if the driver refuses
+(`eval/rivals/rival_common.fit_batch`). Their argparse defaults (`--batch_size 10`) and demo
+one-liners cannot be the rule; on our instances they would hand a rival 1/300–1/500 of what it
+reaches. The other first-order knob, `num_steps`, is **taken from the rival's own artifacts**
+(`RIVAL_STEPS`: DEMOTIC 1, Recurrent 1, HTS 10), tie-broken in the rival's favour and never swept.
+Evidence: RIVAL_FAIRNESS_FINDINGS.md §2, §6.
 
-The patch also carries **`--maxtime N`**, and it must be used for any budgeted run: without it
-the harness kills CMSGen at the deadline and the surviving count is the last `--statsevery`
-multiple. On the 2026-08-23 campaign that floored all 174 timed-out rows to a multiple of 1000
-and **81 of them to a clean `0`, each scored as an outright GPAP win** — one re-measured cell
-really delivers 941 samples in the budget. With `--maxtime` CMSGen stops itself and prints an
-exact `final=1` count (and its work counters even on cells where it emits nothing, which used to
-drop those instances out of the propagation table). Rows carry `cms_count_exact`;
-`verify_artifact.py` FAILS a stage that publishes a floored zero. **Any CMSGen number recorded
-before 2026-08-26 is a lower bound, not a measurement.**
+## 5. Compare against the competitor's own optimized operation
 
-`--maxtime` bounds CMSGen's SAMPLING wall, the same quantity GPAP's `--time-limit` bounds, so the
-two rate columns pair like with like: `cms_sps` (per sampling wall) against GPAP's steady-state
-rate, `cms_sps_e2e` (per subprocess wall, parse included) against GPAP's `wall_total`. The older
-definition divided GPAP's steady state by CMSGen's subprocess wall — one side charged for setup,
-the other not.
+CMSGen's C++ sampler, a solver's in-C `process()` — never a naive pysat re-implementation, which
+once inflated a GPU "speedup" 50–100×. When quoting against a paper, quote both the paper's
+CMSGen number (footnoted: their CNFs, their CPU) and local CMSGen on our CNFs (ours run ~2–3×
+faster, because our unrolls share flip-flop variables).
 
-The same rule binds the GPU rivals, and it is CHECKED rather than assumed:
-`python eval/rivals/check_emission_symmetry.py --results <campaign>` AST-scans the function each
-rival's own `timer(...)` wraps for host transfers and IO, asserts every `.sample()` in our timed
-window passes `collect=False`, and audits `cms_mode` over the recorded rows. On the pinned
-commits DEMOTIC and HTS time the descent loop alone (they count and dedup *after* the timer
-stops). The GPAP half is also a runtime gate:
-`test_timed_run_never_gathers_a_model_to_the_host` disarms `var_bits` and re-runs the timed path.
+## 6. `--n-time` is a delivery target — quote the delivered count
 
-One exception, measured and left uncorrected: Recurrent-CircuitSAT copies its per-depth candidate
-assignments to the host inside its own timed loop. Timing that block directly on an RTX 4080 puts
-it at **0.7–1.4% of `model_runtime`** (bound ≤2.2%), and removing it — snapshots kept on device,
-semantically identical for their solution check — leaves the unique-solution count bit-identical
-while saving 1.41% on s386 over 4 interleaved repetitions. ⚠️ A single on/off pair is worthless
-here: run-to-run spread is the size of the effect. We do not deduct it, because it is one rival,
-worth ~1%, and the correction points **our** way — an uncorrected row under-reports GPAP rather
-than flattering it, which is the right side to err on.
+The run does not stop until it has `N` models, but the batch is the unit of work, so it
+**overshoots** to the end of a chunk (a small formula at the 262,144 cap returns ~10⁶ models for
+`-n 100`) and it **can fall short** when `--time-limit` or the zero-progress stop fires (marked
+`<` after the count, `chunk_capped` in the JSON). A delivered-blend rate below the winner's
+steady-state rate is bandit exploration, not a bug: `samples_per_s` is the best config's
+steady-state rate, `sps_e2e_total` includes setup. `--out` never extends the run — the file holds
+`min(-n, --max-samples, delivered)` rows
+([`findings/CLI_DELIVERY_FINDINGS.md`](findings/CLI_DELIVERY_FINDINGS.md)).
 
-## 4c. Grant the rival the same share of the machine you grant yourself
+## 7. Across GPUs
 
-GPAP sizes its batch `K` at **0.80 of free VRAM**. A GPU rival's batch is the same knob — and
-measured on an RTX 4080 (2026-08-25), every one of the three scores in near-proportion to it,
-with `model_runtime` almost flat, across the whole range the card will run: **HTS 295x from batch
-100 to 100,000; DEMOTIC 564x from 1k to 1M; Recurrent 18.6x from 10k to 300k**. A batch is
-therefore never "their configuration detail"; it is how much of the machine you decided to let
-them use.
+Pin `--k-cap N` explicitly on every arm (`auto` resolves per card), pin the config, and give the
+run several chunks (`--n-time 2000000 --time-limit 20`; a run that ends in one chunk measures
+first-chunk overhead, ~30% off). Read `engine.batch`, `engine.k_cap` and `succ` back from every
+row: success is a property of the formula and the config, so a success rate that differs across
+machines is a confound, not a result. The miner is wall-budgeted, so a faster GPU also learns a
+different clause set. Expect roughly the SM-count ratio (A100 ~1.8×, L4 ~0.85× of the reference
+laptop); K is hygiene, not a lever — 4× the batch bought +2.8%.
+[`findings/CROSS_GPU_FINDINGS.md`](findings/CROSS_GPU_FINDINGS.md).
 
-So size it by the same rule: **the largest batch that fits in 0.80 of free VRAM**
-(`rival_common.fit_batch`), one run per cell, stepping down a rung if the driver refuses the size.
-Record every rung as `batch_sweep` and the budget as `vram_budget_bytes`.
+## 8. Which number to quote
 
-Their own defaults cannot be that rule, and reaching for them would flatter you: all three
-argparse defaults are `--batch_size 10`, and the published demo scripts are per-instance
-one-liners with a 1000x spread on comparably tiny circuits (DEMOTIC 1,000 on c17; Recurrent
-1,000,000 on s27; HTS 100 on a 75-variable CNF). On our instances those would hand DEMOTIC ~1/500
-and HTS ~1/295 of what their tool actually reaches, inflating our ratios by the same factor. A
-share of the machine is the only quantity that means the same thing for both sides.
+The reporting rules are enforced once, in `eval/artifact/paper_tables.py`, and every other table
+generator imports them ([`paper/README.md`](paper/README.md)). In prose:
 
-**Where your responsibility ends.** A rival that does not auto-tune its batch to the card takes
-whatever it is given, so hand it the same share you take, sized from measured peak VRAM so the
-grant itself does not cause a spill, and step down once if the driver refuses. Past that, memory
-management is the tool's own concern — hand-tuning a rival beyond its share of the card produces
-a number nobody can re-derive, which is worse than being strict.
+- **Steady-state vs end-to-end.** `samples_per_s` excludes parse, construction, ELS, warmup and
+  mining (a median 21% of GPAP's wall); CMSGen's rate carries its setup. Print both; quote the
+  `e2e` column for a delivered-samples claim.
+- **Rare targets.** At random output pins CPU rejection sampling beats every CNF sampler, so a
+  win there is not a sampling result. Quote `--target rare` and report `p_acc` / `amp` beside it.
+- **Screen degenerate cells first, then bucket**: vacuous pins (constant outputs — `b02`, `b05`,
+  `b07`, `s526` at T=25) and zero-search cells (models emitted with zero decisions and zero
+  implications).
+- **The zero ledger is symmetric**: `CMSGen=0`, `GPAP=0` and `both=0` are columns that sum, with
+  the geomean's instances, to the instance count. A geomean over fewer than three instances is
+  flagged, not quoted.
+- **No best-of-encoders**: one row per (family, encoder). Selecting on the published ratio lets
+  the rival's number choose which of our runs is shown.
+- **A CMSGen ratio travels with its CPU** (`cpu` is in every row): the same suite reads 46× on
+  one host and 99× on a host whose CPU is 0.41× as fast.
+- **Uniformity claims name a config and carry both controls** — an exactly uniform sampler that
+  must pass and a known-biased one that must fail — and an Accept is "not caught", never
+  "uniform" ([`findings/UNIFORMITY_FINDINGS.md`](findings/UNIFORMITY_FINDINGS.md) §4b).
 
-Two failure modes this fixes, both of which flattered us: a **fixed 5 GiB** budget regardless of
-card (a fifth of a 24 GB L4 while GPAP took ~19 GB of it), and running HTS at **batch 100/1000**,
-~1/295 of the rate it reaches when it gets its share. Size from MEASURED peak VRAM, not the
-graph formula: `n_gates * T * batch * 4` undercounts by **2-6x**, tool-dependent.
+## 9. Result JSON is versioned
 
-## 5. Benchmark against the competitor's OWN optimized operation
-
-Compare GPU work against CMSGen's actual C++ sampler (or a solver's in-C `process()`), never a naive
-pysat re-implementation — the latter inflated a bogus GPU "speedup" 50–100×. When quoting vs the
-papers, quote **both** paper-CMSGen (footnoted: their CNFs/CPU) and **local** CMSGen on our CNFs
-(ours are ~2–3× faster than the papers' numbers due to DFF variable sharing).
-
-## 6. `--n-time` is a delivery TARGET — quote the delivered count, never the request
-
-`--n-time N` asks for N models, and the run does not stop until it has them. It is not a guarantee
-in either direction, so a table must report what was DELIVERED:
-
-- **it overshoots.** The batch K is the unit of work and a chunk is never abandoned half-done, so
-  a small formula at the 262,144 cap returns ~1e6 models for `-n 100`.
-- **it can fall short.** `--time-limit` and the zero-progress stop both end a run early; both are
-  marked `<` after the sols count and set `chunk_capped` in the JSON.
-
-A delivered-blend rate below the winner's steady-state rate is bandit exploration drag, not a bug
-— the headline `samples_per_s` is the best-measured config's steady-state rate.
-
-`--out` does not extend the run: the file holds `min(-n, --max-samples, models delivered)` rows,
-collected off the timed run's own chunks (docs/findings/CLI_DELIVERY_FINDINGS.md).
-
-## 7. Result JSON is versioned
-
-Benchmark result JSONs should carry a `"schema"` field so `eval/` plots and comparisons stay stable
-as the schema evolves.
+`gpap bench` writes `"schema": 3`. Plots and comparisons key off it, so a schema change is a
+version bump, never a silent field rename.

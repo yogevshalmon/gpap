@@ -90,7 +90,7 @@ So: **a ~25% device-memory placement effect exists and is worth chasing, but it 
 allocator-ownership win and it did not transfer to the port.** The honest statement is that the
 C++ core ties the Python engine. Anyone quoting the earlier 1.2-1.35× number should stop.
 
-Tracked follow-up (docs/plans/CPP_CORE_PLAN.md §8): give the core a single **state arena** — one
+Tracked follow-up (docs/plans/CPP_CORE_PLAN.md §9): give the core a single **state arena** — one
 allocation covering packed + abits + trail + flags + counters, sub-allocated with a large
 alignment — and A/B it across instances and K. If placement is really the lever, that is a ~1.2×
 the Python engine could never have reached, and the first genuine performance argument for C++.

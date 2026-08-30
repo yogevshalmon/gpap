@@ -42,7 +42,8 @@ Colab are worth paying for. An L40S (48 GB, 142 SM, ~864 GB/s) exists only on th
 ## 2. Where the speedup comes from — and where it does not
 
 **Not from the batch.** The one experiment in which K is the only variable: one A100, one formula,
-`K_fused` 262,144 → 1,048,576 (4×), everything else fixed → **+2.8%**, at 8.8 GB of 41 GB used. At
+the batch (then `K_fused`, folded into `K` on 2026-08-18) 262,144 → 1,048,576 (4×), everything
+else fixed → **+2.8%**, at 8.8 GB of 41 GB used. At
 262,144 rows over ~6,912 resident warps we are already ~38× oversubscribed; extra rows queue.
 
 **Not from VRAM.** `--k-cap` is `min(analytic, cap)`, and the analytic VRAM bound drops below the
@@ -50,6 +51,9 @@ cap once M ≳ 20k (at M=100k: 9,696 on the 4080, 37,440 on the A100). Every rea
 far past that, so the cap never binds there — and the analytic bound already scales with free VRAM
 on its own. Where the cap *does* bind (small M), the GPU is already saturated. The
 VRAM-proportional `--k-cap auto` shipped the same day is **hygiene, not a throughput lever**.
+(Since 2026-08-18 `auto` resolves to a 262,144 floor on every card up to ~64 GB — which changes
+nothing here, for the same reason; the `--k-cap 49152` pins below are simply the explicit pin
+this protocol requires.)
 
 **From the hardware, flatly.** The work rate (assigns/s, the raw propagation rate) is **flat in M**
 — sk_ 1.58–2.02, b03 1.90, s1196 1.71–2.31, b12 1.91–2.05 — and lands on the A100's **1.86×
@@ -154,7 +158,7 @@ gpap bench 'benchmarks/circuits/bench/seq/b12.bench' --cycles 25 --encoder tseit
     --target rare --portfolio b1 --k-cap 49152 --n-time 2000000 --time-limit 20
 ```
 
-Read back per row: `engine.batch` (what actually ran), `engine.K` / `K_fused` / `k_cap`,
+Read back per row: `engine.batch` (what actually ran), `engine.K`, `engine.k_cap`,
 `succ`, `assigns_per_s`. If `succ` differs across machines for the same instance+config,
 something is confounded — stop and find it before believing the rates.
 

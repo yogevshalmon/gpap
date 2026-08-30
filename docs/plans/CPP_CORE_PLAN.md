@@ -1,5 +1,10 @@
 # GPAP C++ core — implementation plan (option C)
 
+> **Status: DONE (2026-08-08).** M1–M4 shipped, the torch engine was deleted and the eval re-run
+> on the core. §6 carries the gate evidence, §9 the one open experiment (device-memory placement
+> / a state arena), §10–11 the two C++ API tiers and the branch review. The layout block in §1 is
+> as of 2026-07-29 — `_torch_engine.py`, `kernels.py` and `scripts/engine_ab.py` no longer exist.
+
 **Goal.** Make the engine a real library: one implementation of the K-parallel packed BCP
 primitive, written in C++, callable from C++ *and* from Python. Python keeps the whole
 application layer (sampling, circuits, CLI, eval); it stops carrying a second engine.

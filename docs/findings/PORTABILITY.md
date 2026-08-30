@@ -43,6 +43,7 @@ and entirely standard:
 ```
 tl.load  tl.store  tl.constexpr  tl.where  tl.program_id  tl.sum  tl.arange
 tl.atomic_or  tl.atomic_add  tl.cumsum  tl.minimum/min/max  tl.zeros
+tl.gather   (since 2026-08-27 — the WAVE lane schedule; a warp shuffle on NVIDIA)
 ```
 
 This matters more than it looks. **The WAVE kernel's correctness does not rest on
@@ -75,6 +76,11 @@ dynamic shared). Triton 3.6 ships the `amd` backend *in the same wheel we alread
 So the kernel-compilation half of an AMD port is not work — it already functions. What remains
 is the host layer and validation.
 
+⚠️ Measured on the 2026-07-29 kernels: 29 specializations, the one-hot WAVE schedule. The build
+now ships 33 (CLEAN mode, 2026-08-21) and the WAVE schedule uses `tl.gather` (2026-08-27,
+Triton ≥ 3.2), which lowers to warp shuffles on NVIDIA — re-run the cross-compile before quoting
+this table for the current kernels.
+
 Work:
 - **Kernels: none** (demonstrated above). Same Triton source, different `target`.
 - **`build_kernels.py`**: two lines of assumption — `arch` is parsed as an `int` (`sm_89`) while
@@ -83,7 +89,8 @@ Work:
 - **Host**: a `gpu_api.h` shim over those 18 calls. HIP is close to 1:1
   (`hipModuleLoadData`, `hipModuleLaunchKernel`, `hipMalloc`, `hipMemcpyDtoH`, …), so this is
   mostly mechanical.
-- **Re-tuning, not re-writing**: the wave/scalar crossover (30× resident warps), `W`, and
+- **Re-tuning, not re-writing**: the wave/scalar crossover (`M >= 2048` today, calibrated on
+  NVIDIA), `W`, and
   `compute_k_safe`'s constants were all measured on a 4080 and must be re-measured. The
   no-change gate (`tests/test_core.py` against `reference_bcp.py`) transfers
   unchanged and is what proves correctness on the new device.

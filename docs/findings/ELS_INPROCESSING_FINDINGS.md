@@ -1,5 +1,14 @@
 # GPU Equivalent-Literal Substitution (ELS) + Complete Vivification — Findings
 
+> **Retired direction — historical record (2026-06/07).** GPU inprocessing for a CDCL solver was
+> measured out on both legs (discovery is 7–15× slower than CaDiCaL's incremental probe, and
+> the reduction helps CaDiCaL but not kissat) and is not pursued. The code this file describes
+> (`gpap/solver/inprocess.py`, `scripts/preprocess_solve.py`, …) exists only in git history, on
+> the branch named below. Two things survived into the shipping tree: ELS as a *sampling*
+> preprocess (`gpap/sampling/preprocess.py`, a measured ~1.4–1.5× win there, on by default) and
+> the full-BCP-closure implication sweep as `gpap.implications`. Summary in
+> [INSIGHTS.md](INSIGHTS.md), "Retired application directions".
+
 Branch: `pysat_cadical_inprocess_intg`. Companion to the clause-addition and vivify findings
 (see memory `inprocessing-binary-discovery-finding`). This phase added the **untried** reduction
 lever — equivalent-literal substitution — plus the missing **asymmetric** half of vivification,

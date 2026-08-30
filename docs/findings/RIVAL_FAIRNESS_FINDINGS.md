@@ -422,8 +422,9 @@ owes the reader. Kept here because a scratch note does not survive the session t
 - HTS caches its generated model at `models/{basename}.json` and the harness clears only
   `src/results/`, so a LOCAL re-run under the same filename silently measures the old formula.
   The recorded campaigns are safe (fresh VMs). One line: unlink the model JSON too.
-- `ARTIFACT.md` is still a self-declared placeholder and `docs/EVAL_RUNBOOK.md` never mentions the
-  artifact tooling: no claim->file map, no expected verifier verdict.
+- `ARTIFACT.md` is still a self-declared placeholder: no claim->file map, no expected verifier
+  verdict (`docs/EVAL_RUNBOOK.md` §8 now points at the artifact tooling; the map itself is still
+  owed).
 
 **Checked and clean — do not re-litigate:** emission symmetry; the batch grant itself; zero-ledger
 symmetry (the buckets are exhaustive); the propagation identity (re-derived from raw rows, closes
