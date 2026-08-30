@@ -1,5 +1,12 @@
 # GPU BCP-Completion Sampling — Findings
 
+> **Historical record (2026-06 → 2026-07-04).** The development log of the sampler, from the sk_
+> CNF suite to the first circuit results, on the PyTorch engine and the first Triton kernels.
+> Everything structural here still holds — the algorithm (GPU-parallel CMSGen), the niche, the
+> two lookahead negatives, ELS, B=8, mining, the bandit, the fairness audit — but the engine, the
+> portfolios and every absolute number have moved since. [INSIGHTS.md](INSIGHTS.md) is the
+> current state; the ⚠️ markers below flag what this file says that is now superseded.
+
 GPAP as a **GPU-parallel SAT solution sampler**. This is the first *produce-a-solution* task GPAP
 wins (clause reduction and unprojected sampling were retired — they need search GPAP lacks). Code:
 [`gpap/sampling/sampler.py`](../../gpap/sampling/sampler.py), harness
@@ -61,7 +68,9 @@ uniform vs CMSGen's 0.200 (GPAP slightly *more* uniform); both cover all solutio
 GPAP in as a custom sampler and ran the CM (uniformity) test on `blasted_case110`: GPAP passed **185
 rounds with 0 rejects** (every round's bias stayed inside [loThresh 0.29, hiThresh 0.71]). Barbarik is
 designed to *reject quickly* on non-uniform samplers (it rejects QuickSampler fast); GPAP runs clean,
-like CMSGen — independent confirmation that GPAP is uniform-like, not just fast.
+like CMSGen — independent confirmation that GPAP is uniform-like, not just fast. ⚠️ Superseded
+by the 66-instance circuit certification with both controls and an eligibility screen —
+[UNIFORMITY_FINDINGS.md](UNIFORMITY_FINDINGS.md) §4b.
 
 ## Cracking the search-heavy lose-cases: structured decision order (auto-tuned)
 
@@ -236,19 +245,17 @@ by setting B=8 (now the default in `gpap/benchmark.py`). A larger-VRAM card's bi
 - Metrics follow the literature: samples/sec + **2-wise coverage %** (Golia et al.).
 - Soundness is checked two ways: GPU (`all sat_count > 0` over completed rows) and CPU (reconstructed
   models vs original clauses, in tests).
-- WSL2 spill: K is sized by a calibrated empirical per-batch cost (≈70·M + 40·N bytes/batch at 0.7×
-  free VRAM); `compute_k_safe` alone is ~20× optimistic for these formulas.
+- WSL2 spill: ⚠️ the empirical 70·M + 40·N per-batch model this file was written under was
+  retired on 2026-07-13; K is now `gpap_row_bytes` (4·M_long + the bitmap + the trail), verified
+  against measured VRAM at 1.00–1.04× and validated under the kill-switch.
 
 ## Next steps
 
-- **A100 run**: measure the real K-scaling multiplier — and the ELS bonus, since uncapped K turns
-  ELS's N-reduction into extra parallelism on top of the propagate speedup. Driver:
-  `scripts/colab_sampling_benchmark.py` (+ `notebooks/gpap_colab_sampling.ipynb`), els on by default.
-- **GPU-BCP ELS**: replace the cheap binary-graph SCCs with the inprocessing branch's
-  `discover_implications` (BCP-to-fixpoint closure) — it finds ~2.8× more equivalences, so the M/N
-  cut (hence the 1.48×) should grow. Reconstruction is already class-consistent, so it drops in.
-- **Niche detection**: cheaply flag in-niche formulas (`freeAftSup≈0 ∧ supOK high`) to auto-route.
-- **Barbarik** uniformity testing for a formal Accept/Reject vs CMSGen (already passed 185/0 once).
+All four landed: the cross-GPU run ([CROSS_GPU_FINDINGS.md](CROSS_GPU_FINDINGS.md)); BCP-closure
+ELS as an analysis product (`gpap.implications` — strictly stronger than the sampler's
+binary-clause edges, not yet wired in: [MINING_FINDINGS.md](MINING_FINDINGS.md)); niche detection
+as the per-instance config bandit (above); and Barbarik with both controls
+([UNIFORMITY_FINDINGS.md](UNIFORMITY_FINDINGS.md) §4b).
 
 ## CircuitSAT sampling — the "Recurrent CircuitSAT Sampling" family (2026-07-01)
 
@@ -281,6 +288,9 @@ runs each at full K and spends the budget on the per-instance winner (validated 
 soft, b06 T=25 and the deep instances pick B=8). This required extending the sampler's config tuples from
 `(random_var, B)` to `(random_var, B, lookahead)`; the sk_ default portfolio stays 2-tuple (no soft —
 soft is net-negative *there*, see the killer-app-regime note: config value is regime-dependent).
+⚠️ `soft` was removed from BOTH default portfolios on 2026-07-30 — Barbarik rejects it on 64 of
+65 circuits — and is opt-in via `--allow-soft`; the regime-dependence lesson stands, the
+membership does not (UNIFORMITY_FINDINGS.md §4).
 
 **Unique-solutions metric (decoupled from timing).** Re-added the distinct-solution readout, this time as
 a **count computed off the throughput path**: the timed run stays `collect=False` (pure GPU generation
@@ -374,7 +384,8 @@ stateless splitmix-hash polarity, and propagates in-kernel. Two critical details
 - **K-boost**: a fused chunk never builds the (K,N) decide masks, so its true footprint is just
   engine state + trail (≈ (sat+4)·M + 10·N per batch). Fused chunks run at `K_fused` (up to 262k;
   kill-switch validated ≤5.3 GB reserved on the densest instances) while v1 configs keep the safe K —
-  per-chunk, inside the same bandit run.
+  per-chunk, inside the same bandit run. ⚠️ `K_fused` was folded into the single batch `K` on
+  2026-08-18: the boost only ever undid a per-row model that over-charged by 1.57×.
 
 Exposed as a THIRD config-tuple value: `(rv, B, "fused")` — the adaptive bandit measures it against
 the v1-kernel and soft configs per instance and commits to the winner (it loses nowhere by
@@ -401,6 +412,11 @@ tests (65/65 green); the fused polarity source is a splitmix64 hash (balanced; b
 8-groups) rather than the torch stream — watch 2-wise coverage parity on the next full CMSGen run.
 
 ## v3: packed 16|16 (sat|XOR) clause state + cached-flush reset (2026-07-03)
+
+> ⚠️ The XOR field was replaced by a modular SUM on 2026-07-13 (one `atomic_add` per update, which
+> is what made the WAVE kernel exact), the 8|24 "wide" split was added on 2026-07-08, and since
+> 2026-08-27 only clauses of length ≥ 3 carry a word at all. The cached-flush reset survives as
+> designed. [INSIGHTS.md](INSIGHTS.md) "Engine & memory model".
 
 The fused kernel's inner loop is **bandwidth-bound on scattered clause-state sectors**: every occ
 entry does read-modify-write on `sat_count` (int8/16) AND `lit_sum` (int32) — 4 uncoalesced 32-byte

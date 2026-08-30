@@ -335,7 +335,7 @@ kernels are the only path — the oracle is `tests/reference_bcp.py`).
   Triton ≥ 3.2 (`tl.gather`); runtime still `libcuda` alone.
   docs/findings/WAVE_SHUFFLE_FINDINGS.md. The trajectory kernel's
   **decision scan** is warp-wide in WAVE only (bit-identical picks; +12-19% there; in scalar
-  the bitmap made the serial scan L1-cheap and the screen LOSES; `GPAP_VSCAN=0` disables;
+  the bitmap made the serial scan L1-cheap and the screen LOSES; `vscan=-1` in the engine options disables (the `GPAP_VSCAN` env knob is gone);
   SOFT path stays scalar).
 - **Packed field split** (per formula, in `BCPEngine.__init__`): 16|16 for 2N ≤ 65535;
   **8|24 ("wide") for 65535 < 2N ≤ 0xFFFFFF, max clause len ≤ 255** (the big instances — covers

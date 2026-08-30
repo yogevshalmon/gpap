@@ -1,13 +1,14 @@
 # GPAP — GPU-Parallel Assumption Propagation & CircuitSAT Sampling
 
 GPAP is a GPU primitive for **Boolean Constraint Propagation (BCP) over millions of independent
-assumption sets at once** (PyTorch + fused Triton kernels), and a flagship application built on it:
+assumption sets at once** — a C++ library with Triton kernels compiled in ahead of time, driven
+from Python or C++ — and a flagship application built on it:
 **guaranteed-valid SAT solution sampling** for CircuitSAT and projected sampling.
 
 - **The engine** ([`gpap.engine`](gpap/engine/)) — the novelty. K independent assumption sets are
-  BCP'd to fixpoint in parallel with no clause scanning, via *negated occurrence lists* + two
-  per-clause counters and **the sum trick** (below). A fused Triton kernel runs a whole randomized
-  decide+propagate trajectory per GPU thread in one launch.
+  BCP'd to fixpoint in parallel with no clause scanning, via *negated occurrence lists* + one
+  packed per-clause word and **the sum trick** (below). A fused Triton kernel runs a whole
+  randomized decide+propagate trajectory per row in one launch.
 - **The sampler** ([`gpap.sampling`](gpap/sampling/)) — GPU-parallel CMSGen: K randomized
   BCP-completions per chunk, every emitted model provably satisfies the formula (no
   gradient/rounding/repair). It samples the primary-input support of unrolled sequential/
@@ -298,8 +299,8 @@ eval/             # the experiment layer
   uniformity/     #   Barbarik certification + exact-oracle uniformity fuzzing
   colab/          #   cross-GPU drivers for rented/ephemeral GPU VMs
 scripts/          # build libgpap, optional third-party tools, fetch benchmarks
-docs/             # the ONLY place measurements, dates and hardware are recorded
-  findings/       #   settled results: INSIGHTS.md + the deep *_FINDINGS.md write-ups
+docs/             # start at docs/README.md — engine design, API map, measurement protocol, runbook
+  findings/       #   the evidence: INSIGHTS.md (settled results) + the deep *_FINDINGS.md write-ups
 tests/            # pytest suite (CPU smoke + `gpu`/`slow` markers); circuit CNFs generated on demand
 benchmarks/circuits/bench/  # tiny committed .bench sources (CNFs are generated, never committed)
 .gpap/            # built/fetched tools, sources and benchmark sets — gitignored, NOT in $HOME

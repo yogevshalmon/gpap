@@ -1,5 +1,11 @@
 # GPAP Refactor Plan — from experiment pile to publishable package
 
+> **Status: EXECUTED (2026-07, all phases).** Kept as the record of what was archived and why.
+> The layout it targeted has moved on since — the engine became the C++ library `libgpap`, the
+> kernels live in `cpp/kernels/`, `miner.py` became `gpap/mining.py`, the PyTorch engine is
+> gone; [CLAUDE.md](../../CLAUDE.md) is the current map and [../findings/INSIGHTS.md](../findings/INSIGHTS.md)
+> the current version of §0's settled-findings list.
+
 Instructions for the refactor session agent. Written 2026-07-08 on branch `gpu_bcp_sampling`
 (all tests green: 78/78; latest wins: wide 8|24 kernel geomean 1.19× on big circuits).
 Goal: a light, friendly, production/publication-shaped package whose center of gravity is

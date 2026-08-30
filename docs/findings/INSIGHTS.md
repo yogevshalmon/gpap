@@ -1,13 +1,47 @@
 # INSIGHTS — settled results index
 
 One-paragraph summaries of every settled (measured, often multi-day) result in this project.
-Code that produced a **negative** result may be deleted; the insight lives here. Deep write-ups:
-[GPU_SAMPLING_FINDINGS.md](GPU_SAMPLING_FINDINGS.md), [ELS_INPROCESSING_FINDINGS.md](ELS_INPROCESSING_FINDINGS.md),
-[CPP_BACKEND_FINDINGS.md](CPP_BACKEND_FINDINGS.md).
-Do **not** re-litigate these without new evidence (a new GPU class or a new regime counts;
-"maybe it'll work this time" does not).
+Code that produced a **negative** result may be deleted; the insight lives here. Entries are
+dated and newest-first within a section; a ⚠️ note means a later measurement moved the number
+while the mechanism stands. Do **not** re-litigate these without new evidence (a new GPU class or
+a new regime counts; "maybe it'll work this time" does not).
+
+The deep write-ups, by topic:
+
+| topic | file |
+|---|---|
+| binary clauses as implication edges (2026-08-27) | [BINARY_OCC_FINDINGS.md](BINARY_OCC_FINDINGS.md) |
+| the WAVE kernel's shuffle-based lane schedule (2026-08-27) | [WAVE_SHUFFLE_FINDINGS.md](WAVE_SHUFFLE_FINDINGS.md) |
+| WAVE vs scalar by formula size, the L4 A/B (2026-08-23) | [KERNEL_AB_FINDINGS.md](KERNEL_AB_FINDINGS.md) |
+| the C++ core, the AOT kernel build, the two API tiers | [CPP_BACKEND_FINDINGS.md](CPP_BACKEND_FINDINGS.md) |
+| what a bigger GPU buys, and the two cross-GPU traps | [CROSS_GPU_FINDINGS.md](CROSS_GPU_FINDINGS.md) |
+| porting to AMD / Intel / Apple | [PORTABILITY.md](PORTABILITY.md) |
+| entailed-clause mining, redundancy, CLEAN mode's origin | [MINING_FINDINGS.md](MINING_FINDINGS.md) |
+| uniformity: exact-oracle TV, Barbarik with both controls, the B knob | [UNIFORMITY_FINDINGS.md](UNIFORMITY_FINDINGS.md) |
+| rival-comparison fairness — seven audits, all of which had flattered us | [RIVAL_FAIRNESS_FINDINGS.md](RIVAL_FAIRNESS_FINDINGS.md) |
+| the 2026-08 L4 campaign and what the platform does to you | [L4_EVAL_FINDINGS.md](L4_EVAL_FINDINGS.md) |
+| what `--out` cost and what the counters were saying (2026-08-27) | [CLI_DELIVERY_FINDINGS.md](CLI_DELIVERY_FINDINGS.md) |
+| the sampler's development log, sk_ era → first circuits (historical) | [GPU_SAMPLING_FINDINGS.md](GPU_SAMPLING_FINDINGS.md) |
+| GPU inprocessing for CDCL — a retired direction (historical) | [ELS_INPROCESSING_FINDINGS.md](ELS_INPROCESSING_FINDINGS.md) |
 
 ## Engine & memory model
+
+**WAVE's lane→segment schedule is warp-shuffle based — the O(W²) one-hot reductions round-tripped
+SHARED memory, and removing them is 1.80× at the same K (2026-08-27).** The wave inner loop
+mapped lanes to (segment, offset) with a W×W compare-reduce plus three one-hot gathers per
+32-entry stride; Triton lowers axis-1 reductions of a (W,W) tensor through shared memory with
+barriers (~239 instructions and 3 barriers per gather, measured at the PTX level) — invisible in
+the source, where each reads as "one tl.sum". Replaced by a branchless lower_bound over the prefix
+sums with log2(W) `tl.gather` probes (one `shfl.sync` each): 4 shared-memory passes + 6 barriers
+per stride became 7 shuffles, and the kernel now uses ZERO shared memory. Same indices computed
+cheaper ⇒ fixpoints, models and counters unchanged (count-terminated pinned-K identity on 4
+cells; `gpap mine` emits the identical 9,890 clauses). Interleaved best-of-3 at the same K:
+b03-c25 2.30×, s1196-c25 1.62×, b12-c25 1.74×, b04-c25 1.61× — **geomean 1.80×**, and the ~1e9
+impl/s plateau moves to 1.05–2.41e9, so every pre-2026-08-27 wave rate is superseded. W=64 as ILP
+inside one warp, unlocked by cheap shuffles, was measured too: 0.918× — W=32 stays. Scalar
+`_propagate` is untouched, so the M≈0.5–9k dispatch tie band now under-dispatches wave —
+re-derive the threshold at the next kernel A/B, do not guess. Builds need Triton ≥ 3.2; runtime
+is still `libcuda` alone. [WAVE_SHUFFLE_FINDINGS.md](WAVE_SHUFFLE_FINDINGS.md).
 
 **BINARY CLAUSES ARE IMPLICATION EDGES, NOT COUNTED CLAUSES — only len >= 3 carries per-row
 state (2026-08-27).** ~80% of a circuit CNF's clauses are binary (Tseitin AND-gates emit 2 per
@@ -25,6 +59,33 @@ K-free, and the TRAIL term (4N/row) newly dominates per-row bytes on big-N unrol
 bound is the soundness proof, not a knob. Details: BINARY_OCC_FINDINGS.md. ⚠️ Rates recorded
 before this change are not comparable to new ones; the 20260827 L4 campaign is the pre-binary
 baseline.
+
+**WAVE vs SCALAR on the L4, 141 cells (2026-08-23): 1.30× geomean, rising monotonically with
+clause count — 1.01× below 2k clauses, 1.33× at 2k–20k, 1.48× at 20k–100k, 1.64× above 100k.**
+Forced-kernel A/B at pinned K (`k_cap=4096`), `b8` pinned, mining OFF (mining is wall-budgeted,
+so a faster kernel would mine more and the arms would run different formulas), 20 s × 2 reps
+with the order alternated; validated first by identical model counts on all 141 cells. The
+`M >= 2048` rule picked the faster kernel on 77/93, every miss inside the M≈0.5–9k tie band
+(worst 0.66×). ⚠️ Measured on the one-hot WAVE schedule and the pre-binary-edge engine; the
+shuffle rewrite (entry above) sped up WAVE only, so the bins' ORDER stands but the numbers and
+the crossover must be re-measured before being quoted for the current engine.
+[KERNEL_AB_FINDINGS.md](KERNEL_AB_FINDINGS.md).
+
+**CLEAN mode: the probe launch restores its own rows, and the per-chunk state broadcast is gone
+(2026-08-21).** The reset broadcast was a constant ~26 ms per chunk (50–94% of probe wall, entry
+below) while a probe dirtied 0.02–8% of the words. `gpap_engine_apply_clean` runs the identical
+fixpoint and then, in the same launch, rewrites every word its trail could have touched
+(`∪ occ[l]` — superset-safe on conflicted rows, idempotent) back to the baseline, trail in
+registers and words hot in L2; `gpap_engine_reset` then goes LITE (no K·M broadcast) when the
+rows are provably clean. b12-c50: 20.9 → 4.7 ms per chunk GPU-side (4.4×); b03-c25 probe sweep
+2.60× end to end. Only the clause words are restored, so readouts of post-apply state
+(`sat_rows`, `check_sound`, `recache_flush`) REFUSE after a clean launch (`abits_diverged`) —
+plain `apply` keeps full semantics, and `GPAP_CLEAN=0` is exact legacy. Gated by a
+state-identity fuzz against a plain twin + the reference BCP, both kernels × both splits, which
+FAILS against a sabotaged tail. On the L4: 19/19 seq rows, 16/19 bit-identical model counts (the
+3 that differ mined a different clause set under the retuned width-2 ceiling). Design + lemmas:
+[../plans/RESET_RESTORE_PLAN.md](../plans/RESET_RESTORE_PLAN.md) §9; origin in
+[MINING_FINDINGS.md](MINING_FINDINGS.md).
 
 **A single 30s sampling run cannot tell you which of two builds is faster, because the config
 BANDIT is a coin flip at that budget (2026-08-18).** Reported on hwmcc17 6s215rb0 c25 abc:fast,
@@ -102,7 +163,8 @@ the memory budget, 5.5-5.8 GiB here. Meanwhile a probe chunk MODIFIES 0.02-8.4% 
 restores. Full design for a trail-superset restore (rewrite the baseline into `∪ occ[l]` over the
 row's trail — superset-safe on conflicted rows, idempotent, no new kernel state) and its regime
 bound are in docs/findings/MINING_FINDINGS.md. It is regime-dependent: a sampling trajectory
-assigns 28-56% of variables and lands the wrong side of the crossover.
+assigns 28-56% of variables and lands the wrong side of the crossover. **SHIPPED 2026-08-21 as
+CLEAN mode** (entry above); the sampler stays on the broadcast by design.
 
 **The wave/scalar dispatch keys off M (clause count), NOT the batch — and the batch-only rule it
 replaced was a PROXY that a K change silently invalidated (2026-08-18).** The rule was
@@ -155,7 +217,7 @@ Toolchain: no CUDA toolkit, no nvcc (triton bundles ptxas + `cuda.h`; runtime ne
 alone). RETRACTED en route: "owning the device memory is worth 1.2-1.35×" — that was a
 device-memory PLACEMENT effect (the same cubin on the same input runs 43-44 ms or 54-56 ms
 depending on where the 2 GB (K,M) buffer lands), it did not transfer to the core, and it would
-help either engine. State-arena follow-up in docs/plans/CPP_CORE_PLAN.md §8. Full write-up:
+help either engine. State-arena follow-up in docs/plans/CPP_CORE_PLAN.md §9. Full write-up:
 [CPP_BACKEND_FINDINGS.md](CPP_BACKEND_FINDINGS.md).
 
 **Portability: AMD is a small port, Apple is a kernel reimplementation (2026-07-29).** MEASURED
@@ -169,7 +231,7 @@ ships the `amd` backend in the SAME wheel we build with, so **all 29 kernel spec
 already cross-compile unmodified for gfx90a / gfx942 / gfx1100 (0 failures, measured on the
 NVIDIA box with no AMD hardware)**. ⇒ ROCm ≈ 1-2 weeks and NONE of it is kernel work (a HIP shim
 over the 18 calls, two builder assumptions — `int(arch)` and `threads = 32*num_warps` — and
-re-tuning the 30×-resident crossover for wavefront 64), Intel 2-4 weeks.
+re-tuning the wave/scalar crossover — `M >= 2048` today — for wavefront 64), Intel 2-4 weeks.
 **Apple has no Triton Metal backend**, so it needs a hand-written MSL (or WGSL) kernel layer —
 4-8 weeks AND a permanent second kernel source, the exact thing the port removed; plus the
 unified-memory model invalidates `compute_k_safe`/the spill story. Full analysis:
@@ -183,7 +245,10 @@ reserved track allocated (2.3× less) and linear in K. With that, K = min(4 × o
 analytic, cap) is measured-safe. Every probe/differencing variant FAILED: under
 expandable_segments the peak-reserved read at construction is ~1.6× below production
 (allocation-history dependent) and the frontier peak varies with the RNG draw → probes
-under-measure → over-sized K → spill. Do not resurrect the probe.
+under-measure → over-sized K → spill. Do not resurrect the probe. ⚠️ The 4× floor itself was
+retired on 2026-07-13 (K = min(analytic, cap), entry below) and the batch model collapsed to ONE
+exact per-row term on 2026-08-18 (`gpap_row_bytes`, verified against measured VRAM); what stands
+from this entry is the probe verdict and the `expandable_segments` setting.
 
 **This WSL2 box SPILLS to shared host RAM, it does not OOM (2026-05-31).** Oversizing K makes
 tensors migrate over PCIe (~12 GB/s vs ~200 GB/s VRAM) and throughput collapses silently — a
@@ -226,6 +291,7 @@ its own second implementation. (3) Formulas outside the packed envelopes (2N > 0
 spelled `"soft"` ("fused"/"fsoft" accepted as aliases). (5) DEFAULT_PORTFOLIO's
 (True,8,False)/(False,1,False) entries — which ran the PyTorch v1 loop — now run in-kernel at
 K_fused: sk_-suite numbers published before 2026-07-13 predate that switch (expected faster).
+(`K_fused` was itself folded into the single batch `K` on 2026-08-18.)
 Validated by the no-change gate: 11 baseline model-set hashes (fused packed configs, pinned K,
 seed 5; circuits + ELS + wide-ladder + units-flush cases) reproduced bit-identically after the
 delete. `external_solver.py` (PySAT wrapper) moved to `scripts/`; `profile_engine.py` (profiled
@@ -301,7 +367,8 @@ b14 read −15% until interleaved, then exact tie — clock/power drift): wave b
 1.07×, b14 1.00×; scalar b06 1.16×, b03 0.97× (8-rep; shortest order = the one loser, within
 3%). Regime: wins scale with order length × completion rate (assigned-crawl dominated); losses
 capped at the early-phase 32-wide gather waste. Default ON for both modes (`GPAP_VSCAN=0`
-disables); the scalar pick loop remains as the SOFT path (soft polarity needs per-var occ
+disabled it; that env knob is gone — today `vscan=-1` in the engine options does — and the scan
+became WAVE-only, see the bitmap entry); the scalar pick loop remains as the SOFT path (soft polarity needs per-var occ
 walks — vectorizing it is future work).
 
 **SUM-packed word (modular sum, back from the XOR): ONE atomic_add IS the whole clause update
@@ -418,6 +485,50 @@ the bulk path got it 2026-07-03 (+ regression test). Any new engine entry point 
 
 ## Sampler / portfolio
 
+**Barbarik, re-derived circuit-only with both controls and an eligibility screen (2026-08-28):
+GPAP as shipped is Accepted on 64/66 circuit instances with ZERO Rejects — CMSGen 66/66, the
+exactly uniform reference 66/66, `soft` Rejected 64/65 — and 6/6 vs 6/6 at barbarik's own
+stricter default.** The two misses are orders GPAP could not fill on instances where it produces
+nothing (b13-c25-rare, c6288-c1-random): a budget, not a verdict. Three things a paper sentence
+must not get wrong: (1) the guarantee is ASYMMETRIC — Reject is unconditional, Accept holds only
+under the paper's non-adversality assumption and only against η, so an Accept is "not caught",
+never "uniform"; (2) there are TWO parameter settings — the CMSGen paper's ε=0.3/η=1.8/δ=0.1
+(1,872 samples, band [0.05, 0.95], rejects TV ≥ 0.90) and barbarik's own ε=0.1/η=0.9/δ=0.05
+(70,596 samples, bands ≈ ±0.21, rejects TV ≥ 0.45) — different tests, never pooled
+(`barbarik_table.py` refuses); (3) CMSGen's own Accept was FITTED to this test (their Remark 1),
+so parity is the honest framing. **The finding that changes how any Barbarik table must be built:
+CM_test rejects its OWN trusted reference on instances whose declared `c ind` is not an
+independent support** — its kernel pins every indVar, so the buckets hold full-model extensions
+and the model-uniform reference is skewed by exactly the extension spread (ActivityService 4×,
+IssueServiceImpl 6.6×, PhaseService 21.8×, IterationService 103.7× ⇒ all Rejected; every
+spread-1.0× instance Accepts; `--sampler spur-raw` rejects identically, which exonerates our
+marshalling). Circuits are immune by construction (Tseitin support = primary inputs ⇒ one
+extension per projection): 0 of 92 failed the independence screen (the 25 exclusions were all
+reference cost). RULE: never quote a row without
+`--sampler spur` Accepting it (the gate, enforced once in `eval/uniformity/barbarik_table.py` and
+IMPORTED by `paper_tables.py`) and `--config soft` Rejecting (the instrument has power). Three
+harness defects fixed en route: `s1` sat in DEFAULT_PORTFOLIO with no arm (a third of that
+portfolio uncertified — gated now); a hardcoded `k_cap=4096` manufactured "produced 9/50"
+failures; and `sample_bits`' one-empty-chunk give-up charged OUR collector's stopping rule to
+GPAP's coverage on barbarik's deliberately sparse kernels (an order-fill retry turned the strict
+table from 4/6 into 6/6 — anything reading "produced n/N" is a budget, not a verdict). **THE TV
+NUMBER, 120 circuit instances at |S| 128–1920** (the regime that discriminates — below |S|≈380
+every sampler sits at the 0.0399 floor, which is how a 24-instance draft manufactured "GPAP at
+the floor, CMSGen 1.8× worse"): `b16` (B ≥ |support|) 0.0398 median / 0.0439 max, 119/120
+unflagged — exactly uniform at scale; raw `b8` 0.0571, better than CMSGen on 92%; CMSGen 0.1219;
+**the SHIPPED pipeline 0.1651 — 1.35× WORSE than CMSGen** (the bandit picks B=1), though
+unflagged 2× as often (46 vs 23) and **no GPAP config ever skews where CMSGen does not, 0/120 for
+all of them**. Isolated: the pipeline HELPS b8 (raw 0.057 → 0.040) and HURTS b1 (0.097 → 0.161),
+so "the pipeline is distribution-neutral" is false here. Paired on 80 fresh instances: `pipe:b8`
+0.0402 against a 0.0399 floor, better than CMSGen on 84%; the default 0.1471, better on 51%.
+**A TV claim must name a config.** Pinning B=8 costs ~10% (geomean 0.910, interleaved, 15
+non-vacuous seq circuits, zero capability losses — the bandit already picks B=8 on 7 of 15), not
+the 5–7× an older raw-config table implied. The release decision is DEFERRED (user): the next
+campaign runs both the default and `b8` pinned. ⚠️ `gpap sample`/`bench` default to
+`--portfolio circuit` for EVERY input; on a plain CNF that costs 2 certificates on the sk_ set
+(18/2 vs 20/0) because `circuit` lacks `s1` — not fixed, irrelevant to a circuits paper.
+[UNIFORMITY_FINDINGS.md](UNIFORMITY_FINDINGS.md) §4b–§4c.
+
 **B (decisions per round) = 8 is the tensor-path throughput sweet spot; B≥16 over-constrains
 and collapses success.** B=1's success edge is FREE in-kernel (fused configs), which is why
 B1-fused wins broadly.
@@ -461,7 +572,11 @@ certifiably non-uniform) and it is worth 5-7× throughput on deep unrolls (inter
 relative to B=1: b03-c25 **0.15×**, b06-c25 **0.18×**, vs b10-c25 1.33×, 27.sk 1.03×, 53.sk
 1.18×). Options ranked in the doc: surface the chosen config + caveat / a `--uniform` mode
 restricting to B≥8. Campaign totals: gpap:b8 ok 57% TV 0.041 (**GPAP-only skew 0/600**, CMSGen-only
-200), pipeline 45% / 0.113, CMSGen 24% / 0.102; controls 0/600 false positives, 600/600 power.
+200), pipeline 45% / 0.113, CMSGen 24% / 0.102; controls 0/600 false positives, 600/600 power. ⚠️ 2026-08-28 (§4c of the
+doc): "the pipeline costs nothing" held only where both arms sat at the floor — at |S| ≥ 128 the
+pipeline HELPS b8 and HURTS b1, so the bandit's pick is only half of the default's gap; and
+pinning `--portfolio b8` costs ~10%, not 5–7× (the 0.15–0.18× table was raw configs on Tseitin
+CNFs on the pre-wave engine). See the 2026-08-28 entry at the top of this section.
 
 **The |support| >> B regime (where real benchmarks live) is FINE — it gets BETTER, not worse**
 (2026-07-30). It cannot be probed directly (|S| grows exponentially with T, |support| only
@@ -485,8 +600,13 @@ from another, so support decisions stay near-independent; support=all-vars propa
 within the support (= attraction-basin weighting). ⇒ **the flagship projected-circuit regime is
 exactly where GPAP is uniform and CMSGen is not.** The pipeline TRACKS its raw config per family
 (0.441/0.446 cnf, 0.040/0.039 circuit): simplify+mining+bandit neither help nor hurt.
+⚠️ REGIME-LIMITED (2026-08-28, §4c): those 12 circuits have |S| ≤ 384, where every sampler —
+CMSGen included — sits at the floor. At |S| ≥ 128 on 120 instances the SHIPPED pipeline's TV is
+1.35× WORSE than CMSGen's; the floor result holds for `B ≥ |support|` at every size and for the
+pipeline with `--portfolio b8`, not for the default. Entry at the top of this section.
 
-**`soft` (risk-polarity) is NON-UNIFORM enough for Barbarik to REJECT it, 5/5.** Same doc.
+**`soft` (risk-polarity) is NON-UNIFORM enough for Barbarik to REJECT it — 5/5 on the first
+fuzz set, 64/65 on the 2026-08-28 circuit re-derivation.** Same doc.
 `gpap:b8`, `gpap:b1` and CMSGen all get Accept 5/5 at the CMSGen paper's own parameters
 (ε=0.3, η=1.8, δ=0.1 ⇒ 1,872 samples); `soft` is rejected in 156-936 samples. Exact-layer TV
 median 0.694 (max 0.907). Its original-instance TV UNDERSTATES the problem — cnf-028 reads TV
@@ -541,13 +661,42 @@ plausibility-filtered to ≥ best/20 (run noise is ~1.9×, 20× behind is dead, 
 UCB-style exploration bonuses FAILED acceptance (diverting budget from a dominant winner costs
 0.52× on small budgets) — plain decaying-ε-greedy stays.
 
+**Mining: three notions of redundancy, a clause does k JOBS, and mined clauses are kept only if
+they PAY (2026-08-19 → 21).** (1) The subsumption filter caught a rounding error: on b03-c25
+`subsumed` removes 21 of 1,508 wide clauses (1.4%) while `derivable` — every forcing job of the
+clause re-derivable by unit propagation — removes 61%, and the two barely overlap. (2) A clause
+`(l1|…|lk)` is k constraints and ALL must be covered before it can go: propagation is not
+contrapositive-complete (`(-1|5),(-1|6),(-5|-6|2)` gives `1 ⇒ 2` but not `-2 ⇒ -1`), so the
+literature's one-direction transitive-reduction rule — correct on the symmetric binary
+implication graph — discards a THIRD of the mined wide clauses with a live direction (b03-c25
+34.6%, b09-c25 34.2%). (3) Derivable is NOT useless: a derivable clause still SHORTENS propagation
+and the sampler is propagation-bound — keeping them is +29% (b03-c25) / +43% (s386-c25) / +3%
+(b09-c25) — so the default filter is `subsumed`, the strongest is opt-in (`--drop derivable`),
+and the engine-side `skip_subsumed` (worth 0.0–0.3% of the result buffer for an int32 per row
+and a branch in both propagate loops) was deleted. (4) KEEP-IF-IT-HELPS replaced every gate:
+`K × M` is ~constant, so chunk wall is ~constant and **models per chunk = K × success** is the
+throughput proxy — both terms already in hand. If the mined formula does not beat the pre-mining
+sampler the clauses are dropped and the original rebuilt (b06-c25/abc: 5 units cost 0.55× e2e,
+now reverted), except when the un-mined warmup completed NOTHING (b12-c25/abc 516 → 20,031
+models). The ABC provenance gate and the inline `MINE_MIN_CLAUSES=3000` that hid the same
+instances a second way were deleted: mining is worth MORE on ABC CNFs than on Tseitin (geomean
+3.28× vs 2.05×). (5) The width-2 ceiling (80,000) was calibrated against the OLD reset cost;
+raising it to 1,000,000 is free and buys the `exhausted` proof — and on s832-c25 exhausting
+width 2 leaves less budget for width 3, so the mined formula SHRINKS (4,457 fewer ternaries), K
+grows 15% and throughput 1.75×. Do NOT widen the pool past the support: every free literal finds
+100–1000× more (sound) clauses and sampling the result is 582× SLOWER on b03-c25 — the keep gate
+rejects it. Since 2026-08-27 mined width-2 clauses are K-free (binary clauses carry no per-row
+state), so the gate keeps more of them at no memory cost. [MINING_FINDINGS.md](MINING_FINDINGS.md).
+
 **Entailed-clause mining (gpap/mining.py) is the lose-set killer.** L1 backbone units are the #1 lever
 (sk geomean vs CMSGen 4.65×→27.3×; massive-backbone instances collapse to N~100 formulas);
 5 s budget captures the full benefit; the pre-mining "stuck" gate is a FALLACY (pre-mining
 success is low almost everywhere BECAUSE mining lifts it — gate must be POST-L1, two-stage);
 tier COST is predictable from |sup| (pairs="auto" thresholds), tier VALUE is per-instance.
 After any big GPU phase, `torch.cuda.empty_cache()` before constructing a sampler — reserved
--not-freed VRAM poisons the K calibration (measured: K collapsed to 1).
+-not-freed VRAM poisons the K calibration (measured: K collapsed to 1). ⚠️ The stuck gate and
+the `pairs="auto"` thresholds are gone (2026-08-20/21): mining runs above `MINE_MIN_CLAUSES` and
+is kept only if it pays, and the ceilings are `pipeline.STAGE1_MAX_TUPLES` — entry above.
 
 **ELS (equivalent-literal substitution) is a real sampling win: geomean 1.48× over plain
 simplify, 4.16× vs CMSGen, identical coverage, sound** iff reconstruction is class-CONSISTENT
@@ -619,7 +768,8 @@ a subprocess per call; SPUR stays the trusted reference). Notes: their repo need
 `git submodule update --init` (interfaces/convert); barbarik.py's own SAMPLER_* table is stale —
 drive `interfaces.cnf.cnf_test` directly with `SAMPLER_CUSTOM=7`. FIRST RESULTS: **Barbarik
 Accept:1 on BOTH b03-c2 (70,471 samples) and their canonical blasted_case110 (70,596 samples)
-at eta=0.9 eps=0.1 delta=0.05, GPAP B=8** — 2/2 certified.
+at eta=0.9 eps=0.1 delta=0.05, GPAP B=8** — 2/2 certified. ⚠️ SUPERSEDED by the 2026-08-28
+entry at the top of this section (66 circuit instances, both controls, an eligibility screen).
 
 **Uniform-LIKE means instance-dependent skew — and the readout sees it (2026-07-11).** On most
 tested instances GPAP's distribution is indistinguishable from uniform (b03-c2 |S|=256 p=0.79;
@@ -879,7 +1029,8 @@ INSTANCE, not the sampler** (`docs/findings/L4_EVAL_FINDINGS.md` §2; re-derive 
 `eval/artifact/paper_tables.py`, which applies the exclusions in one place): vacuous pins put seq-c25 rare
 at 47.7× when it is **36.5×**, and zero-search cells (samples emitted with 0 decisions AND 0
 implications — the support is free after propagation) put epfl rare at 12.7× when it is **6.4×**
-and sk at 48.5× when it is **46.2×**. The encoder and regime conclusions below are unaffected.
+and sk at 48.5× when it is **46.2×**. The encoder and regime conclusions below are unaffected. Its CMSGen counts also predate
+`--maxtime` (2026-08-26), so its CMSGen-zero cells are floored counts (methodology entry below).
 Three things the sweep settled: (1) rare targets cost ~4× of the ratio versus rejection-easy
 random pins, on identical instances — quote the rare column; (2) per-ROW and per-INSTANCE
 geomeans diverge (epfl 3.4× vs 12.7×) whenever one encoder collapses on an instance the other

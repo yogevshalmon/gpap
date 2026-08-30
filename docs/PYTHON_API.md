@@ -15,6 +15,8 @@ gpap.sample(path, n)                       tier 0 — one call, samples out
 │     GPUSampler                               warmup, portfolios, contract-timed run)
 ├── gpap.engine.AssumptionChecker              "propagate THESE assumption sets"
 ├── gpap.engine.LiteralProbe                   "probe every k-subset of this literal pool"
+├── gpap.mining / gpap.implications            applications on LiteralProbe: entailed
+│                                                clauses; failed literals, HBR, equivalences
 │
 ├── gpap.engine.BCPEngine / CnfFormula     tier 2 — the engine primitive (torch)
 │     reset(K) / apply_and_propagate / check_sets / run_trajectory + selection readout
@@ -83,6 +85,6 @@ every emitted model is externally verifiable.
 
 ## Deep material
 
-Design and state layout: [`docs/ENGINE.md`](ENGINE.md). Measurement protocol:
-[`docs/BENCHMARKING.md`](BENCHMARKING.md). Settled experimental results:
-[`docs/findings/INSIGHTS.md`](findings/INSIGHTS.md).
+How the engine works: [`ENGINE.md`](ENGINE.md). Measurement protocol:
+[`BENCHMARKING.md`](BENCHMARKING.md). Settled experimental results:
+[`findings/INSIGHTS.md`](findings/INSIGHTS.md). The whole documentation tree: [`README.md`](README.md).

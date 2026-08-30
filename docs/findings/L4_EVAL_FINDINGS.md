@@ -1,5 +1,18 @@
 # Running the evaluation on a Colab L4 — results, and what the platform does to you
 
+> ⚠️ **Campaign of 2026-08-03/04 — superseded in three ways; the structural findings stand.**
+> (1) The rival rows predate the parallelism-grant and step-count rules of 2026-08-25/26
+> ([RIVAL_FAIRNESS_FINDINGS.md](RIVAL_FAIRNESS_FINDINGS.md) §2, §6) — HTS in particular ran at
+> ~1/300 of its share. (2) The CMSGen counts predate `--maxtime` (§7 there), so a "CMSGen=0"
+> cell here is a floored count and the CMSGen-zero columns are upper bounds. (3) The engine has
+> since gained the binary-edge representation and the shuffle-based WAVE schedule (1.4× and 1.8×
+> at the same K), so every absolute GPAP rate is old. What stands: hardware-independent rival
+> win counts (§1), the CPU dependence of any CMSGen ratio (§2), the four reporting corrections
+> (§2), the propagation identity and its rejection-cost reading (§3), the uniformity regime split
+> and the soft price by difficulty (§4), reproducibility (§5) and the platform rules (§6). The
+> current campaigns are the `$GPAP_RESULTS/l4_campaign_*` directories
+> ([../paper/README.md](../paper/README.md)).
+
 Measured 2026-08-03/04 on a Colab **NVIDIA L4** (24 GB, 58 SM, sm_89), driven from a terminal via
 the Colab CLI. Two sweeps: the GPU-rival head-to-heads and GPAP vs CMSGen.
 
