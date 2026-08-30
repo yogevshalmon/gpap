@@ -6,7 +6,18 @@ readouts could only say "consistent with uniform" (the `l2_ratio` gross-skew che
 (Barbarik, at parameters coarse enough to be affordable). This is the first measurement against a
 **known** target distribution.
 
-Headline, in three parts: **(1) on the flagship projected-circuit regime the shipped pipeline is
+**2026-08-28 — §4b supersedes §4**, and is CIRCUIT-ONLY (the flagship regime): the Barbarik setup
+was audited before a paper sentence rested on it, then re-run on 66 circuit instances. **GPAP as
+shipped is Accepted on 64/66 with ZERO Rejects** (the 2 misses are orders GPAP could not fill on
+instances where it produces nothing at all, not adverse verdicts), against CMSGen's 66/66 — and
+**6/6 with zero Rejects at barbarik's own stricter default** (70,596 samples, rejecting TV >= 0.45
+rather than 0.90), where CMSGen is also 6/6. Every run carries a negative control (an exactly
+uniform sampler under test, which must Accept) and a positive control (`soft`, which must Reject).
+Instances have to be SCREENED first: CM_test **rejects the trusted reference itself** where the
+declared sampling set is not an independent support. No circuit instance failed that screen; five
+`sk_`/service CNFs did.
+
+Headline of the original (2026-07-30) campaign, in three parts: **(1) on the flagship projected-circuit regime the shipped pipeline is
 already at the exact-uniform noise floor (TV 0.040 vs the control's 0.040, ok 9/12) and beats
 CMSGen (0.087, 4/12) — while on random k-CNF over ALL variables it is clearly worse than CMSGen,
 so the aggregate must never be quoted without the split; (2) there is an exactness knob nobody had
@@ -117,7 +128,10 @@ The suite is half random k-CNF and half circuits by construction, and the two fa
 
 On circuits the GPAP pipeline sits at **0.040, which IS the exact-uniform control's floor
 (0.0400)** — statistically indistinguishable from uniform — and beats CMSGen (0.087, flagged on
-8/12). On random k-CNF it is clearly worse than CMSGen (0.441 vs 0.272), though both are heavily
+8/12). ⚠️ **Regime-limited — see §4c.** These 12 circuits have |S| 8-384, and below |S| ~ 380 every
+sampler (CMSGen included) sits at the floor; measured on 120 instances at |S| >= 128 the shipped
+pipeline is 0.165 against CMSGen's 0.122, because the bandit picks B=1. The floor result holds for
+`B >= |support|` at every size and for the pipeline with `--portfolio b8`, not for the default. On random k-CNF it is clearly worse than CMSGen (0.441 vs 0.272), though both are heavily
 skewed there and neither passes a single instance. The 0.298-vs-0.177 aggregate is an artifact of
 mixing them 50/50; it describes my generator, not either tool.
 
@@ -309,7 +323,10 @@ restricted to a single config:
 
 **Simplify + mining + the projection path cost nothing** (0.0420 vs 0.0422 — they are
 model-preserving and it shows). The entire gap is the adaptive bandit, which **chose B=1 on 30/30
-instances** because B=1 wins on throughput, and B=1 is measurably more skewed than B=8. This is the
+instances** because B=1 wins on throughput, and B=1 is measurably more skewed than B=8.
+⚠️ **"Cost nothing" is true only where this was measured (both arms at the floor). §4c isolates it
+at |S| >= 128: the pipeline HELPS b8 (raw 0.057 -> 0.040) and HURTS b1 (0.097 -> 0.161) — it is
+not distribution-neutral there, and the bandit's B=1 pick is only half of the default's gap.** This is the
 `soft` failure mode one level milder: *the bandit optimises models/second with no uniformity term.*
 
 **Unlike `soft`, this is a real trade-off and should NOT be fixed by deleting the config.** B=1 is
@@ -331,7 +348,10 @@ is a user's call, not a default to flip silently. Recommended (not implemented �
 1. **Surface it.** The chosen config is already in `tuned_b` / `config_breakdown`; say in the CLI
    output when the winner is B=1 that the distribution is more skewed than B=8.
 2. **A `--uniform` mode** restricting the portfolio to B>=8 (and to B>=|support| where the support
-   is small enough for §3's exactness), accepting the measured throughput cost.
+   is small enough for §3's exactness), accepting the measured throughput cost. **§4c prices it:
+   `--portfolio b8` is ~10% slower (geomean 0.910, interleaved, 15 non-vacuous seq circuits) for TV
+   0.040 instead of 0.147 — far cheaper than the 5-7x this table suggested, because that table was
+   raw configs on Tseitin CNFs and the bandit already picks B=8 on 7 of 15.**
 3. Do **not** remove B=1 from the portfolio — the throughput loss is large and it is
    Barbarik-Accepted.
 
@@ -343,7 +363,10 @@ not just GPAP. Those parameters cost ~1,872 samples per instance instead of the 
 eps 0.1 / eta 0.9 demands — a 38x cheaper certificate, minutes not hours. Measured budget matches
 the paper's stated 1.836x10^3 exactly.
 
-5 instances, CM_test with the SPUR reference:
+5 instances, CM_test with the SPUR reference. ⚠️ **SUPERSEDED by §4b** (2026-08-28): these ran
+on generated fuzz instances, with no negative control, with a config missing from the harness and
+with a `k_cap` that was not the shipped one. The `soft` verdict below survives re-derivation; the
+counts do not — read §4b for the numbers to quote.
 
 | sampler under test | verdict | samples to verdict |
 |---|---|---|
@@ -449,6 +472,405 @@ results-JSON `config_breakdown` keys are built by formatting the config, and the
 in as `rv=VarOrder.RANDOM,B=8`, which would have broken comparison against every row recorded
 before the enums existed. Fixed at the source (`bool()`/`str()` in the label) and gated.
 
+## 4b. What Barbarik actually measures, how CMSGen certified itself with it, and how we do
+
+Re-derived 2026-08-28 because a paper sentence was going to rest on §4, which turned out to have
+been produced with no controls, a config missing from the harness and a `k_cap` that was not the
+shipped one. This section supersedes §4. **The evaluation here is circuit-only** — the flagship
+regime — with the `sk_`/service set kept at the end as the secondary evidence, because that is
+where the only Rejects live and hiding them would be the point of the exercise.
+
+### The test, in one paragraph
+
+You want to know whether every solution is equally likely. You cannot check that by counting: with
+n variables, noticing that one solution is twice as likely as another needs Omega(2^n) samples from
+a black box. Barbarik's move is to stop testing the whole space and **test two solutions at a
+time**. Each round: draw one solution A from the sampler under test and one solution B from SPUR (a
+slow but exactly uniform reference); construct a *kernel* formula phi-hat whose solutions are only
+A-like and B-like, in a ratio fixed by construction — a rigged coin whose true odds you know; hand
+phi-hat back to the sampler under test, ask for a batch, and count the split. A wildly lopsided
+split means bias. Repeat; if no round is lopsided, Accept. The sample count depends only on
+(eps, eta, delta) and **not on the formula size**, which is the whole trick.
+
+### Accept and Reject are NOT symmetric, and the asymmetry is the thing to quote correctly
+
+From the CMSGen paper's own summary of the guarantee (FMCAD'21 §I):
+
+> *"if Barbarik Rejects a sampler, the distribution generated by sampler is indeed
+> (probabilistically) far from uniform, but if Barbarik Accepts a sampler, the sampler's
+> distribution is close to uniform **under the assumption of non-adversality with respect to
+> Kernel** ... this allows some samplers to behave in an adversarial manner, i.e., such samplers
+> may not generate uniform distribution over phi, however may generate uniform distributions for
+> phi-hat. In such a case, Barbarik will return Accept for such samplers."*
+
+So: **Reject is unconditional. Accept is conditional** — on the sampler treating the kernel the way
+it treats the original formula. On top of that, `eta` bounds what "far" even means. An Accept is
+therefore *"not caught"*, never *"uniform"*, and any sentence we write has to say so.
+
+### Two parameter settings, and they are different tests
+
+`eval/uniformity/barbarik_gpap.py --explain` prints the unrolled constants for any triple:
+
+| | eps | eta | rounds | samples for an Accept | per-round accept band | rejects |
+|---|---|---|---|---|---|---|
+| **CMSGen paper** (FMCAD'21 §V-A) | 0.3 | 1.8 | 36 | 1,872 (1,836 from the sampler) | [0.05, 0.95] | TV >= 0.90 |
+| **barbarik's own default** | 0.1 | 0.9 | 477 (2 loops) | 70,596 | [0.288, 0.712], [0.3125, 0.6875] | TV >= 0.45 |
+
+The strict setting is not a scaled-up version of the loose one — the per-round band tightens from
++-0.45 to about +-0.21, so it is a genuinely more discriminating instrument. We report both.
+(`36 x 51 = 1,836` samples come from the sampler under test and `36 x 52 = 1,872` including the
+reference draws; the paper states 1.836x10^3, which is the arithmetic check that our parameters
+really are theirs.)
+
+### How CMSGen certified itself
+
+Golia, Soos, Chakraborty & Meel, *"Designing Samplers is Easy: The Boon of Testers"*, FMCAD'21,
+§V-A and Table I — verbatim:
+
+> *"For experimentation evaluations with Barbarik, we used the default parameters suggested by the
+> authors: In particular, we set tolerance parameter eps, intolerance parameter eta, and confidence
+> delta to be 0.3, 1.8, and 0.1 respectively. For our chosen parameters, the number of samples
+> required to return Accept for a given sampler under test is 1.836 x 10^3, and to maintain
+> consistency with evaluation setup of Barbarik, we selected benchmarks (50 in total) that were
+> used in evaluation of QuickSampler and UniGen3 **for which Barbarik terminates within 2 hours**.
+> To test uniformity of distributions generated by CMSGen and other samplers, we employed Barbarik
+> augmented with SPUR as the underlying uniform sampler."*
+
+Their Table I, over those 50 benchmarks:
+
+| | QuickSampler | STS | UniGen3 | CMSGen |
+|---|---:|---:|---:|---:|
+| Accept | 0 | 14 | 50 | **50** |
+| Reject | 50 | 36 | 0 | **0** |
+
+Two things in that setup are worth carrying over deliberately:
+
+* **They filtered instances on COST** ("for which Barbarik terminates within 2 hours"). Our
+  20 s-per-reference-sample budget is the same kind of rule, stated up front rather than applied
+  after seeing results.
+* **CMSGen's Accept was fitted to this test.** Their Remark 1: *"we arrived at the choice of
+  parameters of CMSGen, such as when to restart via an iterative process where we would run
+  Barbarik for the given choice of parameters and change them based on the number of instances
+  rejected by Barbarik."* That is a legitimate and openly-stated design method (they call it
+  TDD-style), but it means passing here is parity with a sampler tuned to pass here. Say it once;
+  do not lean on it.
+
+### How we do it, and the five defects that had to be fixed first
+
+Same tester (`CM_test`), same reference (SPUR, their stock `./samplers/spur` path), same
+parameters. GPAP is hooked in-process so the whole certificate costs one CUDA init. What we add:
+**two controls the paper's table does not have**, and an eligibility screen.
+
+1. **A portfolio member had no arm.** `s1` (STRUCTURED, B=1) is in `DEFAULT_PORTFOLIO` and the
+   harness knew only `b8`/`b1`/`soft`/`bsup`. The bandit emits only the winning config's rows, so
+   "the pipeline is certified" IS "every portfolio member is certified" — a third of that portfolio
+   was uncertified. Gated now by
+   `tests/test_sampler.py::test_every_default_portfolio_config_is_barbarik_certifiable`.
+2. **No negative control.** `--sampler spur` puts the exactly uniform reference UNDER TEST through
+   the same hook and reformatting. It must Accept. It found defect 5 inside one arm.
+3. **`k_cap=4096` was hardcoded**, not the shipped default. Short chunks make the collector's
+   zero-yield stop fire early, which surfaces as "GPAP produced 9/50" and reads as a GPAP failure.
+   `polynomial.sk_7_25` goes **error -> Accept** at the shipped cap. K is a batch size, not a
+   distribution knob.
+4. **One hang killed the sweep**, and nothing was machine-readable. Rows are written per instance,
+   an errored instance is recorded and the sweep continues, and the per-round bias values are kept.
+5. **Not every instance is a valid subject** — next.
+
+### The screen: CM_test rejects its own trusted reference on some instances
+
+`spur(control)` is **Rejected** on `ActivityService`, `ActivityService2`, `IssueServiceImpl`,
+`IterationService` and `PhaseService`. Handing barbarik's own unreformatted retriever output
+through (`--sampler spur-raw`) rejects the identical instances, so our marshalling is exonerated.
+
+The mechanism: the kernel pins every declared indVar to sigma1's or sigma2's values, so the two
+buckets hold (extensions of sigma1) and (extensions of sigma2) FULL MODELS. SPUR is uniform over
+models. When the declared sampling set is **not an independent support**, extension counts vary
+across projections and the reference's own bucket share is off by exactly that ratio. Counted
+exactly with `spur -count-only`:
+
+| instance | full models per projection | spread | SPUR verdict |
+|---|---|---:|---|
+| `27.sk_3_32`, `53.sk_4_32` | 2, 2, 2, ... | **1.0x** | Accept |
+| `GuidanceService2` | constant | **1.0x** | Accept |
+| `ActivityService` | 6.0e10 .. 2.4e11 | 4.0x | **Reject** |
+| `IssueServiceImpl` | 8.4e11 .. 5.6e12 | 6.6x | **Reject** |
+| `PhaseService` | 3.0e10 .. 6.6e11 | 21.8x | **Reject** |
+| `IterationService` | — | 103.7x | **Reject** |
+
+Every constant-spread instance Accepts, every varying-spread one Rejects. A Reject there is a
+statement about the benchmark, not about any sampler. `eval/uniformity/barbarik_screen.py`
+re-derives the exclusion; `eval/uniformity/barbarik_table.py` enforces that only control-Accepted
+instances are counted, and `eval/artifact/paper_tables.py` IMPORTS that rule rather than restating
+it. ⚠️ **The spread number is a LOWER bound and the control is the gate** — re-screening the sk_
+set with 4 projections instead of 8 lets `ActivityService2` and `PhaseService` through.
+
+**Circuits are ideal subjects for this test, and that is not luck.** A Tseitin-encoded unroll's
+sampling set is the primary inputs; every other variable is functionally determined, so each
+projection has exactly one extension. Screened over 92 generated circuit instances (12 sequential
+circuits x T in {5,10,25} x {rare, random} + 10 ISCAS-85 combinational x {rare, random}):
+**67 eligible, and not one exclusion was for non-independent support** — all 25 were the reference
+failing to sample within the cost budget.
+
+### Batch delivery vs the i.i.d. premise — measured, not assumed
+
+`_run_chunk` draws ONE variable permutation per chunk and shares it across all K rows (only the
+polarity hash is per-row), so delivered samples are i.i.d. only CONDITIONAL on that order, while
+barbarik's guarantee is stated for independent draws. Against the exact oracle, 8 generated circuit
+instances x 3 seeds at n = 100|S|:
+
+| draw | TV median | TV max | ok | same instances skewed? |
+|---|---|---|---|---|
+| batch (one chunk — what the tool delivers) | 0.0400 | 0.1241 | 6/8 | — |
+| iid (one chunk per sample) | 0.0399 | 0.1147 | 6/8 | yes, the same two |
+| exact-uniform control | 0.0400 | 0.0409 | 8/8 | — |
+
+A wash: identical verdicts, medians at the control's floor, iid very slightly better only on the
+two instances that already skew at B=8. `--draw iid` is in the harness for anyone who wants the
+premise met exactly; it Accepts.
+
+### Results — 66 circuit instances, the CMSGen paper's setting
+
+92 generated instances (12 sequential circuits x T in {5,10,25} x {rare, random} + 10 ISCAS-85
+combinational x {rare, random}), screened to 67, of which the control Accepts 66.
+
+| sampler under test | Accept | Reject | no verdict | mean bias | max bias |
+|---|---:|---:|---:|---:|---:|
+| `spur(control)` — exactly uniform | **66/66** | 0 | 0 | 0.558 | 0.740 |
+| `cmsgen` | **66/66** | 0 | 0 | 0.556 | 0.740 |
+| `gpap:b8` | 64/66 | **0** | 2 | 0.556 | 0.760 |
+| `gpap:b1` | 64/66 | **0** | 2 | 0.556 | 0.780 |
+| `gpap:s1` | 63/66 | **0** | 3 | 0.555 | 0.720 |
+| `gpap:soft` (positive control) | 1/66 | **64** | 1 | 0.662 | 0.940 |
+
+**Zero rejections for every uniformity-safe config, on all 66.** Both controls behave: the exactly
+uniform sampler Accepts everywhere, the deliberately biased one is Rejected on 64 of the 65 it
+could sample — and `soft` is the only arm whose mean bias (0.662) separates from the reference's
+(0.558), which is the instrument showing its work.
+
+Joined against the config the bandit actually DELIVERS (`--portfolio circuit`, the right portfolio
+for this input type; it picks `b1` on 58 instances and `b8` on 8):
+
+> **Accept 64/66, Reject 0, no verdict 2.**
+
+The two are `b13-c25-rare` and `c6288-c1-random`, where GPAP returns **0 samples on the original
+formula** — a capability limit (c6288 is the multiplier; b13 at T=25 is a tight rare pin), not a
+distribution result. `spur` was Rejected on `c6288-c1-rare`, which is why 66 and not 67; at
+delta=0.1 a perfectly uniform sampler may be Rejected up to 10% of the time, so 1 in 67 is well
+inside expectation, and the eligibility rule drops it either way.
+
+### Results — the same circuits at barbarik's OWN default (the sharper test)
+
+Six circuits at eps=0.1 / eta=0.9 / delta=0.05 — 70,596 samples each, per-round band about +-0.21
+instead of +-0.45, rejecting TV >= 0.45 instead of TV >= 0.90:
+
+| sampler under test | Accept | Reject | no verdict | mean bias |
+|---|---:|---:|---:|---:|
+| `spur(control)` | 6/6 | 0 | 0 | 0.533 |
+| `cmsgen` | 6/6 | 0 | 0 | 0.533 |
+| **`gpap:b8`** | **6/6** | **0** | 0 | 0.533 |
+| **`gpap:b1`** | **6/6** | **0** | 0 | 0.534 |
+| `gpap:soft` (positive control) | 0/6 | **6** | 0 | — |
+
+A clean sweep at the more discriminating setting, with GPAP's mean bias (0.533/0.534)
+indistinguishable from the exact-uniform reference's (0.533). Not run on all 66 because the
+reference cost scales with the sample count; the six are the cheapest circuits by certificate wall.
+
+⚠️ **`sample_bits`' give-up rule cost us verdicts before this was measured.** It stops after ONE
+empty chunk past its cold-start grace — correct for "this instance produces nothing", wrong for
+"this instance produces rarely", which is precisely what barbarik's kernel is by construction. Low
+yield came back as "GPAP produced 22/125" and was recorded as no-verdict, charging OUR collector's
+stopping rule to GPAP's coverage. With an order-fill retry in the harness (`_FILL_ATTEMPTS`;
+independent chunks, so concatenating changes no distribution) `c499-c1-rare` goes **error ->
+Accept in 6.1 s** and `c1355-c1-rare` at the strict setting **error -> Accept in 82 s**, and the
+strict table above goes from 4/6 to 6/6. Anything reading "produced n/N" is a budget, not a verdict.
+
+### The secondary set: sk_ / service CNFs, where the only Rejects are
+
+Kept because dropping the set that contains our losses would be the whole problem with benchmark
+tables. 22 screened, 21 eligible, same loose setting:
+
+| sampler under test | Accept | Reject | no verdict |
+|---|---:|---:|---:|
+| `spur(control)` | 21/21 | 0 | 0 |
+| `cmsgen` | 21/21 | 0 | 0 |
+| `gpap:s1` | 20/21 | 0 | 1 |
+| `gpap:b1` | 18/21 | **2** | 1 |
+| `gpap:b8` | 16/21 | **1** | 4 |
+
+Delivered-config: `--portfolio default` (the CNF portfolio) 20 Accept / 0 Reject / 1 no verdict;
+`--portfolio circuit` 18 / **2** / 1.
+
+⚠️ **`gpap sample` and `gpap bench` default to `--portfolio circuit` for EVERY input, including a
+plain CNF, and on CNF that costs two certificates.** `circuit` has no `s1`, so the bandit falls
+back to `b1`, which is Rejected on `registerlesSwap` and `UserServiceImpl` where `s1` is Accepted —
+and it is not even a throughput trade (`s1` delivers 46,512 models to `b1`'s 4,767 on
+registerlesSwap). The cheap fix is to default the portfolio by INPUT TYPE. NOT DONE: it moves a
+default every recorded `gpap bench` CNF row was produced under. Irrelevant to a circuits-only
+paper; relevant to anyone pointing the CLI at a CNF.
+
+`registerlesSwap.sk_3_10` has |support| = 10, so its 78-solution space is enumerable and the coarse
+verdict can be checked against the sensitive instrument (n = 100|S|, 3 seeds): `spur` TV
+0.063-0.068, `cmsgen` 0.139-0.159, `gpap:b1` 0.211-0.257, `gpap:s1` 0.204-0.220. The Reject is
+genuine and we are the worst of the three there. (SPUR itself is flagged at 0.065 against a 0.0399
+floor, i.e. this support is mildly non-independent and the 8-projection screen missed it — the
+control Accepted it, so it stays in and the Reject counts against us.)
+
+### The bottom line for a circuits paper
+
+| | Accept | Reject | no verdict |
+|---|---:|---:|---:|
+| **GPAP as shipped** (`--portfolio circuit`, delivered config) | **64/66** | **0** | 2 |
+| CMSGen | 66/66 | 0 | 0 |
+| `spur` — exactly uniform (control) | 66/66 | 0 | 0 |
+| `soft` (positive control) | 1/66 | 64 | 1 |
+
+plus **6/6 with zero rejections at barbarik's own stricter default**, where CMSGen is also 6/6.
+This is a PARITY claim at the bar the field certifies samplers by, and it is all CM_test can
+support. The quantitative claim belongs to the exact-oracle layer — see §4c, which measures it
+properly and does NOT say what an earlier draft of this section said.
+
+## 4c. The TV number, measured on 120 circuit instances in the regime that discriminates
+
+⚠️ **An earlier reading of this — "GPAP's TV is at the exact-uniform floor while CMSGen's is ~1.8x
+larger" — was WRONG for the shipped pipeline, and the way it went wrong is worth keeping.** It came
+from a 24-instance mixed campaign whose circuit half had |S| between 8 and 384. Seven of those 12
+instances are small enough that *every* sampler including CMSGen sits at the exact-uniform floor,
+so the median landed inside the floor cluster and manufactured a gap. Only the five instances with
+|S| >= 176 discriminate at all, and on those the shipped pipeline is 0.176-0.289 against CMSGen's
+0.121-0.305 — comparable, and worse on three of five.
+
+Re-measured circuit-only, restricted to **|S| >= 128** where the arms actually separate:
+**120 instances, |S| 128-1920, |support| 14-20, 3 seeds, n = 100|S|**, same negative and positive
+controls. The theoretical floor for a PERFECT sampler at this n is `0.399*sqrt(S/n) = 0.0399`, and
+the exact-uniform control reads 0.0399 — so the instrument is calibrated to three decimals.
+
+| arm | TV median | TV p90 | TV max | unflagged | better TV than CMSGen | skews where CMSGen does NOT |
+|---|---:|---:|---:|---:|---:|---:|
+| `ctl:uniform` (exactly uniform) | 0.0399 | 0.0403 | 0.0408 | 120/120 | 94% | 0/120 |
+| **`gpap:b16`** (B >= \|support\|) | **0.0398** | 0.0411 | **0.0439** | **119/120** | 90% | **0/120** |
+| `gpap:b8` | 0.0571 | 0.1230 | 0.1598 | 47/120 | **92%** | **0/120** |
+| `gpap:b1` | 0.0910 | 0.1914 | 0.3136 | 44/120 | 73% | **0/120** |
+| **`pipe:circuit`** (as shipped) | **0.1651** | 0.3010 | 0.4345 | 46/120 | **46%** | **0/120** |
+| `cmsgen` | 0.1219 | 0.2270 | 0.3501 | 23/120 | — | — |
+
+Controls: 0/120 false positives, 120/120 detection of a planted TV = 0.05. Zero unsound rows.
+
+**Four statements this supports, and one it kills.**
+
+1. **`B >= |support|` is exactly uniform at scale.** TV 0.0398 median / 0.0439 max against a 0.0399
+   floor, unflagged on 119 of 120, holding out to |S| = 1920. It has a proof (rejection sampling —
+   GPAP discards conflicted trajectories rather than backtracking, §3), and this is the measurement
+   that shows the proof survives the regime where everything else falls apart.
+2. **The raw `b8` config beats CMSGen**: 0.0571 vs 0.1219 median, better on **92%** of instances.
+3. **No GPAP config ever skews where CMSGen does not — 0/120 for every one of them.** GPAP's skew
+   set is a strict subset of CMSGen's, which is the cleanest comparative statement available here.
+4. **GPAP is unflagged ~2x as often**: 44-47/120 against CMSGen's 23/120.
+5. **KILLED: the shipped pipeline does NOT beat CMSGen on TV.** `pipe:circuit` is **0.1651 vs
+   0.1219 — 1.35x WORSE**, and better on only 46% of instances. It still passes chi2 twice as often
+   (46 vs 23) and still never skews alone, so the two summaries genuinely disagree and BOTH have to
+   be reported. The cause is the bandit picking B=1 for throughput; §3c found this at 30 instances
+   on the old engine and it reproduces at 120 on the current one.
+
+Split by solution-space size, which is what makes the pipeline's cost visible:
+
+| \|S\| | n | `b16` | `b8` | `b1` | `pipe:circuit` | `cmsgen` |
+|---|---:|---|---|---|---|---|
+| 128-255 | 25 | 0.040 | 0.042 | 0.043 | 0.042 | 0.088 |
+| 256-511 | 30 | 0.040 | 0.041 | 0.063 | 0.096 | 0.105 |
+| 512-1920 | 65 | 0.040 | **0.069** | 0.097 | **0.168** | **0.137** |
+
+The pipeline degrades FASTER than CMSGen as the space grows and crosses it around |S| ~ 500, while
+`b8` stays 2x better than CMSGen throughout and `b16` does not move at all. **So a TV claim must
+name a config.** `--portfolio b8` buys 0.057; the default bandit costs 0.165. That is the same
+throughput-vs-uniformity trade as §3c, now sized in the regime a real unroll lives in.
+
+### Where the default's TV actually comes from — isolated, then confirmed paired
+
+The default (0.165) is worse than EVERY config it can select (`b8` 0.057, `b1` 0.097), which the
+bandit alone cannot explain. Running the pipeline with a ONE-entry portfolio (no bandit to choose)
+against the same config driven raw, 40 instances:
+
+| config | raw | through the pipeline |
+|---|---|---|
+| `b8` | 0.0569 | **0.0405** — the pipeline HELPS |
+| `b1` | 0.0967 | **0.1605** — the pipeline HURTS |
+| default bandit | — | 0.1661 (= `pipe:b1`, i.e. the bandit picks B=1) |
+
+So there are TWO effects, not one: the bandit choosing B=1, **and** the pipeline moving the two
+configs in opposite directions. The likely mechanism is ELS shrinking the effective support, which
+pushes B=8 toward the `B >= |support|` exact-rejection regime and does nothing for B=1. §3c
+reported the pipeline as distribution-neutral; that was measured where every arm sat at the floor,
+and it is NOT neutral here.
+
+Confirmed paired on **80 fresh circuit instances** (independent generation seed), the three arms a
+release decision is actually between:
+
+| arm | TV median | TV p90 | TV max | unflagged | better TV than CMSGen | skews where CMSGen does not |
+|---|---:|---:|---:|---:|---:|---:|
+| `ctl:uniform` (exactly uniform) | 0.0400 | 0.0403 | 0.0412 | 80/80 | 91% | 0/80 |
+| `gpap:b16` (B >= \|support\|) | **0.0398** | 0.0414 | 0.0429 | **80/80** | 90% | 0/80 |
+| **`pipe:b8`** (shipped pipeline, B=8 pinned) | **0.0402** | 0.1599 | 0.2016 | **64/80** | **84%** | **0/80** |
+| `pipe:circuit` (shipped DEFAULT) | 0.1471 | 0.2902 | 0.3796 | 36/80 | 51% | **0/80** |
+| `cmsgen` | 0.1125 | 0.2131 | 0.2643 | 16/80 | — | — |
+
+| \|S\| | n | `b16` | `pipe:b8` | `pipe:circuit` | `cmsgen` |
+|---|---:|---|---|---|---|
+| 128-383 | 36 | 0.039 | 0.040 | **0.039** | 0.088 |
+| 384-767 | 23 | 0.040 | 0.040 | **0.166** | 0.131 |
+| 768-1536 | 21 | 0.040 | 0.040 | **0.168** | 0.144 |
+
+**`pipe:b8` holds the floor at every size; the default holds it only to |S| ~ 380 and then breaks.**
+That is the shape of the release decision: the default is fine on small spaces and loses on large
+ones, while pinning B=8 keeps the whole range at the floor.
+
+### What may be claimed about the RELEASE DEFAULT
+
+For `--portfolio circuit` exactly as it ships, these hold and are paired:
+
+* Barbarik: **64/66 Accept, 0 Reject** (CMSGen 66/66), and **6/6 vs 6/6** at barbarik's stricter own
+  setting — §4b;
+* **it never skews where CMSGen does not: 0/120 and 0/80**, across every campaign and every config;
+* **statistically indistinguishable from uniform ~2x as often as CMSGen**: 36/80 vs 16/80
+  (46/120 vs 23/120 on the other campaign);
+* zero unsound rows, ever.
+
+This does NOT hold and must not be written: *the default has lower TV than CMSGen*. It is
+**0.1471 vs 0.1125 — 1.31x worse**, better on 51% of instances, i.e. a coin flip. The two summaries
+disagree because GPAP is more often exactly right AND more often badly wrong (p90 0.290 vs 0.213,
+max 0.380 vs 0.264) while CMSGen is uniformly mediocre; report both or neither.
+
+**A TV claim needs `--portfolio b8`**, where the shipped pipeline reads **0.0402 against a 0.0399
+floor** — 2.8x better than CMSGen, better on 84%, unflagged 4x as often (64/80 vs 16/80).
+
+### And the price of pinning B=8 is ~10%, not the 5-7x the old note implied
+
+Measured with `eval/profile_soft_portfolio.py` (now `--arm-a`/`--arm-b` for any two portfolios;
+each circuit encoded ONCE, both arms in the SAME process, arm order alternated across reps, best of
+reps per arm — this box's SM clock swings 615-1710 MHz so nothing else resolves 10%). 19 seq
+circuits, `abc:fast`, T=25, `--target rare`, 15 non-vacuous / 14 comparable:
+
+| | ratio `b8` / `circuit` |
+|---|---|
+| **geomean** | **0.910** — pinning B=8 is **1.10x slower** |
+| median | 0.964 |
+| worst non-vacuous | 0.516 (`b13`, 28.9M/s -> 14.9M/s; both enormous) |
+| capability losses | **0** — no instance where the pinned arm produced nothing |
+
+The reason it is cheap: the bandit ALREADY picks B=8 on 7 of the 15 non-vacuous instances (b03,
+b04, b09, b10, b12, s1196, s832), so those arms are the same configuration and the ratio is ~1.00.
+The cost lands only where it picks B=1.
+
+⚠️ **This does not contradict §3c's 0.15-0.18x, it supersedes the setting.** That table was raw
+configs on TSEITIN CNFs on the pre-wave engine; this is the full pipeline on ABC-encoded CNFs on
+the current one. Quote this one for a release decision about `--portfolio`, and re-measure with the
+same script if either the encoder or the engine moves.
+
+**So the trade is: ~10% throughput for TV 0.040 instead of 0.147, 4x more instances
+indistinguishable from uniform, and a TV that beats CMSGen on 84% of instances instead of 51%.**
+That is a far better bargain than §3c's `soft` decision was (which cost 2.44x), and it is a release
+decision rather than a documentation one — NOT taken here, because moving the default portfolio
+moves every recorded `gpap bench` circuit row.
+
 ## 5. What is NOT shown
 
 - **Scale.** Every exact result here is on |S| <= 400 and n <= 40k. Skew on tiny random CNFs need
@@ -474,10 +896,40 @@ PYTHONPATH=. .venv/bin/python eval/uniformity/fuzz_uniformity.py --count 24 --se
 # the B sweep (the exactness knob)
 PYTHONPATH=. .venv/bin/python eval/uniformity/fuzz_uniformity.py --count 12 --seeds 3 --n-mult 100 \
     --configs b1 b2 b4 b8 b16 b32 b64 b256 --controls 0.0
-# the standard certificate, per sampler under test
-PYTHONPATH=. .venv/bin/python eval/uniformity/barbarik_gpap.py .experiments/fuzz/instances/*.cnf \
-    --sampler gpap --config b8      # or: --config soft | --sampler cmsgen
+# the standard certificate (§4b), CIRCUIT-ONLY -- generate, SCREEN, then every arm incl. both controls
+PYTHONPATH=. .venv/bin/python eval/uniformity/barbarik_gpap.py --explain    # what the numbers mean
+mkdir -p /tmp/circ
+for c in b01 b03 b04 b06 b08 b09 b10 b11 b13 s386 s832 s1196; do for T in 5 10 25; do for tg in rare random; do
+  gpap circuit2cnf benchmarks/circuits/bench/seq/$c.bench /tmp/circ/$c-c$T-$tg.cnf --cycles $T --target $tg --seed 1
+done; done; done
+for c in c432 c499 c880 c1355 c1908 c2670 c3540 c5315 c6288 c7552; do for tg in rare random; do
+  gpap circuit2cnf benchmarks/circuits/bench/comb/$c.bench /tmp/circ/$c-c1-$tg.cnf --cycles 1 --target $tg --seed 1
+done; done
+PYTHONPATH=. .venv/bin/python eval/uniformity/barbarik_screen.py /tmp/circ/*.cnf --out /tmp/eligible.txt
+for arm in "--sampler spur" "--sampler cmsgen" "--sampler gpap --config b8" \
+           "--sampler gpap --config b1" "--sampler gpap --config s1" \
+           "--sampler gpap --config soft"; do
+  PYTHONPATH=. .venv/bin/python eval/uniformity/barbarik_gpap.py $(cat /tmp/eligible.txt) \
+      $arm --out .experiments/barbarik/circ.jsonl                       # CMSGen-paper setting
+  PYTHONPATH=. .venv/bin/python eval/uniformity/barbarik_gpap.py $(head -6 /tmp/eligible.txt) \
+      $arm --epsilon 0.1 --eta 0.9 --delta 0.05 --out .experiments/barbarik/circ_strict.jsonl
+done
+PYTHONPATH=. .venv/bin/python eval/uniformity/barbarik_table.py .experiments/barbarik/circ.jsonl
+PYTHONPATH=. .venv/bin/python eval/uniformity/barbarik_table.py .experiments/barbarik/circ_strict.jsonl
+# the TV number (§4c): circuit-only, |S| >= 128 so the arms can separate, paired on identical files
+PYTHONPATH=. .venv/bin/python eval/uniformity/fuzz_uniformity.py --kinds circuit --count 80 --seeds 3 \
+    --n-mult 100 --sup-min 12 --circuit-inputs 14 20 --s-min 128 --s-max 2000 \
+    --configs b16 --pipelines circuit b8 --cmsgen .gpap/bin/cmsgen --controls 0.0 0.05
+# and its price: both portfolios in ONE process, arm order alternated
+PYTHONPATH=. .venv/bin/python eval/profile_soft_portfolio.py --glob 'benchmarks/circuits/bench/seq/*.bench' \
+    --encoder abc --abc-opt fast --cycles 25 --target rare --arm-a circuit --arm-b b8
 ```
+The instance set (2026-08-28 rows in `.experiments/barbarik_20260828/`): 12 seq circuits x T in
+{5,10,25} x {rare,random} + 10 ISCAS-85 x {rare,random} = 92 generated, 67 pass the cost screen,
+66 pass the control.
+`--sampler spur` (must Accept) and `--config soft` (must Reject) are the two controls; a table
+without both of them is not evidence. `--draw iid` re-runs any GPAP arm with one chunk per sample,
+which is the independence premise barbarik's guarantee is stated under.
 
 `tests/test_uniformity_fuzz.py` gates the invariants: oracle self-consistency, the negative control
 (the statistics must not manufacture skew), the positive control (they must have power), soundness
