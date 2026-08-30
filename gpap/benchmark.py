@@ -333,7 +333,7 @@ def _build_argparser():
                          "confounds the comparison")
     ap.add_argument("--allow-soft", action="store_true",
                     help="add the soft risk-polarity config to the portfolio. Higher success on "
-                         "tight/deep circuits but NOT uniform (Barbarik rejects it 5/5) — never "
+                         "tight/deep circuits but NOT uniform (Barbarik rejects it on 64 of 65 circuits) — never "
                          "use for a distribution claim")
     ap.add_argument("--b", type=_POS_INT, default=8,
                     help="decisions per round (8 is the throughput sweet spot: fewer rounds while "

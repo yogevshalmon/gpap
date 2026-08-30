@@ -264,7 +264,7 @@ def test_portfolio_configs_are_tuple_compatible():
 
 
 def test_soft_is_not_in_any_default_portfolio():
-    """`soft` biases the distribution (Barbarik rejects it 5/5, docs/findings/
+    """`soft` biases the distribution (Barbarik rejects it on 64 of 65 circuits, docs/findings/
     UNIFORMITY_FINDINGS.md), and the bandit selects on throughput with no uniformity term — so it
     must never arrive without the caller asking for it."""
     from gpap.sampling.pipeline import (CIRCUIT_PORTFOLIO, DEFAULT_PORTFOLIO, Lookahead,
@@ -274,6 +274,60 @@ def test_soft_is_not_in_any_default_portfolio():
             f"{name} portfolio must be uniformity-safe by default"
         assert SOFT_CONFIG in portfolio(name, allow_soft=True)
     assert all(c[2] is Lookahead.NONE for c in (*CIRCUIT_PORTFOLIO, *DEFAULT_PORTFOLIO))
+
+
+def test_every_default_portfolio_config_is_barbarik_certifiable():
+    """The uniformity certificate is per-CONFIG, so a portfolio member with no arm in the Barbarik
+    harness is an uncertified sampler the bandit can select.
+
+    The pipeline buckets delivered rows per config and returns only the winner's, so "the shipped
+    tool is Accepted" is exactly "every member of its portfolio is Accepted" — and that argument
+    silently breaks the moment someone adds a config here without adding it there. It had already
+    broken once: `s1` (STRUCTURED, B=1) has been in DEFAULT_PORTFOLIO while the harness only knew
+    b8/b1/soft/bsup, so the sk_/CMSGen-comparison portfolio was a third uncertified.
+    """
+    import ast
+    import pathlib
+
+    from gpap.sampling.pipeline import CIRCUIT_PORTFOLIO, DEFAULT_PORTFOLIO
+
+    src = pathlib.Path(__file__).resolve().parents[1] / "eval/uniformity/barbarik_gpap.py"
+    tree = ast.parse(src.read_text())
+    configs = next(ast.literal_eval(node.value)
+                   for node in ast.walk(tree)
+                   if isinstance(node, ast.Assign)
+                   and any(getattr(t, "id", None) == "CONFIGS" for t in node.targets))
+    covered = {(bool(rv), b, str(la or "")) for rv, b, la in configs.values()}
+    for cfg in (*CIRCUIT_PORTFOLIO, *DEFAULT_PORTFOLIO):
+        key = (bool(cfg[0]), cfg[1], str(cfg[2] or ""))
+        assert key in covered, (
+            f"portfolio config {cfg.describe()} has no arm in barbarik_gpap.py CONFIGS "
+            f"({sorted(configs)}) — the bandit could select a sampler nothing has certified")
+
+
+def test_barbarik_harness_silences_upstream_rm_noise_and_nothing_else(tmp_path, capfd, monkeypatch):
+    """barbarik unlinks its kernel CNF and then shells out `rm *.nnf <that file>`, so every round
+    of a certificate printed two `rm: cannot remove` warnings for a file it had already deleted.
+    The shim must (a) do that housekeeping quietly, including the already-gone case, and (b) leave
+    every other os.system call — the SPUR launch goes through it — exactly alone."""
+    import os
+
+    from eval.uniformity.barbarik_gpap import _QuietOS
+
+    shim = _QuietOS(os)
+    monkeypatch.chdir(tmp_path)
+    nnf, kernel = tmp_path / "x.nnf", tmp_path / "k_t.cnf"
+    nnf.write_text(""); kernel.write_text("p cnf 1 1\n1 0\n")
+    assert shim.system(f"rm *.nnf {kernel}") == 0
+    assert not nnf.exists() and not kernel.exists()
+    assert shim.system(f"rm *.nnf {kernel}") == 0           # the upstream double-delete
+    out, err = capfd.readouterr()
+    assert out == "" and err == "", f"housekeeping must be silent, got {err!r}"
+    # passthrough: exit status and output of anything else are untouched
+    assert shim.system("exit 3") >> 8 == 3
+    assert shim.system("echo passthrough") == 0
+    assert "passthrough" in capfd.readouterr()[0]
+    assert shim.path.join("a", "b") == os.path.join("a", "b")   # attribute forwarding
 
 
 @needs_gpu

@@ -107,8 +107,10 @@ eval/                      # the experiment layer: run_full_eval.sh (staged/resu
                            #   rival) + check_emission_symmetry.py (RE-DERIVES that
                            #   no tool is timed while DELIVERING solutions: AST-scans what each
                            #   rival's own timer() wraps, our collect=False, cmsgen --nowrite)
-                           #   + barbarik_gpap.py (CM_test, gpap|cmsgen under
-                           #   test) + fuzz_uniformity.py (exact-oracle uniformity fuzzing)
+                           #   + barbarik_gpap.py (CM_test; gpap|pipe|cmsgen|spur under test,
+                           #   spur = the NEGATIVE CONTROL) + barbarik_screen.py (WHICH instances
+                           #   the test can speak about) + barbarik_table.py (THE eligibility rule,
+                           #   imported by paper_tables) + fuzz_uniformity.py (exact-oracle fuzzing)
                            #   + the cross-GPU Colab driver + colab_supervisor.py (survives the
                            #   ~1h VM lifetime: mirror every cycle, reseed, resume)
                            #   PAPER OUTPUT: paper_tables.py is THE generator (all exclusion
@@ -367,6 +369,15 @@ scripts/build_abc.sh                                         # optional: pinned 
 | entailed-clause mining | **on** above `MINE_MIN_CLAUSES`, bounded by `MINE_SECONDS` | `--mine off` |
 | mined clauses | **kept only if they pay** (below) | — |
 
+⚠️ **`gpap sample`/`gpap bench` default to `--portfolio circuit` for EVERY input, including a
+plain CNF, and on CNF that costs certificates**: `circuit` has no `s1`, so the bandit falls back to
+`b1`, which Barbarik REJECTS on `registerlesSwap` and `UserServiceImpl` where `s1` is Accepted —
+and it is not even a throughput trade (`s1` delivers 46,512 models to `b1`'s 4,767 on
+registerlesSwap). Delivered-config verdicts on the 21 eligible sk_ instances: `default` 20 Accept /
+0 Reject, `circuit` 18 / 2. On circuits the default is right (19/20 Accept, 0 Reject). NOT FIXED —
+defaulting the portfolio by input type moves a default every recorded `gpap bench` CNF row was
+produced under. docs/findings/UNIFORMITY_FINDINGS.md §4b.
+
 ⚠️ **Recorded sweeps predating these defaults are not comparable to new ones** — re-run, or label
 with the flags above. Validation and per-instance numbers: docs/findings/MINING_FINDINGS.md.
 
@@ -434,8 +445,31 @@ when the space/formula defeats enumeration it falls back to the repeat-rate line
 honest "barbarik for certification" hint (`enum_status` capped/timeout/skipped-large).
 Certificates on big spaces = conditional sampling = Barbarik (`eval/uniformity/barbarik_gpap.py`, GPAP
 hooked in-process OR `--sampler cmsgen`, SPUR reference; defaults are the CMSGen paper's
-ε=0.3/η=1.8/δ=0.1 ⇒ 1,872 samples/instance, 38× cheaper than ε=0.1/η=0.9). chi2 sf is native
+ε=0.3/η=1.8/δ=0.1 ⇒ 1,872 samples/instance = 36 rounds × (1+1+50), accept band [0.05, 0.95],
+38× cheaper than ε=0.1/η=0.9; `--explain` prints the derivation). chi2 sf is native
 (`metrics._gammq`) — no scipy dep.
+⚠️ **THE PARAMETERS ARE A CHOICE AND THERE ARE TWO**: the CMSGen paper's ε=0.3/η=1.8/δ=0.1
+(1,872 samples, band [0.05, 0.95], rejects TV ≥ 0.90) and barbarik's OWN default ε=0.1/η=0.9/δ=0.05
+(70,596 samples, bands ≈±0.21, rejects TV ≥ 0.45) — different tests, never pooled
+(`barbarik_table.py` refuses). ⚠️ **The guarantee is ASYMMETRIC**: Reject is unconditional, Accept
+holds only under the paper's *non-adversality w.r.t. Kernel* assumption AND only against η, so an
+Accept is "not caught", never "uniform". ⚠️ CMSGen's own Accept was FITTED to this test (their
+Remark 1: they tuned CMSGen's restart parameters against Barbarik's rejections) — parity is the
+honest framing. ⚠️ **A Barbarik table is only evidence with BOTH controls and the eligibility screen**
+(docs/findings/UNIFORMITY_FINDINGS.md §4b): `--sampler spur` puts an exactly uniform sampler under
+test through the same hook and MUST Accept; `--config soft` MUST Reject. The screen exists because
+**CM_test rejects its own trusted reference** on instances whose declared `c ind` is not an
+independent support — its kernel pins every indVar, so the two buckets hold (extensions of σ1) vs
+(extensions of σ2) MODELS and a model-uniform reference is skewed by exactly that ratio
+(ActivityService 4×, IssueServiceImpl 6.6×, PhaseService 21.8×, IterationService 103.7× ⇒ all
+Rejected; every spread-1.0× instance Accepts). `barbarik_screen.py` re-derives it (SPUR feasible
+within a 20 s/sample cost bound + extension spread); `barbarik_table.py` buckets on the CONTROL's
+verdict, never on the screen — the spread estimate is a LOWER bound (4 projections misses what 8
+catches). ⚠️ `k_cap` is a batch size, NOT a distribution knob, but a small one makes short chunks
+and the collector's zero-yield stop fires early ⇒ "produced 9/50", which reads as a GPAP failure;
+the harness defaults to the shipped cap. ⚠️ Barbarik's kernel is adversarial for a REJECTION
+sampler by construction (it enlarges the sampling set while pinning the support), so GPAP
+sometimes cannot fill an order — that is "no verdict", not a Reject, and it bounds coverage.
 **Uniformity FUZZING against an exact oracle** (`eval/uniformity/fuzz_uniformity.py`, full
 writeup `docs/findings/UNIFORMITY_FINDINGS.md`): generates small random CNFs / random Tseitin
 circuits whose solution set is enumerated EXHAUSTIVELY (solver-free oracle; the circuit generator
@@ -443,7 +477,9 @@ proves its own encoding over the whole truth table), then runs GPAP and CMSGen o
 with negative + positive **controls** (exact-uniform must not be flagged; a known TV must be —
 these calibrate the instrument, sensitivity floor TV≈0.05 at n=100|S|×3 seeds). Two settled
 results: **B ≥ |support| ⇒ exactly uniform** (rejection sampling, since GPAP discards conflicted
-trajectories) and **`soft` is Barbarik-REJECTED 5/5** while b8/b1/CMSGen are Accepted 5/5 — the
+trajectories) and **`soft` is Barbarik-REJECTED on 64 of the 65 circuit instances it can sample**
+while the config the bandit delivers is Accepted 64/66 with ZERO rejections (CMSGen 66/66; and
+6/6 vs 6/6 at barbarik's stricter own default) — the
 bandit picks configs on models/s with no uniformity term, so `soft` winning was silent ⇒
 **`soft` was REMOVED from CIRCUIT_PORTFOLIO and is now opt-in via `--allow-soft`**
 (`gpap sample`/`gpap bench`; prints a warning; `pipeline.SOFT_CONFIG`).
@@ -554,7 +590,7 @@ Cross-GPU K-scaling: `eval/colab/colab_sampling_benchmark.py` + `notebooks/gpap_
   kill-switch; check the power state first (a 40 W cap / battery clocks ~halve every rate).
 - `mono` kernel (0.93× vs wide), `orac` circuit config (0/64 wins), full/soft global lookahead:
   measured out. **soft is now OPT-IN (`--allow-soft`), not a default portfolio member** — it is
-  Barbarik-rejected 5/5, so a throughput bandit must not be able to choose it for a
+  Barbarik-rejected on 64 of 65 circuit instances, so a throughput bandit must not choose it for a
   user who asked for a sampler. It stays reachable: regime-dependence rule, it still wins
   tight/deep circuits on success rate.
 - `--n-time` is a delivery TARGET, not a guarantee in either direction: the batch K is the unit of

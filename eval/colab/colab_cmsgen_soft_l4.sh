@@ -3,7 +3,7 @@
 #
 # What this measures, and why it needs a whole second sweep.
 #
-# `soft` (soft global lookahead) is Barbarik-REJECTED 5/5 against an exact oracle, so it was
+# `soft` (soft global lookahead) is Barbarik-REJECTED on 64 of 65 circuit instances, so it was
 # removed from CIRCUIT_PORTFOLIO and is now opt-in. The shipped sampler — and every
 # number in `eval/colab/colab_cmsgen_l4.sh`'s output — therefore already runs WITHOUT it (`allow_soft:
 # false` is recorded in each of those JSONs' `args`). What we could not previously state is the
