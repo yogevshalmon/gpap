@@ -384,6 +384,36 @@ def uniformity(paths):
     return out, args
 
 
+# ------------------------------------------------------------------ barbarik
+
+def barbarik(paths):
+    """The standard certificate, per sampler under test.
+
+    The eligibility rule and the per-arm counts are IMPORTED from
+    eval/uniformity/barbarik_table.py, not re-derived: an instance counts only where the negative
+    control (the trusted uniform reference, put under test through the same hook) was itself
+    Accepted. Where the control is Rejected, CM_test is not measuring sampler uniformity — the
+    declared sampling set is not an independent support, so the model-uniform reference is not
+    projection-uniform. Publishing those cells would report an instance property as a sampler one.
+    """
+    import os
+    import sys
+    sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "uniformity"))
+    from barbarik_table import arm_summary, buckets, check_one_setting, load as bload
+
+    rows = []
+    for p in paths or []:
+        if os.path.exists(p):
+            rows += bload([p])
+    if not rows:
+        return None
+    eps, eta, delta = check_one_setting(rows)      # raises on a pooled loose+strict file list
+    eligible, rejected, errored = buckets(rows)
+    return {"summary": arm_summary(rows, eligible), "eligible": sorted(eligible),
+            "control_rejected": sorted(rejected), "control_errored": sorted(errored),
+            "params": {"epsilon": eps, "eta": eta, "delta": delta}}
+
+
 # ------------------------------------------------------------------ reproducibility
 
 def recheck(orig, rec, stages=("seq-c25-rare", "comb-rare", "epfl-rare", "sk")):
@@ -443,6 +473,7 @@ def build(args):
     riv = {s: rival_family(args.rivals, s, k) for s, k, _, _ in RIVALS}
     prop = {(s, e): prop_rates(args.cmsgen, s, e) for s, e in fam_encs}
     uni, uni_args = uniformity(args.uniformity)
+    barb = barbarik(args.barbarik)
     rc = recheck(args.cmsgen, args.recheck)
     soft = load(args.soft) if args.soft else None
 
@@ -640,6 +671,37 @@ def build(args):
         for (name, kind), a in sorted(uni.items(), key=lambda kv: uni_sort_key(kv[0])):
             M.append(f"| `{name}` | {kind} | {a['n']} | "
                      f"{a['tv']:.4f} | {a['reject']}/{a['n']} | {a['unsound']} |")
+    if barb:
+        p = barb["params"]
+        n_el = len(barb["eligible"])
+        setting = {(0.3, 1.8, 0.1): "the parameters CMSGen's own authors certify at (FMCAD'21 "
+                                    "Table I): 36 rounds x (1 + 1 + 50) = **1,872 samples** for "
+                                    "an Accept, per-round accept band **[0.05, 0.95]**",
+                   (0.1, 0.9, 0.05): "barbarik's own default: 477 rounds, **70,596 samples** for "
+                                     "an Accept, per-round bands about +-0.21"
+                   }.get((p["epsilon"], p["eta"], p["delta"]), "a non-standard setting")
+        M += ["", "## Table 4b — Barbarik CM_test (the standard certificate)", "",
+              f"`eps={p['epsilon']} eta={p['eta']} delta={p['delta']}` — {setting}. "
+              f"An Accept means *not caught being eta-far* (L1 >= {p['eta']}, i.e. TV >= "
+              f"{p['eta'] / 2:.2f}) and holds only under Barbarik's non-adversality assumption; "
+              f"a Reject is unconditional. It is not a proof of uniformity; Table 4 is the "
+              f"sensitive instrument.", "",
+              f"{n_el} eligible instances "
+              f"({len(barb['control_rejected'])} dropped because the trusted reference is itself "
+              f"Rejected on them — a non-independent sampling set, or a delta-level false "
+              f"rejection of an exactly uniform sampler; either way the test cannot speak about "
+              f"the instance; {len(barb['control_errored'])} dropped on a reference error).", "",
+              "| sampler under test | Accept | Reject | no verdict | mean bias | max bias |",
+              "|---|---:|---:|---:|---:|---:|"]
+        for arm, a in barb["summary"].items():
+            bm = "-" if a["bias_mean"] is None else f"{a['bias_mean']:.3f}"
+            bx = "-" if a["bias_max"] is None else f"{a['bias_max']:.3f}"
+            M.append(f"| `{arm}` | {a['accept']}/{a['n']} | {a['reject']} | {a['error']} | "
+                     f"{bm} | {bx} |")
+        M += ["", "`bias` is CM_test's own per-round bucket share (rejects outside "
+                  "[0.05, 0.95]); it is reported because the verdict alone hides how much "
+                  "headroom an Accept had. `no verdict` = the sampler could not fill an order "
+                  "barbarik placed, which is neither an Accept nor a Reject."]
     soft_stats = None
     if soft:
         rows = [r for r in (soft.get("rows") or []) if not r.get("vacuous")]
@@ -898,6 +960,8 @@ def main():
     ap.add_argument("--rivals", default=None)
     ap.add_argument("--recheck", default=None)
     ap.add_argument("--uniformity", nargs="*", default=[])
+    ap.add_argument("--barbarik", nargs="*", default=[],
+                    help="barbarik_gpap.py JSONL result files (Table 4b)")
     ap.add_argument("--soft", default=None)
     ap.add_argument("--out-tex", default=None)
     ap.add_argument("--out-md", default=None)

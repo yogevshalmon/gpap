@@ -3,7 +3,7 @@
 # `soft` config do to that, and what does excluding `soft` cost in throughput.
 #
 # Two experiments, deliberately in one script because they answer two halves of ONE question --
-# `soft` was removed from the default circuit portfolio because Barbarik rejects it 5/5, and that
+# `soft` was removed from the default circuit portfolio because Barbarik rejects it on 64 of 65 circuits, and that
 # is only defensible if we can state the price:
 #
 #   1. fuzz_uniformity.py  — GPAP (several configs INCLUDING soft), the shipped pipelines, and

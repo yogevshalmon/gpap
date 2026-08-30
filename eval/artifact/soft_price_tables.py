@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """What the uniformity guarantee costs, measured on the comparison we actually publish.
 
-`soft` (soft global lookahead) is Barbarik-rejected 5/5 against an exact oracle, so it was removed
+`soft` (soft global lookahead) is Barbarik-rejected on 64 of 65 circuit instances, so it was removed
 from the default portfolio and is opt-in behind `--allow-soft`. Every number in the
 shipped comparison therefore comes from a sampler that cannot choose it. This tool prices that
 decision by pairing two complete sweeps that differ in exactly one flag:
@@ -161,7 +161,7 @@ def build(args):
           f"cross-campaign draw noise into a comparison that has none of the confounds the "
           f"CMSGen table has.",
           "",
-          "`soft` is Barbarik-rejected 5/5 against an exact oracle (median TV 0.63 vs a 0.040 "
+          "`soft` is Barbarik-rejected on 64 of 65 circuit instances (exact-oracle median TV 0.63 vs a 0.040 "
          "detection floor), so the shipped sampler cannot select it. Ratios below are "
          "**safe / soft**: less than 1.0 means the uniformity-safe default is slower.", "",
          "## Summary", "",
@@ -294,7 +294,7 @@ def build(args):
          r"  \caption{\textbf{The price of the uniformity guarantee.} The entire "
          r"GPAP-vs-CMSGen matrix run twice on the same machine, differing only in whether the "
          r"portfolio may select \texttt{soft} (soft global lookahead), which an exact-oracle "
-         r"test rejects 5/5. Ratios are safe$/$soft, so $<1$ favours the rejected configuration. "
+         r"test rejects it on 64 of 65 circuits. Ratios are safe$/$soft, so $<1$ favours the rejected configuration. "
          r"The all-cells column is diluted by construction --- where the bandit would not choose "
          r"\texttt{soft}, both arms run identical configurations and contribute $1.0\times$ --- "
          r"so the column restricted to cells it did choose is the real cost.}",

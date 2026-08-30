@@ -114,13 +114,16 @@ class Lookahead(str, Enum):
     the sampler normalises `lookahead in ("soft", "fsoft")` and treats everything else as off.
     """
 
-    NONE = ""         # uniform random polarity. THE UNIFORMITY-SAFE CHOICE: Barbarik Accepts B=8
-    #                   and B=1 5/5 at the CMSGen paper's parameters.
+    NONE = ""         # uniform random polarity. THE UNIFORMITY-SAFE CHOICE: at the CMSGen
+    #                   paper's Barbarik parameters, the config the bandit delivers is Accepted on
+    #                   64/66 circuit instances with ZERO rejections (the 2 are orders GPAP could
+    #                   not fill), matching CMSGen's 66/66 — and 6/6 vs 6/6 at barbarik's own
+    #                   stricter default. docs/findings/UNIFORMITY_FINDINGS.md §4b.
     SOFT = "soft"     # ε-greedy CONFLICT-RISK polarity: prefer the value less likely to conflict.
     #                   Big success-rate win on the tight/deep circuit family (b03-c25: 10% -> 88%)
     #                   — but it BIASES the distribution by construction, and Barbarik REJECTS it
-    #                   5/5 (in 156-936 samples, vs the 1,872 an Accept costs; exact-oracle TV
-    #                   median 0.694, max 0.907). See docs/findings/UNIFORMITY_FINDINGS.md.
+    #                   on 64 of the 65 circuit instances it can sample (exact-oracle TV median
+    #                   0.694, max 0.907). See docs/findings/UNIFORMITY_FINDINGS.md §4b.
     #                   OPT-IN ONLY — never in a default portfolio.
 
 
@@ -213,7 +216,8 @@ def soft_warning() -> str:
     apart in the commit that introduced the second. What it says is a uniformity VERDICT about
     `SOFT_CONFIG`, which lives here — so it belongs beside it, not in a print layer."""
     return ("  [warn] --allow-soft: the soft risk-polarity config is in the portfolio. It raises\n"
-            "         success rate on tight circuits but is NOT uniform (Barbarik rejects it 5/5)\n"
+            "         success rate on tight circuits but is NOT uniform (Barbarik rejects it\n"
+            "         on 64 of the 65 circuit instances it can sample)\n"
             "         — do not use rows produced by it for a distribution claim.")
 
 

@@ -92,6 +92,14 @@ def enumerate_projections(clauses, support, cap=4096, budget_s=2.0):
     return projs, status
 
 
+EXACT_ALPHA = 1e-3
+"""Significance for the exact readout's SKEWED verdict.
+
+Matches eval/uniformity/fuzz_uniformity.py's flag threshold, whose controls calibrate it: 0/120
+exact-uniform campaigns were flagged at this alpha, and a planted TV of 0.05 was caught 97% of the
+time. A looser alpha would start calling honest samplers skewed on a single instance."""
+
+
 def format_uniformity(u, verbose=False):
     """One-line human rendering of a uniformity_stats dict. verbose=True gives the full sentence
     (gpap sample); verbose=False a short table cell (gpap bench)."""
@@ -102,11 +110,20 @@ def format_uniformity(u, verbose=False):
         if u.get("unsound_projections"):
             return f"UNSOUND ({u['unsound_projections']} bad projections)"
         p, tv = u.get("p"), u.get("tv", 0.0)
+        # The exact mode used to print bare numbers while the WEAKER `fast` mode printed OK /
+        # SKEWED — so the sensitive test looked less conclusive than the gross-skew one, and a
+        # reader had to know that p=0.000 is bad news. Both modes lead with a verdict now.
+        skewed = p is not None and p < EXACT_ALPHA
+        word = "SKEWED" if skewed else ("OK" if p is not None else "n/a")
         if not verbose:
-            return f"p={p:.2f}" if p is not None else f"TV={tv:.2f}"
+            return f"{'SKEW' if skewed else 'OK'} p={p:.2f}" if p is not None else f"TV={tv:.2f}"
         ptxt = (f"chi2({u['dof']})={u['chi2']:.0f} p={p:.3f}" if p is not None
                 else f"chi2 p n/a ({u.get('note', 'n too small')})")
-        return f"TV={tv:.3f} {ptxt}  [exact: n={u['n']:,} over |S|={u['S']:,}]"
+        tail = ("" if p is None else
+                (f" — the sample is too uneven to come from a uniform sampler "
+                 f"(p < {EXACT_ALPHA})" if skewed else
+                 f" — no skew detectable at p < {EXACT_ALPHA}; NOT a proof of uniformity"))
+        return (f"{word} TV={tv:.3f} {ptxt}  [exact: n={u['n']:,} over |S|={u['S']:,}]{tail}")
     # fast/collision mode (|S| unknown): repeat behaviour only — a gross-skew detector. The
     # follow-up hint depends on WHY |S| is unknown: in fast mode exact was never attempted
     # (suggest it); in exact mode enumeration was attempted and the space defeated it (only

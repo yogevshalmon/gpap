@@ -53,6 +53,33 @@ def test_exact_mode_accepts_uniform_and_rejects_skew():
     assert "p=" in format_uniformity(u2)
 
 
+def test_exact_mode_leads_with_a_verdict_like_the_weaker_mode_does():
+    """The SENSITIVE readout must not be the vaguer one.
+
+    `fast` (a gross-skew check that misses TV=0.17 by design) printed "OK"/"SKEWED"; `exact`
+    printed bare numbers, so `--uniformity exact` on a skewed instance said
+    "TV=0.257 chi2(7)=735 p=0.000" and left the reader to know that p=0.000 is the bad end. Both
+    modes lead with a word now, and the exact one says what it does and does not prove.
+    """
+    from gpap.sampling.metrics import EXACT_ALPHA
+    rng = np.random.default_rng(4)
+    S, n = 64, 6400
+    uni = uniformity_stats(rng.multinomial(n, [1.0 / S] * S).tolist(), n, S=S)
+    w = np.array([3.0] * (S // 2) + [1.0] * (S // 2))
+    skew = uniformity_stats(rng.multinomial(n, w / w.sum()).tolist(), n, S=S)
+    assert skew["p"] < EXACT_ALPHA <= uni["p"]
+
+    assert format_uniformity(skew, verbose=True).startswith("SKEWED")
+    assert format_uniformity(skew).startswith("SKEW")
+    ok = format_uniformity(uni, verbose=True)
+    assert ok.startswith("OK")
+    # an "OK" must not be readable as a proof of uniformity — that is the whole caveat
+    assert "NOT a proof" in ok
+    # n too small for chi2: no verdict may be invented from a TV alone
+    tiny = format_uniformity(uniformity_stats([2, 1, 1], 4, S=64), verbose=True)
+    assert not tiny.startswith("OK") and not tiny.startswith("SKEW")
+
+
 def test_exact_mode_small_n_reports_tv_only():
     u = uniformity_stats([2, 1, 1], 4, S=64)       # n << 5*S
     assert u["mode"] == "exact" and u["p"] is None and u["tv"] > 0

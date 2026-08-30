@@ -137,8 +137,22 @@ the implied solution-space floor — no solver work, catches gross bias only). T
 - `eval/uniformity/barbarik_gpap.py` — a standalone harness running the
   [Barbarik](https://github.com/meelgroup/barbarik) (AAAI'19) conditional-sampling tester with
   GPAP hooked in-process (SPUR as the trusted reference); the only way to *certify* uniformity on
-  large spaces. Barbarik **accepts** GPAP (η=0.9, ε=0.1, δ=0.05; ~70k samples per instance) on
-  both instances tested so far.
+  large spaces. On **66 circuit instances** at the parameters CMSGen's own authors certify at
+  (ε=0.3, η=1.8, δ=0.1 — 1,872 samples each), Barbarik **accepts GPAP as shipped on 64/66 with zero
+  rejections** against CMSGen's 66/66, and **6/6 with zero rejections at Barbarik's own stricter
+  default** (ε=0.1, η=0.9, δ=0.05 — 70,596 samples, rejecting TV ≥ 0.45 rather than 0.90) where
+  CMSGen is also 6/6. The two misses are sample orders GPAP could not fill on instances where it
+  produces nothing at all, not adverse verdicts.
+
+  Run it with both controls — `--sampler spur` (an exactly uniform sampler put *under test*, which
+  must Accept) and `--config soft` (which must Reject) — and screen instances with
+  `barbarik_screen.py` first: CM_test rejects its own trusted reference where the declared sampling
+  set is not an independent support. Circuits are clean subjects for it (Tseitin support = primary
+  inputs ⇒ one extension per projection); no circuit instance failed that screen. Note the
+  guarantee is asymmetric — Reject is unconditional, but Accept holds only under the paper's
+  non-adversality assumption and only against η — so an Accept is "not caught", not a proof of
+  uniformity; the quantitative statement lives in the exact-oracle fuzzing. Details:
+  `docs/findings/UNIFORMITY_FINDINGS.md` §4b.
 
 **Writing solutions.** `--out FILE` writes the sampled solutions as compact **support projections**
 — one row per sample, one bit per support variable (for a `.bench` input, one primary-input
