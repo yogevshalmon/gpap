@@ -26,34 +26,33 @@
 namespace {
 constexpr int64_t kWddmReserveBytes = 800000000ll;   /* WDDM/WSL2 driver overhead */
 
-/* The VRAM-proportional batch cap (mirrored by calibrate.py's K_CAP_REF / K_CAP_VRAM_REF).
- * kKCapRef is the historical hardcoded cap and kKCapVramRef the TOTAL VRAM of the reference
- * card it was validated on, so that card gets back exactly kKCapRef and every
- * smaller card is floored there — no existing measurement moves — while a larger card may use
- * the memory it has.
+/* THE batch cap: one number, the same on every GPU.
  *
- * TOTAL VRAM, never free: a free-memory cap made K jitter run-to-run on an idle box (49,526 vs
- * 49,671 in one session) and a sweep whose batch depends on what else is resident is not a
- * measurement. And it is a CAP, not a K — the analytic bound below still decides what fits. */
-constexpr int32_t kKCapRef = 49152;
-constexpr int64_t kKCapVramRef = 12878086144ll;
-
-/* Floor on the batch cap.
+ * It is a SATURATION limit, not a safety limit — the analytic bound in gpap_compute_k_safe is
+ * what protects memory, and where this cap binds the memory model would allow orders of
+ * magnitude more rows than the run can use. At this batch a card is already ~2 orders of
+ * magnitude oversubscribed against its resident warps: a 4x larger batch measured at +2.8%,
+ * and auto-vs-pinned across three GPUs bought ~1%. It also bounds host-side readout, which
+ * does not scale with VRAM at all.
  *
- * This is a SATURATION limit, not a safety limit. Where it binds hardest the memory model would
- * allow orders of magnitude more rows than the run actually uses, so it is not protecting VRAM:
- * at this batch the card is already ~2 orders of magnitude oversubscribed against its resident
- * warps, and a 4x larger batch measured at +2.8%. Raising it would buy ~nothing and cost the
- * comparability of every recorded sweep. It also bounds host-side readout, which is NOT
- * VRAM-proportional.
+ * DEVICE-INDEPENDENT ON PURPOSE. It used to scale with the card's total VRAM off a reference
+ * card's historical cap (49,152 at 12.0 GiB), which meant `--k-cap auto` resolved differently
+ * per machine and a cross-GPU A/B had to pin an explicit cap to compare anything. That scaling
+ * had also stopped doing ANYTHING: the floor below it exceeded the reference cap 5.3x, so the
+ * proportional term could not win until ~68 GB of VRAM and every card we run on got this
+ * constant anyway. A library's default batch should not depend on which GPU it woke up on.
  *
  * Revisit only with a throughput measurement showing the cap binding on something that is not
  * already occupancy-bound. Numbers: docs/findings/CROSS_GPU_FINDINGS.md. */
-constexpr int32_t kBatchCapFloor = 262144;
+constexpr int32_t kBatchCap = 262144;
 
 /* Clause count at or above which the warp-wide WAVE propagate beats the scalar one. Measured, see
  * gpap_dispatch_wave below for the whole calibration table and why the variable is M, not batch. */
 constexpr int32_t kWaveMinClauses = 2048;
+
+/* Trail headroom past the exact bound — one wavefront. See gpap_trail_cap for why that is the
+ * unit. Keep in step with WAVE_W (cpp/tools/build_kernels.py). */
+constexpr int32_t kTrailSlack = 32;
 }  // namespace
 
 /* NOTE — there is deliberately NO formula-bytes deduction here, and no gpap_formula_mem_bytes().
@@ -64,12 +63,33 @@ constexpr int32_t kWaveMinClauses = 2048;
  * default anyone should have to defend against. Size the batch against live free memory; the
  * formula is already paid for. */
 
-extern "C" int32_t gpap_trail_cap(int32_t num_vars, int32_t decisions_per_round) {
-    /* Mirrors engine.cpp::trail_cap_for — see the proof there for why the assumption width
-     * does not enter: every trail push is deduplicated against the assignment bitmap, so a
-     * variable can contribute at most one entry. */
-    const int32_t floor_b = 64;
-    return num_vars + std::max(decisions_per_round, floor_b) + 8;
+/* THE trail sizing rule — one definition, called by the engine's own ensure_state() as well as
+ * by every sizing consumer, so the allocation and the model cannot disagree.
+ *
+ * BOUND = num_vars, and it is TIGHT. The trail holds literals made TRUE and not yet propagated,
+ * and every push is gated on the assignment BITMAP flipping that literal's bit from 0 to 1: the
+ * scalar paths test-then-set inside one program, the WAVE paths take the `atomic_or` RETURN, so
+ * for a given literal exactly one lane can ever observe the transition. Pushing a literal whose
+ * negation is already set is a CONTRADICTION and conflicts the row instead of pushing, and l and
+ * ~l always share a bitmap word (2v / 2v+1) — so a VARIABLE contributes at most ONE trail entry
+ * per launch, whatever the decision batch B or the assumption width L. Neither is a parameter
+ * here for that reason: both used to be, and each cost something (L made the cap grow and never
+ * shrink, so 10.sk_1_46's 1,121 units inflated every later chunk by +27% per row; B survived as
+ * a floor the engine ignored while this model still honoured it, charging a caller who asked for
+ * B=128 for a trail that was never allocated).
+ * Measured, both kernels: max depth == N exactly on a trajectory that decides every variable,
+ * and well under N on 100%-conflicted rows with deep binary chains.
+ *
+ * SLACK = one WAVEFRONT. The wave propagate and the warp-wide decision scan append a whole
+ * wavefront of pushes in ONE masked store at `tail + prefix_sum`, and unlike the scalar path
+ * (`elif tail < TRAIL_CAP`) a vectorised append has no bound test — so a wavefront is the
+ * granularity in which a broken dedup invariant would overshoot, and one wavefront of headroom
+ * keeps the first such step inside this row instead of in the next row's trail. It is 32 int32
+ * = 128 bytes per row against 4*N + 4*M, i.e. nothing; the alternative (size at exactly N and
+ * add the bound test to the hottest loop in the engine) buys no memory and costs a kernel
+ * rebuild. Must not be smaller than WAVE_W in cpp/tools/build_kernels.py. */
+extern "C" int32_t gpap_trail_cap(int32_t num_vars) {
+    return num_vars + kTrailSlack;
 }
 
 /* `M` here is the STATE clause count — clauses of length >= 3, `gpap_formula_info.num_long` —
@@ -78,7 +98,7 @@ extern "C" int32_t gpap_trail_cap(int32_t num_vars, int32_t decisions_per_round)
  * total num_clauses over-charges ~4-10x of the first term on circuit CNFs (65-82% of their
  * clauses are binary) and was exactly the kind of phantom charge the HISTORY note above bans. */
 extern "C" int64_t gpap_row_bytes(int32_t M, int32_t N, int32_t trail_cap) {
-    if (trail_cap <= 0) trail_cap = gpap_trail_cap(N, 0);
+    if (trail_cap <= 0) trail_cap = gpap_trail_cap(N);
     const int64_t words = (2ll * N + 31) / 32;          /* assignment bitmap, int32 words */
     return 4ll * M                                      /* packed clause word   (K, M)      */
            + 4ll * words                                /* assignment bitmap    (K, ceil2N/32)*/
@@ -104,19 +124,14 @@ extern "C" int64_t gpap_mem_available(int device, double fraction) {
 }
 
 extern "C" int32_t gpap_default_k_cap(int device) {
-    CUdevice dev;
-    size_t total = 0;
-    if (cuInit(0) != CUDA_SUCCESS) return kBatchCapFloor;
-    if (cuDeviceGet(&dev, device) != CUDA_SUCCESS) return kBatchCapFloor;
-    if (cuDeviceTotalMem(&total, dev) != CUDA_SUCCESS || total == 0) return kBatchCapFloor;
-    const int64_t k = (int64_t)((double)kKCapRef * (double)total / (double)kKCapVramRef);
-    return (int32_t)std::max<int64_t>(kBatchCapFloor, std::max<int64_t>(kKCapRef, k));
+    (void)device;                 /* kept in the signature: the cap is device-INDEPENDENT now,
+                                     and a caller should not have to care that it became so */
+    return kBatchCap;
 }
 
-extern "C" int32_t gpap_compute_k_safe(int32_t M, int32_t N, int64_t bytes, int32_t cap,
-                                       int32_t decisions_per_round) {
+extern "C" int32_t gpap_compute_k_safe(int32_t M, int32_t N, int64_t bytes, int32_t cap) {
     if (bytes <= 0) return 1;
-    const int64_t per_row = gpap_row_bytes(M, N, gpap_trail_cap(N, decisions_per_round));
+    const int64_t per_row = gpap_row_bytes(M, N, gpap_trail_cap(N));
     int64_t k = bytes / std::max<int64_t>(per_row, 1);
     if (cap > 0) k = std::min<int64_t>(k, cap);
     return (int32_t)std::max<int64_t>(1, k);

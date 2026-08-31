@@ -53,6 +53,31 @@ def test_sound_basic():
 
 
 @needs_gpu
+def test_wide_decision_rounds_are_accepted_and_sound():
+    """B is NOT capped, and must not be: the trail is sized by the VARIABLE count alone.
+
+    Every trail push is deduplicated against the assignment bitmap (l and ~l share a word), so a
+    variable can contribute at most one entry however many literals one round decides — the cap
+    is N + slack for ANY B. That is not a curiosity: `B >= |support|` decides the whole support
+    in one round, which is exactly the configuration behind the "exactly uniform by rejection
+    sampling" property (barbarik's `bsup` arm, tests/test_uniformity_fuzz.py). A ceiling on B
+    would silently remove it.
+
+    Gated with B past the old 64-wide trail floor AND past the variable count itself."""
+    rng = random.Random(7)
+    N, M = 200, 60                                  # loose: most assignments satisfy it
+    clauses = [[v if rng.random() < 0.5 else -v
+                for v in rng.sample(range(1, N + 1), 3)] for _ in range(M)]
+    for B in (64, 65, N, 4 * N):
+        smp = GPUSampler.from_clauses(N, clauses, DEV, seed=5, k_cap=4096)
+        out = smp.sample(3000, decisions_per_round=B, collect=True, verify_clauses=clauses,
+                         verify_sound=True)
+        assert out["n_models"] > 0, f"B={B} produced nothing"
+        assert out["all_valid"], f"B={B} emitted a row that violates the formula"
+        assert out["sound_check"] == "ok", f"B={B} left an unsound row"
+
+
+@needs_gpu
 def test_config_portfolio_soft_lookahead():
     # The circuit portfolio uses 3-tuple configs (random_var, B, lookahead) including "soft"
     # risk-polarity. Every produced model must satisfy the formula, and the reported dominant/

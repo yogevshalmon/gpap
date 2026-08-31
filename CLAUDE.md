@@ -217,20 +217,20 @@ kernels are the only path — the oracle is `tests/reference_bcp.py`).
   a small K. Do not remove it.
 - `GPUSampler._calibrate_k`: **K = min(analytic, cap)** (kill-switch
   validated: the old 4×0.7·free/(70M+40N) floor modeled the deleted PyTorch path and bound K at
-  ~1/3 of the packed fit; the 4096×M soundness transient is now read in ≤256 MB slices). A
-  runtime memory PROBE is unreliable here — do not resurrect it.
-- **The `cap` is VRAM-proportional** (`engine.calibrate.default_k_cap`; `--k-cap auto`
-  is the default of `gpap sample`/`gpap bench`/`pipeline.sample_clauses`). `max(kBatchCapFloor =
-  262,144, K_CAP_REF · total_VRAM / K_CAP_VRAM_REF)` (`cpp/src/calibrate.cpp`) — since 2026-08-18
-  the FLOOR binds on every card up to ~64 GB, so the resolved cap is 262,144 on the 4080, the L4
-  and the A100 alike; it is a saturation limit (4× batch measured +2.8%), not a safety one. ⚠️
-  Sweeps recorded before that date ran at the old caps (4080 49,152 / L4 90,300) — one more
-  reason they are not comparable to new ones (gated by tests/test_k_cap.py). Keys off **total** VRAM, not free: a
-  free-memory cap drifted between runs in one session (49,526 vs 49,671), and a sweep whose K
-  depends on what else was resident is not a measurement. Resolved value in every row's
-  `engine.k_cap`; **a cross-GPU A/B must pass an explicit `--k-cap N`** since `auto` differs per
-  card. ⚠️ **This is HYGIENE, not a throughput lever**: measured across GPUs, auto vs pinned
-  bought ~1%, and a 4× batch bought 2.8%. The cap only binds
+  ~1/3 of the packed fit). A runtime memory PROBE is unreliable here — do not resurrect it.
+- **The `cap` is ONE constant, the same on every GPU**: `kBatchCap = 262,144`
+  (`cpp/src/calibrate.cpp`; `engine.calibrate.K_CAP`; `--k-cap auto` is the default of
+  `gpap sample`/`gpap bench`/`pipeline.sample_clauses`). It is a saturation limit (4× batch
+  measured +2.8%), not a safety one — `compute_k_safe` is what keeps a chunk inside VRAM.
+  ⚠️ **It used to scale with total VRAM** off a reference card's historical cap
+  (`K_CAP_REF·total/K_CAP_VRAM_REF`, floored at 262,144). Removed 2026-08-31: `auto` meant a
+  different batch per machine — so a cross-GPU A/B had to remember `--k-cap N` — and the
+  proportional term had stopped firing anyway (the floor sat 5.3× above the reference cap, so it
+  could not win below ~68 GB and every card in reach got the floor). Device-INDEPENDENCE is now
+  the gated property (tests/test_k_cap.py). ⚠️ Sweeps recorded before 2026-08-18 ran at the old
+  per-card caps (4080 49,152 / L4 90,300) and are not comparable to new ones. Resolved value in
+  every row's `engine.k_cap`. ⚠️ **This is HYGIENE, not a throughput lever**: measured across
+  GPUs, auto vs pinned bought ~1%, and a 4× batch bought 2.8%. The cap only binds
   for M ≲ 20k (above that the analytic bound is lower — and it ALREADY scales with free VRAM on
   its own), and those small-M instances are already occupancy-saturated. The cross-GPU win is the
   hardware. **Corroborated with the CONFIG PINNED (`--portfolio b1|b8`) + a multi-chunk budget,
@@ -256,8 +256,18 @@ kernels are the only path — the oracle is `tests/reference_bcp.py`).
   engine's EXACT per-chunk allocation list (4·**M_long** packed — the len≥3 STATE clauses only,
   never total M — + 4·ceil(2N/32) bitmap + 4·trail_cap + flags/counters/masks), verified against
   measured VRAM (cuMemGetInfo deltas: 1.00x on b03-c25, 1.04x on b12-c50 — multi-GB alloc
-  rounding). On circuit CNFs the TRAIL term now dominates per-row bytes; its N bound is the
-  soundness proof, not a knob. `K_fused` and its 0.6 budget are GONE: the boost only ever existed to
+  rounding). On circuit CNFs the TRAIL term now dominates per-row bytes. **`gpap_trail_cap(N)` in
+  `cpp/src/calibrate.cpp` is THE definition** — `ensure_state` calls it, so the allocation and
+  the model cannot drift — and it is `N + 32`: the bound is EXACTLY N (every push flips a bitmap
+  bit and l/~l share a word, so a variable contributes one entry; measured tight on both kernels,
+  and well under N on 100%-conflicted rows), plus **one WAVEFRONT** because the wave paths append
+  a whole wavefront at `tail + prefix_sum` with no bound test — that is the granularity a broken
+  invariant would overshoot by, at 128 B/row. Keep the slack in step with `WAVE_W`.
+  **There is no ceiling on B**: the cap holds for any B, and `B >= |support|` (one round over the
+  whole support) is exactly the exactly-uniform configuration. The decision batch used to be a
+  parameter here — a floor the engine ignored while the sizing model honoured it, charging a
+  caller who asked for B>64 for a trail that was never allocated. Gated by tests/test_k_cap.py
+  and tests/test_sampler.py::test_wide_decision_rounds_are_accepted_and_sound. `K_fused` and its 0.6 budget are GONE: the boost only ever existed to
   undo a per-row model that was 1.57x over (it charged a phantom sat array, a byte-per-literal
   assignment and deleted PyTorch scatter temporaries, while omitting the trail). ⚠️ **`trail_cap`
   used to be sized by the width of the last apply and only ever grew**, so the construction units
@@ -276,8 +286,8 @@ kernels are the only path — the oracle is `tests/reference_bcp.py`).
   can observe it.
 - ⚠️ **Any retune of `compute_k_safe` is a K change**: it needs kill-switch re-validation AND a
   dispatch re-check, since the batch feeds `gpap_dispatch_wave`'s small-batch term. That coupling
-  has caused a regression before. The 4096×M soundness transient is real and is covered by reading
-  it in ≤256 MB slices, not by a headroom reservation.
+  has caused a regression before. The soundness re-check needs no headroom at all: it is one
+  device flag per row (`sound_rows`), never a host transient.
 - **Assignment BITMAP**: assignment = bit l of (K, ⌈2N/32⌉) int32 words (l/~l
   share a word) — 8× smaller than byte-per-literal (small-2N rows go L1-resident), and in
   WAVE a forced-literal push is ONE `tl.atomic_or` whose RETURN deduplicates (old bit l) and
@@ -368,6 +378,7 @@ scripts/build_abc.sh                                         # optional: pinned 
 | ELS (equivalent-literal substitution) | **on** | `--no-els` |
 | entailed-clause mining | **on** above `MINE_MIN_CLAUSES`, bounded by `MINE_SECONDS` | `--mine off` |
 | mined clauses | **kept only if they pay** (below) | — |
+| soundness re-check of emitted models | **off** everywhere (`eval/run_full_eval.sh`: on) | `--verify-sound` |
 
 ⚠️ **`gpap sample`/`gpap bench` default to `--portfolio circuit` for EVERY input, including a
 plain CNF, and on CNF that costs certificates**: `circuit` has no `s1`, so the bandit falls back to
@@ -387,6 +398,23 @@ with the flags above. Validation and per-instance numbers: docs/findings/MINING_
   total pre-sampling overhead, which is the useful thing to bound.
 - **`--mine on` FORCES past `MINE_MIN_CLAUSES`**; `auto` respects it. Gated by
   tests/test_mining.py::TestMiningPipelineDefaults.
+- **SOUNDNESS RE-CHECK is OPT-IN everywhere and, when on, covers EVERY emitted row**
+  (`verify_sound=` / `--verify-sound`, on the library, `gpap sample`, `gpap bench` and the C++
+  `SampleOptions::verify` alike; `eval/run_full_eval.sh` sets `VERIFY_SOUND=1` for a campaign).
+  It is a SELF-TEST, not part of producing samples — a row is only counted when it is active and
+  fully assigned, which already means no clause was emptied — so it is not a tax on every run,
+  and `verify_artifact` counts it without requiring it. Reported as **`sound_check`: `"ok"` |
+  `"UNSOUND"` | `"off"`** plus `unsound_rows` — a tri-state, never a bool, because "not run" is
+  neither verdict (the `unique_est_status` lesson). Its wall is `verify_sound_s`, EXCLUDED from
+  every rate exactly as `out_project_s` is, so enabling it cannot move samples/s; cost grows with
+  the formula (measured 0.13-0.84% of a chunk).
+  ⚠️ It used to run unconditionally on a **4096-row prefix** of each chunk, a cap that sized a
+  (rows, M) host transient deleted long ago — so it bounded only the COVERAGE, leaving
+  "0 unsound" standing on as little as **4.8% of what a chunk emitted**. ⚠️ The old key was
+  `gpu_sound` (a bool); recorded rows still carry it and `paper_tables.sound_failed` /
+  `sound_unchecked` read both shapes. ⚠️ A conflicted row is NOT necessarily unsound: on the
+  scalar kernel nearly every conflict surfaces as a contradictory PUSH, having emptied no
+  clause. Gated by tests/test_core.py::test_check_sound_agrees_with_an_independent_recount.
 - **KEEP-IF-IT-HELPS**: mined clauses of width ≥ 3 enlarge `num_long`, and `K ~ budget/4M_long`,
   so a bigger formula buys a SMALLER batch — **but mined width-2 clauses are K-FREE** (they join
   the binary implication list, zero per-row state), so the proxy naturally keeps more of them. `K x M` is ~constant ⇒ chunk wall is ~constant ⇒ **models per chunk

@@ -136,8 +136,14 @@ struct gpap_formula {
                                           unit clauses contribute none) */
     std::vector<int32_t> occ_offsets;  /* (2N+1) CSR: occ[l] = entries where ~l appears */
     std::vector<int32_t> occ_mid;      /* (2N) end of the binary prefix of occ[l] */
-    std::vector<int32_t> occ_clauses;  /* payload: other literal (< occ_mid[l]) or long
-                                          clause index (>= occ_mid[l]); ascending per kind */
+    /* payload, ascending within each kind: below occ_mid[l] the OTHER LITERAL's 2N index
+       ORed with GPAP_OCC_BIN_TAG (the sign bit); at or above it the long clause's index in
+       [0, num_long), never tagged. BOTH readers depend on that tag — the scalar propagate
+       masks it off, the WAVE propagate classifies with `payload < 0` instead of gathering
+       occ_mid a second time — and it is free by construction: num_long <= total_lits <=
+       INT32_MAX (checked in build()) so a long payload's sign bit is 0, and a literal index
+       is capped at 0xFFFFFF by the widest packed envelope. */
+    std::vector<int32_t> occ_clauses;
     std::vector<int32_t> clause_sizes; /* (M) original order, all kept clauses */
     std::vector<int32_t> lit_sum;      /* (M) sum of literal indices, exact mod 2^32 */
     std::vector<int32_t> packed_init;  /* (num_long) size | ((sum & mask) << shift) */

@@ -275,8 +275,10 @@ class Engine {
               "gpap_selection_set");
     }
 
-    /** How many selected rows have a clause with sat_count == 0. Must be 0. */
-    std::int32_t check_sound(std::int32_t slot = 0, std::int32_t max_rows = 4096) {
+    /** How many selected rows have a clause with sat_count == 0. Must be 0.
+     *  `max_rows = 0` (the default) checks EVERY selected row; a positive bound checks a prefix,
+     *  and then a 0 answer only speaks for that prefix. */
+    std::int32_t check_sound(std::int32_t slot = 0, std::int32_t max_rows = 0) {
         std::int32_t n = 0;
         check(gpap_check_sound(h_, slot, max_rows, &n), "gpap_check_sound");
         return n;
@@ -343,16 +345,15 @@ inline std::int64_t mem_available(int device = 0, double fraction = 0.75) {
 
 /** Largest K fitting `bytes` for a formula shape. See cpp/src/calibrate.cpp for the model. */
 inline std::int32_t compute_k_safe(std::int32_t M, std::int32_t N, std::int64_t bytes,
-                                   std::int32_t cap, std::int32_t decisions_per_round = 8) {
-    return gpap_compute_k_safe(M, N, bytes, cap, decisions_per_round);
+                                   std::int32_t cap = 0) {
+    return gpap_compute_k_safe(M, N, bytes, cap);
 }
-
-/** Device bytes one row of engine state costs (the exact allocation list). */
+/** Device bytes one row of engine state costs. */
 inline std::int64_t row_bytes(std::int32_t M, std::int32_t N, std::int32_t trail_cap = 0) {
     return gpap_row_bytes(M, N, trail_cap);
 }
 
-/** Batch cap sized to this device's total VRAM — the `cap` above, chosen for you. */
+/** The default batch cap — the `cap` above, chosen for you. Device-independent. */
 inline std::int32_t default_k_cap(int device = 0) { return gpap_default_k_cap(device); }
 
 inline std::string version() { return gpap_version(); }
@@ -399,15 +400,19 @@ struct SampleOptions {
     bool auto_retry = true;
     /** Trajectories per chunk. 0 = size it to the free VRAM (recommended). */
     std::int32_t k = 0;
-    /** Upper bound on the auto-sized K. **0 (default) = size the cap to this GPU's total VRAM**
-     *  (`gpap_default_k_cap`); a positive value is that cap verbatim — what a cross-GPU A/B needs,
-     *  since the auto value differs per card; negative means no cap at all, leaving the analytic
-     *  memory model as the only bound. A hardcoded default would hand a large-VRAM card the
-     *  reference card's batch. */
+    /** Upper bound on the auto-sized K. **0 (default) = the library's batch cap**
+     *  (`gpap_default_k_cap`, the same number on every GPU); a positive value is that cap
+     *  verbatim; negative means no cap at all, leaving the analytic memory model as the only
+     *  bound. */
     std::int32_t k_cap = 0;
-    /** Verify on the device that emitted rows really satisfy every clause. Costs ~nothing;
-     *  turning it off is only for measuring the kernel in isolation. */
-    bool verify = true;
+    /** Re-check on the device that every emitted row really satisfies every clause.
+     *  OFF by default: it is a self-test, not part of producing samples — a row is only counted
+     *  when it is active and fully assigned, which already means no clause was emptied. Turn it
+     *  on in tests, or in a run whose output will be published. When on it checks EVERY emitted
+     *  row (measured 0.13-0.84% of a chunk, growing with the formula), and `Sampler::sample`
+     *  throws if any row fails. Matches gpap.sampling's `verify_sound`, which is also off by
+     *  default — the two faces must not disagree about what a default run does. */
+    bool verify = false;
 };
 
 /** The result of `Sampler::sample`: a bit matrix of solutions plus what it cost to get them.
@@ -633,7 +638,7 @@ class Sampler {
         /* num_long: only length>=3 clauses carry per-row state — binaries are implication
          * edges and units live in the flush bitmap, so charging total M would waste ~2.3x
          * of the batch on circuit CNFs. */
-        return gpap_compute_k_safe(info.num_long, info.num_vars, free_bytes, cap, o.batch);
+        return gpap_compute_k_safe(info.num_long, info.num_vars, free_bytes, cap);
     }
 
     /** One chunk: reshuffle within each phase, run K trajectories, count the models. */

@@ -77,12 +77,19 @@ gpap_status gpap_formula_from_clauses(int32_t num_vars, const int32_t *flat_lits
 void gpap_formula_info_get(const gpap_formula *f, gpap_formula_info *out);
 void gpap_formula_free(gpap_formula *f);
 
+/* Sign bit set on BINARY occurrence payloads, so a reader can classify an occ entry from the
+ * value it has ALREADY LOADED instead of looking that segment's split point up again (what the
+ * WAVE kernel's hottest loop does). Free and unambiguous BY CONSTRUCTION: a long payload is a
+ * clause index in [0, num_long), and num_long <= total_lits <= INT32_MAX is enforced at build
+ * time, so its sign bit is always 0; a binary payload is a 2N literal index, which the widest
+ * packed envelope caps at 0xFFFFFF. Mask with ~GPAP_OCC_BIN_TAG to recover the literal. */
+#define GPAP_OCC_BIN_TAG ((int32_t)0x80000000)
+
 /* Read-back of the built structures (for tests / inspection). Pass NULL to query sizes.
  * occ entry payloads are SPLIT by kind: within occ[l], entries below gpap_formula_occ_mid()[l]
- * are BINARY (payload = the other literal's 2N index) and entries at or above it are LONG
- * (payload = the length>=3 clause's index in 0..num_long-1). Unit clauses have no occ entry.
- * A BINARY payload additionally carries GPAP_OCC_BIN_TAG (the sign bit), so an entry can be
- * classified from its value alone; mask it off to recover the literal index.
+ * are BINARY (payload = the other literal's 2N index, TAGGED with GPAP_OCC_BIN_TAG) and entries
+ * at or above it are LONG (payload = the length>=3 clause's index in 0..num_long-1, never
+ * tagged). Unit clauses have no occ entry.
  * `mid_out` receives that split point per literal; it is (2N,) = n_offsets - 1 entries, so it
  * needs no size query of its own. Any out pointer may be NULL. */
 gpap_status gpap_formula_occ(const gpap_formula *f, int32_t *offsets_out, int32_t *mid_out,
@@ -332,8 +339,6 @@ gpap_status gpap_pair_mask_create(gpap_engine *e, const int32_t *vars, int32_t n
  * for ad-hoc readout). Returns the row count. */
 #define GPAP_SLOTS 3
 
-/* Sign bit set on BINARY occurrence payloads (see gpap_formula_occ). */
-#define GPAP_OCC_BIN_TAG ((int32_t)0x80000000)
 gpap_status gpap_select_complete(gpap_engine *e, int32_t mask_id, int32_t slot,
                                  int32_t *count_out);
 /* Ascending row indices of a selection. Writes min(selection count, capacity) entries — pass the
@@ -346,7 +351,10 @@ gpap_status gpap_selection_set(gpap_engine *e, int32_t slot, const int32_t *rows
                                int32_t n_rows);
 
 /* Soundness: how many selected rows have ANY clause with sat_count == 0 (must be 0 for a
- * fully-assigned row). max_rows caps the check; pass 0 for "all selected". */
+ * fully-assigned row). `max_rows` = 0 checks EVERY selected row and is what a caller should
+ * pass; a positive bound checks a PREFIX, and then "0 unsound" is a statement about that
+ * prefix rather than about the rows the caller received. Cost is per row and scales with the
+ * formula (measured 0.13-0.84% of a sampling chunk at full coverage). */
 gpap_status gpap_check_sound(gpap_engine *e, int32_t slot, int32_t max_rows,
                              int32_t *n_unsound_out);
 
@@ -397,20 +405,27 @@ void gpap_counters_reset(gpap_engine *e);
 
 /* Bytes available for new allocations (free VRAM minus a driver reserve, times `fraction`). */
 int64_t gpap_mem_available(int device, double fraction);
-/* Trail slots one row can need. Bounded by the VARIABLE count, not by how many literals are
- * assumed or decided: every trail push is deduplicated against the assignment bitmap, so a
- * variable contributes at most one entry before the row conflicts. */
-int32_t gpap_trail_cap(int32_t num_vars, int32_t decisions_per_round);
+/* Trail slots one row needs — THE rule (cpp/src/calibrate.cpp), which the engine's own
+ * allocator calls too, so the model and the allocation cannot disagree.
+ *
+ * A function of the VARIABLE count ALONE, not of how many literals are assumed or decided at
+ * once: every trail push is gated on the assignment bitmap flipping a literal's bit, and l/~l
+ * share a word, so a variable contributes at most one entry before the row conflicts. The bound
+ * is exactly num_vars (measured tight on both kernels) plus one wavefront of headroom for the
+ * vectorised append. There is therefore NO ceiling on the decision batch B anywhere in the
+ * engine: deciding the whole support in one round is a supported — and used — configuration. */
+int32_t gpap_trail_cap(int32_t num_vars);
 /* Device bytes ONE row of engine state costs — the exact allocation list, not an estimate.
  * Exported so a caller that allocates something else per row (a decision matrix, say) can
  * budget for both against one model. Pass trail_cap <= 0 for the default. */
 int64_t gpap_row_bytes(int32_t M, int32_t N, int32_t trail_cap);
 /* Largest K fitting `bytes` for a formula shape. `cap` <= 0 means uncapped. */
-int32_t gpap_compute_k_safe(int32_t M, int32_t N, int64_t bytes, int32_t cap,
-                            int32_t decisions_per_round);
-/* Batch cap sized to THIS device's total VRAM — what a caller who does not want to think about
- * K should pass as `cap` above. Falls back to the reference card's cap if the device cannot be
- * queried, so it always returns a usable number. */
+int32_t gpap_compute_k_safe(int32_t M, int32_t N, int64_t bytes, int32_t cap);
+/* THE default batch cap — what a caller who does not want to think about K passes as `cap`
+ * above. One constant, the SAME on every device (`device` is accepted and ignored), so a run's
+ * batch does not depend on which GPU it woke up on and a cross-machine comparison needs no
+ * pinned override. It is a saturation limit, not a memory bound: gpap_compute_k_safe is what
+ * keeps a chunk inside VRAM. */
 int32_t gpap_default_k_cap(int device);
 /* Resident-warp count of the device (SMs x warps per SM) — the ceiling on rows a SCALAR launch can
  * have in flight at once, and so the small-batch term of the dispatch rule below. */

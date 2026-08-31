@@ -25,7 +25,7 @@ def main(path: str) -> int:
     print(f"{path}: {info['nv']:,} vars, {info['n_clauses']:,} clauses")
     print(f"  {samples.shape[0]:,} solutions x {samples.shape[1]} variables  ({samples.dtype})")
     print(f"  {info['samples_per_s']:,.0f} solutions/s, {info['success_rate']:.0%} of "
-          f"trajectories succeeded, sound={info['gpu_sound']}")
+          f"trajectories succeeded, sound-check={info['sound_check']}")
 
     # `info['cols']` names the columns: column j is the value of DIMACS variable cols[j].
     cols = info["cols"]

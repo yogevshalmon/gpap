@@ -91,7 +91,9 @@ static gpap_status build(int32_t num_vars, const int32_t *flat, const int32_t *l
     /* The occurrence CSR indexes with int32; past 2^31 literal slots its offsets would wrap
      * into silent corruption, so refuse rather than build something subtly wrong. Checked against
      * total_lits, which now OVER-counts the CSR (unit clauses contribute no occ entry) — the
-     * conservative direction, and the bound that also protects the flat clause read-back. */
+     * conservative direction, and the bound that also protects the flat clause read-back.
+     * It is ALSO what keeps GPAP_OCC_BIN_TAG unambiguous: num_long <= num_clauses <= total_lits,
+     * so a long payload never reaches the sign bit the binary entries claim. */
     if (f->total_lits > 0x7FFFFFFFll) {
         set_error("formula too large: %lld literal occurrences exceeds the int32 CSR limit",
                   (long long)f->total_lits);
@@ -158,8 +160,9 @@ static gpap_status build(int32_t num_vars, const int32_t *flat, const int32_t *l
             f->unit_lits.push_back(lit_index(lits[0]));
         } else if (n == 2) {
             /* Binary payloads carry GPAP_OCC_BIN_TAG (the sign bit): a literal index needs at
-             * most 24 bits (the 8|24 envelope's 2N ceiling) and a long clause index is a
-             * non-negative int32, so the sign bit is free and unambiguous. It lets the WAVE
+             * most 24 bits (the 8|24 envelope's 2N ceiling), and a long payload is a clause
+             * index in [0, num_long) with num_long <= total_lits <= INT32_MAX (refused above),
+             * so the sign bit is free and unambiguous for both kinds. It lets the WAVE
              * kernel classify an entry from the value it has already loaded instead of gathering
              * this segment's occ_mid through an extra shuffle gather in its hottest loop.
              * occ_mid still bounds the scalar loop split, the CLEAN restore and the SOFT scan. */

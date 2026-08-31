@@ -21,8 +21,8 @@ Three measurements, all on the projected-sampling sk_ benchmarks (independent su
 K auto-sizes to the GPU's free VRAM: importing gpap.sampling.sampler enables CUDA `expandable_segments`
 (one growable segment instead of many fixed blocks) which removed the allocator fragmentation that
 used to inflate reserved memory ~2.3× and forced a small K; K is then set to 4× a proven-safe floor,
-bounded by a VRAM-PROPORTIONAL cap (default_k_cap) so an 80 GB A100 gets ~7× the K of a 12 GB laptop
-at the same safe memory fraction. Pass --k-cap to override. Results are saved per-GPU to
+bounded by the library's batch cap (default_k_cap), which is the SAME on every GPU so two cards'
+rows are comparable without pinning an override. Pass --k-cap to override. Results are saved per-GPU to
 benchmarks/colab_sampling_results/<gpu>.json (+ plots) so runs on different GPUs accumulate and can be
 ranked with compare_saved().
 
@@ -93,7 +93,7 @@ def _slug(name: str) -> str:
 DEFAULT_SAMPLING_DIR = os.path.join(REPO_ROOT, "benchmarks", "sampling")
 DEFAULT_OUT_DIR = os.path.join(REPO_ROOT, "benchmarks", "colab_sampling_results")
 
-# The VRAM-proportional K cap now lives in gpap.engine.calibrate (imported above) — it used to be
+# The K cap now lives in gpap.engine.calibrate (imported above) — it used to be
 # defined here, which is precisely why `gpap bench` and eval/run_full_eval.sh never got it and
 # pinned every GPU to the 12 GB laptop's K. One definition, every driver.
 
@@ -203,14 +203,17 @@ def run_instance(path: str, device: torch.device, *, cmsgen_bin: str | None, n_t
     faster propagate + bigger K; ~1.5x). `configs` = the adaptive-bandit portfolio (default
     DEFAULT_PORTFOLIO for the sk_ niche; pass CIRCUIT_PORTFOLIO for circuits — adds soft-lookahead)."""
     name = os.path.basename(path)
+    # verify_sound: these rows get published, so the soundness column must be evidence
+    # rather than an absence (its wall is excluded from every rate).
     g = gpap_sample(path, device, simplify=True, els=els, n_time=n_time, n_cov=n_cov, b=b,
+                    verify_sound=True,
                     k_cap=k_cap, configs=configs)
     sup1 = g["sup1"]                       # metadata from gpap_sample's single parse
     twg = two_wise_coverage(g["models"], sup1)
     row = {
         "name": name, "N": g["nv"], "M": g["n_clauses"], "support": len(sup1),
         "gpap_sps": round(g["samples_per_s"], 1), "succ": round(g["success_rate"], 4),
-        "twise_gpap": round(twg, 2), "gpu_sound": g["gpu_sound"],
+        "twise_gpap": round(twg, 2), "sound_check": g.get("sound_check", "off"),
         # UNIQUE-solution readout — computed OFF the timing path (see gpap_sample): distinct support-
         # projections among the n_collected coverage models. Verifies the sampler emits genuinely
         # distinct solutions rather than re-emitting the same model; NOT part of samples/s.
@@ -370,6 +373,20 @@ def _print_circuit_matrix(rows: list[dict]) -> None:
 # Aggregation
 # ---------------------------------------------------------------------------
 
+def _sound_summary(rows: list[dict]) -> str:
+    """One line for the soundness re-check over a set of rows.
+
+    Three outcomes, because the check is OPT-IN: "ok (n/n)" when every row was checked and
+    passed, "UNSOUND" if any failed, and "not run" / a partial count otherwise. A bool would
+    have to call an unchecked sweep either a pass or a failure, and it is neither."""
+    if not rows:
+        return "no rows"
+    if any(r.get("sound_check") == "UNSOUND" for r in rows):
+        return "UNSOUND"
+    n_ok = sum(1 for r in rows if r.get("sound_check") == "ok")
+    return f"ok ({n_ok}/{len(rows)})" if n_ok else "not run"
+
+
 def aggregate(results: list[dict], ksweeps: list[dict]) -> dict:
     niche = [r for r in results if r.get("in_niche")]
     sps = [r["gpap_sps"] for r in niche]
@@ -401,7 +418,7 @@ def aggregate(results: list[dict], ksweeps: list[dict]) -> dict:
         "ratio_geomean":        _gm(ratios),
         "ratio_max":            round(max(ratios), 2) if ratios else None,
         "twise_delta_mean":     round(float(np.mean(dq)), 2) if dq else None,
-        "all_gpu_sound":        all(r["gpu_sound"] for r in results) if results else None,
+        "all_sound_checked":    _sound_summary(results),
         "kscale_slope_loglog":  slope,          # ~1.0 ⇒ samples/s ∝ K
         "kscale_peak_sps":      round(peak_k_sps, 1),
         "auto_K":               auto_K,
@@ -449,7 +466,7 @@ def aggregate_circuits(circuits: list[dict], ksweeps: list[dict]) -> dict:
         "n_win_vs_cms":         sum(1 for x in ratios if x >= 1.0),
         "n_compared":           len(ratios),
         "twise_delta_mean":     round(float(np.mean(dq)), 2) if dq else None,
-        "all_gpu_sound":        all(r["gpu_sound"] for r in rows) if rows else None,
+        "all_sound_checked":    _sound_summary(rows),
         "gpap_distinct_frac":   _frac("n_distinct", "n_collected"),   # ~1.0 = all-distinct output
         "cms_distinct_frac":    _frac("cms_distinct", "cms_collected"),
         "kscale_slope_loglog":  slope,
@@ -502,7 +519,7 @@ def _print_table(results: list[dict], has_cms: bool) -> None:
         hdr += f"{'CMS/s':>9}{'2wC':>6}{'GPAP/CMS':>9}"
     print("\n" + hdr); print("-" * len(hdr))
     for r in results:
-        snd = "OK" if r["gpu_sound"] else "BAD"
+        snd = {"ok": "OK", "UNSOUND": "BAD"}.get(r.get("sound_check"), "-")
         line = (f"{r['name'][:22]:<24}{r['N']:>6}{r['M']:>7}{r['support']:>6}"
                 f"{r['gpap_sps']:>10,.0f}{100*r['succ']:>5.0f}%{r['twise_gpap']:>6.1f}{snd:>4}")
         if has_cms and "cms_sps" in r:
@@ -538,7 +555,7 @@ def _print_headline(payload: dict) -> None:
               if a.get("cms_distinct_frac") is not None else "")
         print(f"  Unique output (GPAP) : {100*a['gpap_distinct_frac']:>11.0f}%  distinct of collected"
               f"{cf}")
-    print(f"  GPU-sound (all)      : {a['all_gpu_sound']}")
+    print(f"  sound re-check       : {a['all_sound_checked']}")
     if a.get("kscale_slope_loglog") is not None:
         print(f"  K-scaling (log-log)  : slope {a['kscale_slope_loglog']:.2f}  "
               f"(1.0 = throughput ∝ K; peak {a['kscale_peak_sps']:,.0f}/s at K-sweep)")
@@ -571,7 +588,7 @@ def run_all(quick: bool = False, device=None, sampling_dir: str = DEFAULT_SAMPLI
     family. It skips the sk_ suite entirely and K-sweeps the best-throughput circuit instead. This is
     the current focus (the circuit regime is where the adaptive soft-lookahead config earns its keep).
 
-    k_cap=None (default) sizes the cap to the GPU's VRAM (default_k_cap) so an A100 gets a much larger
+    k_cap=None (default) uses the library's batch cap (default_k_cap), the same on every GPU
     K than a laptop GPU — the cross-GPU headroom this benchmark exposes.
     """
     device = _resolve_device(device)
@@ -1009,7 +1026,7 @@ def main() -> None:
     ap.add_argument("--n-cov", type=int, default=None, help="samples used for 2-wise coverage")
     ap.add_argument("--b", type=int, default=8, help="decisions per round (8 = throughput sweet spot)")
     ap.add_argument("--k-cap", type=int, default=None,
-                    help="max K (batch). Default: VRAM-proportional (bigger on A100) — see default_k_cap")
+                    help="max K (batch). Default: the library cap, same on every GPU — see default_k_cap")
     ap.add_argument("--no-els", dest="els", action="store_false", default=True,
                     help="disable equivalent-literal substitution (on by default; ~1.5x throughput)")
     ap.add_argument("--k-sweep", default=None, help="comma list of instances for the K-scaling sweep")

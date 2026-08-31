@@ -46,12 +46,6 @@ from gpap.engine.calibrate import (
     resolve_k_cap,
 )
 
-# Decision batch the trail is sized for. The trail cap is num_vars + max(B, 64) + 8, so any B
-# at or below the floor costs the same; sizing with the floor makes K independent of the
-# portfolio's B, which a measurement wants.
-SOUND_B_FLOOR = 64
-
-
 class GPUSampler:
     """Batched GPU sampler: K parallel randomized BCP-completions per chunk."""
 
@@ -65,7 +59,7 @@ class GPUSampler:
     ):
         """`k_cap` bounds the per-chunk batch. THREE values, and the default is the useful one:
 
-            "auto"  (default) size the cap to THIS GPU's VRAM (calibrate.default_k_cap) — what a
+            "auto"  (default) the library's batch cap (calibrate.default_k_cap) — what a
                     user who never wants to think about K should get, and what the pipeline and
                     the CLI have always passed. Exactly the historical 49,152 at or below the
                     reference card, larger on a bigger one.
@@ -115,8 +109,11 @@ class GPUSampler:
         # for them is: the old per-row model charged for a separate sat array, a byte-per-literal
         # assignment and PyTorch-era scatter temporaries that no longer exist, while omitting the
         # trail, which made it 1.57x over. The boost was a correction factor for a wrong model.
-        self.K = compute_k_safe(self.M_state, self.N, gpu_mem_available(device), cap=k_cap,
-                                decisions_per_round=SOUND_B_FLOOR)
+        # No B term: the trail is sized by the VARIABLE count alone (every push is bitmap-
+        # deduped), so K is independent of the portfolio's decision batch by construction rather
+        # than by passing a floor here — which is what a measurement wants and what the sizing
+        # model now guarantees instead of merely permitting.
+        self.K = compute_k_safe(self.M_state, self.N, gpu_mem_available(device), cap=k_cap)
         self._K_init = self.K
         # PIN the propagate kernel to the batch the chunks will actually run, rather than letting
         # the engine re-dispatch per reset(). The two agree on every full chunk, but the sampler
@@ -159,10 +156,6 @@ class GPUSampler:
             yield self
         finally:
             self.K = k
-
-    # Byte cap for one (rows, M) int32 soundness-check slice (see sample()); bounds the
-    # transient regardless of M so the K budget needs no silent headroom for it.
-    _SOUND_SLICE_BYTES = 256e6
 
     @classmethod
     def from_cnf_file(cls, path: str, device: torch.device, *, simplify: bool = False,
@@ -576,6 +569,7 @@ class GPUSampler:
         min_measure_chunks: int = 1,
         max_seconds: "float | None" = None,
         out_cap: int = 0,
+        verify_sound: bool = False,
     ) -> dict:
         """Draw at least `n_target` valid models.
 
@@ -619,6 +613,16 @@ class GPUSampler:
         as `out_project_s` and excluded from every rate — the per-config stamp alone was not
         enough, because a pinned single config has no per-config wall at all.
         Measurements: docs/findings/CLI_DELIVERY_FINDINGS.md.
+
+        `verify_sound` (default OFF) re-checks on the device that EVERY emitted model satisfies
+        EVERY clause, and reports `sound_check` / `unsound_rows`. It is opt-in because it is a
+        self-test, not part of producing samples: a row is only counted when it is active and
+        fully assigned, which already means no clause was emptied. Turn it on in tests, in a
+        campaign whose rows will be published, or when something looks wrong. Its wall is
+        accumulated into `verify_sound_s` and EXCLUDED from every rate, exactly as the output
+        projection is, so enabling it cannot move samples/s. Cost is per completed row and
+        scales with the formula, so a large instance pays more than a small one (measured
+        0.13-0.84% of a chunk).
         """
         if isinstance(random_var, str):
             raise ValueError(f"random_var={random_var!r} is not a mode: pass a bool. Per-formula "
@@ -648,8 +652,6 @@ class GPUSampler:
                                  "path; use False or 'soft'")
             return (c[0], max(1, c[1]), "soft" if la in ("soft", "fsoft") else False)
         plan = [_norm(c) for c in configs] if configs else [_norm((random_var, B, lookahead))]
-        # The 4096-row soundness check reads sat_count in bounded slices (_SOUND_SLICE_BYTES),
-        # so it needs no reservation in the batch budget.
         K = self.batch_size
         # More than one config => the bandit picks per chunk. Exactly one => nothing to pick, and
         # per-config timing is skipped (that is the pinned-algorithm measurement mode).
@@ -665,6 +667,7 @@ class GPUSampler:
         cfg_bits: "dict[tuple, list]" = {c: [] for c in plan}
         cfg_bits_n = {c: 0 for c in plan}
         proj_s = 0.0                       # delivery wall, excluded from every reported rate
+        verify_s = 0.0                     # soundness re-check wall, likewise excluded
         models: list[list[int]] = []
         attempts = 0
         n_models = 0
@@ -672,7 +675,8 @@ class GPUSampler:
         rounds_hist: list[int] = []
         chunk = 0
         all_valid = True
-        gpu_unsound = 0          # rows that were 'fully+active' yet a clause had sat_count==0 (should be 0)
+        gpu_unsound = 0          # rows that were 'fully+active' yet a clause had sat_count==0
+                                 # (must be 0); only populated when verify_sound is on
         distinct: set[tuple[int, ...]] = set()
         keep_rows = collect or verify_clauses is not None
 
@@ -730,16 +734,23 @@ class GPUSampler:
                     self._sync(); cfg_stats[cfg]["wall"] += time.perf_counter() - t_cfg
                     cfg_stats[cfg]["props"] += self.engine.props_total() - p_before
                     cfg_stats[cfg]["decs"] += self.engine.decs_total() - d_before
-                if n_done:
-                    # GPU soundness (cheap): for a FULLY-assigned row, non-falsified ⟺ TRUE, so
-                    # "every clause has sat_count > 0" ⟺ "every clause has a TRUE literal" ⟺ satisfied.
-                    # (Holds ONLY at a complete assignment — sat_count>0 on a PARTIAL assignment just
-                    # means "not yet violated". We gate on the completed selection, so it's valid.)
-                    # Redundant with `active` (cleared the instant a clause hits 0); CPU
-                    # `_satisfies()` is the real check. Evaluated entirely on device (one flag per
-                    # row): the old path shipped a (rows, M) int32 slice to the host, which on
-                    # b05-c50 reached ~3.3 GB and forced the K budget to keep silent headroom.
-                    gpu_unsound += self.engine.check_sound(slot=0, max_rows=4096)
+                if n_done and verify_sound:
+                    # OPT-IN self-test: for a FULLY-assigned row, non-falsified ⟺ TRUE, so
+                    # "every clause has sat_count > 0" ⟺ "every clause has a TRUE literal" ⟺
+                    # satisfied. (Holds ONLY at a complete assignment — sat_count>0 on a PARTIAL
+                    # assignment just means "not yet violated". We gate on the completed
+                    # selection, so it is valid.) Redundant with `active`, which is cleared the
+                    # instant a clause empties; that is why it is off by default rather than a
+                    # tax on every run.
+                    # EVERY completed row, never a prefix: the 4096-row cap it used to carry was
+                    # sizing a (rows, M) int32 slice that this path shipped to the HOST (~3.3 GB
+                    # on b05-c50). The check has been one device flag per row since, so the cap
+                    # bounded nothing but the coverage — it left the claim standing on as little
+                    # as 4.8% of what a chunk emitted. Full coverage measures 0.13-0.84% of a
+                    # chunk, and it is billed to `verify_s`, outside every rate.
+                    _tv = time.perf_counter()
+                    gpu_unsound += self.engine.check_sound(slot=0, max_rows=0)
+                    verify_s += time.perf_counter() - _tv
                 have = cfg_bits_n[cfg]
                 if out_cap and n_done and have < out_cap:
                     # AFTER the cfg_stats wall stamp, and separately accumulated into `proj_s`,
@@ -779,9 +790,11 @@ class GPUSampler:
                     if collect:
                         models.extend(out_rows)
         self._sync()
-        # `elapsed` is SAMPLING wall: the output projection is delivery and is billed separately
-        # (`out_project_s`), so a caller asking for rows cannot move samples/s, dec/s or impl/s.
-        elapsed = time.perf_counter() - t0 - proj_s
+        # `elapsed` is SAMPLING wall: the output projection is delivery and the soundness
+        # re-check is a self-test, both billed separately (`out_project_s` / `verify_sound_s`),
+        # so neither asking for rows nor asking for verification can move samples/s, dec/s or
+        # impl/s.
+        elapsed = time.perf_counter() - t0 - proj_s - verify_s
         bcp_rounds = self.engine.launches - bcp_r0             # kernel launches over this run (delta)
         bcp_ops = self.engine.ops_total() - bcp_o0
         bcp_props = self.engine.props_total() - bcp_p0
@@ -814,7 +827,12 @@ class GPUSampler:
             "mean_decision_rounds": (sum(rounds_hist) / len(rounds_hist)) if rounds_hist else 0,
             "max_decision_rounds": max(rounds_hist) if rounds_hist else 0,
             "n_distinct": len(distinct) if keep_rows else None,
-            "gpu_sound": gpu_unsound == 0, "gpu_unsound": gpu_unsound,
+            # Tri-state, never a bool: "off" is not "unsound", and a consumer that folds the
+            # two publishes an un-run check as a failure (the `unique_est_status` lesson).
+            "sound_check": ("off" if not verify_sound else
+                            ("ok" if gpu_unsound == 0 else "UNSOUND")),
+            "unsound_rows": (gpu_unsound if verify_sound else None),
+            "verify_sound_s": verify_s,
         }
         if collect:
             out["models"] = models
