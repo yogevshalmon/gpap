@@ -37,12 +37,17 @@ def trail_cap(num_vars: int) -> int:
     return _core.trail_cap(num_vars)
 
 
-def row_bytes(M: int, N: int) -> int:
+def row_bytes(num_long: int, N: int) -> int:
     """Device bytes ONE row of engine state costs — the exact allocation list, not an estimate.
+
+    ⚠️ `num_long` is the STATE clause count (`BCPEngine.num_long` / `FormulaInfo.num_long`), NOT
+    num_clauses: only length>=3 clauses carry a packed word, since binaries are occ implication
+    edges and units live in the flush bitmap. Passing the total is the natural misreading and it
+    is SILENT — no error, just 1.78-2.36x fewer rows on circuit and sk_ CNFs.
 
     A caller that allocates something else per row (a (K, L) decision matrix, say) should add its
     own term to this rather than inventing a whole model."""
-    return _core.row_bytes(M, N, _core.trail_cap(N))
+    return _core.row_bytes(num_long, N, _core.trail_cap(N))
 
 
 def gpu_mem_available(device: torch.device, fraction: float = 0.80) -> int:
@@ -55,9 +60,12 @@ def gpu_mem_available(device: torch.device, fraction: float = 0.80) -> int:
     return _core.mem_available(device.index or 0, fraction)
 
 
-def compute_k_safe(M: int, N: int, gpu_mem_bytes: float, cap: "int | None" = None) -> int:
-    """Largest K fitting `gpu_mem_bytes`. `cap` None/0 means uncapped."""
-    return _core.compute_k_safe(M, N, gpu_mem_bytes, cap)
+def compute_k_safe(num_long: int, N: int, gpu_mem_bytes: float,
+                   cap: "int | None" = None) -> int:
+    """Largest K fitting `gpu_mem_bytes`. `cap` None/0 means uncapped.
+
+    `num_long`, not num_clauses — see row_bytes above for what the misreading costs."""
+    return _core.compute_k_safe(num_long, N, gpu_mem_bytes, cap)
 
 
 def default_k_cap(device: torch.device) -> int:

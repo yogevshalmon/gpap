@@ -46,8 +46,15 @@ int main(int argc, char **argv) {
                     static_cast<long long>(r.probed()), static_cast<long long>(r.total()),
                     r.seconds(), static_cast<long long>(r.size()),
                     r.exhausted() ? "  [exhaustive: a negative result would be a PROOF]" : "");
+        // max_tuples is a WORK BUDGET, not a refusal: at the default (ProbeBudget::
+        // refuse_over_max == false) the sweep probes that many candidates and KEEPS what it
+        // found — every conflict is a genuine entailed clause whatever went unprobed. Only
+        // `exhausted` is lost, and only that licenses "no clause of this width exists".
         if (!r.exhausted() && r.stop() == GPAP_PROBE_CEILING)
-            std::printf("  (refused: over max_tuples — raise the ceiling or narrow the pool)\n");
+            std::printf("  (stopped at max_tuples: the clauses above are entailed, but the "
+                        "sweep is not a proof — raise the ceiling or narrow the pool)\n");
+        if (!r.exhausted() && r.stop() == GPAP_PROBE_DEADLINE)
+            std::printf("  (stopped at the %.0fs deadline — same caveat)\n", budget.seconds);
 
         for (std::int64_t i = 0; i < r.size() && i < 10; ++i) {
             std::printf("  entailed: (");

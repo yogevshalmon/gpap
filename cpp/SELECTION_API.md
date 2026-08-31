@@ -227,7 +227,7 @@ count rather than a mask, selections live in numbered slots rather than being pa
 | `select_complete(mask_id, slot = 0)` | `gpap_select_complete` |
 | `selection_rows(slot, count)` | `gpap_selection_rows` |
 | `selection_set(slot, rows)` | `gpap_selection_set` |
-| `check_sound(slot = 0, max_rows = 4096)` | `gpap_check_sound` |
+| `check_sound(slot = 0, max_rows = 0)` | `gpap_check_sound` — `0` = EVERY selected row; a positive bound checks a PREFIX, and then "0 unsound" only speaks for that prefix |
 | `var_bits(cols, count, slot = 0)` | `gpap_var_bits` |
 | `assignment_rows(count, slot = 0)` | `gpap_assignment_rows` |
 | `flags()` / `num_propagated()` | `gpap_flags` / `gpap_num_propagated` |

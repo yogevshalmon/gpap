@@ -24,7 +24,7 @@ import numpy as np
 
 GPAP_OK = 0
 _STATUS = {0: "OK", 1: "bad argument", 2: "CUDA error", 3: "formula outside packed envelopes",
-           4: "I/O error", 5: "missing kernel binary", 6: "device allocation failed"}
+           4: "I/O error", 5: "missing kernel binary", 6: "allocation failed"}
 
 
 class GpapError(RuntimeError):
@@ -243,15 +243,17 @@ def trail_cap(num_vars: int) -> int:
     return int(load().gpap_trail_cap(int(num_vars)))
 
 
-def row_bytes(M: int, N: int, trail_cap_: int = 0) -> int:
+def row_bytes(num_long: int, N: int, trail_cap_: int = 0) -> int:
     """Device bytes ONE row of engine state costs — the exact allocation list."""
-    return int(load().gpap_row_bytes(int(M), int(N), int(trail_cap_)))
+    return int(load().gpap_row_bytes(int(num_long), int(N), int(trail_cap_)))
 
 
-def compute_k_safe(M: int, N: int, gpu_mem_bytes: float, cap: "int | None" = None) -> int:
+def compute_k_safe(num_long: int, N: int, gpu_mem_bytes: float,
+                   cap: "int | None" = None) -> int:
     """Largest K fitting `gpu_mem_bytes`. THE sizing call — the model lives in
     cpp/src/calibrate.cpp and this is a binding, not a second implementation."""
-    return int(load().gpap_compute_k_safe(int(M), int(N), int(gpu_mem_bytes), int(cap or 0)))
+    return int(load().gpap_compute_k_safe(int(num_long), int(N), int(gpu_mem_bytes),
+                                          int(cap or 0)))
 
 
 def mem_available(device: int = 0, fraction: float = 0.80) -> int:

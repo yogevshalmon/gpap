@@ -84,7 +84,11 @@ struct Options {
     std::int32_t vscan = 0;
 
     gpap_engine_options raw() const {
-        gpap_engine_options o;
+        /* VALUE-INITIALIZED, so a field added to gpap_engine_options later reaches the core as
+         * its documented zero default rather than as stack garbage from this face. Same rule as
+         * "`{0}` must equal NULL on every options struct" — the C caller gets it from the
+         * struct's own zero, and this is how the C++ caller gets it. */
+        gpap_engine_options o{};
         o.device = device;
         /* Auto goes THROUGH to the core, which re-resolves it on every reset(K). */
         o.mode = static_cast<gpap_mode>(mode);
@@ -222,6 +226,7 @@ class Engine {
 
     /** Entry point 1: K x L internal literal indices (-1 = padding), BCP to fixpoint. */
     void apply(const std::vector<std::int64_t> &decisions, std::int32_t L) {
+        require_matrix(decisions, L, "apply");
         check(gpap_engine_apply(h_, decisions.data(), L), "gpap_engine_apply");
     }
 
@@ -231,6 +236,7 @@ class Engine {
      *  gpap.h for exactly which readouts see the baseline, which see the fixpoint, and why
      *  recache_flush() refuses afterwards. */
     void apply_clean(const std::vector<std::int64_t> &decisions, std::int32_t L) {
+        require_matrix(decisions, L, "apply_clean");
         check(gpap_engine_apply_clean(h_, decisions.data(), L), "gpap_engine_apply_clean");
     }
 
@@ -343,6 +349,25 @@ class Engine {
     int device() const noexcept { return device_; }
 
   private:
+    /** MEMORY SAFETY, not politeness: the ABI stages K*L int64s from `decisions.data()` and has
+     *  no size to check against, so a short vector is read past its end and the garbage becomes
+     *  literal indices — and an index past 2N makes the kernel write into a LATER ROW's bitmap,
+     *  which nothing downstream can detect (see gpap_engine_apply in gpap.h). The size is free
+     *  here, so this face pays for it; the Python face already did. K is read from the CORE, so
+     *  it is right even if the caller never called reset(). */
+    void require_matrix(const std::vector<std::int64_t> &decisions, std::int32_t L,
+                        const char *what) const {
+        const std::size_t want = static_cast<std::size_t>(k()) * static_cast<std::size_t>(L);
+        /* `<`, not `!=`: the ABI reads exactly K*L entries, so a LARGER buffer is safe, and
+         * rejecting it breaks reusing one scratch vector sized for K_max across chunks. `L < 0`
+         * is not redundant — `k() * size_t(L)` can WRAP small (k()=2, L=-2^63 gives want 0). */
+        if (L < 0 || decisions.size() < want)
+            throw Error(GPAP_ERR_ARG, std::string("Engine::") + what + ": decisions holds " +
+                                          std::to_string(decisions.size()) + " literals but K=" +
+                                          std::to_string(k()) + " x L=" + std::to_string(L) +
+                                          " needs " + std::to_string(want));
+    }
+
     void reset_handle() {
         if (h_) gpap_engine_free(h_);
         h_ = nullptr;
@@ -351,19 +376,29 @@ class Engine {
     int device_ = 0;
 };
 
-/** Bytes available for new allocations on `device` (free VRAM minus a driver reserve). */
-inline std::int64_t mem_available(int device = 0, double fraction = 0.75) {
+/** Bytes available for new allocations on `device` (free VRAM minus a driver reserve).
+ *  `fraction` is the ONLY headroom left in the sizing path now that gpap_row_bytes is the exact
+ *  allocation list, and 0.80 is what EVERY other face uses — Sampler::kMemFraction,
+ *  gpap_check_chunk_size, the probe batch, and Python's gpu_mem_available. This default used to
+ *  be 0.75, so a tier-2 C++ caller writing the natural
+ *  `compute_k_safe(info.num_long, info.num_vars, mem_available())` silently got a 6% smaller
+ *  batch than every packaged path. One model means one number. */
+inline std::int64_t mem_available(int device = 0, double fraction = 0.80) {
     return gpap_mem_available(device, fraction);
 }
 
-/** Largest K fitting `bytes` for a formula shape. See cpp/src/calibrate.cpp for the model. */
-inline std::int32_t compute_k_safe(std::int32_t M, std::int32_t N, std::int64_t bytes,
+/** Largest K fitting `bytes` for a formula shape. See cpp/src/calibrate.cpp for the model.
+ *  ⚠️ `num_long` is `gpap_formula_info::num_long`, NOT num_clauses — only length>=3 clauses
+ *  carry per-row state. The total clause count is the natural misreading and it is SILENT: a
+ *  1.78-2.36x smaller batch on circuit and sk_ CNFs, no error. */
+inline std::int32_t compute_k_safe(std::int32_t num_long, std::int32_t N, std::int64_t bytes,
                                    std::int32_t cap = 0) {
-    return gpap_compute_k_safe(M, N, bytes, cap);
+    return gpap_compute_k_safe(num_long, N, bytes, cap);
 }
-/** Device bytes one row of engine state costs. */
-inline std::int64_t row_bytes(std::int32_t M, std::int32_t N, std::int32_t trail_cap = 0) {
-    return gpap_row_bytes(M, N, trail_cap);
+/** Device bytes one row of engine state costs. `num_long` as in compute_k_safe above. */
+inline std::int64_t row_bytes(std::int32_t num_long, std::int32_t N,
+                              std::int32_t trail_cap = 0) {
+    return gpap_row_bytes(num_long, N, trail_cap);
 }
 
 /** The default batch cap — the `cap` above, chosen for you. Device-independent. */
@@ -975,6 +1010,11 @@ class Prober {
      *  Saturates at INT64_MAX instead of wrapping. */
     std::int64_t count(const std::vector<std::int32_t> &pool, std::int32_t k,
                        const ProbeBudget &budget = ProbeBudget()) {
+        /* LOAD-BEARING, for the same reason probe() throws on an empty pool: `std::vector::data()`
+         * is nullptr when empty, and nullptr is the ABI's sentinel for EVERY FREE LITERAL — so
+         * without this an empty pool would be counted as the largest possible sweep instead of
+         * the smallest. Do not "simplify" it into the call below. The pair is deliberately
+         * asymmetric: counting nothing is 0, probing nothing is a caller mistake worth an error. */
         if (pool.empty()) return 0;
         const gpap_probe_options o = to_options(budget);
         return gpap_probe_count(engine_.handle(), pool.data(),

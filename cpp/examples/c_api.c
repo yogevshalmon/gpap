@@ -132,8 +132,13 @@ static int demo_sampling(const char *path, int32_t K, int32_t B, int64_t seed) {
     CHECK("check_sound", gpap_check_sound(e, /*slot=*/0, /*max_rows=*/0, &unsound));
 
     printf("entry point 2 — trajectory sampling (K=%d, B=%d, %d decision rounds):\n", K, B, rounds);
-    printf("  %d models (%.1f%% of trajectories), unsound rows: %d\n", models,
-           100.0 * (double)models / (double)K, unsound);
+    /* "0 unsound" over 0 rows is not a verdict, it is an unrun check — say which one this is.
+     * The library reports the same distinction as a TRI-STATE (sound_check ok/UNSOUND/off with
+     * sound_rows_checked beside it) rather than a bool, for exactly this reason. */
+    printf("  %d models (%.1f%% of trajectories), soundness: %s\n", models,
+           100.0 * (double)models / (double)K,
+           models == 0 ? "not checked (no models to check)"
+                       : (unsound == 0 ? "ok — every model satisfies the formula" : "UNSOUND"));
 
     if (models > 0) {
         /* Gather the variables of the selected rows straight out of the assignment bitmap. */
@@ -149,7 +154,8 @@ static int demo_sampling(const char *path, int32_t K, int32_t B, int64_t seed) {
             printf("%s\n", info.num_vars > width ? "..." : "");
         }
     }
-    rc = (unsound == 0) ? 0 : 1;
+    /* A run that produced nothing has PROVED nothing, so it is not a pass. */
+    rc = (models > 0 && unsound == 0) ? 0 : 1;
 fail:
     free(bits);
     free(cols);

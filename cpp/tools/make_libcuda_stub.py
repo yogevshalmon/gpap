@@ -28,9 +28,20 @@ SYMBOL = re.compile(r"\bcu[A-Z][A-Za-z0-9_]*")
 
 
 def driver_symbols() -> list[str]:
-    """Every `cu*` driver entry point referenced by the core sources."""
+    """Every `cu*` driver entry point referenced by the core sources.
+
+    The PUBLIC headers are scanned too, not just src/. `include/gpap/gpap.hpp` is header-only and
+    is compiled into every C++ consumer — including the examples this stub exists to let CI link
+    — so a driver call added there would break the driverless build while the scan said nothing,
+    which is exactly the failure deriving the list is meant to prevent.
+
+    A `cu*` name appearing only in a COMMENT is counted. That is the same conservative direction
+    the `_v2`/`_v3` aliasing below takes: an unused symbol in a link stub costs nothing, a
+    missing one breaks the build."""
     found: set[str] = set()
-    for path in sorted((CPP / "src").glob("*.cpp")) + sorted((CPP / "src").glob("*.hpp")):
+    sources = (sorted((CPP / "src").glob("*.cpp")) + sorted((CPP / "src").glob("*.hpp"))
+               + sorted((CPP / "include" / "gpap").glob("*.h*")))
+    for path in sources:
         found.update(SYMBOL.findall(path.read_text()))
     return sorted(found)
 

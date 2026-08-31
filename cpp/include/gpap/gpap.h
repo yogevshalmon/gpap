@@ -36,7 +36,7 @@ typedef enum {
     GPAP_ERR_ENVELOPE = 3,  /* formula outside both packed splits */
     GPAP_ERR_IO = 4,        /* file could not be read / parsed */
     GPAP_ERR_KERNEL = 5,    /* no cubin for the requested specialization */
-    GPAP_ERR_MEMORY = 6     /* device allocation failed */
+    GPAP_ERR_MEMORY = 6     /* an allocation failed — device OR host; the message says which */
 } gpap_status;
 
 typedef enum {
@@ -104,8 +104,11 @@ gpap_status gpap_formula_clause_arrays(const gpap_formula *f, int32_t *sizes_out
 
 /* The clauses back out as FLAT DIMACS literals (clause c = the next clause_sizes[c] entries;
  * sizes from gpap_formula_clause_arrays), in the ORIGINAL input clause order. Within-clause
- * order is ascending by literal index, not input order (long clauses are rebuilt by inverting
- * the occ CSR; binary pairs and units come from their side lists). `n_lits` (may be NULL) receives total_lits;
+ * order is NOT input order: it is ascending by VARIABLE (long clauses are rebuilt by inverting
+ * the occ CSR, which is keyed by the NEGATED literal, so the two polarities of one variable come
+ * back negative-first; binary pairs and units come from their side lists, sorted by literal
+ * index). The two orders therefore differ only inside a TAUTOLOGICAL clause, and the set of
+ * literals is exact in every case. `n_lits` (may be NULL) receives total_lits;
  * lits_out NULL = query only. This is what lets a host-side consumer (simplification, mining,
  * re-emission) get Python/C++ clause lists from THE parser instead of shipping a second one. */
 gpap_status gpap_formula_clauses(const gpap_formula *f, int32_t *lits_out, int64_t *n_lits);
@@ -162,7 +165,27 @@ int32_t gpap_engine_num_long(const gpap_engine *e);      /* packed-word clauses:
 gpap_status gpap_engine_reset(gpap_engine *e, int32_t K);
 
 /* Entry point 1 — apply a (K, L) matrix of INTERNAL literal indices (-1 = padding) and BCP to
- * fixpoint in one launch. Duplicates are skipped; l/~l pairs conflict the row. */
+ * fixpoint in one launch. Duplicates are skipped; l/~l pairs conflict the row.
+ *
+ * PRECONDITION, AND IT IS THE CALLER'S: every entry is -1 or an internal index in [0, 2N).
+ * This is the RAW primitive and it does NOT check, because the check is not free where it would
+ * sit: an O(K*L) host pass costs 9.7-13.6% of a probe chunk at small M (measured, b03-c25) and
+ * is pure duplication there — gpap_check_sets and gpap_probe_* both validate their whole input
+ * BEFORE any launch, which is also what gives them their all-or-nothing property. Prefer those
+ * faces; reach for this one only when you are forming internal indices yourself.
+ * What a bad index does, if you do: the kernel turns it into `ab_row + (lit >> 5)`, so an index
+ * past the row's bitmap writes into a LATER ROW's assignment. Row A's bad literal silently
+ * changes row B's answer, the call still returns GPAP_OK, and no readout downstream can tell.
+ * (Verified, tests/test_core.py.) Convert with the same rule the library uses — +v -> 2(v-1),
+ * -v -> 2(v-1)+1 — after checking |v| <= num_vars.
+ *
+ * The `_dev` variants take a DEVICE pointer, which must be 16-BYTE ALIGNED: the AOT cubins are
+ * compiled with a tt.divisibility(16) attribute on it, so the promise is baked into the binary,
+ * not merely assumed. cuMemAlloc and every framework allocator (PyTorch, the CUDA runtime)
+ * satisfy it; a pointer you formed by INDEXING INTO a larger buffer may not. Today's kernels
+ * happen not to vectorize these loads — the offsets are runtime values — so a misaligned pointer
+ * currently produces identical results (measured), but that is a compiler outcome and not a
+ * guarantee this ABI makes. Align, or pass the host variant and let the library stage it. */
 gpap_status gpap_engine_apply(gpap_engine *e, const int64_t *decisions_host, int32_t L);
 gpap_status gpap_engine_apply_dev(gpap_engine *e, uintptr_t decisions_dev, int32_t L);
 
@@ -187,7 +210,15 @@ gpap_status gpap_engine_apply_clean(gpap_engine *e, const int64_t *decisions_hos
 /* Entry point 2 — the whole randomized decide+propagate trajectory per row, one launch.
  * `order` is P variable indices (0-based), support variables first; a decision group never
  * straddles the n_support boundary. Polarity is a stateless hash of (seed, row, var), so a run
- * is reproducible from `seed` alone. Returns the max decision rounds any row used. */
+ * is reproducible from `seed` alone. Returns the max decision rounds any row used.
+ *
+ * `n_support` must lie in [0, P] and is CHECKED on both variants — it is the end of phase 1 and
+ * the kernel walks `order` up to it, so a larger value read past the caller's buffer and still
+ * returned GPAP_OK. The order ENTRIES must be variable indices in [0, num_vars); the host
+ * variant checks them (it is walking the array to stage it anyway), the `_dev` variant cannot
+ * without a device pass and so does not — same cross-row corruption as entry point 1 above, via
+ * `ab_row + (v >> 4)`. Build the order from a permutation of range(num_vars), as every in-tree
+ * caller does. */
 gpap_status gpap_engine_trajectory(gpap_engine *e, const int32_t *order_host, int32_t P,
                                    int32_t n_support, int32_t B, int64_t seed, int soft,
                                    int32_t *max_rounds_out);
@@ -364,8 +395,13 @@ gpap_status gpap_pair_mask_create(gpap_engine *e, const int32_t *vars, int32_t n
 
 gpap_status gpap_select_complete(gpap_engine *e, int32_t mask_id, int32_t slot,
                                  int32_t *count_out);
-/* Ascending row indices of a selection. Writes min(selection count, capacity) entries — pass the
- * real capacity of `rows_out`, which gpap_select_complete told you. */
+/* Ascending row indices of a selection. Writes min(selection count, capacity) entries and LEAVES
+ * THE REST OF `rows_out` UNTOUCHED — pass the real capacity, which gpap_select_complete told you,
+ * and read only that many back. There is no out-count here (unlike gpap_free_literals), so a
+ * capacity larger than the live selection cannot be distinguished from a full write: the tail is
+ * whatever the caller's buffer already held. A slot that has had NO selection since the last
+ * gpap_engine_reset writes NOTHING — it does not compact the mask, whose device bytes are
+ * uninitialized until gpap_select_complete fills them. */
 gpap_status gpap_selection_rows(gpap_engine *e, int32_t slot, int32_t *rows_out,
                                 int32_t capacity);
 /* Put an EXPLICIT ascending row list in a slot, so the readout calls below can serve arbitrary
@@ -448,10 +484,18 @@ int64_t gpap_mem_available(int device, double fraction);
 int32_t gpap_trail_cap(int32_t num_vars);
 /* Device bytes ONE row of engine state costs — the exact allocation list, not an estimate.
  * Exported so a caller that allocates something else per row (a decision matrix, say) can
- * budget for both against one model. Pass trail_cap <= 0 for the default. */
-int64_t gpap_row_bytes(int32_t M, int32_t N, int32_t trail_cap);
-/* Largest K fitting `bytes` for a formula shape. `cap` <= 0 means uncapped. */
-int32_t gpap_compute_k_safe(int32_t M, int32_t N, int64_t bytes, int32_t cap);
+ * budget for both against one model. Pass trail_cap <= 0 for the default.
+ *
+ * ⚠️ `num_long` IS `gpap_formula_info.num_long`, NOT num_clauses. Only clauses of length >= 3
+ * carry a packed word: binary clauses are implication edges in the shared occurrence list and
+ * unit clauses live in the flush bitmap, so neither costs a single per-row byte. Passing the
+ * total clause count is the natural misreading and it is SILENT — no error, just a smaller
+ * batch: measured 1.78-2.36x fewer rows on circuit CNFs and the sk_ instances (65-82% of their
+ * clauses are binary), 1.00x only where the batch cap binds anyway. */
+int64_t gpap_row_bytes(int32_t num_long, int32_t N, int32_t trail_cap);
+/* Largest K fitting `bytes` for a formula shape. `cap` <= 0 means uncapped.
+ * `num_long` as above — gpap_formula_info.num_long, not num_clauses. */
+int32_t gpap_compute_k_safe(int32_t num_long, int32_t N, int64_t bytes, int32_t cap);
 /* THE default batch cap — what a caller who does not want to think about K passes as `cap`
  * above. One constant, the SAME on every device (`device` is accepted and ignored), so a run's
  * batch does not depend on which GPU it woke up on and a cross-machine comparison needs no

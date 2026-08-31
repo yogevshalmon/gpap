@@ -12,6 +12,7 @@ clause, and these tests check that directly rather than trusting either implemen
 (This file once also A/B'd the core against a retired PyTorch/Triton-JIT engine —
 the port gate. That engine is gone; the checks that survived it are the ones below.)
 """
+import ctypes
 import random
 
 import numpy as np
@@ -19,6 +20,7 @@ import pytest
 import torch
 
 from gpap.engine import _core
+from gpap.engine._core import check
 
 from tests.reference_bcp import assigned_set, ref_bcp
 from tests.reference_formula import ReferenceFormula
@@ -372,3 +374,272 @@ def test_wide_split_is_selected_and_sound():
     core.trajectory_dev(order.data_ptr(), nv, nv, 8, 4242)
     core.select_complete(core.pair_mask(None), 0)
     assert core.check_sound(0) == 0
+
+
+# ---------------------------------------------------------------- ABI preconditions
+
+# NOTE — there is deliberately NO test here that feeds gpap_engine_apply an out-of-range literal
+# and watches it corrupt a later row. Demonstrating that hazard REQUIRES an index past 2N (any
+# smaller one stays inside its own row's bitmap words), and the propagate loop dereferences the
+# popped literal as `occ_off[lit]`, `occ_mid[lit]`, `occ_off[lit+1]` — arrays of exactly 2N and
+# 2N+1 entries. So the demonstration is an unbounded out-of-bounds DEVICE read whose garbage
+# bounds then drive a store; it passes here only because the driver hands back zeroed padding,
+# and a CUDA_ERROR_ILLEGAL_ADDRESS is sticky for the context, i.e. it would cascade-fail every
+# later GPU test in the process rather than failing alone.
+#
+# The guarantee that actually matters is that the PACKAGED faces validate before any launch, and
+# that is gated twice, safely: tests/test_assumption_checker.py (test_out_of_range_literal_raises
+# over five bad literals, plus test_bad_literal_cannot_corrupt_another_row) and
+# tests/test_mining.py::test_rejects_out_of_range_literals. The raw ABI's precondition is stated
+# in gpap.h.
+
+
+def test_n_support_past_the_order_length_is_refused():
+    """n_support is the end of decision phase 1 and the kernel walks `order` up to it, so
+    n_support > P was an out-of-bounds read of the caller's buffer that still returned OK."""
+    nv = 8
+    core = _core.Engine(_core.Formula.from_clauses(nv, [[1, 2, 3], [-1, 4], [5, 6, 7], [-5, 8]]))
+    core.reset(4)
+    order = np.arange(nv, dtype=np.int32)
+    with pytest.raises(_core.GpapError):
+        core.trajectory(order, n_support=nv * 10, B=4, seed=7)
+    with pytest.raises(_core.GpapError):
+        core.trajectory(order, n_support=-1, B=4, seed=7)
+    core.trajectory(order, n_support=nv, B=4, seed=7)          # the boundary value is legal
+
+
+def test_an_order_entry_past_num_vars_is_refused_on_the_host_face():
+    """Same cross-row write as the apply hazard, via `ab_row + (v >> 4)` — and here the check is
+    free, because gpap_engine_trajectory is already walking the array to stage it."""
+    nv = 8
+    core = _core.Engine(_core.Formula.from_clauses(nv, [[1, 2, 3], [-1, 4], [5, 6, 7], [-5, 8]]))
+    core.reset(4)
+    bad = np.arange(nv, dtype=np.int32)
+    bad[0] = 10_000
+    with pytest.raises(_core.GpapError):
+        core.trajectory(bad, n_support=nv, B=4, seed=7)
+
+
+@pytest.mark.slow          # ~1.2 GB of VRAM: the slice loop only engages past 256 MB
+def test_readout_slicing_matches_an_unsliced_read():
+    """`var_bits` / `assignment_rows` SLICE the readout so the (rows, cols) host transient stays
+    under `kReadoutSliceBytes` (256 MB, cpp/src/engine.cpp). The loop only engages when
+    rows > 256MB/cols — a wide formula with many rows — which no other test reaches, so the
+    row-pointer offsetting and the per-slice copy-back were unexercised.
+
+    A wide, nearly-free formula gets there cheaply: 2N past the 16|16 envelope forces the 8|24
+    split as a bonus."""
+    nv = 100_000                                  # 2N = 200,000 -> wide split, small slice step
+    clauses = [[v, -(v + 1)] for v in range(1, 400)]
+    core = _core.Engine(_core.Formula.from_clauses(nv, clauses))
+    step = max(32, (256 << 20) // nv) // 32 * 32
+    # ONE slice plus a short tail is all the boundary arithmetic needs, and the buffers here are
+    # (K x nv) and (K x 2N) BYTES on the host: at 3 slices this test allocated 2.4 GB, which is
+    # not a cost a unit test should impose (and it is what stalled the suite under ASan).
+    K = step + 96
+    core.reset(K)
+    # A TRAJECTORY first, so the rows actually DIFFER. Straight after reset every row holds the
+    # same broadcast baseline, and then a slicing loop that dropped its row-pointer offset would
+    # compare equal to itself and this test would prove nothing.
+    core.trajectory(np.arange(nv, dtype=np.int32), nv, 64, 20260831)
+    rows = np.arange(K, dtype=np.int32)
+    core.selection_set(core.SCRATCH_SLOT, rows)
+    cols = np.arange(nv, dtype=np.int32)
+
+    sliced = core.var_bits(core.SCRATCH_SLOT, cols, K)
+    assert sliced.shape == (K, nv)
+    assert K > step, f"precondition: {K} rows must exceed the {step}-row slice"
+    # NON-VACUITY: rows on either side of a slice boundary must be distinguishable, or a loop
+    # that ignored the offset would pass by comparing identical rows.
+    assert not np.array_equal(sliced[0], sliced[step]), "rows must differ across the boundary"
+
+    piece = max(1, step // 4)                     # each request below the slice threshold
+    for r0 in range(0, K, piece):
+        core.selection_set(1, rows[r0:r0 + piece])
+        ref = core.var_bits(1, cols, min(piece, K - r0))
+        assert np.array_equal(ref, sliced[r0:r0 + len(ref)]), f"slice boundary at row {r0}"
+
+    # assignment_rows runs the same loop at 2N columns, so its step is half — K already crosses
+    # it twice. Read a bounded prefix: the point is the boundary, not the volume.
+    step2 = max(32, (256 << 20) // (2 * nv)) // 32 * 32
+    rows2 = min(K, step2 + 96)
+    assert rows2 > step2, "precondition: assignment_rows must cross a slice too"
+    asg = core.assignment_rows(core.SCRATCH_SLOT, rows2)
+    assert asg.shape == (rows2, 2 * nv)
+    assert np.array_equal(sliced[:rows2], asg[:, 0::2]), \
+        "var_bits must equal the even literal columns, across both slice boundaries"
+
+
+@pytest.mark.parametrize("mode", ["scalar", "wave"])
+@pytest.mark.parametrize("shift", [16, 8])
+def test_a_row_never_writes_outside_itself(mode, shift):
+    """Device-side spill detector. `compute-sanitizer` ships with the CUDA toolkit, which this
+    project deliberately does not require, so there is no device memcheck to lean on — and every
+    kernel does raw per-row pointer arithmetic (`st_row + c`, `ab_row + (lit >> 5)`,
+    `trail_row + tail`).
+
+    A row whose decisions are ALL padding does no work: the seed loop assigns nothing, the trail
+    stays empty, and neither its packed words nor its bitmap are touched. Interleaving such
+    CANARY rows among rows doing deep propagation turns any cross-row write into a visible
+    change. The detector is known to fire: aiming an out-of-range literal index at a canary's
+    bitmap words trips exactly that canary (see
+    test_an_out_of_range_apply_literal_corrupts_a_DIFFERENT_row, which is the same mechanism)."""
+    from tests.reference_bcp import lit_idx
+
+    nv = 300
+    rng = random.Random(31337)
+    clauses = ([[-v, v + 1] for v in range(1, nv)]                       # deep implication chains
+               + [[-v, -(v + 1), -(v + 2), nv] for v in range(1, nv - 2)])
+    core = _core.Engine(_core.Formula.from_clauses(nv, clauses), mode=mode, force_shift=shift)
+    assert not core.flush_conflict
+
+    K = 257                                     # odd, so canaries land at every alignment
+    core.reset(K)
+    rows = np.arange(K, dtype=np.int32)
+    before_packed = core.packed_rows(rows).copy()
+    before_bits = core.rows_assignment(rows).copy()
+
+    canaries = [i for i in range(K) if i % 3 == 1]
+    L = 6
+    dec = np.full((K, L), -1, dtype=np.int64)
+    for i in range(K):
+        if i in canaries:
+            continue                            # all padding: this row must not move
+        for j, v in enumerate(rng.sample(range(1, nv + 1), L)):
+            dec[i, j] = lit_idx(v if rng.random() < 0.5 else -v)
+    core.apply(dec)
+
+    after_packed = core.packed_rows(rows)
+    after_bits = core.rows_assignment(rows)
+    for i in canaries:
+        assert np.array_equal(before_packed[i], after_packed[i]), f"packed row {i} was written"
+        assert np.array_equal(before_bits[i], after_bits[i]), f"bitmap row {i} was written"
+    worked = sum(1 for i in range(K)
+                 if i not in canaries and not np.array_equal(before_bits[i], after_bits[i]))
+    assert worked > K // 3, f"only {worked} rows did any work — the fixture proves little"
+
+
+@pytest.mark.parametrize("mode", ["scalar", "wave"])
+def test_probe_returns_exactly_the_conflicting_tuples(mode):
+    """The probe's SET, not just its counts. Existing coverage checks the candidate arithmetic
+    (`gpap_probe_count` vs a binomial), the ceiling, and that width-1 agrees with the Python
+    miner — but nothing compares the returned tuples against an independent decision procedure.
+    Brute-force every k-subset through the reference BCP and require set equality, at both
+    `same_var` settings and three widths.
+
+    An `exhausted` sweep is the only one this can be asked of: it is what licenses "these are ALL
+    of them", which is exactly the claim under test."""
+    import itertools
+
+    from tests.reference_bcp import lit_idx, ref_bcp
+
+    rng = random.Random(4242)
+    compared = conflicts_seen = 0
+    for _ in range(6):
+        nv = rng.randint(5, 12)
+        clauses = []
+        for _ in range(rng.randint(nv, 3 * nv)):
+            w = min(rng.choice([1, 2, 2, 3, 3, 4]), nv)
+            clauses.append([v if rng.random() < 0.5 else -v
+                            for v in rng.sample(range(1, nv + 1), w)])
+        f = _core.Formula.from_clauses(nv, clauses)
+        if f.info.has_empty_clause:
+            continue
+        core = _core.Engine(f, mode=mode)
+        if core.flush_conflict:
+            continue
+        pool = sorted(core.free_literals(), key=lambda x: (abs(x), x < 0))
+        if len(pool) < 3:
+            continue
+        for k, same_var in ((1, False), (2, False), (2, True), (3, False)):
+            sweep = core.probe_combinations(pool, k, distinct_vars=not same_var)
+            if not sweep.stats.exhausted:
+                continue
+            got = {tuple(row) for row in sweep.conflicts()}
+            want = set()
+            for combo in itertools.combinations(pool, k):
+                if not same_var and len({abs(x) for x in combo}) != k:
+                    continue
+                if ref_bcp(clauses, [lit_idx(x) for x in combo])[0]:
+                    want.add(combo)
+            assert got == want, (mode, k, same_var,
+                                 sorted(got - want)[:3], sorted(want - got)[:3])
+            assert sweep.stats.conflicts == len(want), "stats.conflicts must match the set"
+            compared += 1
+            conflicts_seen += len(want)
+    assert compared >= 8 and conflicts_seen > 50, \
+        f"fixture proves little: {compared} sweeps, {conflicts_seen} conflicts"
+
+
+def test_a_slot_with_no_selection_yields_nothing_not_the_uninitialized_mask():
+    """`gpap_engine_reset` sets a slot's count to 0 to say "nothing selected this chunk", and
+    `ensure_rows` used to overwrite that by COMPACTING THE MASK — device memory that
+    `DevBuf::reserve` never zeroes and only `gpap_select_complete` fills. A slot nobody had
+    selected into therefore produced arbitrary row indices, and `gpap_check_sound` on it
+    pronounced a verdict over rows the caller never chose."""
+    nv = 40
+    clauses = [[1, 2, 3], [-1, 4], [5, 6, 7], [-5, 8]] + [[i, -(i + 1)] for i in range(9, nv)]
+    core = _core.Engine(_core.Formula.from_clauses(nv, clauses))
+    order = np.arange(nv, dtype=np.int32)
+    mask = core.pair_mask(None)
+
+    core.reset(64)
+    core.trajectory(order, nv, 8, 7)
+    n1 = core.select_complete(mask, 0)
+    assert n1 > 0, "fixture must select something, or the reset below proves nothing"
+    assert len(core.selection_rows(0, n1)) == n1
+
+    core.reset(64)                       # new chunk: slot 0 has no selection yet
+    buf = np.full(64, -7, dtype=np.int32)
+    check(_core.load().gpap_selection_rows(core._h, 0, _core._p(buf, ctypes.c_int32), 64), "rows")
+    assert np.all(buf == -7), f"the library wrote into an unselected slot: {buf[:8].tolist()}"
+    unsound = ctypes.c_int32(-1)
+    check(_core.load().gpap_check_sound(core._h, 0, 0, ctypes.byref(unsound)), "sound")
+    assert unsound.value == 0            # over ZERO rows, not over compacted garbage
+    assert core.select_complete(mask, 0) == 0     # and the real answer is 0 before a trajectory
+
+
+@pytest.mark.parametrize("B", [1, 8, 64])
+def test_the_warp_wide_decision_scan_picks_identically(B):
+    """`bcp.py` claims the warp-wide decision scan makes "bit-identical picks" — the same first B
+    still-free variables in `order`, the same per-(chunk, row, var) polarity hash — and that claim
+    is the whole reason VSCAN is ON by default in the wave kernel. It was checked only for
+    LAUNCHABILITY (tests/test_kernel_table.py runs every vscan value and asserts the cubin
+    exists); nothing compared results.
+
+    Compare the model SETS, not the counts: identical counts from different picks would pass."""
+    rng = random.Random(808)
+    compared = models_seen = 0
+    for trial in range(4):
+        nv = rng.randint(30, 120)
+        # Clause/var ~0.7: deciding 64 variables in ONE round conflicts almost every
+        # trajectory on a tightly constrained formula, and a cell with no models compares two
+        # empty sets. The non-vacuity assertion at the end catches that, so keep the fixture
+        # loose enough for every B to deliver.
+        clauses = [[rng.choice([1, -1]) * v
+                    for v in rng.sample(range(1, nv + 1), rng.choice([2, 3, 3, 4]))]
+                   for _ in range(max(2, (7 * nv) // 10))]
+        f = _core.Formula.from_clauses(nv, clauses)
+        if f.info.has_empty_clause:
+            continue
+        order = np.random.default_rng(trial).permutation(nv).astype(np.int32)
+
+        def run(mode, vscan, seed):
+            core = _core.Engine(f, mode=mode, vscan=vscan)
+            core.reset(512)
+            core.trajectory(order, nv, B, seed)
+            n = core.select_complete(core.pair_mask(None), 0)
+            if not n:
+                return 0, b"", b""
+            assert core.check_sound(0) == 0
+            return (n, core.selection_rows(0, n).tobytes(),
+                    core.var_bits(0, np.arange(nv, dtype=np.int32), n).tobytes())
+
+        for seed in (7, 20260901):
+            on, off, scalar = run("wave", 1, seed), run("wave", -1, seed), run("scalar", 0, seed)
+            assert on == off, f"wave vscan on/off diverged (B={B}, nv={nv}, seed={seed})"
+            assert on[0] == scalar[0], f"wave and scalar disagree on the count (B={B}, nv={nv})"
+            compared += 1
+            models_seen += on[0]
+    assert compared >= 6 and models_seen > 0, \
+        f"fixture proves little: {compared} cells, {models_seen} models"

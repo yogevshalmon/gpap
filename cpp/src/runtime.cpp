@@ -162,10 +162,18 @@ extern "C" const char *gpap_build_id(void) {
                 size_t n;
                 while ((n = std::fread(buf.data(), 1, buf.size(), fp)) > 0)
                     for (size_t i = 0; i < n; ++i) h = (h ^ buf[i]) * 1099511628211ull;
+                /* ferror, not just "fread stopped": a short read ends the loop the same way EOF
+                 * does, so without this a truncated read hashed a PREFIX and returned it as a
+                 * fingerprint — indistinguishable from the real one, and cached for the life of
+                 * the process. "unknown" is the value this function already uses when it cannot
+                 * fingerprint (no dladdr, no fopen); a partial read is that same situation. */
+                const bool complete = std::ferror(fp) == 0;
                 std::fclose(fp);
-                char hex[17];
-                std::snprintf(hex, sizeof(hex), "%016llx", (unsigned long long)h);
-                digest = hex;
+                if (complete) {
+                    char hex[17];
+                    std::snprintf(hex, sizeof(hex), "%016llx", (unsigned long long)h);
+                    digest = hex;
+                }
             }
         }
 #endif

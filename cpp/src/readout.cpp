@@ -86,6 +86,7 @@ extern "C" gpap_status gpap_select_complete(gpap_engine *e, int32_t mask_id, int
                     {&e->abits.ptr, &e->pair_masks[(size_t)mask_id]->ptr, &e->active.ptr,
                      &s.mask.ptr, &NW}));
     s.rows_valid = false;
+    s.selected = true;                   /* the mask now holds a real selection */
     GPAP_TRY(reduce_flags(e, s.mask, e->K, &s.count));
     if (count_out) *count_out = s.count;
     return GPAP_OK;
@@ -104,6 +105,13 @@ extern "C" gpap_status gpap_selection_set(gpap_engine *e, int32_t slot, const in
         }
     s.host_rows.assign(rows, rows + n_rows);
     s.count = n_rows;
+    /* INVALIDATED BEFORE the fallible upload, not just set true after it. The host side has
+     * already moved; if the upload then failed, `rows_valid` would keep its PREVIOUS value, and
+     * a slot that was valid would pair the NEW count with the OLD device row list — so
+     * gpap_var_bits would gather the previous selection's rows while reporting this one's
+     * count, with no error anywhere downstream. */
+    s.rows_valid = false;
+    s.selected = true;
     GPAP_TRY(engine_stage(s.rows, s.host_rows.data(), s.host_rows.size() * sizeof(int32_t)));
     s.rows_valid = true;                 /* explicit rows: no mask compaction needed */
     return GPAP_OK;
@@ -251,7 +259,7 @@ extern "C" gpap_status gpap_sat_rows(gpap_engine *e, const int32_t *rows, int32_
     GPAP_TRY(gpap::engine_reject_if_packed_is_baseline(e, "gpap_sat_rows"));
     GPAP_TRY(engine_use_ctx(e));
     const int32_t M = e->num_clauses, ML = e->num_long;
-    const uint32_t sat_mask = (uint32_t)((1u << e->shift) - 1);
+    const uint32_t sat_mask = (1u << e->shift) - 1;
     /* The bitmap is only read to synthesize binary/unit counts, so a formula made entirely of
      * length>=3 clauses must not pay for it: that copy is per ROW, and this runs over a whole
      * chunk from gpap_check_sets. */

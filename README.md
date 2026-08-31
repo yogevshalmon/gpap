@@ -219,8 +219,10 @@ for (std::size_t i = 0; i < sols.size(); ++i)
         bool value = sols(i, j);                   // of variable sols.variables()[j] (DIMACS)
 ```
 
-The sampler sizes the GPU batch to free VRAM, picks the propagate kernel, orders decisions so
-propagation does the work, and verifies on the device that every row it returns is a real model.
+The sampler sizes the GPU batch to free VRAM, picks the propagate kernel, and orders decisions so
+propagation does the work. `SampleOptions::verify` re-checks on the device that every row it
+returns is a real model — OFF by default on every face, because it is a self-test rather than
+part of producing samples.
 `gpap::AssumptionChecker` is the same deal for the other entry point — K assumption sets
 propagated independently in one launch. Underneath, `gpap::Formula` / `gpap::Engine` expose the
 engine directly for callers who want to own the loop:

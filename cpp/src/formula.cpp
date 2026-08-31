@@ -17,6 +17,7 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <memory>
 #include <string>
 #include <vector>
 
@@ -66,7 +67,10 @@ static gpap_status build(int32_t num_vars, const int32_t *flat, const int32_t *l
                   num_vars, m);
         return GPAP_ERR_ARG;
     }
-    gpap_formula *f = new gpap_formula();
+    /* OWNED for the whole build: every vector operation below can throw (guard_entry turns
+     * that into GPAP_ERR_MEMORY rather than terminate()), and a raw pointer would leak the
+     * half-built formula on the way out. */
+    std::unique_ptr<gpap_formula> f(new gpap_formula());
     f->num_vars = num_vars;
 
     /* Pass 1: drop empty clauses, measure. */
@@ -79,7 +83,6 @@ static gpap_status build(int32_t num_vars, const int32_t *flat, const int32_t *l
         /* A negative length would walk `cur` backwards out of the caller's buffer. */
         if (lens[c] < 0) {
             set_error("clause %d has negative length %d", c, lens[c]);
-            delete f;
             return GPAP_ERR_ARG;
         }
         if (lens[c] == 0) {
@@ -102,7 +105,6 @@ static gpap_status build(int32_t num_vars, const int32_t *flat, const int32_t *l
     if (f->total_lits > 0x7FFFFFFFll) {
         set_error("formula too large: %lld literal occurrences exceeds the int32 CSR limit",
                   (long long)f->total_lits);
-        delete f;
         return GPAP_ERR_ARG;
     }
 
@@ -133,7 +135,6 @@ static gpap_status build(int32_t num_vars, const int32_t *flat, const int32_t *l
             const int32_t li = lit_index(lits[i], num_vars);
             if (li < 0) {                          /* 0, or a variable past num_vars */
                 set_error("literal %d out of range for num_vars=%d", lits[i], num_vars);
-                delete f;
                 return GPAP_ERR_ARG;
             }
             sum += (uint32_t)li;
@@ -197,8 +198,8 @@ static gpap_status build(int32_t num_vars, const int32_t *flat, const int32_t *l
     }
 
     /* Packed initial word — LONG clauses only (binary/unit clauses have no per-row state). */
-    gpap::pack_long_init(f, f->shift, f->packed_init);
-    *out = f;
+    gpap::pack_long_init(f.get(), f->shift, f->packed_init);
+    *out = f.release();
     return GPAP_OK;
 }
 
@@ -206,28 +207,63 @@ extern "C" gpap_status gpap_formula_from_clauses(int32_t num_vars, const int32_t
                                                  const int32_t *clause_lens, int32_t num_clauses,
                                                  gpap_formula **out) {
     if (!out) return GPAP_ERR_ARG;
-    return build(num_vars, flat_lits, clause_lens, num_clauses, out);
+    /* guard_entry: the clause counts and num_vars are the CALLER's, and they size every
+       container below. See gpap_internal.hpp for why the boundary is drawn here. */
+    return gpap::guard_entry("gpap_formula_from_clauses", [&] {
+        return build(num_vars, flat_lits, clause_lens, num_clauses, out);
+    });
 }
 
 /* ------------------------------------------------------------------ DIMACS */
 
-extern "C" gpap_status gpap_formula_from_dimacs(const char *path, gpap_formula **out) {
-    if (!path || !out) return GPAP_ERR_ARG;
+static gpap_status from_dimacs(const char *path, gpap_formula **out) {
+    /* Cleared UP FRONT, not just inside build(): the tokenizer below has a dozen early
+       GPAP_ERR_IO returns, and a caller whose cleanup path frees `*out` would otherwise free
+       whatever the variable held before the call. */
+    *out = nullptr;
     FILE *fp = fopen(path, "rb");
     if (!fp) {
         set_error("cannot open '%s'", path);
         return GPAP_ERR_IO;
     }
-    fseek(fp, 0, SEEK_END);
-    long size = ftell(fp);
-    fseek(fp, 0, SEEK_SET);
-    std::string buf((size_t)(size > 0 ? size : 0), '\0');
-    if (size > 0 && fread(&buf[0], 1, (size_t)size, fp) != (size_t)size) {
-        fclose(fp);
-        set_error("short read on '%s'", path);
+    /* READ TO EOF; do not size the buffer from ftell(). Two real inputs broke the sized read,
+     * one in each direction:
+     *   - a DIRECTORY. fopen("rb") SUCCEEDS on a directory on Linux and ftell then reports
+     *     LONG_MAX, so `std::string buf(size)` threw std::length_error — out through this
+     *     extern "C" boundary, where there is no handler, so the whole process called
+     *     std::terminate(). `gpap sample <a directory>` core-dumped.
+     *   - any file ftell CANNOT size: a FIFO, /dev/stdin, a <(...) process substitution
+     *     (ftell = -1), or procfs/sysfs (ftell = 0 while the file has content). The sized read
+     *     was then skipped entirely and the caller got the EMPTY formula back with GPAP_OK —
+     *     zero variables, trivially satisfiable, no warning. That is the same failure the
+     *     tokenizer below is strict about: a file silently becoming a DIFFERENT formula.
+     * Reading until EOF answers both — a directory fails inside fread (EISDIR, caught by
+     * ferror) and a stream parses the bytes it actually carries. ftell survives only as a
+     * reserve HINT, where being wrong costs one reallocation and nothing else. */
+    std::string buf;
+    if (fseek(fp, 0, SEEK_END) == 0) {
+        const long hint = ftell(fp);
+        /* 1LL, not 1L: `1L << 40` is undefined where long is 32-bit. The cap only
+           keeps a nonsense ftell (a directory's LONG_MAX) out of reserve(). */
+        if (hint > 0 && (long long)hint < (1LL << 40)) buf.reserve((size_t)hint);
+        rewind(fp);
+    }
+    {
+        std::vector<char> chunk(1 << 16);   /* heap: 64 KB overflows a small thread stack */
+        for (;;) {
+            /* fread returns short ONLY at EOF or on error (it loops internally), so this is a
+             * complete read of a pipe, not a first-packet read of one. */
+            const size_t n = fread(chunk.data(), 1, chunk.size(), fp);
+            if (n) buf.append(chunk.data(), n);
+            if (n < chunk.size()) break;
+        }
+    }
+    const bool read_failed = ferror(fp) != 0;
+    fclose(fp);
+    if (read_failed) {
+        set_error("cannot read '%s' — is it a directory?", path);
         return GPAP_ERR_IO;
     }
-    fclose(fp);
 
     /* Token stream: clauses are 0-TERMINATED, not line-based (multiple clauses per line and
      * clauses spanning lines are both legal). 'c' comments and the SATLIB '%' end marker are
@@ -288,10 +324,32 @@ extern "C" gpap_status gpap_formula_from_dimacs(const char *path, gpap_formula *
                     q = p + 2;
                 while (q && q < line_end) {
                     char *tail = nullptr;
-                    long v = strtol(q, &tail, 10);
-                    if (tail == q) break;
-                    if (v != 0) support.push_back((int32_t)(v < 0 ? -v : v) - 1);
+                    errno = 0;
+                    const long v = strtol(q, &tail, 10);
+                    /* `tail > line_end`: strtol skips leading whitespace INCLUDING \r and \n,
+                     * so a cursor left short of the newline — one \r on a CRLF file, or a
+                     * trailing space — parsed across it and pulled the NEXT line's first literal
+                     * into the support, silently widening the projection set. */
+                    if (tail == q || tail > line_end) break;
                     q = tail;
+                    /* The MAGNITUDE in int64, range-checked BEFORE it is negated or narrowed —
+                     * the same discipline the literal path above uses, and for the same reason:
+                     * `-v` at LONG_MIN is undefined, and an int32 cast of an oversized value
+                     * WRAPS into a plausible-looking variable. Both were reachable from a file
+                     * and both were silent: `c ind 4294967297` became variable 1, and
+                     * `c ind 9223372036854775808` became support index -2 — a NEGATIVE "0-based
+                     * variable index", which this ABI says it never returns. Dropped rather than
+                     * refused, matching the established policy for a support variable the header
+                     * never declared (the `>= nv` trim below); `c ind` is a comment line, and
+                     * tools do write junk there. */
+                    /* RANGE-CHECKED BEFORE NEGATING. `long` and `int64_t` are the same width
+                     * here, so there is no wider type to take the magnitude in the way
+                     * lit_index_from_dimacs does — and LONG_MIN is exactly representable, so
+                     * strtol does NOT set ERANGE for it while `-v` is still undefined. Testing
+                     * the range first is the same guard the literal path above uses. */
+                    if (errno == ERANGE || v == 0 || v > INT32_MAX || v < -(long)INT32_MAX)
+                        continue;
+                    support.push_back((int32_t)(v > 0 ? v : -v) - 1);
                 }
             }
             p = line_end;
@@ -357,6 +415,13 @@ extern "C" gpap_status gpap_formula_from_dimacs(const char *path, gpap_formula *
     return st;
 }
 
+/* The FILE's contents size every container in the tokenizer and the builder, so this is the
+ * other side of the guard_entry boundary (gpap_internal.hpp). */
+extern "C" gpap_status gpap_formula_from_dimacs(const char *path, gpap_formula **out) {
+    if (!path || !out) return GPAP_ERR_ARG;
+    return gpap::guard_entry("gpap_formula_from_dimacs", [&] { return from_dimacs(path, out); });
+}
+
 /* ------------------------------------------------------------------ accessors */
 
 extern "C" void gpap_formula_info_get(const gpap_formula *f, gpap_formula_info *out) {
@@ -380,11 +445,19 @@ extern "C" gpap_status gpap_formula_occ(const gpap_formula *f, int32_t *offsets_
     /* mid is (2N,) = n_offsets - 1, so it needs no size of its own. */
     if (n_offsets) *n_offsets = (int32_t)f->occ_offsets.size();
     if (n_clauses) *n_clauses = (int64_t)f->occ_clauses.size();
+    /* EVERY copy is guarded on non-empty, not just some of them. `std::vector::data()` on an
+     * empty vector may be nullptr, and `memcpy(dst, nullptr, 0)` is UNDEFINED even at length 0 —
+     * UBSan reports "null pointer passed as argument 2, which is declared to never be null".
+     * Both are reachable: `occ_clauses` is empty for a units-only formula and `occ_mid` for a
+     * 0-variable one (which unit propagation / ELS really can produce). One carried the guard and
+     * the other did not, which is the shape of bug that stays hidden until a test happens to
+     * build the degenerate formula. `occ_offsets` needs NO guard: build() gives it num_lits + 1
+     * entries, so it holds at least one even at N = 0. */
     if (offsets_out)
         memcpy(offsets_out, f->occ_offsets.data(), f->occ_offsets.size() * sizeof(int32_t));
     if (mid_out && !f->occ_mid.empty())
         memcpy(mid_out, f->occ_mid.data(), f->occ_mid.size() * sizeof(int32_t));
-    if (clauses_out)
+    if (clauses_out && !f->occ_clauses.empty())
         memcpy(clauses_out, f->occ_clauses.data(), f->occ_clauses.size() * sizeof(int32_t));
     return GPAP_OK;
 }
@@ -392,9 +465,11 @@ extern "C" gpap_status gpap_formula_occ(const gpap_formula *f, int32_t *offsets_
 extern "C" gpap_status gpap_formula_clause_arrays(const gpap_formula *f, int32_t *sizes_out,
                                                   int32_t *lit_sum_out) {
     if (!f) return GPAP_ERR_ARG;
-    if (sizes_out)
+    /* Guarded on non-empty for the same reason as gpap_formula_occ above: both vectors are
+     * empty when the formula has no clauses, and a null memcpy source is UB at any length. */
+    if (sizes_out && !f->clause_sizes.empty())
         memcpy(sizes_out, f->clause_sizes.data(), f->clause_sizes.size() * sizeof(int32_t));
-    if (lit_sum_out)
+    if (lit_sum_out && !f->lit_sum.empty())
         memcpy(lit_sum_out, f->lit_sum.data(), f->lit_sum.size() * sizeof(int32_t));
     return GPAP_OK;
 }

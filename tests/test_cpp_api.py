@@ -9,6 +9,7 @@ exactly as a new C++ consumer would exercise it.
 
 Skipped unless `cmake --build build` has produced the examples (scripts/build_core.sh).
 """
+import re
 import subprocess
 from pathlib import Path
 
@@ -224,15 +225,30 @@ def test_probe_finds_the_same_failed_literals_as_python(tmp_path):
     assert "exhaustive" in out, "a complete width-1 sweep must report itself as a proof"
 
 
-def test_probe_refuses_an_impossible_width_instead_of_trying(tmp_path):
+def test_probe_bounds_an_impossible_width_without_enumerating_it(tmp_path):
     """REGRESSION: the ceiling has to be checked against an EXACT count computed without
     generating anything. Enumerating first and measuring afterwards OOM-killed the process — at
-    width 3 over a few thousand free literals the enumeration is ~1e11 tuples."""
+    width 3 over a few thousand free literals the enumeration is ~1e11 tuples.
+
+    It gates the CONTRACT, not a wording: at the default budget `max_tuples` is a WORK BUDGET,
+    so the sweep probes that many, KEEPS every clause it found, and reports itself as not
+    exhaustive. This assertion used to be `"refused" in out` — which passed against an example
+    that printed the word "refused" directly above 2.5 million clauses it had just delivered, so
+    the test was pinning the misstatement rather than catching it."""
     nv = 400
     clauses = [[i, -(i + 1)] for i in range(1, nv)]
     cnf = tmp_path / "wide.cnf"
     cnf.write_text("p cnf %d %d\n" % (nv, len(clauses))
                    + "".join(" ".join(map(str, c)) + " 0\n" for c in clauses))
     out = _probe(cnf, 3)
-    assert "candidate tuples" in out
-    assert "refused" in out, out
+    # the exact count, computed up front — the thing that must not be reached by enumerating
+    assert "width 3: 84694400 candidate tuples" in out, out
+    probed, total = re.search(r"probed (\d+) of (\d+)", out).groups()
+    # The example sets BOTH a 5M ceiling and a 10s deadline, and probe.cpp overwrites the stop
+    # reason with DEADLINE when the clock wins — which it can on a slower card or under ASan. So
+    # assert the property (the sweep stopped SHORT of `total`, and says so) rather than which
+    # budget got there first; `total` never being enumerated is what this test is really for.
+    assert 0 < int(probed) <= 5_000_000 < int(total), out
+    assert "exhaustive" not in out, "a budgeted sweep is not a proof"
+    assert ("stopped at max_tuples" in out) or ("deadline" in out), out
+    assert "entailed: (" in out, "a budgeted sweep still KEEPS the clauses it proved"

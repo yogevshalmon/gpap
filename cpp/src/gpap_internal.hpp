@@ -6,6 +6,8 @@
 #include <cuda.h>
 
 #include <cstdint>
+#include <new>
+#include <stdexcept>
 #include <string>
 #include <unordered_map>
 #include <vector>
@@ -53,6 +55,36 @@ inline int64_t lit_index_from_dimacs(int32_t lit, int32_t num_vars) {
         gpap_status _st = (expr);                                                        \
         if (_st != GPAP_OK) return _st;                                                  \
     } while (0)
+
+/* Run an entry point's body so that a C++ exception becomes a gpap_status instead of escaping.
+ *
+ * THE ABI PROMISES "every call returns gpap_status" — and an exception crossing an extern "C"
+ * frame does not return anything, it calls std::terminate(). A C consumer has no handler and no
+ * way to install one, so the failure mode is a core dump of THEIR process. That was not
+ * theoretical: sizing the DIMACS buffer from ftell() made `gpap sample <a directory>` throw
+ * std::length_error out of gpap_formula_from_dimacs and abort (fixed at the source in
+ * formula.cpp — this is the second line of defence, not the fix).
+ *
+ * Used where CALLER- OR FILE-DERIVED sizes reach a host container, i.e. the two builders. The
+ * rest of the ABI allocates against shapes already validated by then; on Linux with default
+ * overcommit a genuinely huge request is SIGKILLed by the kernel before new ever throws, so a
+ * blanket wrap would catch nothing that this does not. Add a call here when a new entry point
+ * sizes a container from something a caller controls. */
+template <typename F>
+gpap_status guard_entry(const char *what, F &&body) {
+    try {
+        return body();
+    } catch (const std::bad_alloc &) {
+        set_error("%s: out of host memory", what);
+        return GPAP_ERR_MEMORY;
+    } catch (const std::exception &ex) {
+        set_error("%s: %s", what, ex.what());
+        return GPAP_ERR_ARG;
+    } catch (...) {
+        set_error("%s: unknown host-side failure", what);
+        return GPAP_ERR_ARG;
+    }
+}
 
 /* ------------------------------------------------------------------ kernels */
 
@@ -179,6 +211,13 @@ struct Selection {
     std::vector<int32_t> host_rows;    /* same, host side (compaction happens here) */
     int32_t count = 0;
     bool rows_valid = false;
+    /* Has anything actually SELECTED into this slot since the last reset? The mask is device
+     * memory that DevBuf::reserve does not zero, and only gpap_select_complete fills it — so
+     * without this, compacting the mask for a slot nobody selected into reads UNINITIALIZED
+     * bytes and produces arbitrary rows. reset() sets `count = 0` to say "nothing selected" and
+     * ensure_rows() would then overwrite it from that garbage; a gpap_check_sound on such a slot
+     * pronounces on rows the caller never chose. */
+    bool selected = false;
 };
 
 struct gpap_engine {
