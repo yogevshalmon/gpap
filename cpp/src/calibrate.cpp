@@ -24,7 +24,20 @@
 #include "gpap/gpap.h"
 
 namespace {
-constexpr int64_t kWddmReserveBytes = 800000000ll;   /* WDDM/WSL2 driver overhead */
+/* Absolute slack between what cuMemGetInfo reports free and what we then allocate. `free` is a
+ * SNAPSHOT of somebody else's bookkeeping: on a WDDM-paged GPU (Windows, WSL2) the display driver
+ * can take memory back underneath us, and on any shared or preemptible host another process can.
+ * The `fraction` argument is the proportional margin; this is the absolute one.
+ *
+ * FLAT ON EVERY PLATFORM, on purpose. It was briefly made conditional on WDDM — the driver it is
+ * named for — which is defensible on the naming but is a change to gpap_compute_k_safe's INPUT,
+ * i.e. a K change on every native-Linux card and only on the cards this project's development box
+ * cannot test. K changes need kill-switch re-validation, and they make recorded sweeps
+ * incomparable at the same --k-cap. The saving would have been ~4% of K on a 23 GB card, worth
+ * ~1% of throughput (measured: a 4x batch buys 2.8%). Not a trade worth an unvalidated default.
+ * If it is ever revisited, make it an explicit sizing PARAMETER that a row can record, not an
+ * invisible platform sniff inside the allocator. */
+constexpr int64_t kFreeVramReserveBytes = 800000000ll;
 
 /* THE batch cap: one number, the same on every GPU.
  *
@@ -66,19 +79,19 @@ constexpr int32_t kTrailSlack = 32;
 /* THE trail sizing rule — one definition, called by the engine's own ensure_state() as well as
  * by every sizing consumer, so the allocation and the model cannot disagree.
  *
- * BOUND = num_vars, and it is TIGHT. The trail holds literals made TRUE and not yet propagated,
+ * BOUND = num_vars, and it is TIGHT (measured on both kernels; docs/findings/INSIGHTS.md). The trail holds literals made TRUE and not yet propagated,
  * and every push is gated on the assignment BITMAP flipping that literal's bit from 0 to 1: the
  * scalar paths test-then-set inside one program, the WAVE paths take the `atomic_or` RETURN, so
  * for a given literal exactly one lane can ever observe the transition. Pushing a literal whose
  * negation is already set is a CONTRADICTION and conflicts the row instead of pushing, and l and
  * ~l always share a bitmap word (2v / 2v+1) — so a VARIABLE contributes at most ONE trail entry
  * per launch, whatever the decision batch B or the assumption width L. Neither is a parameter
- * here for that reason: both used to be, and each cost something (L made the cap grow and never
- * shrink, so 10.sk_1_46's 1,121 units inflated every later chunk by +27% per row; B survived as
- * a floor the engine ignored while this model still honoured it, charging a caller who asked for
- * B=128 for a trail that was never allocated).
- * Measured, both kernels: max depth == N exactly on a trajectory that decides every variable,
- * and well under N on 100%-conflicted rows with deep binary chains.
+ * here for that reason: both used to be, and each cost something. L made the cap grow and never
+ * shrink, so a formula with many construction units inflated every later chunk permanently; B
+ * survived as a floor the engine ignored while this model still honoured it, charging a caller
+ * who asked for a wide decision batch for a trail that was never allocated. Max depth reaches
+ * exactly N on a trajectory that decides every variable, and stays well under it on conflicted
+ * rows.
  *
  * SLACK = one WAVEFRONT. The wave propagate and the warp-wide decision scan append a whole
  * wavefront of pushes in ONE masked store at `tail + prefix_sum`, and unlike the scalar path
@@ -119,7 +132,7 @@ extern "C" int64_t gpap_mem_available(int device, double fraction) {
     CUresult rc = cuMemGetInfo(&free_b, &total_b);
     cuDevicePrimaryCtxRelease(dev);
     if (rc != CUDA_SUCCESS) return 0;
-    const int64_t usable = std::max<int64_t>(0, (int64_t)free_b - kWddmReserveBytes);
+    const int64_t usable = std::max<int64_t>(0, (int64_t)free_b - kFreeVramReserveBytes);
     return (int64_t)(usable * fraction);
 }
 

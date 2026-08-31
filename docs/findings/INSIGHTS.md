@@ -26,6 +26,59 @@ The deep write-ups, by topic:
 
 ## Engine & memory model
 
+**The C ABI's own defaults were the last place the dispatch rule did not reach (2026-08-31).**
+`gpap_engine_options.mode` was `GPAP_MODE_SCALAR`, and scalar was the enum's 0 — so `{0}` and a
+NULL options pointer, the two spellings the header calls "every default", handed the raw C face
+the one kernel that never re-dispatches. Both wrappers overrode it, so the hole was invisible
+from Python and C++ and cost 1.28–2.20× to anyone who used the ABI directly (measured, M=3000:
+NULL → SCALAR, `{0}` → SCALAR, `gpap_dispatch_wave` → WAVE). `GPAP_MODE_AUTO` is 0 now.
+**The general rule this is the third instance of: on an options struct, the zero value must BE
+the default, so name the field for the opt-out.** `vscan` was the first (NULL silently disabled
+the warp-wide decision scan while `{0}` left it on); `gpap_probe_options.distinct_vars` was the
+second and the worst, because it changed the ANSWER — `{0}` probed 66 candidates where NULL
+probed 60, and `exhausted`, which the header calls a PROOF, was computed against whichever total
+the caller accidentally chose. It is `same_var` now (0 = drop same-variable tuples), and
+`gpap_probe_count` takes the sweep's own options struct instead of a loose flag, so the count and
+the sweep can no longer be asked about different enumerations. A renamed field is a compile error
+for an out-of-tree caller; a silently flipped one is not.
+
+**A soundness verdict needs EVIDENCE, and a self-test's wall needs a subtractor (2026-08-31).**
+Two holes in the opt-in `--verify-sound` readout, found by review after it shipped. (1) The check
+runs per chunk over the rows that chunk COMPLETED, so a 0%-success run never calls it — and it
+still reported `sound_check: "ok"`, an un-run check published as a passing one, which is the same
+conflation the tri-state was introduced to prevent, one state along. It now reports `"off"` unless
+`sound_rows_checked > 0`. That immediately exposed a vacuous test: `test_wide_matches_base_random`
+drew five over-constrained random CNFs that each yielded ZERO models, so it had been asserting
+that two empty model sets are equal — it would have passed against a wide kernel that emitted
+nothing. (2) The verify wall was subtracted by the sampler's per-config stamp but not by the
+PIPELINE, and `best_rate_sps` exists only on the adaptive path — so on a pinned single config,
+the mode every measurement uses, the published samples/s carried the self-test. Verbatim the hole
+already documented for `out_project_s` ("a pinned single config has no per-config wall"),
+reopened one field later. Structural lesson: when a rate excludes something, the exclusion has to
+live where the rate is COMPUTED, not where the cost is measured.
+
+**6 of 33 AOT cubins were byte-identical duplicates, and the check for it is not byte-identity
+(2026-08-31).** The trajectory kernel reads `VSCAN` only under `if WAVE and VSCAN and not SOFT`,
+so every scalar and every SOFT trajectory was compiled twice — 0.19 MB of a 0.83 MB payload.
+Trimming the matrix (`build_kernels.vscan_is_read`) is half a change: the engine's `traj_key`
+must normalize to the key that exists, or a SOFT run with the scan on dies at launch with
+`GPAP_ERR_KERNEL` after the chunk is already paid for. ⚠️ **Cubin byte-identity is useless as a
+no-change gate**: inserting 55 blank lines into `bcp.py`, with NO code change, moves 24 of 33
+cubins — line info is embedded. Compare the executable (SHF_EXECINSTR) sections instead. That is
+what proved the shared-body refactor of `_bcp_fixpoint_kernel` / `_bcp_fixpoint_clean_kernel`
+(the clean kernel duplicated the whole seed+propagate body verbatim, under a comment asking the
+reader to keep the two in lockstep) emits IDENTICAL SASS for all 27 shipped kernels. Compilation
+itself is deterministic — 33/33 byte-identical across two runs of one source — so a same-source
+A/B remains exact.
+
+**`gpap_version()` was frozen at "0.1.0" and was being used as a cache key (2026-08-31).** The
+literal never changed while the engine got 1.8× faster under it, so keying anything on it scored
+a REBUILT engine as a hit — which is how a rival re-run came to pair today's rival subprocess
+with last month's GPAP. `gpap_build_id()` returns "<version>+<FNV-1a of the loaded library's own
+bytes>" (via `dladdr`, computed once); it is what `_core_provenance()` stamps into every results
+row and what the rival cache keys on. Verified: a one-character source change moves the id, and
+restoring the source restores it.
+
 **WAVE's lane→segment schedule is warp-shuffle based — the O(W²) one-hot reductions round-tripped
 SHARED memory, and removing them is 1.80× at the same K (2026-08-27).** The wave inner loop
 mapped lanes to (segment, offset) with a W×W compare-reduce plus three one-hot gathers per

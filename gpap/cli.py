@@ -71,6 +71,13 @@ _POS_SECS = _bounded(float, 0.0, "a positive number of seconds", exclusive=True)
 _SOUND_LABEL = {"ok": "OK", "UNSOUND": "*** UNSOUND ***", "off": "not run (--verify-sound)"}
 
 
+def _sound_label(info):
+    """The printed verdict — `sound_verdict` is the ONE rule, shared with the bench table and
+    the paper tables so a console line and a published cell cannot disagree."""
+    from gpap.sampling.metrics import sound_verdict
+    return _SOUND_LABEL[sound_verdict(info)]
+
+
 def _ensure_cnf(args):
     """(cnf_path, temp_path_or_None, encode_seconds_or_None) for a CNF **or** circuit input.
 
@@ -201,7 +208,7 @@ def _sample_run(args, device, path, tmp, encode_s):
           f"({info['wall_timed_s']:.1f}s sampling)")
     print(f"  {info['samples_per_s']:,.0f} samples/s (steady-state), "
           f"{info.get('sps_e2e_total') or 0:,.0f}/s end-to-end | success {info['success_rate']*100:.0f}% "
-          f"| sound-check {_SOUND_LABEL.get(info.get('sound_check'), '?')}")
+          f"| sound-check {_sound_label(info)}")
     if info["n_models"] == 0 and not info.get("unsat") and info["n_clauses"]:
         # Every trajectory conflicted. Nothing above says why, and the three causes want three
         # different responses from the user, so name them rather than leaving a bare 0.

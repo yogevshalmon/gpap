@@ -4,6 +4,11 @@
 #include <cstdarg>
 #include <cstdio>
 #include <cstring>
+#include <string>
+#include <vector>
+#if defined(__linux__) || defined(__APPLE__)
+#include <dlfcn.h>                 /* dladdr, for gpap_build_id */
+#endif
 
 #include "generated/gpap_kernels.h"
 
@@ -127,4 +132,44 @@ void DevBuf::release() {
 }  // namespace gpap
 
 extern "C" const char *gpap_last_error(void) { return gpap::get_error(); }
-extern "C" const char *gpap_version(void) { return "0.1.0"; }
+
+#ifndef GPAP_VERSION_STR
+#define GPAP_VERSION_STR "0.0.0-dev"      /* built outside CMake */
+#endif
+extern "C" const char *gpap_version(void) { return GPAP_VERSION_STR; }
+
+/* Fingerprint of the loaded library's own file. FNV-1a 64 rather than a cryptographic hash:
+ * the question is "is this the same build?", not "can an adversary forge one", and a real hash
+ * would mean vendoring an implementation into a library whose only runtime dependency is
+ * libcuda. Computed once and cached — a caller keying a results cache on it calls it per row. */
+extern "C" const char *gpap_build_id(void) {
+    /* Built ONCE into a function-local static, whose initialization the C++11 magic-static rule
+     * makes thread-safe -- and, critically, whose value is published only when it is COMPLETE.
+     * An `if (id.empty())` memo that assigned the version prefix first would hand a concurrent
+     * caller "<version>+" -- a fingerprint identical for every build, i.e. exactly the stale-cache
+     * failure this function exists to prevent -- while `id += digest` reallocated the buffer under
+     * the pointer it had just returned. ctypes drops the GIL across the call, so two Python
+     * threads stamping provenance are enough to reach it. */
+    static const std::string id = [] {
+        std::string digest = "unknown";
+#if defined(__linux__) || defined(__APPLE__)
+        Dl_info info{};
+        /* Any symbol IN this library resolves to its file; gpap_version is as good as any. */
+        if (dladdr(reinterpret_cast<const void *>(&gpap_version), &info) && info.dli_fname) {
+            if (FILE *fp = std::fopen(info.dli_fname, "rb")) {
+                uint64_t h = 1469598103934665603ull;    /* FNV-1a 64 offset basis */
+                std::vector<unsigned char> buf(1 << 16);  /* heap: 64 KB overflows a small stack */
+                size_t n;
+                while ((n = std::fread(buf.data(), 1, buf.size(), fp)) > 0)
+                    for (size_t i = 0; i < n; ++i) h = (h ^ buf[i]) * 1099511628211ull;
+                std::fclose(fp);
+                char hex[17];
+                std::snprintf(hex, sizeof(hex), "%016llx", (unsigned long long)h);
+                digest = hex;
+            }
+        }
+#endif
+        return std::string(GPAP_VERSION_STR) + "+" + digest;
+    }();
+    return id.c_str();
+}

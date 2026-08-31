@@ -103,8 +103,10 @@ def run_gpap(cnf, n_time, device, time_limit=60.0, n_cov=1000):
     a 34 s instance on s1196-c25). It only feeds distinct_frac, which is ~1.0 on every non-tiny
     space — so keep it small here; this harness is about the rival comparison, not coverage."""
     from gpap.sampling.pipeline import CIRCUIT_PORTFOLIO, sample_file
+    # verify_sound: see rivals_recurrent — the row records `sound_check`, so it must run the
+    # check, and the check's wall is excluded from every rate.
     g = sample_file(cnf, device, n_time=n_time, n_cov=n_cov, configs=CIRCUIT_PORTFOLIO,
-                    time_limit=time_limit, seed=5)
+                    time_limit=time_limit, seed=5, verify_sound=True)
     return {"sps": g["samples_per_s"], "sps_e2e": g.get("sps_e2e_total"),
             "unique_per_s_est": g.get("unique_sps_est"),
             # None means NOT MEASURED (the off-timing coverage run collected nothing on a

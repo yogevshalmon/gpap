@@ -48,7 +48,7 @@ import gpap
 samples, info = gpap.sample("formula.cnf", n=50_000, seed=5, device="cuda")
 samples.shape                 # (50000, S) uint8 — one column per support variable
 info["cols"]                  # the DIMACS variable each column stands for
-print(info["samples_per_s"], info["success_rate"], info["gpu_sound"])
+print(info["samples_per_s"], info["success_rate"], info["sound_check"])
 
 # Sample a sequential circuit: unroll T cycles, pin outputs to a reachable pattern, sample inputs
 samples, info = gpap.sample_circuit("b10.bench", cycles=25, n=50_000)

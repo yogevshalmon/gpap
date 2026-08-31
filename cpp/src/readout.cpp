@@ -213,16 +213,26 @@ extern "C" gpap_status gpap_assignment_rows(gpap_engine *e, int32_t slot, int8_t
     return GPAP_OK;
 }
 
-extern "C" gpap_status gpap_flags(gpap_engine *e, int8_t *active_out, int8_t *conflict_out) {
+extern "C" gpap_status gpap_flags(gpap_engine *e, int8_t *active_out, int8_t *conflict_out,
+                                  int32_t capacity) {
     if (!e) return GPAP_ERR_ARG;
+    if ((active_out || conflict_out) && capacity < e->K) {
+        set_error("gpap_flags: buffers hold %d rows, the engine has K=%d", capacity, e->K);
+        return GPAP_ERR_ARG;
+    }
     GPAP_TRY(engine_use_ctx(e));
     if (active_out) GPAP_CU(cuMemcpyDtoH(active_out, e->active.ptr, (size_t)e->K));
     if (conflict_out) GPAP_CU(cuMemcpyDtoH(conflict_out, e->conflict.ptr, (size_t)e->K));
     return GPAP_OK;
 }
 
-extern "C" gpap_status gpap_num_propagated(gpap_engine *e, int32_t *out_host) {
+extern "C" gpap_status gpap_num_propagated(gpap_engine *e, int32_t *out_host,
+                                           int32_t capacity) {
     if (!e || !out_host) return GPAP_ERR_ARG;
+    if (capacity < e->K) {
+        set_error("gpap_num_propagated: out holds %d rows, the engine has K=%d", capacity, e->K);
+        return GPAP_ERR_ARG;
+    }
     GPAP_TRY(engine_use_ctx(e));
     std::vector<int32_t> decs((size_t)e->K);
     GPAP_CU(cuMemcpyDtoH(out_host, e->nprops.ptr, (size_t)e->K * sizeof(int32_t)));

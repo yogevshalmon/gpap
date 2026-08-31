@@ -50,6 +50,7 @@ REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 if REPO_ROOT not in sys.path:
     sys.path.insert(0, REPO_ROOT)
 
+from gpap.sampling.metrics import sound_verdict
 from gpap.sampling.sampler import GPUSampler   # sets expandable_segments
 from gpap.engine.calibrate import default_k_cap
 from gpap.benchmark import cmsgen_sample
@@ -381,9 +382,13 @@ def _sound_summary(rows: list[dict]) -> str:
     have to call an unchecked sweep either a pass or a failure, and it is neither."""
     if not rows:
         return "no rows"
-    if any(r.get("sound_check") == "UNSOUND" for r in rows):
+    # sound_verdict, not a bare string compare: a resumed campaign mixes rows written before
+    # `sound_check` existed (they carry `gpu_sound`), and reading those as "no verdict" reported
+    # a fully verified sweep as "not run" — and a legacy FAILURE as a non-verdict.
+    verdicts = [sound_verdict(r) for r in rows]
+    if "UNSOUND" in verdicts:
         return "UNSOUND"
-    n_ok = sum(1 for r in rows if r.get("sound_check") == "ok")
+    n_ok = verdicts.count("ok")
     return f"ok ({n_ok}/{len(rows)})" if n_ok else "not run"
 
 
@@ -519,7 +524,7 @@ def _print_table(results: list[dict], has_cms: bool) -> None:
         hdr += f"{'CMS/s':>9}{'2wC':>6}{'GPAP/CMS':>9}"
     print("\n" + hdr); print("-" * len(hdr))
     for r in results:
-        snd = {"ok": "OK", "UNSOUND": "BAD"}.get(r.get("sound_check"), "-")
+        snd = {"ok": "OK", "UNSOUND": "BAD"}.get(sound_verdict(r), "-")
         line = (f"{r['name'][:22]:<24}{r['N']:>6}{r['M']:>7}{r['support']:>6}"
                 f"{r['gpap_sps']:>10,.0f}{100*r['succ']:>5.0f}%{r['twise_gpap']:>6.1f}{snd:>4}")
         if has_cms and "cms_sps" in r:

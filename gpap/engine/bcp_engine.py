@@ -98,9 +98,9 @@ class BCPEngine:
 
     def __init__(self, formula: CnfFormula, *, force_wide: bool = False,
                  mode: "str | None" = None):
-        """`mode`: None resolves to $GPAP_KERNEL when set, else "auto" (resolved by the
-        `_core.Engine` binding, ONCE, so every face built on it honours the override). "auto"
-        picks the propagate kernel per `reset(K)` — see `plan_for`. "scalar" = the serial-trail
+        """`mode`: None means "auto"; $GPAP_KERNEL=scalar|wave pins it, honoured by the CORE
+        (beside $GPAP_CLEAN) so every consumer of libgpap gets the override, not only this
+        class. "auto" picks the propagate kernel per `reset(K)` — see `plan_for`. "scalar" = the serial-trail
         kernels, "wave" = the warp-wide wavefront propagate; naming either PINS it. Same state,
         same fixpoints (confluence), different propagation order.
 
@@ -118,7 +118,6 @@ class BCPEngine:
         self._core = _core.Engine(formula.core, device=self._device.index or 0, mode=mode,
                                   force_shift=8 if force_wide else 0)
         self._mode = self._core.requested_mode
-        self._auto_mode = self._mode == "auto"
         self._K = 0
         self._counter_base = (0, 0, 0, 0)
 
@@ -133,22 +132,24 @@ class BCPEngine:
         engine on "auto" and let `plan_for` choose."""
         self._core.set_mode(mode)
         self._mode = mode
-        self._auto_mode = mode == "auto"
 
     @property
     def auto_dispatch(self) -> bool:
-        """True while no kernel is pinned — neither by the constructor/`$GPAP_KERNEL` nor by a
-        later `set_mode`. A caller about to pin a mode of its own (the sampler does, to keep its
-        warmup and short final chunk on the measured kernel) should check this first, so it
-        never overrides an explicit pin."""
-        return self._auto_mode
+        """True while no kernel is pinned — neither by the constructor, nor by `$GPAP_KERNEL`,
+        nor by a later `set_mode`. A caller about to pin a mode of its own (the sampler does, to
+        keep its warmup and short final chunk on the measured kernel) should check this first,
+        so it never overrides an explicit pin. Answered by the CORE, which is where the env
+        override is read."""
+        return self._core.auto_dispatch
 
     def plan_for(self, K: int) -> str:
         """The propagate kernel a chunk of K rows will run. PURE — `reset(K)` is what applies it.
 
         Kept because a caller sizing a chunk may want to know the kernel before committing to it;
-        it returns the pinned mode verbatim when one is pinned."""
-        if self._auto_mode:
+        it returns the pinned mode verbatim when one is pinned — including a $GPAP_KERNEL pin,
+        which is why `auto_dispatch` is asked of the CORE rather than inferred from the mode this
+        object was constructed with."""
+        if self.auto_dispatch:
             return dispatch_mode(self.num_clauses, int(K), self._device)
         return self._core.mode
 

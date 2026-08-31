@@ -106,11 +106,12 @@ class EngineOptions(ctypes.Structure):
 
 
 class ProbeOptions(ctypes.Structure):
-    """Mirror of `gpap_probe_options`. 0/negative means "no limit" everywhere except
-    `distinct_vars`, whose useful default is 1 (drop tuples sharing a variable). `max_tuples` is a
-    WORK BUDGET — the sweep probes that many rather than refusing (see `refuse_over_max`)."""
+    """Mirror of `gpap_probe_options`. EVERY field's default is 0, so a zeroed struct is the
+    default sweep — including `same_var`, which is the inverse of the Python-facing
+    `distinct_vars=True` for exactly that reason. `max_tuples` is a WORK BUDGET — the sweep
+    probes that many rather than refusing (see `refuse_over_max`)."""
     _fields_ = [("seconds", ctypes.c_double), ("max_tuples", c_int64), ("batch", c_int32),
-                ("distinct_vars", c_int32), ("refuse_over_max", c_int32)]
+                ("same_var", c_int32), ("refuse_over_max", c_int32)]
 
 
 class ProbeStats(ctypes.Structure):
@@ -146,6 +147,7 @@ def _declare(lib: ctypes.CDLL) -> None:
         ("gpap_engine_free", [c_void_p], None),
         ("gpap_engine_set_mode", [c_void_p, c_int], c_int),
         ("gpap_engine_mode", [c_void_p], c_int),
+        ("gpap_engine_auto", [c_void_p], c_int32),
         ("gpap_engine_shift", [c_void_p], c_int32),
         ("gpap_engine_k", [c_void_p], c_int32),
         ("gpap_engine_num_vars", [c_void_p], c_int32),
@@ -173,8 +175,8 @@ def _declare(lib: ctypes.CDLL) -> None:
         ("gpap_check_sound", [c_void_p, c_int32, c_int32, _I32P], c_int),
         ("gpap_var_bits", [c_void_p, c_int32, _I32P, c_int32, _I8P, c_int32], c_int),
         ("gpap_assignment_rows", [c_void_p, c_int32, _I8P, c_int32], c_int),
-        ("gpap_flags", [c_void_p, _I8P, _I8P], c_int),
-        ("gpap_num_propagated", [c_void_p, _I32P], c_int),
+        ("gpap_flags", [c_void_p, _I8P, _I8P, c_int32], c_int),
+        ("gpap_num_propagated", [c_void_p, _I32P, c_int32], c_int),
         ("gpap_sat_rows", [c_void_p, _I32P, c_int32, _I32P], c_int),
         ("gpap_packed_rows", [c_void_p, _I32P, c_int32, _I32P], c_int),
         ("gpap_counters_get", [c_void_p, POINTER(Counters)], c_int),
@@ -189,7 +191,8 @@ def _declare(lib: ctypes.CDLL) -> None:
          [c_void_p, _I32P, c_int32, c_int32, POINTER(ProbeOptions), POINTER(c_void_p)], c_int),
         ("gpap_probe_tuples",
          [c_void_p, _I32P, c_int64, c_int32, POINTER(ProbeOptions), POINTER(c_void_p)], c_int),
-        ("gpap_probe_count", [c_void_p, _I32P, c_int32, c_int32, c_int32], c_int64),
+        ("gpap_probe_count",
+         [c_void_p, _I32P, c_int32, c_int32, POINTER(ProbeOptions)], c_int64),
         ("gpap_probe_free", [c_void_p], None),
         ("gpap_probe_stats_get", [c_void_p, POINTER(ProbeStats)], None),
         ("gpap_probe_conflicts", [c_void_p, _I32P, c_int64], c_int),
@@ -197,6 +200,7 @@ def _declare(lib: ctypes.CDLL) -> None:
         ("gpap_assume_units", [c_void_p, _I32P, c_int32], c_int),
         ("gpap_last_error", [], c_char_p),
         ("gpap_version", [], c_char_p),
+        ("gpap_build_id", [], c_char_p),
     ]
     for name, argtypes, restype in sig:
         fn = getattr(lib, name)
@@ -222,7 +226,16 @@ def i32(arr) -> np.ndarray:
 
 
 def version() -> str:
+    """The library's semantic VERSION — which release, not which build. See build_id()."""
     return load().gpap_version().decode()
+
+
+def build_id() -> str:
+    """Identity of this exact BUILD: "<version>+<fingerprint of libgpap's bytes>".
+
+    Key a cache of measurements on this, never on version(): the version has been "0.1.0"
+    throughout, so a rebuilt engine looked identical to the one measured last month."""
+    return load().gpap_build_id().decode()
 
 
 def trail_cap(num_vars: int) -> int:
@@ -307,7 +320,7 @@ class ProbeSweep:
 def _probe_options(seconds=None, max_tuples=None, batch=0, distinct_vars=True,
                    refuse_over_max=False):
     return ProbeOptions(float(seconds or 0.0), int(max_tuples or 0), int(batch or 0),
-                        1 if distinct_vars else 0, 1 if refuse_over_max else 0)
+                        0 if distinct_vars else 1, 1 if refuse_over_max else 0)
 
 
 def _pool_arg(pool) -> tuple:
@@ -439,20 +452,22 @@ class Engine:
     point). `gpap.engine.bcp_engine.BCPEngine` adapts this class to torch for the sampling
     stack; `gpap.engine.probe.LiteralProbe` consumes it directly."""
 
-    MODE_SCALAR, MODE_WAVE, MODE_AUTO = 0, 1, 2
-    _MODES = {"scalar": MODE_SCALAR, "wave": MODE_WAVE, "auto": MODE_AUTO}
+    # Mirrors gpap_mode in cpp/include/gpap/gpap.h — AUTO is 0 so that a zeroed options
+    # struct means the default on every face, C included.
+    MODE_AUTO, MODE_SCALAR, MODE_WAVE = 0, 1, 2
+    _MODES = {"auto": MODE_AUTO, "scalar": MODE_SCALAR, "wave": MODE_WAVE}
 
     def __init__(self, formula: Formula, device: int = 0, mode: "str | None" = None,
                  force_shift: int = 0, vscan: int = 0):
-        """`mode=None` resolves to $GPAP_KERNEL when set, else "auto" — HERE, once, so the env
-        override reaches every face built on this class rather than only the ones that remember
-        to read it. "auto" lets the CORE pick the kernel on every reset(K); the resolved request
-        is kept in `requested_mode`.
+        """`mode=None` means "auto": the CORE picks the kernel on every reset(K), and honours
+        $GPAP_KERNEL=scalar|wave there — the env override lives beside $GPAP_CLEAN in the C core
+        so it reaches every consumer, not only the ones written in Python. `requested_mode` is
+        what this caller ASKED for; `mode` is what the core resolved.
 
         Pin "scalar"/"wave" only to A/B them: the two share the same state and reach the same
         fixpoints, so the choice can change speed and nothing else."""
         lib = load()
-        self.requested_mode = mode or os.environ.get("GPAP_KERNEL") or "auto"
+        self.requested_mode = mode or "auto"
         self._f = formula                       # keep the formula alive
         h = c_void_p()
         opts = EngineOptions(device, self._mode_code(self.requested_mode), int(force_shift),
@@ -492,6 +507,13 @@ class Engine:
     @property
     def mode(self) -> str:
         return "wave" if load().gpap_engine_mode(self._h) == self.MODE_WAVE else "scalar"
+
+    @property
+    def auto_dispatch(self) -> bool:
+        """Is the CORE still choosing the kernel per reset(K)? Asked of the core rather than
+        inferred from `requested_mode`, because $GPAP_KERNEL pins there — inferring it in Python
+        would let a caller's own set_mode() quietly override the user's env pin."""
+        return bool(load().gpap_engine_auto(self._h))
 
     @classmethod
     def _mode_code(cls, mode: str) -> int:
@@ -653,7 +675,8 @@ class Engine:
         a second copy of this arithmetic in Python is exactly the drift the sizing collapse
         removed."""
         ptr, n = _pool_arg(pool)
-        return int(load().gpap_probe_count(self._h, ptr, n, int(k), 1 if distinct_vars else 0))
+        opts = _probe_options(distinct_vars=distinct_vars)
+        return int(load().gpap_probe_count(self._h, ptr, n, int(k), ctypes.byref(opts)))
 
     def free_literals(self) -> np.ndarray:
         """DIMACS literals the unit flush left undetermined, ascending by variable — what is
@@ -754,12 +777,13 @@ class Engine:
         k = self.K
         a = np.empty(k, dtype=np.int8)
         c = np.empty(k, dtype=np.int8)
-        check(load().gpap_flags(self._h, _p(a, c_int8), _p(c, c_int8)), "flags")
+        check(load().gpap_flags(self._h, _p(a, c_int8), _p(c, c_int8), k), "flags")
         return a.astype(bool), c.astype(bool)
 
     def num_propagated(self) -> np.ndarray:
         out = np.empty(self.K, dtype=np.int32)
-        check(load().gpap_num_propagated(self._h, _p(out, c_int32)), "implications")
+        check(load().gpap_num_propagated(self._h, _p(out, c_int32), out.size),
+              "implications")
         return out
 
     def sat_rows(self, rows) -> np.ndarray:

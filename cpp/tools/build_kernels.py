@@ -63,6 +63,23 @@ def _require_triton_gather():
             f"       pip install -U 'triton>=3.2'")
 
 
+def vscan_is_read(wave: int, soft: int) -> bool:
+    """Does the trajectory kernel's VSCAN constant reach any code for this (wave, soft)?
+
+    Its only use is guarded `if WAVE and VSCAN and not SOFT` (cpp/kernels/bcp.py), so for a
+    scalar or a SOFT trajectory the two VSCAN values compile to THE SAME kernel. We used to
+    emit both anyway: 6 of the 33 shipped cubins were byte-identical duplicates of another
+    entry, 0.19 MB of a 0.83 MB payload, and every one of them was a second copy of a
+    trajectory the engine can reach by two keys. `traj_key` in cpp/src/engine.cpp applies the
+    same rule, so the engine asks for the key that exists.
+
+    THE RULE LIVES IN TWO LANGUAGES and must agree; gated by
+    tests/test_kernel_table.py, which hashes the generated table and launches
+    every reachable key.
+    """
+    return bool(wave and not soft)
+
+
 def kernel_specs():
     """(key, module, fn_name, signature, num_warps) for every kernel binary we ship."""
     out = []
@@ -71,8 +88,8 @@ def kernel_specs():
             # _bcp_fixpoint_kernel(... M, NW, B, TRAIL_CAP, SHIFT, WAVE, W)
             out.append((f"fixpoint.s{shift}.w{wave}", "bcp", "_bcp_fixpoint_kernel",
                         _FIX_PTRS + ["i32"] * 4 + [shift, wave, WAVE_W], 1))
-            for vscan in (0, 1):
-                for soft in (0, 1):
+            for soft in (0, 1):
+                for vscan in ((0, 1) if vscan_is_read(wave, soft) else (0,)):
                     # _bcp_trajectory_kernel(... M, NW, P, NSUP, B, TRAIL_CAP, MAX_ROUNDS,
                     #                        seed, SOFT, SHIFT, WAVE, W, VSCAN)
                     out.append((f"trajectory.s{shift}.w{wave}.v{vscan}.f{soft}", "bcp",

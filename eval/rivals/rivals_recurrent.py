@@ -69,6 +69,7 @@ from eval.rivals.rival_common import (CACHE_MISS, VARIANTS, cache_peek,  # noqa:
                                       run_at_batch, variant_note)
 
 from gpap import paths
+from gpap.sampling.metrics import merge_sound_check, sound_verdict
 
 RIVAL_DEFAULT = str(paths.src_dir() / "Recurrent-CircuitSAT-Sampler")
 # Per-SUBPROCESS wall cap for the rival, default 300 s = 5x the 60 s sampling budget GPAP gets
@@ -297,8 +298,13 @@ def run_gpap(bench_file, T, pin_outputs, target, seeds, n_time, device, time_lim
         for s in seeds:
             # n_cov feeds distinct_frac only, but it COLLECTS models and rebuilds them in
             # Python — real wall on a deep unroll. Keep it small; it is not the measurement.
+            # verify_sound: this row RECORDS `sound_check`, so it has to run the check —
+            # otherwise the column is a permanent "off" beside a comment claiming it is the
+            # on-device model check. Free to the comparison: the check's wall is excluded from
+            # every rate (`verify_sound_s`), so the rival is not credited a millisecond for it.
             g = sample_file(cnf_path, device, n_time=n_time, n_cov=n_cov,
-                            configs=CIRCUIT_PORTFOLIO, time_limit=time_limit, seed=s)
+                            configs=CIRCUIT_PORTFOLIO, time_limit=time_limit, seed=s,
+                            verify_sound=True)
             runs.append({"seed": s, "sps": g["samples_per_s"], "sps_e2e": g.get("sps_e2e_total"),
                          # KEEP None. `or 0.0` turned "the coverage run collected nothing" into
                          # "GPAP produced nothing", and every consumer buckets a zero as an
@@ -326,8 +332,9 @@ def run_gpap(bench_file, T, pin_outputs, target, seeds, n_time, device, time_lim
                                   (runs[0].get("unique_est_status") or "no-coverage-sample")),
             "sps": med("sps"),
             "success": med("success"), "n_vars": b.nv, "n_clauses": len(b.clauses),
-            "sound_check": ("UNSOUND" if any(r.get("sound_check") == "UNSOUND" for r in runs)
-                            else (runs[0].get("sound_check") or "off")),
+            # merge_sound_check, not seed 0's verdict: UNSOUND dominates and "ok" beats "off",
+            # so a mixed set of seeds cannot publish the first seed's silence as the answer.
+            "sound_check": merge_sound_check(*(sound_verdict(r) for r in runs)),
             "decisions_per_s": med0("decisions_per_s"),
             "implications_per_s": med0("implications_per_s"),
             "n_models": int(med("n_models"))}

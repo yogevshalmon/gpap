@@ -33,7 +33,7 @@ def trail_cap(num_vars: int) -> int:
     against the assignment bitmap, so a variable contributes at most one entry before the row
     conflicts. There is consequently no ceiling on the decision batch B anywhere in the engine —
     deciding the whole support in one round is a supported configuration, and the one the
-    "B >= |support| is exactly uniform" property uses. Proof: cpp/src/engine.cpp::trail_cap_for."""
+    "B >= |support| is exactly uniform" property uses. Proof: cpp/src/calibrate.cpp::gpap_trail_cap."""
     return _core.trail_cap(num_vars)
 
 

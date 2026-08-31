@@ -56,8 +56,9 @@ cpp/                       # THE ENGINE CORE — libgpap (C ABI + header-only C+
   src/runtime.cpp          # cubin registry + launches
   kernels/bcp.py           # THE 2 BCP kernels (fixpoint + trajectory, SHIFT=16|8, scalar/WAVE)
   kernels/helpers.py       # support kernels (Triton, so the toolchain stays nvcc-free)
-  tools/build_kernels.py   # AOT: kernels.py + helpers.py -> embedded cubins (33 specializations)
-  examples/                # sample.cpp + assumptions.cpp (tier 1) + c_api.c (raw C ABI)
+  tools/build_kernels.py   # AOT: kernels.py + helpers.py -> embedded cubins (27 specializations;
+                           #   `vscan_is_read` is why it is not 33 — see Ground rules)
+  examples/                # sample.cpp + assumptions.cpp + probe.cpp (tier 1) + c_api.c (raw C ABI)
 examples/                  # RUNNABLE examples, both faces: sample_solutions.py +
                            #   check_assumptions.py (python) + a README pointing at cpp/examples/
 gpap/
@@ -273,7 +274,7 @@ kernels are the only path — the oracle is `tests/reference_bcp.py`).
   used to be sized by the width of the last apply and only ever grew**, so the construction units
   flush inflated it permanently — 10.sk_1_46 (1,121 units) ran at 2,623 instead of 1,566, +27%
   per-row forever. It is bounded by the VARIABLE count (every trail push is bitmap-deduped), see
-  the proof at `cpp/src/engine.cpp::trail_cap_for`. Net: K is 1.4-2.5x larger; kill-switch 81% of
+  the proof at `cpp/src/calibrate.cpp::gpap_trail_cap`. Net: K is 1.4-2.5x larger; kill-switch 81% of
   VRAM, sound in both kernels. ⚠️ wave and scalar agree exactly on MODELS and DECISIONS but the
   IMPLICATION counter differs ~0.6% — gate on models, not counters. **The cause is CONFLICTED rows,
   not a tally bug** (checked; the earlier "wave tallies pre-dedup pushes" note was
@@ -298,8 +299,14 @@ kernels are the only path — the oracle is `tests/reference_bcp.py`).
   slice-writes cost 16× sector RMW amplification, measured).
 - **Kernel variant auto-dispatch lives in the CORE** — `GPAP_MODE_AUTO`, resolved inside
   `gpap_engine_reset`. Every consumer gets it, not just the one that asks, and that
-  now includes consumers written against the C ABI. ⚠️ **This is the THIRD time the same hole
-  opened**: the rule used to be applied by the two WRAPPERS (`BCPEngine.plan_for`,
+  now includes consumers written against the C ABI. ⚠️ **This is the FOURTH time the same hole
+  opened**, and the last one was IN THE DEFAULT ITSELF: `gpap_engine_options.mode` was
+  `GPAP_MODE_SCALAR` and scalar was 0, so `{0}` / NULL opts — the spelling the header calls
+  "every default" — gave the raw C face the one kernel that never dispatches, worth 1.28-2.20x.
+  **`GPAP_MODE_AUTO` is 0 now**, so the zero value and the documented default are the same thing
+  by construction rather than by remembering. (The same trap had already been fixed once for
+  `vscan`; `gpap_probe_options.same_var` was the third field, below.) The rule used to be applied
+  by the two WRAPPERS (`BCPEngine.plan_for`,
   `gpap::Engine::plan_for`), so for a time only GPUSampler dispatched (batched assumptions
   ran scalar, 1.05-1.15x left on the table) and then `gpap_probe_combinations` — which calls the
   ABI directly — ran scalar from its port until this was fixed (measured 1.28x on b03-c25 M=14.5k,
@@ -332,8 +339,11 @@ kernels are the only path — the oracle is `tests/reference_bcp.py`).
   a faster kernel would mine more and the arms would run different formulas): **1.30× geomean,
   1.01× below 2k clauses → 1.33× (2k–20k) → 1.48× (20k–100k) → 1.64× (>100k)**; the rule picked
   the faster kernel on 77/93, every miss in the M≈0.5–9k tie band. docs/findings/KERNEL_AB_FINDINGS.md.
-  Session total vs the pre-wave baseline: b14 5.7×, b12 2.8×, b04 1.8×, b03 1.5×. `GPAP_KERNEL=scalar|wave`
-  forces; W is the AOT constant `WAVE_W` in `cpp/tools/build_kernels.py`, power-of-two only
+  Session total vs the pre-wave baseline: b14 5.7×, b12 2.8×, b04 1.8×, b03 1.5×.
+  `GPAP_KERNEL=scalar|wave` forces — read in the CORE beside `GPAP_CLEAN`, so it reaches every
+  consumer, and applied only where AUTO resolves so it can never contradict an explicit pin
+  (`gpap_engine_auto` is how a caller asks whether it may pin one of its own);
+  W is the AOT constant `WAVE_W` in `cpp/tools/build_kernels.py`, power-of-two only
   (32 best; BOTH ways of raising it measured out — over W/32 REAL warps, and as ILP within one
   warp). **The wave lane→segment schedule is SHUFFLE-BASED since 2026-08-27**: a `tl.gather`
   lower_bound (`_seg_lookup`) replaced the W×W one-hot reductions, which lowered through SHARED
@@ -378,7 +388,7 @@ scripts/build_abc.sh                                         # optional: pinned 
 | ELS (equivalent-literal substitution) | **on** | `--no-els` |
 | entailed-clause mining | **on** above `MINE_MIN_CLAUSES`, bounded by `MINE_SECONDS` | `--mine off` |
 | mined clauses | **kept only if they pay** (below) | — |
-| soundness re-check of emitted models | **off** everywhere (`eval/run_full_eval.sh`: on) | `--verify-sound` |
+| soundness re-check of emitted models | **off** everywhere | — it is OPT-IN: `--verify-sound` turns it ON (`eval/run_full_eval.sh` does) |
 
 ⚠️ **`gpap sample`/`gpap bench` default to `--portfolio circuit` for EVERY input, including a
 plain CNF, and on CNF that costs certificates**: `circuit` has no `s1`, so the bandit falls back to
@@ -404,15 +414,30 @@ with the flags above. Validation and per-instance numbers: docs/findings/MINING_
   It is a SELF-TEST, not part of producing samples — a row is only counted when it is active and
   fully assigned, which already means no clause was emptied — so it is not a tax on every run,
   and `verify_artifact` counts it without requiring it. Reported as **`sound_check`: `"ok"` |
-  `"UNSOUND"` | `"off"`** plus `unsound_rows` — a tri-state, never a bool, because "not run" is
-  neither verdict (the `unique_est_status` lesson). Its wall is `verify_sound_s`, EXCLUDED from
-  every rate exactly as `out_project_s` is, so enabling it cannot move samples/s; cost grows with
-  the formula (measured 0.13-0.84% of a chunk).
+  `"UNSOUND"` | `"off"`** plus `unsound_rows` and `sound_rows_checked` — a tri-state, never a
+  bool, because "not run" is neither verdict (the `unique_est_status` lesson). ⚠️ **"off" also
+  covers REQUESTED-BUT-NEVER-REACHED**: the check runs per chunk over the rows that chunk
+  COMPLETED, so a 0%-success run (or one a `--time-limit` cut before its first completion) never
+  calls it — and reporting that as `"ok"` is the same conflation one state along, an un-run check
+  published as a passing one. `sound_rows_checked` is the evidence; it is what a verdict is a
+  statement about. (It caught a real one: `test_wide_matches_base_random` had been comparing two
+  EMPTY model sets on five instances and asserting `"ok"` over them.) ⚠️ **UNSOUND DOMINATES when
+  the timed and coverage runs are merged** (`metrics.merge_sound_check`) — preferring the timed
+  run's verdict published `sound_check: "ok"` beside a non-zero `unsound_rows`, and every
+  consumer branches on the string.
+  Its wall is `verify_sound_s`, EXCLUDED from every rate exactly as `out_project_s` is, so
+  enabling it cannot move samples/s — ⚠️ **and it has to be subtracted BY THE PIPELINE**, not
+  only stamped per config: `best_rate_sps` exists only on the adaptive path, so a PINNED single
+  config (the mode every measurement uses) falls back to `n_models / wall` and would carry the
+  check. Exactly the hole documented for `out_project_s` one line up, reopened.
   ⚠️ It used to run unconditionally on a **4096-row prefix** of each chunk, a cap that sized a
   (rows, M) host transient deleted long ago — so it bounded only the COVERAGE, leaving
   "0 unsound" standing on as little as **4.8% of what a chunk emitted**. ⚠️ The old key was
-  `gpu_sound` (a bool); recorded rows still carry it and `paper_tables.sound_failed` /
-  `sound_unchecked` read both shapes. ⚠️ A conflicted row is NOT necessarily unsound: on the
+  `gpu_sound` (a bool) and recorded rows still carry it. **`gpap.sampling.metrics.sound_verdict`
+  is THE reader** (legacy shape included) and `merge_sound_check` THE fold: the bench table, the
+  CLI, the Colab driver, the rival harnesses and `paper_tables` all import them. They were six
+  open-coded string compares, of which only two handled the legacy key — so a resumed campaign
+  reported a fully verified sweep as "not run", and a legacy FAILURE as a non-verdict. ⚠️ A conflicted row is NOT necessarily unsound: on the
   scalar kernel nearly every conflict surfaces as a contradictory PUSH, having emptied no
   clause. Gated by tests/test_core.py::test_check_sound_agrees_with_an_independent_recount.
 - **KEEP-IF-IT-HELPS**: mined clauses of width ≥ 3 enlarge `num_long`, and `K ~ budget/4M_long`,
@@ -613,6 +638,32 @@ Cross-GPU K-scaling: `eval/colab/colab_sampling_benchmark.py` + `notebooks/gpap_
 
 ## Ground rules (do not re-litigate — see docs/findings/INSIGHTS.md)
 
+- **An ABI break MUST move the soname.** libgpap is 0.2.0 / SOVERSION 1 as of the defaults
+  change; a caller that only RELINKS gets none of the compile errors the renames were chosen for,
+  and under SOVERSION 0 it would have read `GPAP_MODE_WAVE` as scalar and passed an int where a
+  `gpap_probe_options*` is dereferenced. Bump both again on the next break.
+- **`{0}` MUST equal NULL on every options struct.** Three fields have broken it (`vscan`,
+  `mode`, `same_var`) and each was a silent wrong default on the raw C face, which is the ONE
+  face with no wrapper to fix it up. So: every field's zero is its default, and where the useful
+  default is "on", the field is named for the OPT-OUT (`same_var`, not `distinct_vars`). A
+  renamed field is a compile error for an out-of-tree caller — a flipped one with the same name
+  is not, which is why the rename is the fix and not a comment.
+- **A cubin the kernel cannot tell apart is a cubin we do not ship.** A `tl.constexpr` guarded
+  by other constants (`if WAVE and VSCAN and not SOFT`) must not be specialized where it is
+  unread: 6 of 33 shipped cubins were byte-identical duplicates, 23% of the payload. The rule
+  lives in `build_kernels.vscan_is_read` AND `engine.cpp::traj_key` — trimming the matrix and
+  normalizing the lookup key are one change, and half of it is a launch-time `GPAP_ERR_KERNEL`.
+  Gated by tests/test_kernel_table.py.
+- ⚠️ **Cubin BYTE-identity is not a no-change gate.** Inserting 55 blank lines into `bcp.py`,
+  with no code change at all, moves 24 of 33 cubins: line info is embedded. Compare the
+  **executable sections** (SHF_EXECINSTR) instead — that is what proved the shared-body refactor
+  of `_bcp_fixpoint_kernel` / `_bcp_fixpoint_clean_kernel` emits identical SASS for all 27.
+  Compilation IS deterministic (33/33 byte-identical across two runs of one source), so a
+  same-source A/B is still exact.
+- **Key a results cache on `gpap_build_id()`, never `gpap_version()`.** The version has read
+  "0.1.0" for the project's whole life while the engine got 1.8x faster under it; the build id is
+  a fingerprint of the loaded library's own bytes. It is what `_core_provenance()` stamps into
+  every row and what the rival cache keys on.
 - Runtime per-batch memory PROBES are unreliable → fixed 4×-floor K stays.
 - This box SPILLS to host RAM (never OOMs) → validate every K change under the nvidia-smi
   kill-switch; check the power state first (a 40 W cap / battery clocks ~halve every rate).

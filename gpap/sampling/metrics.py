@@ -18,6 +18,41 @@ import time
 import numpy as np
 
 
+# --------------------------------------------------------------- the soundness verdict, once
+# A row's on-GPU soundness re-check is a TRI-STATE — "ok" / "UNSOUND" / "off" — and reading it
+# is not a one-liner, because recorded rows carry two schemas. Every consumer that has to read
+# it lives somewhere different (the bench table, the CLI, the Colab driver, the rival harnesses,
+# the paper tables, the artifact gate), so the rule lives HERE and they import it. It was six
+# open-coded string comparisons, of which only two remembered the legacy key: a resumed campaign
+# mixing old and new rows reported a fully verified sweep as "not run", and a legacy FAILURE as
+# a non-verdict.
+SOUND_OK, SOUND_BAD, SOUND_OFF = "ok", "UNSOUND", "off"
+
+
+def sound_verdict(row) -> str:
+    """The tri-state verdict of one recorded row, legacy schema included.
+
+    Pre-2026-08-30 rows carry `gpu_sound: bool` and no `sound_check`; those runs always checked,
+    so a bool IS a verdict there. A row with neither key never checked."""
+    verdict = row.get("sound_check")
+    if verdict in (SOUND_OK, SOUND_BAD, SOUND_OFF):
+        return verdict
+    if "gpu_sound" in row:                       # legacy: the check was unconditional
+        return SOUND_OK if row["gpu_sound"] else SOUND_BAD
+    return SOUND_OFF
+
+
+def merge_sound_check(*verdicts) -> str:
+    """Fold several verdicts into one. UNSOUND DOMINATES, then "ok", then "off".
+
+    Any other order loses a failure: a merge that preferred one run's "ok" published it beside
+    the other run's non-zero `unsound_rows`, and the consumers all branch on the string."""
+    seen = [v for v in verdicts if v]
+    if SOUND_BAD in seen:
+        return SOUND_BAD
+    return SOUND_OK if SOUND_OK in seen else SOUND_OFF
+
+
 def _gammq(a: float, x: float) -> float:
     """Regularized upper incomplete gamma Q(a, x) (Numerical-Recipes gser/gcf, via lgamma).
     Q(k/2, x/2) is the chi-square survival function — avoids a scipy dependency."""
