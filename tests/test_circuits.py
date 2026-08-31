@@ -62,10 +62,11 @@ def test_circuit_models_sound(circuit_cnfs, name):
     nv, clauses, support = _inst(circuit_cnfs, name)
     smp = _collecting_sampler(nv, clauses, support, k_cap=256, simplify=True)
     out = smp.sample(400, configs=[(True, 8, False)], max_chunks=3, collect=True,
+                     verify_sound=True,
                      verify_clauses=clauses)
     assert out["n_models"] > 0
     assert out["all_valid"], f"{name}: emitted a model violating the original clauses"
-    assert out["gpu_sound"]
+    assert out["sound_check"] == "ok"
 
 
 @gpu
@@ -75,8 +76,9 @@ def test_circuit_models_sound_matrix(circuit_cnfs, name):
     nv, clauses, support = _inst(circuit_cnfs, name)
     smp = _collecting_sampler(nv, clauses, support, k_cap=1024, simplify=True)
     out = smp.sample(1000, configs=[(True, 8, False), (True, 8, "soft")], max_chunks=4,
+                     verify_sound=True,
                      collect=True, verify_clauses=clauses)
-    assert out["n_models"] > 0 and out["all_valid"] and out["gpu_sound"]
+    assert out["n_models"] > 0 and out["all_valid"] and out["sound_check"] == "ok"
     for m in out["models"][:64]:
         assert _satisfies(m, clauses)
 
@@ -147,7 +149,7 @@ def test_circuit_contract_delivers_n_time(circuit_cnfs):
     from gpap.sampling.pipeline import sample_clauses, CIRCUIT_PORTFOLIO
     nv, clauses, support = _inst(circuit_cnfs, "b02-c1") if "b02-c1" in circuit_cnfs \
         else _inst(circuit_cnfs, "s386-c1")
-    info = sample_clauses(nv, clauses, support, DEV, n_time=5000, n_cov=0,
+    info = sample_clauses(nv, clauses, support, DEV, n_time=5000, n_cov=0, verify_sound=True,
                           configs=CIRCUIT_PORTFOLIO, time_limit=30.0)
     assert info["n_models"] >= 5000 and not info["chunk_capped"]
 
@@ -175,5 +177,6 @@ def test_circuit_deep_cascade_c25(circuit_cnfs):
     nv, clauses, support = _inst(circuit_cnfs, "b03-c25")
     smp = _collecting_sampler(nv, clauses, support, k_cap=1024, simplify=True)
     out = smp.sample(1000, configs=[(True, 1, "soft"), (True, 8, False)], max_chunks=6,
+                     verify_sound=True,
                      collect=True, verify_clauses=clauses)
-    assert out["n_models"] > 0 and out["all_valid"] and out["gpu_sound"]
+    assert out["n_models"] > 0 and out["all_valid"] and out["sound_check"] == "ok"

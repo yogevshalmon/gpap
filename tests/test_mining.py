@@ -552,11 +552,11 @@ class TestMiningPipelineDefaults:
         pins the bookkeeping (`kept`/`gain` present and consistent), not the direction."""
         c = circuit_cnfs["b03-c25"]
         info = sample_clauses(c["nv"], c["clauses"], c["support"], DEV, n_time=2000,
-                              time_limit=30.0, mine=True)
+                              time_limit=30.0, mine=True, verify_sound=True)
         mi = info.get("mined")
         if mi is None:
             pytest.skip("nothing mined on this instance")
         assert "kept" in mi and "gain" in mi
         if mi["gain"] is not None and mi["kept"]:
             assert mi["gain"] > 1.0, "clauses were kept, so the guard must have seen a gain"
-        assert info["gpu_sound"], "the run must be sound whether or not the clauses were kept"
+        assert info["sound_check"] == "ok", "the run must be sound whether or not the clauses were kept"

@@ -56,6 +56,11 @@ CYCLES="${CYCLES:-25 50}"
 N_TIME="${N_TIME:-50000}"
 TIME_LIMIT="${TIME_LIMIT:-60}"
 N_COV="${N_COV:-0}"                 # >0 adds the quality pass (2-wise + distinct); costs a 2nd pass
+# The on-GPU re-check that every emitted model satisfies every clause. OFF everywhere else (it
+# is a self-test, not part of a throughput number), ON here: a campaign's rows get published, so
+# the extra coverage is worth its wall — which is billed to `verify_sound_s` and excluded from
+# every rate, so it cannot move a measurement. Set VERIFY_SOUND=0 to skip it.
+VERIFY_SOUND="${VERIFY_SOUND:-1}"
 SEEDS="${SEEDS:-}"                  # e.g. "5 6 7" -> median-of-3 (docs/BENCHMARKING.md §3)
 MAX_CLAUSES="${MAX_CLAUSES:-4000000}"
 # Extra args appended to EVERY `gpap bench` call. The reason this exists rather than a flag: the
@@ -97,6 +102,7 @@ if [ -x "$CMSGEN" ]; then CMS_ARGS=(--cmsgen "$CMSGEN"); else
     echo "[warn] no cmsgen at $CMSGEN — running GPAP-only (scripts/build_cmsgen.sh)" >&2
 fi
 SEED_ARGS=(); [ -n "$SEEDS" ] && SEED_ARGS=(--seeds $SEEDS)
+SOUND_ARGS=(); [ "$VERIFY_SOUND" != "0" ] && SOUND_ARGS=(--verify-sound)
 
 banner() { echo; echo "=============== $* ==============="; date -Is; }
 
@@ -123,6 +129,7 @@ bench() {
         --max-clauses "$MAX_CLAUSES" --scratch "$SCRATCH" \
         --output "$json" --resume --tag "$name" \
         ${CMS_ARGS[@]+"${CMS_ARGS[@]}"} ${SEED_ARGS[@]+"${SEED_ARGS[@]}"} \
+        ${SOUND_ARGS[@]+"${SOUND_ARGS[@]}"} \
         $EXTRA_ARGS "$@" 2>&1 | tee -a "$log"
 }
 

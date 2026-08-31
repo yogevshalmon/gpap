@@ -178,9 +178,9 @@ def _declare(lib: ctypes.CDLL) -> None:
         ("gpap_sat_rows", [c_void_p, _I32P, c_int32, _I32P], c_int),
         ("gpap_packed_rows", [c_void_p, _I32P, c_int32, _I32P], c_int),
         ("gpap_counters_get", [c_void_p, POINTER(Counters)], c_int),
-        ("gpap_trail_cap", [c_int32, c_int32], c_int32),
+        ("gpap_trail_cap", [c_int32], c_int32),
         ("gpap_row_bytes", [c_int32, c_int32, c_int32], c_int64),
-        ("gpap_compute_k_safe", [c_int32, c_int32, c_int64, c_int32, c_int32], c_int32),
+        ("gpap_compute_k_safe", [c_int32, c_int32, c_int64, c_int32], c_int32),
         ("gpap_default_k_cap", [c_int], c_int32),
         ("gpap_mem_available", [c_int, ctypes.c_double], c_int64),
         ("gpap_resident_warps", [c_int], c_int32),
@@ -225,9 +225,9 @@ def version() -> str:
     return load().gpap_version().decode()
 
 
-def trail_cap(num_vars: int, decisions_per_round: int = 8) -> int:
-    """Trail slots one row can need — bounded by the VARIABLE count (see gpap.h)."""
-    return int(load().gpap_trail_cap(int(num_vars), int(decisions_per_round)))
+def trail_cap(num_vars: int) -> int:
+    """Trail slots one row needs — a function of the VARIABLE count alone (see gpap.h)."""
+    return int(load().gpap_trail_cap(int(num_vars)))
 
 
 def row_bytes(M: int, N: int, trail_cap_: int = 0) -> int:
@@ -235,12 +235,10 @@ def row_bytes(M: int, N: int, trail_cap_: int = 0) -> int:
     return int(load().gpap_row_bytes(int(M), int(N), int(trail_cap_)))
 
 
-def compute_k_safe(M: int, N: int, gpu_mem_bytes: float, cap: "int | None" = None,
-                   decisions_per_round: int = 8) -> int:
+def compute_k_safe(M: int, N: int, gpu_mem_bytes: float, cap: "int | None" = None) -> int:
     """Largest K fitting `gpu_mem_bytes`. THE sizing call — the model lives in
     cpp/src/calibrate.cpp and this is a binding, not a second implementation."""
-    return int(load().gpap_compute_k_safe(int(M), int(N), int(gpu_mem_bytes),
-                                          int(cap or 0), int(decisions_per_round)))
+    return int(load().gpap_compute_k_safe(int(M), int(N), int(gpu_mem_bytes), int(cap or 0)))
 
 
 def mem_available(device: int = 0, fraction: float = 0.80) -> int:
@@ -259,9 +257,9 @@ def dispatch_wave(num_clauses: int, batch: int, device: int = 0) -> bool:
 
 
 def default_k_cap(device: int = 0) -> int:
-    """The core's VRAM-proportional batch cap for `device` — the same rule (and the same two
-    constants) that `gpap.engine.calibrate.default_k_cap` applies from Python. Bound here so the
-    two faces can be asserted equal rather than assumed equal (tests/test_k_cap.py)."""
+    """The core's default batch cap — one constant, the same on every device (`device` is
+    accepted and ignored). Bound here so the two faces can be asserted equal rather than assumed
+    equal (tests/test_k_cap.py)."""
     return int(load().gpap_default_k_cap(int(device)))
 
 
@@ -721,8 +719,11 @@ class Engine:
         n = self.selection_set(self.SCRATCH_SLOT, rows)
         return self.assignment_rows(self.SCRATCH_SLOT, n)
 
-    def check_sound(self, slot: int = 0, max_rows: int = 4096) -> int:
-        """How many selected rows have a clause with sat_count == 0 (must be 0)."""
+    def check_sound(self, slot: int = 0, max_rows: int = 0) -> int:
+        """How many selected rows have a clause with sat_count == 0 (must be 0).
+
+        0 = every selected row. A positive bound checks a PREFIX, which makes the answer a
+        statement about that prefix only."""
         n = c_int32(0)
         check(load().gpap_check_sound(self._h, int(slot), int(max_rows), byref(n)), "soundness")
         return int(n.value)

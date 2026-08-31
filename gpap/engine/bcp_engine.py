@@ -280,11 +280,16 @@ class BCPEngine:
         complete" at the same time."""
         return self._core.select_complete(mask_id, slot)
 
-    def check_sound(self, slot: int = 0, max_rows: int = 4096) -> int:
+    def check_sound(self, slot: int = 0, max_rows: int = 0) -> int:
         """How many selected rows have ANY clause with sat_count == 0 — must be 0.
 
         At a FULLY-assigned row, non-falsified <=> TRUE, so `all sat_count > 0` <=> satisfied.
-        Evaluated on device: no (rows, M) transfer, no slice budget."""
+        Evaluated on device: no (rows, M) transfer, no slice budget.
+
+        `max_rows = 0` (the default) checks EVERY selected row. Pass a positive bound only to
+        deliberately sample a prefix: a partial check makes "0 unsound" a statement about that
+        prefix, not about what the caller received. The default used to be 4096, sizing a host
+        transient that no longer exists."""
         return self._core.check_sound(slot, max_rows)
 
     def var_bits(self, slot: int, cols, count: int) -> np.ndarray:

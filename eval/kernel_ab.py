@@ -15,7 +15,7 @@ METHOD — every rule here was a wrong number once; do not "simplify":
   * MINING IS OFF: mining is wall-budgeted, so a faster kernel mines MORE clauses and the two
     arms would run DIFFERENT formulas (M, K and everything downstream would move);
   * VALIDATION before timing: both arms at a pinned K (`--val-k-cap`) for a fixed number of
-    chunks (`--val-chunks`) must be gpu_sound and produce IDENTICAL model counts — BCP is
+    chunks (`--val-chunks`) must pass the soundness re-check and produce IDENTICAL model counts — BCP is
     confluent, so at equal K/seed/chunks the kernels agree on every model (the repo's no-change
     gate). Every arm also records the sampler's own `engine.mode` provenance, the proof that the
     forced kernel is what ran;
@@ -100,7 +100,7 @@ def run_arm(kernel, cnf, device, configs, *, n_time, time_limit, k_cap, max_chun
             "succ": g["success_rate"], "models": g["n_models"],
             "wall_timed_s": g.get("wall_timed_s"), "chunk_capped": g.get("chunk_capped"),
             "dec_s": g.get("decisions_per_s"), "impl_s": g.get("implications_per_s"),
-            "sound": g.get("gpu_sound"), "mode": eng.get("mode"), "K": eng.get("K"),
+            "sound": g.get("sound_check"), "mode": eng.get("mode"), "K": eng.get("K"),
             "batch": eng.get("batch"), "split": eng.get("split"),
             "M": g.get("n_clauses"), "nv": g.get("nv"), "support": len(g.get("sup1") or [])}
 

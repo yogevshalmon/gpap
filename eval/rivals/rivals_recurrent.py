@@ -307,10 +307,10 @@ def run_gpap(bench_file, T, pin_outputs, target, seeds, n_time, device, time_lim
                          "unique_per_s_est": g.get("unique_sps_est"),
                          "unique_est_status": g.get("unique_est_status"),
                          "success": g["success_rate"], "n_models": g["n_models"],
-                         # engine provenance per row, same as the CMSGen sweeps: gpu_sound is
-                         # the on-device model check, dec/s + impl/s let the zero-search screen
+                         # engine provenance per row, same as the CMSGen sweeps: sound_check is
+                         # the on-device model check (opt-in), dec/s + impl/s let the zero-search screen
                          # (paper_tables.zero_search) run on rival rows too
-                         "gpu_sound": g.get("gpu_sound"),
+                         "sound_check": g.get("sound_check"),
                          "decisions_per_s": g.get("decisions_per_s"),
                          "implications_per_s": g.get("implications_per_s")})
     finally:
@@ -326,7 +326,8 @@ def run_gpap(bench_file, T, pin_outputs, target, seeds, n_time, device, time_lim
                                   (runs[0].get("unique_est_status") or "no-coverage-sample")),
             "sps": med("sps"),
             "success": med("success"), "n_vars": b.nv, "n_clauses": len(b.clauses),
-            "gpu_sound": all(r.get("gpu_sound") is not False for r in runs),
+            "sound_check": ("UNSOUND" if any(r.get("sound_check") == "UNSOUND" for r in runs)
+                            else (runs[0].get("sound_check") or "off")),
             "decisions_per_s": med0("decisions_per_s"),
             "implications_per_s": med0("implications_per_s"),
             "n_models": int(med("n_models"))}

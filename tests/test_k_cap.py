@@ -1,76 +1,49 @@
-"""The VRAM-proportional K cap.
+"""The default batch cap.
 
-Throughput is ~linear in K, so the cap decides what a bigger GPU is allowed to do. A hardcoded
-cap in every driver pinned large-VRAM cards to the reference card's batch size, so a cross-GPU
-sweep reproduced the small card's numbers and could not answer "does this scale with the GPU?"
-at all.
+Throughput is ~linear in K up to saturation, so the cap decides what a chunk is allowed to be.
+It is ONE constant, the same on every GPU, and that device-independence is the property gated
+here: `--k-cap auto` must mean the same batch on the laptop, the L4 and the A100, so two
+machines' rows are comparable without anyone remembering to pin an override.
 
-Two properties are gated here, and the FIRST one is the important one:
+It used to scale with the card's total VRAM off a reference card's historical cap (49,152 at
+12.0 GiB). That was removed because (a) it made `auto` machine-dependent, which is a trap in
+a cross-GPU sweep, and (b) it had stopped doing anything anyway: a floor of 262,144 sat 5.3x
+above the reference cap, so the proportional term could not win below ~68 GB of VRAM and every
+card in reach got the floor regardless.
 
-  * at or below the reference card's VRAM the cap is EXACTLY the historical 49,152, so no result
-    measured on the reference box moves because of this change;
-  * above it the cap grows with total VRAM, so the headroom is actually reachable.
+The cap is a SATURATION limit, not a memory bound — `compute_k_safe` is what keeps a chunk
+inside VRAM. Measured: a 4x larger batch bought +2.8%, auto-vs-pinned across three GPUs ~1%.
 
-These are pure arithmetic over a VRAM number — no GPU needed, which is the point: the property
-must hold for hardware we do not have in front of us.
-
-The cap keys off TOTAL VRAM, not free memory: a free-memory cap is not reproducible (it moved
-between two runs in one session on an idle box), and a sweep whose K depends on what else was
-resident is not a measurement. `test_auto_is_stable_across_calls` is that regression.
+It must also not key off FREE memory: that is not reproducible (it moved between two runs in
+one session on an idle box), and a sweep whose K depends on what else was resident is not a
+measurement. `test_auto_is_stable_across_calls` is that regression.
 """
+import os
+
 import pytest
 import torch
 
-from gpap.engine.calibrate import (
-    K_CAP_REF,
-    K_CAP_VRAM_REF,
-    default_k_cap,
-    resolve_k_cap,
-)
+from gpap.engine.calibrate import K_CAP, default_k_cap, resolve_k_cap
 
-# The historical constant. Spelled out rather than imported so that editing K_CAP_REF cannot
-# silently make this test agree with itself.
-LEGACY_K_CAP = 49_152
+# Spelled out rather than imported so that editing K_CAP cannot silently make this test agree
+# with itself. Moving it re-scales every future run's batch: change it deliberately, and expect
+# recorded sweeps to stop being comparable.
+EXPECTED_CAP = 262_144
+REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
 
-def _cap_for_vram(total_bytes):
-    """default_k_cap's arithmetic against an arbitrary card size (what that GPU would get)."""
-    return max(K_CAP_REF, int(K_CAP_REF * total_bytes / K_CAP_VRAM_REF))
+def test_the_cap_is_the_documented_constant():
+    assert K_CAP == EXPECTED_CAP
 
 
-def test_reference_constant_is_the_historical_cap():
-    assert K_CAP_REF == LEGACY_K_CAP
-
-
-@pytest.mark.parametrize("frac", [0.1, 0.5, 0.9, 1.0])
-def test_no_op_at_or_below_the_reference_card(frac):
-    """A card no bigger than the reference box must get exactly the old cap — the guarantee that
-    this change cannot move an existing number."""
-    assert _cap_for_vram(K_CAP_VRAM_REF * frac) == LEGACY_K_CAP
-
-
-@pytest.mark.parametrize("gpu,total,lo", [
-    ("L4 24GB",     24e9,  1.8),
-    ("L40S 48GB",   48e9,  3.7),
-    ("A100 80GB",   80e9,  6.2),
-    ("H200 141GB", 141e9, 10.9),
-])
-def test_scales_above_the_reference_card(gpu, total, lo):
-    """...and a bigger card must actually get more. The targets we might actually run on, with a
-    FLOOR rather than an equality so int() truncation is not asserted as behaviour."""
-    cap = _cap_for_vram(total)
-    assert cap >= LEGACY_K_CAP * lo, gpu
-    assert cap <= LEGACY_K_CAP * (total / K_CAP_VRAM_REF) + 1, gpu
-
-
-def test_monotone_in_vram():
-    caps = [_cap_for_vram(K_CAP_VRAM_REF * m) for m in (0.5, 1.0, 2.0, 4.0, 10.0)]
-    assert caps == sorted(caps)
-
-
-def test_cpu_device_gets_the_reference_cap():
-    """No CUDA budget to exploit — and it must not crash asking for one."""
-    assert default_k_cap(torch.device("cpu")) == K_CAP_REF
+@pytest.mark.parametrize("device", ["cpu", "cuda"])
+def test_cap_is_device_independent(device):
+    """THE property: same cap everywhere. A CPU device must answer without touching the driver,
+    and a CUDA device must answer the same number — otherwise `auto` silently means a different
+    experiment per machine."""
+    if device == "cuda" and not torch.cuda.is_available():
+        pytest.skip("needs CUDA")
+    assert default_k_cap(torch.device(device)) == EXPECTED_CAP
 
 
 def test_resolve_passes_explicit_values_through_untouched():
@@ -103,13 +76,6 @@ def test_core_and_python_caps_agree():
     if not _core.available():
         pytest.skip("needs a built libgpap")
     assert _core.default_k_cap(0) == default_k_cap(torch.device("cuda"))
-
-
-@pytest.mark.gpu
-def test_auto_is_at_least_the_reference_cap_on_this_gpu():
-    if not torch.cuda.is_available():
-        pytest.skip("needs CUDA")
-    assert default_k_cap(torch.device("cuda")) >= K_CAP_REF
 
 
 @pytest.mark.gpu
@@ -185,21 +151,49 @@ def test_row_bytes_matches_the_engine_allocation_list():
     for M, N in [(2215, 1494), (14505, 5701), (201437, 77151)]:
         want = (4 * M                              # packed clause word
                 + 4 * ((2 * N + 31) // 32)         # assignment bitmap
-                + 4 * trail_cap(N, 8)              # trail
+                + 4 * trail_cap(N)                 # trail
                 + 2 + 16 + 3)                      # flags + counters + selection masks
         assert row_bytes(M, N) == want, (M, N)
 
 
 @pytest.mark.gpu
-def test_trail_cap_ignores_the_assumption_width():
-    """REGRESSION: the trail used to be sized by the width of whatever was last applied, and it
-    only ever grew — so a formula with many unit clauses permanently inflated every later chunk
-    (10.sk_1_46: 1,121 units => trail_cap 2,623 instead of 1,566, +27% per-row for nothing)."""
+def test_trail_cap_is_the_variable_count_plus_one_wavefront():
+    """REGRESSION, twice over. The trail used to be sized by the width of whatever was last
+    applied and only ever grew, so a formula with many unit clauses permanently inflated every
+    later chunk (10.sk_1_46: 1,121 units => 2,623 instead of 1,566, +27% per-row for nothing).
+    The decision batch B then survived that cleanup as a floor the ENGINE ignored but the sizing
+    model still honoured — so a caller asking for B=5000 was charged for a trail that would
+    never be allocated, and got a smaller K for it.
+
+    Both are gone. The bound is EXACTLY num_vars (every push flips a bitmap bit, l and ~l share
+    a word, so a variable contributes at most one entry — measured tight on both kernels), plus
+    one WAVEFRONT of headroom: the vectorised append in the wave paths writes at
+    `tail + prefix_sum` with no bound test, so a wavefront is the granularity in which a broken
+    invariant would overshoot. Keep the slack in step with WAVE_W."""
     if not torch.cuda.is_available():
         pytest.skip("needs CUDA")
     from gpap.engine.calibrate import trail_cap
-    assert trail_cap(1494, 8) == trail_cap(1494, 64) == 1494 + 64 + 8
-    assert trail_cap(1494, 5000) == 1494 + 5000 + 8, "an explicit big B is still honoured"
+    wave_w = 32                                  # cpp/tools/build_kernels.py::WAVE_W
+    assert trail_cap(1494) == 1494 + wave_w
+    assert trail_cap(0) == wave_w and trail_cap(7) == 7 + wave_w, "affine in N, one rule"
+    import inspect
+    assert list(inspect.signature(trail_cap).parameters) == ["num_vars"], \
+        "no decision-batch or assumption-width parameter may come back"
+
+
+@pytest.mark.gpu
+def test_trail_cap_has_exactly_one_definition():
+    """The engine's allocator and the exported sizing model must call the SAME function, or the
+    per-row model stops describing the allocation — which is how the 1.57x-over model survived
+    unnoticed. gpap_row_bytes' default trail term is that function, and it must equal what the
+    engine reserves for a formula of the same size."""
+    if not torch.cuda.is_available():
+        pytest.skip("needs CUDA")
+    import re
+    src = open(os.path.join(REPO, "cpp", "src", "engine.cpp")).read()
+    assert "gpap_trail_cap(" in src, "the engine must call the shared rule"
+    assert not re.search(r"^\s*(constexpr|static).*kTrailSlack", src, re.M), \
+        "engine.cpp must not carry a second copy of the slack"
 
 
 @pytest.mark.gpu

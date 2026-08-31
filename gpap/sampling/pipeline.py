@@ -320,6 +320,7 @@ def sample_clauses(nv, clauses, support, device, *, simplify=True, els=True, n_t
                    n_cov=0, out_cap=0, uniformity="off", n_uni=2000, b=8, k_cap="auto",
                    max_chunks=None, time_limit=60.0, cov_chunks=4,
                    lookahead=False, verify_clauses=None, verify_cpu=False, cov_k_cap=2048,
+                   verify_sound=False,
                    random_var=True, configs="default", mine="auto",
                    mine_gate=0.15, min_measure_chunks=3, seed=5,
                    _t_start=None, _phases=None, _wire_map=None):
@@ -342,10 +343,15 @@ def sample_clauses(nv, clauses, support, device, *, simplify=True, els=True, n_t
     so its K is capped to `cov_k_cap` independently of the (full-K) timing run — otherwise a
     large auto-K on a low-RAM host (12 GB Colab) OOM-kills the session collecting a full chunk.
 
-    `k_cap="auto"` (default) sizes the cap to THIS GPU's VRAM (engine.default_k_cap) instead of
-    a hardcoded constant, which pinned every GPU to the reference card's batch size and made a
-    bigger card report the smaller card's throughput. It is an exact no-op at or below the
-    reference budget; pass an int to force a fixed cap (what a cross-GPU A/B needs)."""
+    `k_cap="auto"` (default) uses the library's batch cap (engine.default_k_cap), which is the
+    SAME number on every GPU so two machines' rows are comparable without pinning an override;
+    pass an int to force a fixed cap.
+
+    `verify_sound` (default OFF) re-checks on the GPU that every emitted model satisfies every
+    clause, reporting `sound_check` ("ok" / "UNSOUND" / "off") and `unsound_rows`. Opt-in
+    because it is a self-test rather than part of sampling; its wall is excluded from every
+    rate, and it grows with the formula. `gpap bench` turns it on by default — those rows get
+    published, and a soundness column that was never computed is not evidence."""
     if configs == "default":
         configs = DEFAULT_PORTFOLIO
     # Resolve ONCE: every GPUSampler built below (initial + post-mining rebuilds) must get the
@@ -494,12 +500,13 @@ def sample_clauses(nv, clauses, support, device, *, simplify=True, els=True, n_t
     if configs:
         t = smp.sample(n_time, configs=configs,
                        max_chunks=max_chunks, collect=False, lookahead=lookahead,
-                       min_measure_chunks=mmc, max_seconds=time_limit, out_cap=out_cap)
+                       min_measure_chunks=mmc, max_seconds=time_limit, out_cap=out_cap,
+                       verify_sound=verify_sound)
     else:
         t = smp.sample(n_time, decisions_per_round=b, random_var=random_var,
                        max_chunks=max_chunks, collect=False,
                        lookahead=lookahead, min_measure_chunks=mmc, max_seconds=time_limit,
-                       out_cap=out_cap)
+                       out_cap=out_cap, verify_sound=verify_sound)
     if device.type == "cuda":
         torch.cuda.synchronize()
     # The projection that fills `--out` runs inside the loop above but is DELIVERY, not sampling:
@@ -517,7 +524,7 @@ def sample_clauses(nv, clauses, support, device, *, simplify=True, els=True, n_t
     engine_info = {"kernel": "triton-packed-sum", "mode": smp.engine.mode,
                    "shift": smp.engine.shift,
                    "split": f"{smp.engine.shift}|{32 - smp.engine.shift}",
-                   # k_cap is the RESOLVED ceiling (auto -> VRAM-proportional). Without it a
+                   # k_cap is the RESOLVED ceiling (auto -> the library cap). Without it a
                    # cross-GPU row is unreadable: a small K could mean "this GPU is small" or
                    # "the cap bound it", and those are different results.
                    # `batch` is what actually ran; `K` is the calibrated value behind it
@@ -611,7 +618,7 @@ def sample_clauses(nv, clauses, support, device, *, simplify=True, els=True, n_t
     _tcov = time.perf_counter()
     c = (smp.sample(n_cov, decisions_per_round=tuned_b, random_var=tuned_rv,
                     max_chunks=cov_chunks, collect=True, verify_clauses=vc,
-                    lookahead=tuned_la) if n_cov else {})
+                    lookahead=tuned_la, verify_sound=verify_sound) if n_cov else {})
     phases_diag["coverage"] = (time.perf_counter() - _tcov) if n_cov else 0.0
     # Uniformity readout, OPT-IN (default "off": it costs an extra ~2s sampling pass even off the
     # timing path). "fast" = collision/repeat check only (no solver work, gross-skew detector).
@@ -676,10 +683,17 @@ def sample_clauses(nv, clauses, support, device, *, simplify=True, els=True, n_t
             "attempts_per_s": t.get("attempts_per_s"),        # raw trajectory throughput (K/chunk rate)
             "bcp_rounds_per_chunk": t.get("bcp_rounds_per_chunk"),
             "bcp_ops_per_attempt": t.get("bcp_ops_per_attempt"),
-            # gpu_sound: from the coverage run when it exists, else from the timed run (the timed
-            # run's capped per-chunk check) — so soundness is reported even with quality checks off
             "support_size": t["support_size"],
-            "gpu_sound": c.get("gpu_sound", t.get("gpu_sound", True)),
+            # `sound_check` is OPT-IN (`verify_sound`), so its third value is "off" — a run that
+            # did not check is NOT a run that failed, and a consumer folding the two into a bool
+            # publishes the first as the second. Reported from the timed run, which is the one
+            # that produced the samples; the coverage run's verdict only stands in when the timed
+            # run emitted nothing to check.
+            "sound_check": (t.get("sound_check", "off")
+                            if t.get("sound_check", "off") != "off"
+                            else c.get("sound_check", "off")),
+            "unsound_rows": ((t.get("unsound_rows") or 0) + (c.get("unsound_rows") or 0)
+                             if verify_sound else None),
             "cpu_sound": c.get("all_valid"), "models": c.get("models", []),
             "n_distinct": c.get("n_distinct"), "n_collected": n_coll,
             # Sample OUTPUT (present when out_cap>0): `samples` = numpy uint8 (n, S) 0/1 matrix of

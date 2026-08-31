@@ -29,8 +29,9 @@ def _sample(clauses, nv, cfg, *, force_wide=False, seed=17, chunks=6, k_cap=128)
     if force_wide:
         smp.engine = BCPEngine(smp.formula, force_wide=True)
     out = smp.sample(10 ** 9, configs=[cfg], max_chunks=chunks, collect=True,
+                     verify_sound=True,
                      verify_clauses=clauses)
-    assert out["all_valid"] and out["gpu_sound"]
+    assert out["all_valid"] and out["sound_check"] == "ok"
     return sorted(tuple(m) for m in out["models"]), out, smp.engine.shift
 
 
@@ -74,8 +75,9 @@ def test_wide_engages_past_16bit_boundary():
     smp.pin_batch(smp.K)
     assert smp.engine.shift == 8, "auto should select the 8|24 wide split at 2N=80,000"
     out = smp.sample(10 ** 9, configs=[(True, 1, False)], max_chunks=1, collect=True,
+                     verify_sound=True,
                      verify_clauses=clauses)
-    assert out["gpu_sound"] and out["all_valid"] and out["n_models"] > 0
+    assert out["sound_check"] == "ok" and out["all_valid"] and out["n_models"] > 0
     # fixpoint path vs reference: decide a middle var each way
     f = CnfFormula(DEV)
     f.init_formula(nv, clauses)

@@ -122,8 +122,9 @@ def test_sampler_portfolio_sound():
     clauses = [[1, 2], [-1, 3], [-2, -3], [2, 4], [-4, -1, 5]]
     smp = GPUSampler.from_clauses(5, clauses, DEV, k_cap=128, seed=5)
     out = smp.sample(400, configs=[(True, 1, "soft"), (True, 4, False)], max_chunks=10,
+                     verify_sound=True,
                      collect=True, verify_clauses=clauses)
-    assert out["all_valid"] and out["gpu_sound"] and out["n_models"] > 0
+    assert out["all_valid"] and out["sound_check"] == "ok" and out["n_models"] > 0
     for m in out["models"]:
         assert _satisfies(m, clauses)
 
@@ -145,8 +146,9 @@ def test_fused_trajectory_sound_and_diverse():
     clauses = [[1, 2, 3], [-1, 4], [-2, -4], [3, -4, 5], [-5, 1]]
     smp = GPUSampler.from_clauses(5, clauses, DEV, k_cap=128, seed=17)
     out = smp.sample(400, configs=[(True, 2, False)], max_chunks=8, collect=True,
+                     verify_sound=True,
                      verify_clauses=clauses)
-    assert out["all_valid"] and out["gpu_sound"] and out["n_models"] > 0
+    assert out["all_valid"] and out["sound_check"] == "ok" and out["n_models"] > 0
     assert out["n_distinct"] >= 2                       # diversity sanity (formula has >=2 models)
 
 
@@ -160,8 +162,9 @@ def test_fused_phase_boundary(tmp_path):
     p = tmp_path / "s386c2.cnf"
     write_dimacs(str(p), b, support)
     smp = GPUSampler.from_cnf_file(str(p), DEV, simplify=True, els=True, k_cap=512, seed=5)
-    out = smp.sample(10 ** 9, configs=[(True, 4096, False)], max_chunks=2, collect=False)
-    assert out["gpu_sound"]
+    out = smp.sample(10 ** 9, configs=[(True, 4096, False)], max_chunks=2, collect=False,
+                     verify_sound=True)
+    assert out["sound_check"] == "ok"
     assert out["success_rate"] > 0.5, "huge-B success collapsed: phase boundary straddled?"
 
 
@@ -184,8 +187,9 @@ def test_bandit_mix_with_k_fused_boost_sound():
     clauses = [[3], [1, 2, -3], [-1, 4], [-2, -4], [3, -4, 5]]
     smp = GPUSampler.from_clauses(5, clauses, DEV, k_cap=64, seed=9)
     out = smp.sample(10 ** 9, configs=[(True, 1, False), (True, 2, "soft")],
+                     verify_sound=True,
                      max_chunks=9, collect=True, verify_clauses=clauses)
-    assert out["all_valid"] and out["gpu_sound"] and out["n_models"] > 0
+    assert out["all_valid"] and out["sound_check"] == "ok" and out["n_models"] > 0
     for m in out["models"]:
         assert _satisfies(m, clauses)
 

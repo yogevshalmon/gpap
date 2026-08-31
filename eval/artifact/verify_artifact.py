@@ -9,7 +9,9 @@ answers "is there anything here I would be embarrassed to defend?" and exits non
 
 Checks, and why each one exists:
 
-  SOUNDNESS   every scored cell must have gpu_sound / cpu_sound true. An unsound row means the
+  SOUNDNESS   no scored cell may REPORT itself unsound. The on-GPU re-check is opt-in
+              (`gpap bench --verify-sound`), so most cells simply carry no verdict — that is
+              counted, not required. An unsound row means the
               sampler emitted something that is not a model, which invalidates the whole run --
               this is the one check that can never be waived.
   FAIRNESS    CMSGen must be the PATCHED binary in every stage. Stock CMSGen is timed WITH sample
@@ -30,6 +32,9 @@ import json
 import math
 import os
 import sys
+
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
+from eval.artifact.paper_tables import sound_failed, sound_unchecked        # noqa: E402
 
 VACUOUS_PINS = {"b02", "b05", "b07", "s526"}
 
@@ -53,7 +58,7 @@ def main():
 
     # ---------------------------------------------------------------- CMSGen sweep
     stages = sorted(globmod.glob(os.path.join(args.cmsgen_dir, "*.json")))
-    tot_cells = tot_unsound = 0
+    tot_cells = tot_unsound = tot_unchecked = 0
     fam_inst = {}
     for p in stages:
         d = load(p)
@@ -66,10 +71,15 @@ def main():
             continue
         rows = [r for r in d.get("results", []) if not r.get("skipped") and not r.get("error")]
         tot_cells += len(rows)
-        uns = [r for r in rows if r.get("gpu_sound") is False or r.get("cpu_sound") is False]
+        # A row that says UNSOUND is a hard failure. A row that ran NO check is not: the
+        # re-check is opt-in (`gpap bench --verify-sound`), it is a self-test rather than part
+        # of producing the numbers this file gates, and demanding it would make the artifact
+        # depend on a flag nobody needs for a throughput claim. Counted, never required.
+        uns = [r for r in rows if sound_failed(r)]
         tot_unsound += len(uns)
         for r in uns:
             fail.append(f"UNSOUND cell {stem}/{r.get('name')}/{r.get('enc_key')}")
+        tot_unchecked += sum(1 for r in rows if sound_unchecked(r))
         if d.get("cmsgen_patched") is not True and any(r.get("cms_sps") for r in rows):
             fail.append(f"{stem}: CMSGen present but NOT patched — ratios inflated by emission")
         modes = {r.get("cms_mode") for r in rows if r.get("cms_mode")}
@@ -135,7 +145,10 @@ def main():
                         f"({', '.join(sorted(free))}) — no decisions, no implications, the "
                         f"support is a free hypercube. Exclude as for vacuous pins")
     if tot_unsound == 0 and tot_cells:
-        ok.append(f"soundness: {tot_cells} scored cells, 0 unsound")
+        checked = tot_cells - tot_unchecked
+        ok.append(f"soundness: 0 unsound of {tot_cells} scored cells"
+                  + (f" ({checked} carry an on-GPU re-check; the rest did not run one, which is "
+                     f"the default)" if checked else " (no cell ran the opt-in re-check)"))
 
     # ---------------------------------------------------------------- the propagation identity
     # Table 3 claims  samples/s ratio == (impl/s ratio) / (impl-per-sample ratio)  on every

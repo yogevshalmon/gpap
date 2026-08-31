@@ -339,8 +339,8 @@ def _build_argparser():
                     help="decisions per round (8 is the throughput sweet spot: fewer rounds while "
                          "success barely drops; B>=16 over-constrains and collapses success)")
     ap.add_argument("--k-cap", type=_k_cap_arg, default="auto",
-                    help="ceiling on the per-chunk batch K. 'auto' (default) sizes it to this "
-                         "GPU's VRAM, so a large card is not pinned to a small one's K "
+                    help="ceiling on the per-chunk batch K. 'auto' (default) is the library's "
+                         "cap, identical on every GPU "
                          "(throughput is ~linear in K); no-op at or below the reference "
                          "budget. Pass an int to FIX the cap — what a cross-GPU A/B needs, "
                          "since 'auto' deliberately differs per card")
@@ -351,6 +351,12 @@ def _build_argparser():
                          "this to reproduce a run made before it became the default)")
     ap.add_argument("--also-plain", action="store_true", help="also run GPAP without simplification")
     ap.add_argument("--verify-cpu", action="store_true", help="also CPU-verify a few models vs clauses")
+    # OFF, like every other entry point: a soundness re-check is a self-test, not part of
+    # measuring throughput, and a row is only counted when it is fully assigned with no clause
+    # emptied. `eval/run_full_eval.sh` turns it on for the campaign, which is where the extra
+    # coverage is worth its wall (excluded from every rate, but it grows with the formula).
+    ap.add_argument("--verify-sound", action="store_true",
+                    help="re-check on the GPU that every emitted model satisfies every clause")
     ap.add_argument("--max-clauses", type=_POS_INT, default=None,
                     help="skip any instance whose CNF exceeds this many clauses (recorded as a "
                          "skipped row with the size). The engine itself only rejects formulas "
@@ -664,6 +670,7 @@ def _run_one(path0, row, args, device, portfolio, mine, quality,
             g = sample_file(path, device, simplify=args.simplify, els=not args.no_els,
                             n_time=args.n_time, n_cov=args.n_cov, b=args.b,
                             k_cap=args.k_cap, verify_cpu=args.verify_cpu,
+                            verify_sound=args.verify_sound,
                             configs=portfolio, max_chunks=args.max_chunks, seed=s,
                             mine=mine, uniformity=args.uniformity, time_limit=args.time_limit)
         except ValueError as e:                    # the engine's packed-envelope rejection
@@ -686,7 +693,10 @@ def _run_one(path0, row, args, device, portfolio, mine, quality,
         "n_models": g["n_models"], "wall_timed_s": g["wall_timed_s"],
         "wall_total_s": g["wall_total_s"], "chunk_capped": g.get("chunk_capped"),
         "uniformity": g.get("uniformity"), "sim_baseline": sim,
-        "succ": g["success_rate"], "gpu_sound": g["gpu_sound"], "cpu_sound": g.get("cpu_sound"),
+        # "ok" | "UNSOUND" | "off" — see gpap.sampling.sampler. NOT a bool: "off" (the check
+        # was not run) must not read as either verdict.
+        "succ": g["success_rate"], "sound_check": g.get("sound_check", "off"),
+        "unsound_rows": g.get("unsound_rows"), "cpu_sound": g.get("cpu_sound"),
         "n_distinct": g["n_distinct"], "n_collected": g.get("n_collected"),
         "unique_sps_est": g.get("unique_sps_est"), "assigns_per_s": g.get("assigns_per_s"),
         "decisions_per_s": g.get("decisions_per_s"),
@@ -814,7 +824,12 @@ def _format_row(r, args, multi_enc, has_circuits, quality, show_unif, format_uni
             line += f"{'<' + format(sim['p_accept_lt'], '.0e'):>9}{'~0':>11}{'inf':>9}"
     # kernel provenance: w/s = wave/scalar propagate, 16 or 8 = the packed split's SHIFT
     krn = f"{eng.get('mode', '?')[0]}{eng.get('shift', '')}" if eng else "—"
-    snd = "OK" if r.get("gpu_sound") and (r.get("cpu_sound") in (None, True)) else "BAD"
+    # Three outcomes, three glyphs: "-" is "not checked", which is neither OK nor BAD.
+    _sc = r.get("sound_check")
+    if _sc is None:                            # a row recorded before the key existed
+        _sc = ("ok" if r["gpu_sound"] else "UNSOUND") if "gpu_sound" in r else "off"
+    snd = ("BAD" if _sc == "UNSOUND" or r.get("cpu_sound") is False else
+           "OK" if _sc == "ok" else "-")
     line += f"{krn:>5}{snd:>4}"
     if args.cmsgen:
         cd = f"{r['cms_decisions_per_s']:.1e}" if r.get("cms_decisions_per_s") else "—"

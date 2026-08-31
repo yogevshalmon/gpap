@@ -32,8 +32,6 @@ using gpap::set_error;
 
 namespace {
 
-/* Decision-batch floor used when sizing the trail. See trail_cap_for(). */
-constexpr int32_t kDefaultBFloor = 64;
 constexpr size_t kReadoutSliceBytes = 256u << 20;   /* bound a (rows, 2N) readout transient */
 
 inline unsigned ceil_div(int64_t a, int64_t b) { return (unsigned)((a + b - 1) / b); }
@@ -193,7 +191,7 @@ extern "C" gpap_status gpap_engine_create(const gpap_formula *f, const gpap_engi
         const char *ce = std::getenv("GPAP_CLEAN");
         e->clean_enabled = (ce && ce[0] == '0') ? 0 : 1;
         e->nw = std::max(1, (2 * f->num_vars + 31) / 32);
-        e->trail_cap = f->num_vars + kDefaultBFloor + 8;
+        e->trail_cap = gpap_trail_cap(f->num_vars);   /* THE rule, in calibrate.cpp */
 
         st = stage(e->occ_off, f->occ_offsets.data(), f->occ_offsets.size() * sizeof(int32_t));
         if (st != GPAP_OK) break;
@@ -281,27 +279,13 @@ extern "C" int gpap_engine_flush_conflict(const gpap_engine *e) { return e ? e->
 
 /* ------------------------------------------------------------------ reset */
 
-/* Trail slots one row can ever need.
- *
- * The trail holds literals that have been made TRUE and not yet propagated. EVERY push is
- * guarded by the assignment bitmap: the scalar seed loop skips a literal whose bit is already
- * set and conflicts the row when the opposite bit is, and the wave path uses the `atomic_or`
- * RETURN value for the same two tests. Since l and ~l share a word, a variable can contribute
- * AT MOST ONE trail entry before the row conflicts. So N + a little slack is sufficient, for
- * any number of decisions and any assumption-set width.
- *
- * This is worth stating precisely because getting it wrong is expensive and SILENT: the cap
- * used to be `num_vars + max(L, 64) + 8` where L was the width of whatever was last applied,
- * and it only ever grows. The construction-time units flush applies L = (number of unit
- * clauses), so a formula with many units permanently inflated every later chunk —
- * 10.sk_1_46 (1,121 units, N=1,494) ran at trail_cap 2,623 instead of 1,566, costing +27%
- * of per-row device memory for the life of the engine, on every chunk, for nothing. */
-static inline int32_t trail_cap_for(int32_t num_vars, int32_t B) {
-    return num_vars + std::max(B, kDefaultBFloor) + 8;
-}
-
-static gpap_status ensure_state(gpap_engine *e, int32_t K, int32_t B) {
-    const int32_t cap = trail_cap_for(e->num_vars, B);
+static gpap_status ensure_state(gpap_engine *e, int32_t K) {
+    /* gpap_trail_cap (cpp/src/calibrate.cpp) is the ONE definition — the same call the exported
+     * sizing model makes, so the allocation below and a caller's K arithmetic cannot disagree.
+     * It is a pure function of num_vars, so this can only be a no-op after construction; the
+     * assignment stays because the cap USED to grow with the last apply's width, and a reader
+     * should be able to see that it no longer can. */
+    const int32_t cap = gpap_trail_cap(e->num_vars);
     if (cap > e->trail_cap) e->trail_cap = cap;
     GPAP_TRY(e->packed.reserve((size_t)K * e->num_long * sizeof(int32_t)));
     GPAP_TRY(e->abits.reserve((size_t)K * e->nw * sizeof(int32_t)));
@@ -318,7 +302,7 @@ extern "C" gpap_status gpap_engine_reset(gpap_engine *e, int32_t K) {
     if (!e || K <= 0) return GPAP_ERR_ARG;
     GPAP_TRY(use_ctx(e));
     const size_t packed_cap = e->packed.bytes;
-    GPAP_TRY(ensure_state(e, K, kDefaultBFloor));
+    GPAP_TRY(ensure_state(e, K));
     if (e->packed.bytes != packed_cap) e->packed_clean_rows = 0;   /* grow = realloc = LOST */
     e->K = K;
     /* Resolve the kernel for THIS K. Cheap (a constant compare unless M is small) and it is the
@@ -383,10 +367,10 @@ static gpap_status apply_dev_common(gpap_engine *e, uintptr_t decisions_dev, int
     if (!e || L < 0 || (L > 0 && !decisions_dev)) return GPAP_ERR_ARG;
     if (L == 0) return GPAP_OK;                     /* no assumptions: nothing to propagate */
     GPAP_TRY(use_ctx(e));
-    /* kDefaultBFloor, NOT L: the trail is bounded by the variable count, not by how many
-     * literals were assumed (dedup — see trail_cap_for). Passing L here made a wide apply
-     * permanently inflate the per-row footprint. */
-    GPAP_TRY(ensure_state(e, e->K, kDefaultBFloor));
+    /* No width argument: the trail is bounded by the variable count, not by how many literals
+     * were assumed (dedup — see gpap_trail_cap). Passing L here made a wide apply permanently
+     * inflate the per-row footprint. */
+    GPAP_TRY(ensure_state(e, e->K));
     /* Inactive rows are left unwritten by the kernel; stale values would corrupt the sums. */
     GPAP_TRY(e->nprops.zero());
     GPAP_TRY(e->nops.zero());
@@ -459,7 +443,7 @@ extern "C" gpap_status gpap_engine_trajectory_dev(gpap_engine *e, uintptr_t orde
         for (int i = 0; i < GPAP_SLOTS; ++i) e->slots[i].rows_valid = false;
         return GPAP_OK;
     }
-    GPAP_TRY(ensure_state(e, e->K, kDefaultBFloor));
+    GPAP_TRY(ensure_state(e, e->K));
     GPAP_TRY(e->nprops.zero());
     GPAP_TRY(e->nops.zero());
     GPAP_TRY(e->ndecs.zero());

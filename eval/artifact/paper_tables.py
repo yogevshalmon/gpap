@@ -60,6 +60,33 @@ def zero_search(r):
             and not (r.get("implications_per_s") or 0))
 
 
+def sound_failed(r):
+    """True when a row's on-GPU soundness re-check RAN and found an unsound model.
+
+    Three-valued, and the third value is the point: `sound_check == "off"` means the check was
+    not run — it is opt-in everywhere (`gpap bench --verify-sound`), so most rows carry no
+    verdict at all, which is neither a pass nor a failure. Reading a missing check as a failure
+    fails an honest sweep; reading it as a pass publishes an unverified one. Rows recorded before
+    the key existed carry the old boolean `gpu_sound` and are read the same way.
+
+    ONE definition, imported by `verify_artifact.py` — the gate and the table must not disagree
+    about which cells were actually checked."""
+    if r.get("cpu_sound") is False:
+        return True
+    sc = r.get("sound_check")
+    if sc is None:
+        return r.get("gpu_sound") is False        # legacy row
+    return sc == "UNSOUND"
+
+
+def sound_unchecked(r):
+    """True when the row says nothing about soundness — the check was not run."""
+    sc = r.get("sound_check")
+    if sc is None:
+        return "gpu_sound" not in r and r.get("cpu_sound") is None
+    return sc == "off" and r.get("cpu_sound") is None
+
+
 def unique_unmeasured(g):
     """True when GPAP's unique/s figure could not be MEASURED on a rival cell.
 
@@ -257,8 +284,8 @@ def cms_family(d, stem, encoder):
         "gpap0_names": sorted(gpap_zero), "both0_names": sorted(both_zero),
         "skipped": sum(1 for r in allr if r.get("skipped")),
         "errors": sum(1 for r in allr if r.get("error")),
-        "unsound": sum(1 for r in rows
-                       if r.get("gpu_sound") is False or r.get("cpu_sound") is False),
+        "unsound": sum(1 for r in rows if sound_failed(r)),
+        "unchecked": sum(1 for r in rows if sound_unchecked(r)),
         "gpu": (payload.get("gpu") or {}).get("name"),
         "cpu": (payload.get("cpu") or {}).get("model"),
         "patched": payload.get("cmsgen_patched"),

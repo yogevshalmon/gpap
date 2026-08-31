@@ -113,10 +113,10 @@ def run_gpap(cnf, n_time, device, time_limit=60.0, n_cov=1000):
             "n_models": g["n_models"], "distinct_frac": (g["n_distinct"] / len(g["models"])
                                                          if g.get("models") else None),
             "wall_total_s": g["wall_total_s"],
-            # engine provenance, same as the CMSGen sweeps: gpu_sound is the on-device model
+            # engine provenance, same as the CMSGen sweeps: sound_check is the on-device model
             # check; dec/s + impl/s let the zero-search screen run on rival rows (a seed-1 b13
             # cell was a FREE HYPERCUBE and carried a 4.7e9x ratio nothing had flagged)
-            "gpu_sound": g.get("gpu_sound"),
+            "sound_check": g.get("sound_check"),
             "decisions_per_s": g.get("decisions_per_s"),
             "implications_per_s": g.get("implications_per_s")}
 

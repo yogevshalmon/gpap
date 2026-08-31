@@ -65,6 +65,11 @@ _NONNEG_SECS = _bounded(float, 0.0, "a non-negative number of seconds", zero_mea
 #: measurement path simply does not accept the ambiguous value.
 _POS_SECS = _bounded(float, 0.0, "a positive number of seconds", exclusive=True)
 
+# How `sound_check` prints. Three values, not two: "off" is not "unsound" — a run that did not
+# verify has said nothing about its rows, and printing that as a failure (or as a pass) is the
+# bug this tri-state exists to prevent.
+_SOUND_LABEL = {"ok": "OK", "UNSOUND": "*** UNSOUND ***", "off": "not run (--verify-sound)"}
+
 
 def _ensure_cnf(args):
     """(cnf_path, temp_path_or_None, encode_seconds_or_None) for a CNF **or** circuit input.
@@ -171,6 +176,7 @@ def _sample_run(args, device, path, tmp, encode_s):
     info = sample_file(path, device, n_time=args.n, n_cov=args.n_cov, out_cap=out_cap,
                        seed=args.seed, simplify=not args.no_simplify, els=not args.no_els, mine=mine,
                        uniformity=args.uniformity, configs=portfolio, k_cap=args.k_cap,
+                       verify_sound=args.verify_sound,
                        # 0 = no cap (the pipeline reads None that way); as a literal 0 it would
                        # expire the sampling loop before its first chunk and report "0 models".
                        time_limit=args.time_limit or None)
@@ -195,7 +201,7 @@ def _sample_run(args, device, path, tmp, encode_s):
           f"({info['wall_timed_s']:.1f}s sampling)")
     print(f"  {info['samples_per_s']:,.0f} samples/s (steady-state), "
           f"{info.get('sps_e2e_total') or 0:,.0f}/s end-to-end | success {info['success_rate']*100:.0f}% "
-          f"| sound={info['gpu_sound']}")
+          f"| sound-check {_SOUND_LABEL.get(info.get('sound_check'), '?')}")
     if info["n_models"] == 0 and not info.get("unsat") and info["n_clauses"]:
         # Every trajectory conflicted. Nothing above says why, and the three causes want three
         # different responses from the user, so name them rather than leaving a bare 0.
@@ -510,6 +516,8 @@ def _cmd_bench(args):
         argv += ["--allow-soft"]
     if args.no_els:
         argv += ["--no-els"]
+    if args.verify_sound:
+        argv += ["--verify-sound"]
     if args.sim_baseline:
         argv += ["--sim-baseline"]
     if args.abc:
@@ -690,10 +698,15 @@ def main(argv=None):
     s.add_argument("--n-cov", type=_NONNEG_INT, default=0,
                    help="collect this many models for the quality/soundness readout (distinct "
                         "count + optional CPU verification); 0 = skip that pass")
+    s.add_argument("--verify-sound", action="store_true",
+                   help="re-check on the GPU that EVERY emitted model satisfies EVERY clause. "
+                        "Off by default: it is a self-test, not part of sampling (a row is only "
+                        "counted when it is fully assigned with no clause emptied). Its wall is "
+                        "excluded from every rate, and it grows with the formula")
     s.add_argument("--device", default=None)
     s.add_argument("--k-cap", type=_k_cap_arg, default="auto",
-                   help="ceiling on the per-chunk batch K. 'auto' (default) sizes it to this "
-                        "GPU's VRAM; pass an int to fix it (needed to A/B two different GPUs)")
+                   help="ceiling on the per-chunk batch K. 'auto' (default) is the library's "
+                        "cap, the same on every GPU; pass an int to fix it explicitly")
     s.add_argument("--portfolio", choices=["circuit", "default", "b8", "b1", "s1"],
                    default="circuit",
                    help="single-config choices (b8/b1/s1) pin ONE config and disable the bandit — use them for any cross-GPU or before/after MEASUREMENT, since the bandit can otherwise pick differently per machine and confound the comparison")
@@ -800,9 +813,14 @@ def main(argv=None):
     b.add_argument("--time-limit", type=_POS_SECS, default=60.0,
                    help="per-instance sampling wall cap in seconds (also the rival's timeout)")
     b.add_argument("--n-cov", type=_NONNEG_INT, default=0)
+    b.add_argument("--verify-sound", action="store_true",
+                   help="re-check on the GPU that EVERY emitted model satisfies EVERY clause. "
+                        "Off by default, as everywhere else: it is a self-test, not part of "
+                        "measuring throughput. Its wall is excluded from every rate, but it "
+                        "grows with the formula (eval/run_full_eval.sh turns it on)")
     b.add_argument("--k-cap", type=_k_cap_arg, default="auto",
-                   help="ceiling on the per-chunk batch K. 'auto' (default) sizes it to this "
-                        "GPU's VRAM; pass an int to fix it (needed to A/B two different GPUs)")
+                   help="ceiling on the per-chunk batch K. 'auto' (default) is the library's "
+                        "cap, the same on every GPU; pass an int to fix it explicitly")
     b.add_argument("--cmsgen", default=None,
                    help="path to a cmsgen binary (enables the comparison). Prefer the one built "
                         "by scripts/build_cmsgen.sh — its --nowrite gives the emission-free, "

@@ -91,8 +91,8 @@ def test_k_calibration_matches():
     for M, N in [(4407, 1701), (109432, 42051), (201437, 77151)]:
         for budget in (1 << 30, 6 << 30):
             for cap in (0, 16384):
-                assert _core.compute_k_safe(M, N, budget, cap or None, 8) == \
-                    py_k(M, N, budget, cap=cap or None, decisions_per_round=8)
+                assert _core.compute_k_safe(M, N, budget, cap or None) == \
+                    py_k(M, N, budget, cap=cap or None)
 
 
 def test_envelope_matches():
@@ -167,6 +167,39 @@ def test_unsat_units_conflict_every_row():
 # ---------------------------------------------------------------- entry point 2
 
 @pytest.mark.parametrize("mode", ["scalar", "wave"])
+def test_check_sound_agrees_with_an_independent_recount(mode):
+    """The soundness check has TEETH, gated against a SECOND computation of the same fact.
+
+    `check_sound() == 0` is evidence only if the kernel can say otherwise, and since the check is
+    opt-in now (`verify_sound`) that evidence is the only reason to pay for it. So instead of
+    trusting a 0, recompute the verdict on the host from `sat_rows` — which reports every clause
+    kind in the ORIGINAL order, long words and bitmap-synthesized binaries alike — over a mixed
+    bag of rows (some conflicted, some not) and require the two to agree row for row.
+
+    Note what does NOT prove this: pointing the check at conflicted rows and expecting them all
+    to be unsound. A row can conflict by a CONTRADICTORY PUSH (some literal forced to both
+    polarities) having emptied nothing, and on the scalar kernel that is how nearly every
+    conflict surfaces — a falsified long clause is normally caught one decrement earlier, when
+    it goes unit and forces a literal whose negation is already set."""
+    rng = random.Random(11)
+    nv, nc, K = 40, 90, 256
+    clauses = _random_cnf(rng, nv, nc, kmin=2)          # kmin=2 -> exercise the binary pair path
+    core = _core.Engine(_core.Formula.from_clauses(nv, clauses), mode=mode)
+    core.reset(K)
+    # Wide random assumptions: plenty of rows conflict, a few survive.
+    dec = np.array([[2 * v + rng.randint(0, 1) for v in rng.sample(range(nv), 12)]
+                    for _ in range(K)], dtype=np.int64)
+    core.apply(dec)
+
+    rows = np.arange(K, dtype=np.int32)
+    sat = core.sat_rows(rows)                            # (K, M) non-falsified count per clause
+    want = int((sat.min(axis=1) == 0).sum())             # rows with SOME emptied clause
+    core.selection_set(core.SCRATCH_SLOT, rows)
+    assert core.check_sound(core.SCRATCH_SLOT) == want
+    assert want > 0, "this fixture must actually contain unsound rows, or it proves nothing"
+
+
+@pytest.mark.parametrize("mode", ["scalar", "wave"])
 @pytest.mark.parametrize("B", [1, 8])
 def test_trajectory_emits_only_real_models(mode, B):
     """THE soundness gate: every row the selection reports must satisfy every clause, checked
@@ -192,6 +225,7 @@ def test_trajectory_emits_only_real_models(mode, B):
     rows = core.selection_rows(0, n)
     assert np.all(np.diff(rows) > 0)                       # ascending, no duplicates
     assert core.flags()[0][rows].all()
+
 
 
 @pytest.mark.parametrize("mode", ["scalar", "wave"])

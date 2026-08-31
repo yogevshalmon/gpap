@@ -11,35 +11,38 @@ What stays Python: the `"auto"` sentinel and the torch-device plumbing, because 
 Python-API conveniences with no C++ counterpart.
 
     compute_k_safe / row_bytes / trail_cap   -> cpp/src/calibrate.cpp   (the memory model)
-    default_k_cap / resolve_k_cap            -> the VRAM-proportional ceiling
+    default_k_cap / resolve_k_cap            -> the batch ceiling
     dispatch_mode                            -> scalar or wave for a formula + batch
 """
 import torch
 
 from gpap.engine import _core
 
-# The reference card's cap and the VRAM it was validated on. Spelled out here only so
-# `default_k_cap` can answer for a non-CUDA device without touching the driver; the number that
-# matters is the one `gpap_default_k_cap` returns, and tests assert the two agree.
-K_CAP_REF = 49_152
-K_CAP_VRAM_REF = 12_878_086_144   # total VRAM of the reference card these were calibrated on
+# THE batch cap, spelled out here only so `default_k_cap` can answer for a non-CUDA device
+# without touching the driver; the number that matters is the one `gpap_default_k_cap` returns,
+# and tests assert the two agree. It is device-INDEPENDENT (see cpp/src/calibrate.cpp): the
+# same batch on every GPU, so `--k-cap auto` means the same thing on every machine and a
+# cross-GPU comparison needs no pinned override.
+K_CAP = 262_144
 
 
-def trail_cap(num_vars: int, decisions_per_round: int = 8) -> int:
-    """Trail slots one row can need.
+def trail_cap(num_vars: int) -> int:
+    """Trail slots one row needs — a function of the VARIABLE count ALONE.
 
-    Bounded by the VARIABLE count, not by how many literals are assumed or decided: every trail
-    push is deduplicated against the assignment bitmap, so a variable contributes at most one
-    entry before the row conflicts. See the proof in cpp/src/engine.cpp::trail_cap_for."""
-    return _core.trail_cap(num_vars, decisions_per_round)
+    Not of how many literals are assumed or decided at once: every trail push is deduplicated
+    against the assignment bitmap, so a variable contributes at most one entry before the row
+    conflicts. There is consequently no ceiling on the decision batch B anywhere in the engine —
+    deciding the whole support in one round is a supported configuration, and the one the
+    "B >= |support| is exactly uniform" property uses. Proof: cpp/src/engine.cpp::trail_cap_for."""
+    return _core.trail_cap(num_vars)
 
 
-def row_bytes(M: int, N: int, decisions_per_round: int = 8) -> int:
+def row_bytes(M: int, N: int) -> int:
     """Device bytes ONE row of engine state costs — the exact allocation list, not an estimate.
 
     A caller that allocates something else per row (a (K, L) decision matrix, say) should add its
     own term to this rather than inventing a whole model."""
-    return _core.row_bytes(M, N, _core.trail_cap(N, decisions_per_round))
+    return _core.row_bytes(M, N, _core.trail_cap(N))
 
 
 def gpu_mem_available(device: torch.device, fraction: float = 0.80) -> int:
@@ -52,25 +55,24 @@ def gpu_mem_available(device: torch.device, fraction: float = 0.80) -> int:
     return _core.mem_available(device.index or 0, fraction)
 
 
-def compute_k_safe(M: int, N: int, gpu_mem_bytes: float, cap: "int | None" = None,
-                   decisions_per_round: int = 8) -> int:
+def compute_k_safe(M: int, N: int, gpu_mem_bytes: float, cap: "int | None" = None) -> int:
     """Largest K fitting `gpu_mem_bytes`. `cap` None/0 means uncapped."""
-    return _core.compute_k_safe(M, N, gpu_mem_bytes, cap, decisions_per_round)
+    return _core.compute_k_safe(M, N, gpu_mem_bytes, cap)
 
 
 def default_k_cap(device: torch.device) -> int:
-    """Batch cap sized to this GPU's TOTAL VRAM (free memory would make it jitter run-to-run)."""
+    """The library's default batch cap — the same number on every device."""
     if device.type != "cuda":
-        return K_CAP_REF
+        return K_CAP
     return _core.default_k_cap(device.index or 0)
 
 
 def resolve_k_cap(k_cap: "int | str | None", device: torch.device) -> "int | None":
     """Resolve the "auto" sentinel to `default_k_cap(device)`; pass ints and None through.
 
-    Three values, and all three are meaningful: "auto" sizes the cap to the card, an int is that
-    cap verbatim (what a cross-GPU A/B needs, since auto differs per card), and None means no cap
-    at all — the memory model alone decides."""
+    Three values, and all three are meaningful: "auto" is the library's cap, an int is that cap
+    verbatim (what an A/B against a recorded sweep needs), and None means no cap at all — the
+    memory model alone decides."""
     return default_k_cap(device) if k_cap == "auto" else k_cap
 
 
