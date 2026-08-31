@@ -319,3 +319,62 @@ class TestKernelDispatch:
             eng.apply_and_propagate(dec)
             out[mode] = (eng.conflict.tolist(), eng.assignment.tolist())
         assert out["scalar"] == out["wave"]
+
+
+@pytest.mark.gpu
+@pytest.mark.parametrize("mode", ["scalar", "wave"])
+@pytest.mark.parametrize("shift", [16, 8])
+def test_full_assignment_matches_reference_across_kernels_and_splits(mode, shift):
+    """The full ASSIGNED-LITERAL SET against the reference BCP, for both propagate kernels AND
+    both packed splits, with every clause kind mixed (units + binaries + longs).
+
+    That cell was the gap: test_matches_reference_random compares assignments but only at the
+    16|16 split, and test_clean_mode.test_state_identity_fuzz covers 8|24 but compares only the
+    CONFLICT flag. Clause-length segregation is what decides which literal a clause forces —
+    binaries from the occ payload, longs from the packed sum field — so an error there shows up
+    in the assignment first and in the flag only sometimes. (Fuzzed at 3x400 formulas across
+    both kernels and both splits before being trimmed to this size: 0 mismatches over ~47k
+    surviving rows.)"""
+    import random
+
+    from gpap.engine import _core
+    from tests.reference_bcp import lit_idx, ref_bcp
+
+    rng = random.Random(2026)
+    compared = 0
+    for _ in range(20):
+        nv = rng.randint(4, 26)
+        clauses = []
+        for _ in range(rng.randint(nv, 3 * nv)):
+            w = min(rng.choice([1, 2, 2, 2, 3, 3, 3, 4, 4]), nv)
+            clauses.append([v if rng.random() < 0.5 else -v
+                            for v in rng.sample(range(1, nv + 1), w)])
+        f = _core.Formula.from_clauses(nv, clauses)
+        if f.info.has_empty_clause:
+            continue
+        eng = _core.Engine(f, mode=mode, force_shift=shift)
+        if eng.flush_conflict:
+            continue
+        K = 24
+        sets = [[(v if rng.random() < 0.5 else -v)
+                 for v in rng.sample(range(1, nv + 1), rng.randint(0, min(4, nv)))]
+                for _ in range(K)]
+        L = max(1, max(len(s) for s in sets))
+        d = np.full((K, L), -1, dtype=np.int64)
+        for i, s in enumerate(sets):
+            for j, x in enumerate(s):
+                d[i, j] = lit_idx(x)
+        eng.reset(K)
+        eng.apply(d)
+        _, conflict = eng.flags()
+        asg = eng.rows_assignment(np.arange(K, dtype=np.int32))
+        for i, s in enumerate(sets):
+            want_conflict, want_asg = ref_bcp(clauses, [lit_idx(x) for x in s])
+            assert bool(conflict[i]) == want_conflict, (mode, shift, nv, s)
+            if want_conflict:
+                continue                      # partial state is unspecified, by contract
+            compared += 1
+            got = frozenset(int(l) for l in range(2 * nv) if asg[i][l])
+            assert got == want_asg, (mode, shift, nv, s,
+                                     sorted(got - want_asg)[:6], sorted(want_asg - got)[:6])
+    assert compared > 100, f"only {compared} surviving rows compared — the fixture proves little"

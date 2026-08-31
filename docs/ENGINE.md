@@ -213,11 +213,18 @@ Nobody names K. Every face sizes it from the formula and the GPU (`cpp/src/calib
 
 ```
 row_bytes = 4·M_long  +  4·⌈2N/32⌉  +  4·trail_cap  +  flags and counters
-K         = min( 0.80 · free VRAM / row_bytes ,  cap )          cap ≥ 262,144
+K         = min( 0.80 · free VRAM / row_bytes ,  cap )          cap = 262,144
 ```
 
-`trail_cap = N + max(B, 64) + 8` is a proof, not a tuning knob: every trail push is deduplicated
-against the bitmap, so a variable can enter a row's trail at most once. The model is verified
+`trail_cap = N + 32` is a proof, not a tuning knob: every trail push is deduplicated against the
+bitmap and `l`/`¬l` share a word, so a VARIABLE can enter a row's trail at most once — the bound
+is exactly `N`, whatever the decision batch `B` or the assumption width. The `+32` is one
+wavefront, because the vectorised append writes at `tail + prefix_sum` with no bound test, so a
+wavefront is the granularity a broken invariant would overshoot by. There is deliberately no `B`
+term: one used to be here, as a floor the engine ignored while the sizing model honoured it —
+charging a caller who asked for a wide decision batch for a trail that was never allocated.
+The cap is likewise ONE constant on every GPU; it used to scale with total VRAM, which made
+`auto` mean a different batch per machine. The model is verified
 against measured VRAM (1.00–1.04×). Because `K × M_long` is roughly the memory budget however
 large the formula, a chunk's wall is roughly constant, and **models per chunk = K × success** is
 the throughput proxy the sampling pipeline uses when it decides whether mined clauses paid.

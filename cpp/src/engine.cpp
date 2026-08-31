@@ -87,6 +87,13 @@ gpap_status stage(DevBuf &buf, const void *host, size_t n) {
 gpap_status ensure_rows(gpap_engine *e, int32_t slot) {
     Selection &s = e->slots[slot];
     if (s.rows_valid) return GPAP_OK;
+    if (!s.selected) {           /* never selected into since the reset: EMPTY, not the mask's
+                                    uninitialized bytes compacted into arbitrary row indices */
+        s.host_rows.clear();
+        s.count = 0;
+        s.rows_valid = true;
+        return GPAP_OK;
+    }
     std::vector<int8_t> mask((size_t)e->K);
     if (e->K) GPAP_CU(cuMemcpyDtoH(mask.data(), s.mask.ptr, (size_t)e->K));
     s.host_rows.clear();
@@ -334,14 +341,25 @@ static gpap_status ensure_state(gpap_engine *e, int32_t K) {
 extern "C" gpap_status gpap_engine_reset(gpap_engine *e, int32_t K) {
     if (!e || K <= 0) return GPAP_ERR_ARG;
     GPAP_TRY(use_ctx(e));
+    /* A GROW is a realloc — DevBuf::reserve frees before it allocates — so the packed rows are
+     * gone and no longer the baseline. Dropped on FAILURE too, not only on a size change: a
+     * reserve that fails PART WAY through ensure_state (packed grew, then the trail's allocation
+     * failed) used to return here with the clean-rows claim intact over a freshly reallocated,
+     * uninitialized packed buffer. The next successful reset would then see an unchanged
+     * `packed.bytes`, take the LITE path, skip the broadcast, and propagate from garbage. */
     const size_t packed_cap = e->packed.bytes;
-    GPAP_TRY(ensure_state(e, K));
-    if (e->packed.bytes != packed_cap) e->packed_clean_rows = 0;   /* grow = realloc = LOST */
+    const gpap_status alloc = ensure_state(e, K);
+    if (alloc != GPAP_OK || e->packed.bytes != packed_cap) e->packed_clean_rows = 0;
+    if (alloc != GPAP_OK) return alloc;
     e->K = K;
     /* Resolve the kernel for THIS K. Cheap (a constant compare unless M is small) and it is the
      * one place every entry point passes through, which is the whole point of putting it here. */
     if (e->auto_mode) e->mode = resolve_mode(e, K);
-    for (int i = 0; i < GPAP_SLOTS; ++i) { e->slots[i].rows_valid = false; e->slots[i].count = 0; }
+    for (int i = 0; i < GPAP_SLOTS; ++i) {
+        e->slots[i].rows_valid = false;
+        e->slots[i].count = 0;
+        e->slots[i].selected = false;    /* a new chunk selects nothing until asked to */
+    }
     if (!e->flush_ready) return GPAP_OK;                 /* construction path: caller seeds */
     if (e->clean_enabled && e->packed_clean_rows >= K) {
         /* RESET-LITE: the previous launch was CLEAN-mode (or nothing dirtied since the last
@@ -380,6 +398,14 @@ extern "C" gpap_status gpap_engine_recache_flush(gpap_engine *e) {
         return GPAP_ERR_ARG;
     }
     GPAP_TRY(use_ctx(e));
+    /* ⚠️ NOT ATOMIC, and it cannot cheaply be made so: the two cached buffers are updated by two
+     * separate device copies, so a failure between them leaves packed_flushed moved and
+     * abits_flushed not — the inconsistent pair this function refuses `abits_diverged` to avoid.
+     * Reaching it needs a driver failure between two adjacent DtoD copies (a deferred async
+     * fault surfaces on the FIRST one), and every in-tree caller abandons the engine on the
+     * error. If this call returns anything but GPAP_OK, DISCARD THE ENGINE — do not reset and
+     * continue. Making it atomic means staging both copies through scratch buffers, i.e. paying
+     * num_long + nw words of device memory on every engine for a path nothing has hit. */
     e->packed_clean_rows = 0;                       /* the baseline itself is moving */
     if (e->num_long)
         GPAP_CU(cuMemcpyDtoD(e->packed_flushed.ptr, e->packed.ptr,
@@ -439,13 +465,25 @@ static gpap_status apply_dev_common(gpap_engine *e, uintptr_t decisions_dev, int
         args.push_back(p);
     GPAP_TRY(launch(k, (unsigned)e->K, 1, args));
     e->launches++;
-    GPAP_TRY(accumulate(e, e->nops, e->acc_ops, e->K));
-    GPAP_TRY(accumulate(e, e->nprops, e->acc_props, e->K));
-    GPAP_TRY(accumulate(e, e->ndecs, e->acc_decs, e->K));
+    /* RECORD WHAT THE LAUNCH DID, BEFORE anything that can fail. These two facts become true
+     * the moment the launch is submitted, and the accumulate() calls below can return
+     * GPAP_ERR_CUDA -- which is in fact where a DEFERRED ASYNC FAULT from this very launch
+     * surfaces, since cuLaunchKernel is asynchronous and reports at the next API call. They used
+     * to sit after the accumulates, so that error path left `abits_diverged` at 0 after a CLEAN
+     * launch: gpap_sat_rows / gpap_check_sound / gpap_engine_recache_flush would then no longer
+     * be rejected and would read the BASELINE as if it were the fixpoint, with recache_flush
+     * poisoning the flush cache for the life of the engine. The stale selection slots were the
+     * same shape of hole one field over. */
     for (int i = 0; i < GPAP_SLOTS; ++i) e->slots[i].rows_valid = false;
     /* A CLEAN launch leaves packed at the baseline but abits at the fixpoint; a plain one
      * leaves both at the fixpoint. Either way this is the authoritative update. */
     e->abits_diverged = clean ? 1 : 0;
+    GPAP_TRY(accumulate(e, e->nops, e->acc_ops, e->K));
+    GPAP_TRY(accumulate(e, e->nprops, e->acc_props, e->K));
+    GPAP_TRY(accumulate(e, e->ndecs, e->acc_decs, e->K));
+    /* LAST, unlike the two above: those are RESTRICTIVE, so setting them early is safe on an
+     * error, but this one PERMITS the next reset to skip the broadcast and is only true if the
+     * launch ran its restore tail to completion — which a failing accumulate says it did not. */
     if (clean) e->packed_clean_rows = clean_rows_prev;
     return GPAP_OK;
 }
@@ -486,6 +524,14 @@ extern "C" gpap_status gpap_engine_trajectory_dev(gpap_engine *e, uintptr_t orde
                                                   int32_t n_support, int32_t B, int64_t seed,
                                                   int soft, int32_t *max_rounds_out) {
     if (!e || P < 0 || B <= 0 || (P > 0 && !order_dev)) return GPAP_ERR_ARG;
+    /* n_support is the END OF DECISION PHASE 1 and the kernel walks `order` up to it
+     * (`phase_end = NSUP if ptr < NSUP else P`), so n_support > P is an out-of-bounds READ of
+     * the caller's order buffer — and it returned GPAP_OK while doing it. O(1) to refuse. */
+    if (n_support < 0 || n_support > P) {
+        set_error("gpap_engine_trajectory: n_support=%d must lie in [0, P=%d] — it is the end of "
+                  "decision phase 1, so a larger value reads past `order`", n_support, P);
+        return GPAP_ERR_ARG;
+    }
     GPAP_TRY(use_ctx(e));
     if (P == 0) {
         /* Nothing to decide (a formula whose variables are all determined, e.g. after unit
@@ -521,10 +567,13 @@ extern "C" gpap_status gpap_engine_trajectory_dev(gpap_engine *e, uintptr_t orde
                      &e->nops.ptr, &e->nprops.ptr, &e->ndecs.ptr, &M, &NW, &P, &n_support, &B,
                      &cap, &max_rounds, &seed64}));
     e->launches++;
+    /* Invalidated BEFORE the fallible accumulates, as in apply_dev_common: a selection that
+     * survived a launch would describe the pre-launch state. (packed_clean_rows and
+     * abits_diverged are already set above, before the launch, for the same reason.) */
+    for (int i = 0; i < GPAP_SLOTS; ++i) e->slots[i].rows_valid = false;
     GPAP_TRY(accumulate(e, e->nops, e->acc_ops, e->K));
     GPAP_TRY(accumulate(e, e->nprops, e->acc_props, e->K));
     GPAP_TRY(accumulate(e, e->ndecs, e->acc_decs, e->K));
-    for (int i = 0; i < GPAP_SLOTS; ++i) e->slots[i].rows_valid = false;
 
     if (max_rounds_out) {                                   /* one sync, as run_trajectory does */
         *max_rounds_out = 0;
@@ -540,7 +589,20 @@ extern "C" gpap_status gpap_engine_trajectory_dev(gpap_engine *e, uintptr_t orde
 extern "C" gpap_status gpap_engine_trajectory(gpap_engine *e, const int32_t *order_host, int32_t P,
                                               int32_t n_support, int32_t B, int64_t seed, int soft,
                                               int32_t *max_rounds_out) {
-    if (!e || !order_host) return GPAP_ERR_ARG;
+    if (!e || !order_host || P < 0) return GPAP_ERR_ARG;
+    /* Range-check the order HERE, where the array is host-side and we are about to walk it to
+     * stage it anyway (P <= N entries against a launch of milliseconds — free). The kernel turns
+     * entry v into `ab_row + (v >> 4)` and the literal `2v + pol`, so a v past N writes into a
+     * LATER ROW's assignment bitmap: row A's bad input silently changes row B's answer, and no
+     * readout downstream can tell. The `_dev` variant cannot do this without a device pass and
+     * says so in the header; every in-tree caller of it builds `order` from a permutation of
+     * range(N). */
+    for (int32_t i = 0; i < P; ++i)
+        if (order_host[i] < 0 || order_host[i] >= e->num_vars) {
+            set_error("gpap_engine_trajectory: order[%d] = %d is not a variable index in "
+                      "[0, %d)", i, order_host[i], e->num_vars);
+            return GPAP_ERR_ARG;
+        }
     GPAP_TRY(use_ctx(e));
     GPAP_TRY(stage(e->staging_a, order_host, (size_t)P * sizeof(int32_t)));
     return gpap_engine_trajectory_dev(e, (uintptr_t)e->staging_a.ptr, P, n_support, B, seed, soft,

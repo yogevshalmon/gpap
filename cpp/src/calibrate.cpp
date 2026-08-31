@@ -105,15 +105,17 @@ extern "C" int32_t gpap_trail_cap(int32_t num_vars) {
     return num_vars + kTrailSlack;
 }
 
-/* `M` here is the STATE clause count — clauses of length >= 3, `gpap_formula_info.num_long` —
- * because only those have a packed word per row. Binary clauses are implication edges in the
+/* `num_long` is the STATE clause count — clauses of length >= 3, `gpap_formula_info.num_long` —
+ * because only those have a packed word per row. The parameter is NOT called `M`: `M` means the
+ * total clause count everywhere else in this codebase, and the header's declaration and this
+ * definition must not name the same thing differently. Binary clauses are implication edges in the
  * shared occ CSR and unit clauses live in the flush cache's bitmap: zero per-row bytes. Feeding
  * total num_clauses over-charges ~4-10x of the first term on circuit CNFs (65-82% of their
  * clauses are binary) and was exactly the kind of phantom charge the HISTORY note above bans. */
-extern "C" int64_t gpap_row_bytes(int32_t M, int32_t N, int32_t trail_cap) {
+extern "C" int64_t gpap_row_bytes(int32_t num_long, int32_t N, int32_t trail_cap) {
     if (trail_cap <= 0) trail_cap = gpap_trail_cap(N);
     const int64_t words = (2ll * N + 31) / 32;          /* assignment bitmap, int32 words */
-    return 4ll * M                                      /* packed clause word   (K, M)      */
+    return 4ll * num_long                               /* packed clause word (K, num_long) */
            + 4ll * words                                /* assignment bitmap    (K, ceil2N/32)*/
            + 4ll * trail_cap                            /* trail                (K, cap)    */
            + 2                                          /* active + conflict                */
@@ -142,9 +144,9 @@ extern "C" int32_t gpap_default_k_cap(int device) {
     return kBatchCap;
 }
 
-extern "C" int32_t gpap_compute_k_safe(int32_t M, int32_t N, int64_t bytes, int32_t cap) {
+extern "C" int32_t gpap_compute_k_safe(int32_t num_long, int32_t N, int64_t bytes, int32_t cap) {
     if (bytes <= 0) return 1;
-    const int64_t per_row = gpap_row_bytes(M, N, gpap_trail_cap(N));
+    const int64_t per_row = gpap_row_bytes(num_long, N, gpap_trail_cap(N));
     int64_t k = bytes / std::max<int64_t>(per_row, 1);
     if (cap > 0) k = std::min<int64_t>(k, cap);
     return (int32_t)std::max<int64_t>(1, k);

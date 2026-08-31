@@ -65,10 +65,16 @@ for (std::size_t i = 0; i < sols.size(); ++i)
 ```
 
 The sampler sizes the GPU batch to free VRAM, picks the propagate kernel, orders decisions so
-propagation does the work, runs as many chunks as the target needs, and verifies on the device
-that every row it returns satisfies every clause. Variables and literals are **DIMACS** — the
-same numbers as in the `.cnf` file. `SampleOptions` covers the rest (`seed`, `time_limit_s`,
-`max_keep`, `variables`, `batch`, `lookahead`, `auto_retry`, `device`, `k`).
+propagation does the work, and runs as many chunks as the target needs. Variables and literals
+are **DIMACS** — the same numbers as in the `.cnf` file. `SampleOptions` covers the rest
+(`seed`, `time_limit_s`, `max_keep`, `variables`, `batch`, `lookahead`, `auto_retry`, `device`,
+`k`, `k_cap`, `verify`).
+
+`verify` re-checks on the device that every returned row really satisfies every clause. It is
+**off by default**, on every face — it is a self-test, not part of producing samples: a row is
+only counted when it is active and fully assigned, which already means no clause was emptied.
+Set it in tests, or in a run whose output will be published; `Sampler::sample` then throws if any
+row fails.
 
 `auto_retry` (on by default) is worth knowing about: if the configured settings find nothing in
 the first few chunks, it flips the in-kernel risk polarity once before giving up. On b12 unrolled
@@ -127,7 +133,8 @@ Or straight from C, with no C++ at all:
 
 gpap_formula *f; gpap_engine *e;
 gpap_formula_from_dimacs("formula.cnf", &f);
-gpap_engine_create(f, NULL, &e);   /* NULL opts = device 0, scalar, auto split */
+gpap_engine_create(f, NULL, &e);   /* NULL opts = every default: device 0, AUTO kernel
+                                      (re-picked per reset), split from the formula */
 
 gpap_engine_reset(e, /*K=*/65536);
 int32_t rounds;
@@ -136,7 +143,9 @@ gpap_engine_trajectory(e, order, P, n_support, /*B=*/8, /*seed=*/42, /*soft=*/0,
 int32_t mask, models, unsound;
 gpap_pair_mask_create(e, NULL, 0, &mask);          /* all variables */
 gpap_select_complete(e, mask, /*slot=*/0, &models);
-gpap_check_sound(e, 0, 4096, &unsound);            /* must be 0 */
+gpap_check_sound(e, 0, /*max_rows=*/0, &unsound);  /* 0 = EVERY selected row; must be 0.
+                                                      A positive bound checks a PREFIX, and
+                                                      then "0 unsound" only speaks for it. */
 ```
 
 Full C example: [`examples/c_api.c`](examples/c_api.c). The two entry points are the same ones the
@@ -179,14 +188,16 @@ include/gpap/gpap.hpp    header-only C++: tier 1 (Sampler/AssumptionChecker) ove
 src/formula.cpp          DIMACS tokenizer (+ `c ind` support), occurrence CSR, packed word
 src/engine.cpp           state ownership, reset/flush cache, the two entry points, counters
 src/readout.cpp          selections, on-device soundness, bit gathers, assignment rows
-src/calibrate.cpp        free-VRAM query + the conservative analytic K bound
+src/calibrate.cpp        the memory model, K sizing and THE wave/scalar dispatch rule
+src/probe.cpp            combinatorial probing: every k-subset of a literal set, paged + budgeted
+src/check.cpp            batched checking: THE chunk loop shared by both AssumptionChecker faces
 src/runtime.cpp          driver-API helpers, cubin registry, launches, device buffers
 src/gpap_internal.hpp    shared internals (not installed)
 src/generated/           GENERATED cubins + lookup table (build_kernels.py output; gitignored)
 kernels/helpers.py       support kernels (Triton, so the toolchain stays nvcc-free)
 tools/build_kernels.py   the AOT compiler
 tools/make_libcuda_stub.py  link-only libcuda stub, so CI can build without a driver
-                            (`--print` lists every driver call the core makes: 18)
+                            (`--print` lists every driver call the core makes)
 examples/c_api.c         standalone C consumer (raw ABI) — the header's reference
 examples/sample.cpp      solution sampling from C++ (gpap::Sampler)
 examples/assumptions.cpp batched assumption checking from C++ (gpap::AssumptionChecker)
@@ -194,6 +205,30 @@ examples/probe.cpp       entailed-clause probing from C++ (gpap::Prober)
 ```
 
 The core's contract is gated by [`tests/test_core.py`](../tests/test_core.py) against two
-pure-Python oracles — the reference formula builder in `gpap/engine/formula.py` and the
-reference BCP in `tests/reference_bcp.py` — plus direct clause-satisfaction checks on every
-emitted model, in both kernel modes and both packed splits.
+INDEPENDENT pure-Python oracles — the formula builder in
+[`tests/reference_formula.py`](../tests/reference_formula.py) and the BCP in
+[`tests/reference_bcp.py`](../tests/reference_bcp.py) — plus direct clause-satisfaction checks on
+every emitted model, in both kernel modes and both packed splits. (Not
+`gpap/engine/formula.py`: that is a FACADE over `src/formula.cpp`, so gating against it would be
+gating the core against itself.)
+
+### Sanitizers
+
+The library and the examples build clean under ASan + UBSan, and the whole Python suite runs
+against such a build. One option is REQUIRED — the CUDA driver reserves address space that
+collides with ASan's shadow gap, and without it `cuInit` fails with a misleading "out of memory":
+
+```bash
+cmake -S cpp -B build-asan -DCMAKE_BUILD_TYPE=RelWithDebInfo \
+      -DCMAKE_CXX_FLAGS="-fsanitize=address,undefined" \
+      -DCMAKE_C_FLAGS="-fsanitize=address,undefined" \
+      -DCMAKE_EXE_LINKER_FLAGS="-fsanitize=address,undefined" \
+      -DCMAKE_SHARED_LINKER_FLAGS="-fsanitize=address,undefined" && cmake --build build-asan -j
+ASAN_OPTIONS=protect_shadow_gap=0 ./build-asan/gpap_sample formula.cnf 20000
+# the Python suite against the same library:
+LD_PRELOAD=$(gcc -print-file-name=libasan.so) ASAN_OPTIONS=protect_shadow_gap=0:detect_leaks=0 \
+  GPAP_LIB=$PWD/build-asan/libgpap.so python -m pytest -q
+```
+
+Leak checking needs `leak:libcuda.so` suppressed: the WSL driver shim leaks ~50 KB in `cuInit`
+on every process, which is not ours.

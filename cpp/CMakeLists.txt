@@ -123,9 +123,14 @@ install(DIRECTORY include/ DESTINATION ${CMAKE_INSTALL_INCLUDEDIR})
 install(EXPORT gpapTargets FILE gpapTargets.cmake NAMESPACE gpap::
         DESTINATION ${CMAKE_INSTALL_LIBDIR}/cmake/gpap)
 
+# SameMINORVersion, not SameMajorVersion. This project encodes an ABI break in the MINOR
+# version (0.1.0 -> 0.2.0 moved SOVERSION 0 -> 1; see the note at the top of this file), and
+# CMake reads a 0.x major as 0 — so SameMajorVersion would have told a downstream
+# `find_package(gpap 0.1 REQUIRED)` that the ABI-incompatible 0.2.0 satisfies it. The rule the
+# soname states and the rule the package config enforces have to be the same rule.
 write_basic_package_version_file(
   "${CMAKE_CURRENT_BINARY_DIR}/gpapConfigVersion.cmake"
-  VERSION ${PROJECT_VERSION} COMPATIBILITY SameMajorVersion)
+  VERSION ${PROJECT_VERSION} COMPATIBILITY SameMinorVersion)
 file(WRITE "${CMAKE_CURRENT_BINARY_DIR}/gpapConfig.cmake"
 "include(CMakeFindDependencyMacro)\n\
 include(\"\${CMAKE_CURRENT_LIST_DIR}/gpapTargets.cmake\")\n")
