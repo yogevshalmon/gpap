@@ -641,9 +641,17 @@ def sample_clauses(nv, clauses, support, device, *, simplify=True, els=True, n_t
     # Estimated UNIQUE solutions/s: timed raw rate × the distinct fraction measured post-hoc on the
     # coverage sample. Dedup/reconstruction NEVER touches the timed run (collect=False) — this is a
     # pure post-processing estimate (exact on large spaces where distinct_frac≈1; honest on tiny
-    # spaces where re-sampling dominates). None when no coverage run was requested.
+    # spaces where re-sampling dominates). None when it could not be measured — `unique_est_status`
+    # says which reason, and the two are NOT interchangeable (see below).
     n_coll = len(c.get("models", []))
     uniq_sps = (sps * c["n_distinct"] / n_coll) if (n_coll and c.get("n_distinct")) else None
+    # WHY it is None is not a detail: "no coverage run was requested" and "the coverage run
+    # collected nothing" are different facts, and a consumer that folds both to 0.0 publishes the
+    # second as "GPAP produced nothing". The coverage run is a few thousand trajectories, so on a
+    # very-low-success instance it comes back empty while the TIMED run delivers models — b11-c25
+    # at a rare pin was recorded that way and scored as an outright loss to a rival it beat.
+    uniq_status = ("ok" if uniq_sps is not None
+                   else ("not-requested" if not n_cov else "no-coverage-sample"))
     phases["timed"] = wall
     return {"samples_per_s": sps, "success_rate": succ,
             "nv": nv, "n_clauses": len(clauses),              # ORIGINAL sizes (pre-simplify)
@@ -660,6 +668,7 @@ def sample_clauses(nv, clauses, support, device, *, simplify=True, els=True, n_t
             "wall_total_s": wall_total,                       # e2e wall incl. construction+simplify+mining
             "mined": mine_info,                               # entailed-clause mining stats (None = skipped)
             "unique_sps_est": uniq_sps,
+            "unique_est_status": uniq_status,                 # ok | not-requested | no-coverage-sample
             "assigns_per_s": aps,                             # literals assigned/s (CDCL props/s analogue)
             "decisions_per_s": dps,                           # branch decisions/s (best-rate config)
             "implications_per_s": ips,                        # unit-prop implications/s (=assigns-decisions)

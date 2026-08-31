@@ -22,7 +22,7 @@ import os
 import sys
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
-from eval.artifact.paper_tables import gm                                    # noqa: E402
+from eval.artifact.paper_tables import gm, unique_unmeasured                 # noqa: E402
 
 
 # stem -> (key in the row holding the rival's numbers, human label)
@@ -51,12 +51,28 @@ def collect(d, stem, key, variant=None):
         if variant and var != variant:
             continue
         rv, g = r.get(key) or {}, r.get("gpap") or {}
-        gpap = g.get("unique_per_s_est") or 0.0
+        # NOT MEASURED is not a zero — one definition, in paper_tables, so this table and the
+        # paper's cannot drift apart about which cells are comparable.
+        nomeas = unique_unmeasured(g)
+        gpap = None if nomeas else (g.get("unique_per_s_est") or 0.0)
         rec = {"gpap": gpap, "p_accept": r.get("p_accept"), "rival": None, "ratio": None,
-               "error": rv.get("error")}
+               "error": rv.get("error"), "kind": "error" if rv.get("error") else None}
         if not rec["error"]:
             rec["rival"] = rv.get("unique_per_s") or 0.0
-            rec["ratio"] = (gpap / rec["rival"]) if rec["rival"] else None   # None = rival got 0
+            # Every cell lands in exactly ONE bucket, so the printed columns SUM to the cell
+            # count. They used not to: a both-zero cell had ratio None like a rival-zero cell and
+            # was printed "GPAP only" — the label an outright win carries — while entering
+            # neither count.
+            if nomeas:
+                rec["kind"] = "nomeas"
+            elif rec["rival"] and gpap:
+                rec["ratio"], rec["kind"] = gpap / rec["rival"], "ratio"
+            elif gpap:
+                rec["kind"] = "rival0"                  # rival silent -> outright win
+            elif rec["rival"]:
+                rec["kind"] = "gpap0"                   # WE are silent -> outright loss
+            else:
+                rec["kind"] = "both0"                   # neither produced anything
         out[(r["name"], var)] = rec
     return out
 
@@ -73,11 +89,13 @@ def report_one(d, variant, markdown):
         rows = collect(d, stem, key, variant)
         if not rows:
             continue
-        ratios = [r["ratio"] for r in rows.values() if r["ratio"]]
-        only = sum(1 for r in rows.values() if r["ratio"] is None and not r["error"] and r["gpap"])
-        gz = sum(1 for r in rows.values()
-                 if not r["error"] and r["rival"] and not r["gpap"])
-        errs = sum(1 for r in rows.values() if r["error"])
+        kinds = [r["kind"] for r in rows.values()]
+        ratios = [r["ratio"] for r in rows.values() if r["kind"] == "ratio"]
+        only = kinds.count("rival0")
+        gz = kinds.count("gpap0")
+        both = kinds.count("both0")
+        nm = kinds.count("nomeas")
+        errs = kinds.count("error")
         # Count wins the way eval/artifact/paper_tables.py does, or the deck and the paper disagree in
         # print. A cell the rival scored ZERO on is an outright win and belongs in BOTH sides of
         # the fraction; a cell WE scored zero on is an outright loss and belongs in the
@@ -86,18 +104,26 @@ def report_one(d, variant, markdown):
         # differed from the published table by exactly the zero-scoring cells.
         wins = sum(1 for x in ratios if x >= 1) + only
         n = len(ratios) + only + gz
+        # The columns must ADD UP to the cell count, or a reader cannot check what was dropped.
         print(f"\n=== {label}   n={len(rows)}  geomean={fmt(gm(ratios), 'x')}  "
               f"GPAP wins {wins}/{n}  rival-scored-0: {only}  GPAP-scored-0: {gz}  "
-              f"rival-errored: {errs}")
+              f"both-scored-0: {both}  u/s-unmeasured: {nm}  rival-errored: {errs}"
+              f"   [{len(ratios)}+{only}+{gz}+{both}+{nm}+{errs}={len(rows)}]")
         if markdown:
             print("\n| instance | p_acc | rival u/s | GPAP u/s | ratio |\n|---|---|---|---|---|")
         for (name, var), r in rows.items():
             tag = f"{name} ({var})" if var not in ("-", None) else name
             pa = f"{r['p_accept']:.1e}" if r["p_accept"] else "—"
-            if r["error"]:
+            if r["kind"] == "error":
                 rival, ratio = f"FAILED: {r['error'][:30]}", "—"
-            elif r["ratio"] is None:
+            elif r["kind"] == "nomeas":
+                rival, ratio = fmt(r["rival"]), "not measured"
+            elif r["kind"] == "rival0":
                 rival, ratio = "0 (found nothing)", "GPAP only"
+            elif r["kind"] == "gpap0":
+                rival, ratio = fmt(r["rival"]), "GPAP found nothing"
+            elif r["kind"] == "both0":
+                rival, ratio = "0 (found nothing)", "neither"
             else:
                 rival, ratio = fmt(r["rival"]), fmt(r["ratio"], "x")
             if markdown:

@@ -59,6 +59,26 @@ def zero_search(r):
             and not (r.get("decisions_per_s") or 0)
             and not (r.get("implications_per_s") or 0))
 
+
+def unique_unmeasured(g):
+    """True when GPAP's unique/s figure could not be MEASURED on a rival cell.
+
+    That is NOT "GPAP produced nothing", and bucketing it as one publishes a win as a loss. The
+    estimate is the timed rate times the distinct fraction of the OFF-timing coverage run, and
+    that run is only a few thousand trajectories: on a very-low-success instance it collects
+    nothing while the TIMED run delivers models. b11-c25 at a rare pin is recorded exactly that
+    way — 42 models, no estimate — against the rival's 0.0469 u/s, an ~15x win that was published
+    as an outright loss. Rows written before `unique_est_status` existed are caught the same way:
+    no estimate, but models in the timed run.
+
+    ONE definition, imported by every consumer (`rival_family` here, `eval/eval_plots.py`,
+    `eval/rivals/rivals_summary.py`) — a rule with three copies is a rule that will drift.
+    """
+    return bool(not g.get("unique_per_s_est")
+                and ((g.get("n_models") or 0) > 0
+                     or g.get("unique_est_status") == "no-coverage-sample"))
+
+
 CMS_FAMILIES = [
     ("seq-c25-rare", "ITC'99 + ISCAS-89 sequential", "T=25", "rare"),
     ("seq-c50-rare", "ITC'99 + ISCAS-89 sequential", "T=50", "rare"),
@@ -308,7 +328,7 @@ def rival_family(d, stem, key):
     seen = {}
     for r in rows:
         seen[(r["name"], r.get("variant", "-"))] = r        # a retry supersedes its error row
-    ratios, errs, zero, gzero, both, free = [], 0, 0, 0, 0, 0
+    ratios, errs, zero, gzero, both, free, nomeas = [], 0, 0, 0, 0, 0, 0
     for r in seen.values():
         rv, g = r.get(key) or {}, r.get("gpap") or {}
         if rv.get("error"):
@@ -321,6 +341,11 @@ def rival_family(d, stem, key):
             free += 1
             continue
         rate = rv.get("unique_per_s") or 0.0
+        # NOT MEASURED is not a zero (see `unique_unmeasured`): it gets its own column, because
+        # it is not evidence in either direction.
+        if unique_unmeasured(g):
+            nomeas += 1
+            continue
         ours = g.get("unique_per_s_est") or 0.0
         # Symmetric with the CMSGen table: name OUR zeros as loudly as theirs. A rival that
         # scored zero is an outright win, ours is an outright loss, and neither has a finite
@@ -335,7 +360,7 @@ def rival_family(d, stem, key):
             ratios.append(ours / rate)
     return {"cells": len(seen), "gm": gm(ratios), "n": len(ratios) + zero + gzero,
             "wins": sum(1 for x in ratios if x >= 1) + zero, "errors": errs, "zero": zero,
-            "gpap0": gzero, "both0": both, "free": free}
+            "gpap0": gzero, "both0": both, "free": free, "nomeas": nomeas}
 
 
 # ------------------------------------------------------------------ uniformity
@@ -568,17 +593,17 @@ def build(args):
           + " — these bound the reach of the whole comparison, not of either tool."]
     M += ["", "## Table 2 — GPAP vs the GPU gradient samplers", "",
           "| rival | protocol | cells | GPAP/rival | wins | rival=0 | GPAP=0 | both=0 |"
-          " no-search | rival failed |",
-          "|---|---|---:|---:|---:|---:|---:|---:|---:|---:|"]
+          " u/s unmeasured | no-search | rival failed |",
+          "|---|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|"]
     for stem, _, rival, proto in RIVALS:
         v = riv.get(stem)
         if not v:
-            M.append(f"| {rival} | {proto} | — | not run | — | — | — | — | — | — |")
+            M.append(f"| {rival} | {proto} | — | not run | — | — | — | — | — | — | — |")
             continue
         gs = f"{v['gm']:,.1f}x" if v["gm"] else "—"
         M.append(f"| {rival} | {proto} | {v['cells']} | {gs} | "
                  f"{v['wins']}/{v['n']} | {v['zero']} | {v['gpap0']} | {v['both0']} "
-                 f"| {v.get('free', 0)} | {v['errors']} |")
+                 f"| {v.get('nomeas', 0)} | {v.get('free', 0)} | {v['errors']} |")
     M += ["",
           "The two protocols are DIFFERENT TASKS and must never be pooled: 'their pins' rows "
           "pin the 1–5 outputs the rival's own table names (rejection-easy by construction — "
@@ -795,18 +820,19 @@ def build(args):
           r"either side emitted nothing carries no finite ratio and is counted separately: "
           r"\emph{R$=$0} (rival silent), \emph{G$=$0} (GPAP silent), \emph{both}.}",
           r"  \label{tab:rivals}",
-          r"  \begin{tabular}{@{}llrrrrrrr@{}}", r"    \toprule",
-          r"    rival & protocol & cells & GPAP/rival & wins & R$=$0 & G$=$0 & both & failed \\",
+          r"  \begin{tabular}{@{}llrrrrrrrr@{}}", r"    \toprule",
+          r"    rival & protocol & cells & GPAP/rival & wins & R$=$0 & G$=$0 & both & "
+          r"u$/$s n$/$a & failed \\",
           r"    \midrule"]
     for stem, _, rival, proto in RIVALS:
         v = riv.get(stem)
         if not v:
-            T.append(f"    {rival} & {tex_escape(proto)} & \\multicolumn{{7}}{{c}}{{not run}} \\\\")
+            T.append(f"    {rival} & {tex_escape(proto)} & \\multicolumn{{8}}{{c}}{{not run}} \\\\")
             continue
         g = f"${v['gm']:,.1f}\\times$" if v["gm"] else "---"
         T.append(f"    {rival} & {tex_escape(proto)} & {v['cells']} & {g} & "
                  f"{v['wins']}/{v['n']} & {v['zero']} & {v['gpap0']} & {v['both0']} & "
-                 f"{v['errors']} \\\\")
+                 f"{v.get('nomeas', 0)} & {v['errors']} \\\\")
     T += [r"    \bottomrule", r"  \end{tabular}", r"\end{table}", ""]
 
     if any(prop.values()):
@@ -920,6 +946,11 @@ def build(args):
             C.append(f"{rival} ({proto}): **GPAP emitted nothing on {v['gpap0']} instance(s)** "
                      f"that the rival sampled. Losses, excluded from the geomean for lack of a "
                      f"finite ratio — state them.")
+        if v and v.get("nomeas"):
+            C.append(f"{rival} ({proto}): {v['nomeas']} cell(s) have no unique/s estimate — the "
+                     f"off-timing coverage run collected nothing there, while the timed run did "
+                     f"produce models. Not measured, so not comparable in either direction; "
+                     f"counted apart from GPAP=0, which means we produced nothing at all.")
     if any(v and not v["cpu"] for v in cms.values()):
         C.append("Some stages lack CPU provenance; a GPAP/CMSGen ratio is not interpretable "
                  "without it.")

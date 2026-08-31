@@ -30,6 +30,8 @@ import sys
 REPO_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
 sys.path.insert(0, REPO_ROOT)
 
+from eval.artifact.paper_tables import unique_unmeasured   # noqa: E402 — the shared cell rules
+
 # Categorical palette: fixed slot order, never cycled (blue/orange/aqua/violet). Validated
 # colorblind-safe against the light chart surface (all pairs, OKLab dE>=8) — see the dataviz
 # reference palette. One role per hue, kept identical across every figure so a colour always
@@ -442,20 +444,41 @@ def fig_rivals(plt, path, out_dir):
     # rows may carry a circuit VARIANT (raw / abc — both sides got the same circuit); when both
     # are present the label must say which, or the two rows collide on one axis tick.
     multi_var = len({r.get("variant") for r in rows if r.get("variant")}) > 1
-    items = [(f"{r['name']} ({r['variant']})" if multi_var else r["name"],
-              (r.get("gpap") or {}).get("unique_per_s_est", 0) or 0,
-              (r.get(key) or {}).get("unique_per_s", 0) or 0)
-             for r in rows if r.get(key) and "error" not in (r.get(key) or {})]
+    # A MISSING unique/s estimate is not a zero: it means the off-timing coverage run collected
+    # nothing, on an instance whose timed run may have delivered models at many times the rival's
+    # rate (b11-c25 at a rare pin). Coercing it to 0 drew GPAP at the axis floor — the picture of
+    # an outright loss — for a cell nobody measured. The rule is imported, not restated, so this
+    # figure and Table 2 cannot disagree about which cells are comparable.
+    items, unmeasured = [], []
+    for r in rows:
+        rv = r.get(key) or {}
+        if not rv or "error" in rv:
+            continue
+        tag = f"{r['name']} ({r['variant']})" if multi_var else r["name"]
+        if unique_unmeasured(r.get("gpap") or {}):
+            unmeasured.append(tag)
+            continue
+        items.append((tag, (r.get("gpap") or {}).get("unique_per_s_est") or 0,
+                      rv.get("unique_per_s") or 0))
     if not items:
         return None
     items.sort(key=lambda t: (t[1] / t[2] if t[2] else float("inf")))
-    gm = _gm([x[1] / x[2] for x in items if x[2]])
+    # A cell where EITHER side scored zero has no finite ratio, so it stays on the figure (it is a
+    # real outcome, and the dumbbell shows which side was silent) but cannot enter the geomean.
+    # The count beside the geomean is therefore its own, never the plotted-cell count.
+    ratios = [x[1] / x[2] for x in items if x[1] and x[2]]
+    gm = _gm(ratios)
     stem = os.path.splitext(os.path.basename(path))[0]
     mode = payload.get("mode") if isinstance(payload, dict) else None
-    sub = f"geomean {gm:,.1f}x" if gm else ""
+    sub = (f"geomean {gm:,.1f}x over {len(ratios)} of {len(items)} plotted cells"
+           + ("" if len(ratios) == len(items) else "; the rest scored zero on one side")) if gm \
+        else ""
     if mode:
         sub += ("  |  their own pins (rejection-easy by construction)" if mode == "native"
                 else "  |  our fixed-depth rare-target instance, handed to them as a miter")
+    if unmeasured:      # never drop cells silently — name them on the figure itself
+        sub += (f"  |  omitted, no unique/s estimate (coverage run collected nothing): "
+                f"{', '.join(sorted(unmeasured))}")
     return _dumbbell(
         plt, [x[0] for x in items], [x[2] for x in items], [x[1] for x in items], label, "GPAP",
         C_RIVAL, C_TSEITIN,

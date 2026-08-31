@@ -207,25 +207,30 @@ def main():
     # ---------------------------------------------------------------- frame 3: vs rivals
     a(r"\begin{frame}{Appendix: every GPU rival measured on the L4}")
     a(r"  \centering \scriptsize")
-    a(r"  \begin{tabular}{@{}llrrrrrr@{}}")
+    a(r"  \begin{tabular}{@{}llrrrrrrrr@{}}")
     a(r"    \toprule")
-    a(r"    rival & protocol & cells & GPAP$/$rival & wins & R$=$0 & G$=$0 & failed \\")
+    a(r"    rival & protocol & cells & GPAP$/$rival & wins & R$=$0 & G$=$0 & both & "
+      r"u$/$s n$/$a & failed \\")
     a(r"    \midrule")
     for stem, key, rival, proto in RIVAL_STAGES:
         v = riv.get(stem)
         if not v:
-            a(f"    {rival} & {proto} & \\multicolumn{{6}}{{c}}{{\\bad{{not run}}}} \\\\")
+            a(f"    {rival} & {proto} & \\multicolumn{{8}}{{c}}{{\\bad{{not run}}}} \\\\")
             continue
         a(f"    {rival} & {proto} & {v['cells']} & {fmt(v['gm'])} & "
-          f"{v['wins']}/{v['n']} & {v['zero']} & {v['gpap0']} & {v['errors']} \\\\")
+          f"{v['wins']}/{v['n']} & {v['zero']} & {v['gpap0']} & {v['both0']} & "
+          f"{v.get('nomeas', 0)} & {v['errors']} \\\\")
     a(r"    \bottomrule")
     a(r"  \end{tabular}")
     a(r"  \\[0.7em]")
     a(r"  \rem{Their metric: unique solutions $/$ their \texttt{model\_runtime}, which excludes"
       r"  their model build while ours includes construction. \keyw{failed} = timeout or"
       r"  no gradient path; those rows are reported, never folded in as a zero."
-      r"  \keyw{R$=$0} the rival emitted nothing, \bad{G$=$0} \emph{we} emitted nothing ---"
-      r"  neither has a finite ratio, both are counted.}")
+      r"  \keyw{R$=$0} the rival emitted nothing, \bad{G$=$0} \emph{we} emitted nothing,"
+      r"  \keyw{both} neither did --- none has a finite ratio, all are counted."
+      r"  \keyw{u$/$s n$/$a} our unique$/$s could not be MEASURED (the off-timing coverage"
+      r"  run collected nothing while the timed run delivered models): not evidence in"
+      r"  either direction, so it is neither a win nor a loss.}")
     a(r"\end{frame}")
     a("")
     # ---------------------------------------------------------------- frame 4: uniformity
