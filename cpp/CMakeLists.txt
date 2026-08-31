@@ -8,7 +8,14 @@
 #   cmake -S cpp -B build && cmake --build build -j
 #   ./build/gpap_c_api
 cmake_minimum_required(VERSION 3.18)
-project(gpap VERSION 0.1.0 LANGUAGES C CXX)
+# 0.2.0 / SOVERSION 1 — the ABI break. gpap_mode's values were renumbered (AUTO is 0
+# now, so a zeroed options struct dispatches), gpap_flags / gpap_num_propagated gained a capacity
+# argument, gpap_probe_count takes the options struct, and gpap_probe_options.distinct_vars became
+# same_var with the sense INVERTED at the same offset. The rename is a compile error for a caller
+# that recompiles -- but a caller that only RELINKS gets none of that, so the soname has to move:
+# under SOVERSION 0 an old binary would have read GPAP_MODE_WAVE as SCALAR and passed the integer
+# 1 where a gpap_probe_options* is now dereferenced. Bump both again on the next break.
+project(gpap VERSION 0.2.0 LANGUAGES C CXX)
 
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -80,7 +87,12 @@ target_link_libraries(gpap PRIVATE ${GPAP_CUDA_DRIVER})
 # gpap.h instead and are unaffected — that header is plain C99.)
 target_compile_features(gpap PUBLIC cxx_std_17)
 target_compile_options(gpap PRIVATE -Wall -Wextra -Wno-unused-parameter)
-set_target_properties(gpap PROPERTIES VERSION ${PROJECT_VERSION} SOVERSION 0)
+# ONE spelling of the version: gpap_version() reports this, rather than a second literal in
+# runtime.cpp that nobody remembers to bump alongside it.
+target_compile_definitions(gpap PRIVATE GPAP_VERSION_STR="${PROJECT_VERSION}")
+# dladdr, so gpap_build_id() can find and fingerprint the library's own file.
+target_link_libraries(gpap PRIVATE ${CMAKE_DL_LIBS})
+set_target_properties(gpap PROPERTIES VERSION ${PROJECT_VERSION} SOVERSION 1)
 
 # ---------------------------------------------------------------- examples
 add_executable(gpap_c_api examples/c_api.c)                   # plain C, the raw ABI

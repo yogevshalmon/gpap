@@ -81,7 +81,8 @@ def convert(kind, src, out, cycles, seed, pin_outputs, encoder, abc_opt, abc_pat
                         abc_path=abc_path, quiet=True, abc_opt=abc_opt, target_mode=target)
 
 
-def run_arm(kernel, cnf, device, configs, *, n_time, time_limit, k_cap, max_chunks, seed):
+def run_arm(kernel, cnf, device, configs, *, n_time, time_limit, k_cap, max_chunks, seed,
+            verify_sound=False):
     """One sampling run with the kernel FORCED. Returns the fields the A/B needs, or an error."""
     import torch
     from gpap.sampling.pipeline import sample_file
@@ -89,7 +90,7 @@ def run_arm(kernel, cnf, device, configs, *, n_time, time_limit, k_cap, max_chun
     try:
         g = sample_file(cnf, device, n_time=n_time, n_cov=0, configs=configs,
                         time_limit=time_limit, seed=seed, uniformity="off", mine="off",
-                        k_cap=k_cap, max_chunks=max_chunks)
+                        k_cap=k_cap, max_chunks=max_chunks, verify_sound=verify_sound)
     except Exception as e:                      # noqa: BLE001 — envelope rejection, OOM, ...
         return {"error": f"{type(e).__name__}: {e}"[:300]}
     finally:
@@ -111,8 +112,12 @@ def measure(cnf, device, configs, args):
     # ---- validation: same K, same seed, same chunk count -> the kernels must agree exactly
     val = {}
     for k in KERNELS:
+        # verify_sound ON for the VALIDATION arms only: this is the pass whose job is to
+        # prove both kernels emit real models, and it is untimed. The timing arms below leave it
+        # off so nothing is charged to a measured wall.
         val[k] = run_arm(k, cnf, device, configs, n_time=10**9, time_limit=args.val_time_limit,
-                         k_cap=args.val_k_cap, max_chunks=args.val_chunks, seed=args.seed)
+                         k_cap=args.val_k_cap, max_chunks=args.val_chunks, seed=args.seed,
+                         verify_sound=True)
     ok = all("error" not in val[k] for k in KERNELS)
     row["validation"] = {
         "K": {k: val[k].get("K") for k in KERNELS},
@@ -127,9 +132,13 @@ def measure(cnf, device, configs, args):
         row["validation"]["identical_models"] = (same_k and
                                                 val["scalar"]["models"] == val["wave"]["models"])
         row["validation"]["mode_ok"] = all(val[k]["mode"] == k for k in KERNELS)
+        # `sound` is the TRI-STATE string, so it must be compared to "ok" — truthiness passes
+        # for "off" AND for "UNSOUND", which silently disarmed this gate when the key changed
+        # from the old `gpu_sound` bool.
+        row["validation"]["sound_ok"] = all(val[k]["sound"] == "ok" for k in KERNELS)
         row["validation"]["passed"] = bool(row["validation"]["identical_models"]
                                            and row["validation"]["mode_ok"]
-                                           and all(val[k]["sound"] for k in KERNELS))
+                                           and row["validation"]["sound_ok"])
     else:
         row["validation"]["passed"] = False
     # ---- timing: fixed wall, reps alternated, best-of per arm

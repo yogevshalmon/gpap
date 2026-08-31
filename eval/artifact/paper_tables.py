@@ -35,7 +35,11 @@ import math
 import os
 import statistics
 import subprocess
+import sys
 import time
+
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
+from gpap.sampling.metrics import sound_verdict            # noqa: E402 — after sys.path
 
 VACUOUS_PINS = {"b02", "b05", "b07", "s526"}
 
@@ -70,21 +74,18 @@ def sound_failed(r):
     the key existed carry the old boolean `gpu_sound` and are read the same way.
 
     ONE definition, imported by `verify_artifact.py` — the gate and the table must not disagree
-    about which cells were actually checked."""
+    about which cells were actually checked. The tri-state itself (including how a legacy
+    `gpu_sound` bool reads) comes from `gpap.sampling.metrics.sound_verdict`, which is also what
+    the bench table, the CLI and the Colab driver use, so a reader and a writer of the same JSON
+    cannot disagree either."""
     if r.get("cpu_sound") is False:
         return True
-    sc = r.get("sound_check")
-    if sc is None:
-        return r.get("gpu_sound") is False        # legacy row
-    return sc == "UNSOUND"
+    return sound_verdict(r) == "UNSOUND"
 
 
 def sound_unchecked(r):
     """True when the row says nothing about soundness — the check was not run."""
-    sc = r.get("sound_check")
-    if sc is None:
-        return "gpu_sound" not in r and r.get("cpu_sound") is None
-    return sc == "off" and r.get("cpu_sound") is None
+    return sound_verdict(r) == "off" and r.get("cpu_sound") is None
 
 
 def unique_unmeasured(g):

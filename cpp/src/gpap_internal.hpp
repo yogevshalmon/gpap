@@ -22,12 +22,17 @@ const char *get_error();
 gpap_status engine_reject_if_packed_is_baseline(gpap_engine *e, const char *what);
 
 /* DIMACS literal -> internal 2N index (+v -> 2(v-1), -v -> 2(v-1)+1), or -1 if out of range
- * for an N-variable formula. The one conversion every DIMACS-speaking entry point shares. */
+ * for an N-variable formula. The one conversion every DIMACS-speaking entry point shares —
+ * including the BUILDER, which used to carry its own copy built on std::abs().
+ * The magnitude is taken in int64 because -INT32_MIN does not fit in int32: std::abs(INT32_MIN)
+ * and -lit are both undefined behaviour, and the range check that would have rejected the
+ * literal happened AFTER them. It is reachable from public API (gpap_formula_from_clauses takes
+ * caller-supplied int32 literals), so it is a real input, not a theoretical one. */
 inline int64_t lit_index_from_dimacs(int32_t lit, int32_t num_vars) {
     if (lit == 0) return -1;
-    const int32_t v = lit > 0 ? lit : -lit;
+    const int64_t v = lit > 0 ? (int64_t)lit : -(int64_t)lit;
     if (v > num_vars) return -1;
-    return 2ll * (v - 1) + (lit < 0 ? 1 : 0);
+    return 2 * (v - 1) + (lit < 0 ? 1 : 0);
 }
 
 /* Every driver call goes through this: it records a readable message and returns. */
@@ -185,6 +190,7 @@ struct gpap_engine {
     int64_t total_lits = 0;
     int32_t max_clause_len = 0;
     gpap_mode mode = GPAP_MODE_SCALAR;   /* always RESOLVED: scalar or wave, never auto */
+    gpap_mode env_mode = GPAP_MODE_AUTO; /* $GPAP_KERNEL, read once; AUTO = not set */
     int auto_mode = 0;                   /* 1 = re-resolve `mode` on every reset(K) */
     int vscan = 1;
     int has_empty_clause = 0;

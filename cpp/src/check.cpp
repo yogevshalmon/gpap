@@ -107,8 +107,8 @@ extern "C" gpap_status gpap_check_sets(gpap_engine *e, const int32_t *lits,
             GPAP_TRY(gpap_engine_apply(e, decisions.data(), static_cast<int32_t>(L)));
         else
             GPAP_TRY(gpap_engine_apply_clean(e, decisions.data(), static_cast<int32_t>(L)));
-        GPAP_TRY(gpap_flags(e, nullptr, conflict_out + a));
-        GPAP_TRY(gpap_num_propagated(e, propagated_out + a));
+        GPAP_TRY(gpap_flags(e, nullptr, conflict_out + a, K));
+        GPAP_TRY(gpap_num_propagated(e, propagated_out + a, K));
         if (assign_out || sat_out) {
             rows.resize(static_cast<size_t>(K));
             std::iota(rows.begin(), rows.end(), 0);

@@ -40,13 +40,18 @@ typedef enum {
 } gpap_status;
 
 typedef enum {
-    GPAP_MODE_SCALAR = 0,   /* serial-trail propagate (best below ~2k clauses) */
-    GPAP_MODE_WAVE = 1,     /* warp-wide wavefront propagate (best above it) */
     /* Let the engine choose, per reset(K), with gpap_dispatch_wave. INPUT ONLY: gpap_engine_mode
      * always reports the RESOLVED kernel, never this. Auto is the right default for anything that
      * is not deliberately A/B-ing the two kernels, and resolving it HERE rather than in a wrapper
-     * is what makes that true for every consumer -- see gpap_engine_reset. */
-    GPAP_MODE_AUTO = 2
+     * is what makes that true for every consumer -- see gpap_engine_reset.
+     * IT IS ZERO on purpose: `gpap_engine_options o = {0}` and a NULL options pointer must mean
+     * the same thing, and that thing must be the default a library would pick for you. Scalar
+     * held 0 once, which made the raw C face the ONE consumer that did not dispatch -- both
+     * wrappers overrode it -- so it ran the slower kernel on large formulas. Same hole
+     * gpap_engine_reset's comment describes; the measurements are in docs/findings/INSIGHTS.md. */
+    GPAP_MODE_AUTO = 0,
+    GPAP_MODE_SCALAR = 1,   /* serial-trail propagate (best below ~2k clauses) */
+    GPAP_MODE_WAVE = 2      /* warp-wide wavefront propagate (best above it) */
 } gpap_mode;
 
 typedef struct gpap_formula gpap_formula;
@@ -117,13 +122,12 @@ gpap_status gpap_packed_envelope(int32_t num_vars, int32_t max_clause_len, int32
 
 /* ------------------------------------------------------------------ engine */
 
-/* Engine options. Pass NULL to gpap_engine_create for the defaults (device 0, scalar propagate,
- * auto split) — every field is "0 means the sensible default". */
+/* Engine options. Pass NULL to gpap_engine_create for the defaults (device 0, auto kernel,
+ * auto split) — every field is "0 means the sensible default", and `{0}` is that same struct. */
 typedef struct {
     int device;             /* CUDA device ordinal (0) */
-    gpap_mode mode;         /* GPAP_MODE_SCALAR (so `{0}` stays the historical default);
-                             * GPAP_MODE_AUTO to let every reset(K) pick -- what the C++ and
-                             * Python faces both pass unless a caller pins a kernel */
+    gpap_mode mode;         /* GPAP_MODE_AUTO (0): every reset(K) picks the kernel. Pin
+                             * GPAP_MODE_SCALAR / GPAP_MODE_WAVE only to A/B the two. */
     int32_t force_shift;    /* 0 = pick the split from the formula shape; 8 or 16 to pin it
                              * (A/B testing the packed splits on a small formula) */
     int32_t vscan;          /* warp-wide decision scan in the wave kernel:
@@ -137,6 +141,11 @@ void gpap_engine_free(gpap_engine *e);
 gpap_status gpap_engine_set_mode(gpap_engine *e, gpap_mode mode);
 /* The RESOLVED kernel (never GPAP_MODE_AUTO) -- what the next launch will actually run. */
 gpap_mode gpap_engine_mode(const gpap_engine *e);
+/* 1 while the engine is still CHOOSING its kernel per reset(K) -- i.e. nothing pinned one, by
+ * options, by gpap_engine_set_mode, or by $GPAP_KERNEL. A caller about to pin a kernel of its
+ * own (the sampler pins the chunk batch's kernel so a short final chunk cannot switch it
+ * mid-measurement) must ask this first, or it will override the pin a user just set. */
+int32_t gpap_engine_auto(const gpap_engine *e);
 int32_t gpap_engine_shift(const gpap_engine *e);
 int32_t gpap_engine_k(const gpap_engine *e);
 int32_t gpap_engine_num_vars(const gpap_engine *e);
@@ -149,7 +158,7 @@ int32_t gpap_engine_num_long(const gpap_engine *e);      /* packed-word clauses:
  * wrapper: every entry point resets, so every entry point dispatches. It used to be resolved by
  * gpap::Engine::plan_for and BCPEngine.plan_for instead, and the predictable happened twice --
  * a consumer that reset through the ABI ran SCALAR forever without anyone noticing (the batched
- * assumption path, then gpap_probe_combinations; measured at 1.28-2.20x). */
+ * assumption path, then gpap_probe_combinations). What it cost each time: INSIGHTS.md. */
 gpap_status gpap_engine_reset(gpap_engine *e, int32_t K);
 
 /* Entry point 1 — apply a (K, L) matrix of INTERNAL literal indices (-1 = padding) and BCP to
@@ -265,16 +274,23 @@ typedef enum {
     GPAP_PROBE_UNSAT    = 3   /* the formula's own units already conflict; nothing to probe */
 } gpap_probe_stop;
 
-/** When to stop. Every field is optional; 0 (or negative) means "no limit". */
+/** How to sweep, and when to stop. Every field is optional and 0 is its default, so `{0}` and a
+ *  NULL options pointer are the same sweep. */
 typedef struct {
     double  seconds;       /* wall-clock budget, checked BETWEEN chunks (a chunk is atomic) */
     int64_t max_tuples;    /* how many candidates to probe at most — checked against an EXACT
                             * count before anything is generated. See refuse_over_max. */
     int32_t batch;         /* tuples per launch; 0 = size it from free VRAM */
-    int32_t distinct_vars; /* 1 = drop tuples holding two literals of the SAME variable. Such a
+    int32_t same_var;      /* 1 = KEEP tuples holding two literals of the same variable. Such a
                             * tuple is a repeat or a direct contradiction, so it conflicts for
-                            * reasons that have nothing to do with the formula. Default for a
-                            * literal pool; pass 0 only if you want them. */
+                            * reasons that have nothing to do with the formula — 0 (the default)
+                            * drops them, which is what a literal pool wants.
+                            * The sense is INVERTED from the `distinct_vars` field it replaced,
+                            * precisely so that 0 is the default: with the old spelling `{0}` and
+                            * NULL were DIFFERENT sweeps over the same pool, and `exhausted` —
+                            * which this header calls a PROOF — was computed against whichever
+                            * total the caller accidentally chose. The rename is a compile error
+                            * on purpose. docs/findings/INSIGHTS.md. */
     int32_t refuse_over_max; /* what `max_tuples` MEANS. 0 (default) = a WORK BUDGET: probe the
                             * first max_tuples candidates and report `exhausted = 0`. Every
                             * conflict found is still a genuine entailed clause — a truncated
@@ -300,16 +316,20 @@ gpap_status gpap_probe_combinations(gpap_engine *e, const int32_t *pool, int32_t
                                     int32_t k, const gpap_probe_options *opts,
                                     gpap_probe **out);
 /** Probe an explicit (n, k) row-major matrix of DIMACS literals — the escape hatch for callers
- *  that build candidates themselves (filtered, weighted, or drawn from somewhere else). */
+ *  that build candidates themselves (filtered, weighted, or drawn from somewhere else).
+ *  `same_var` is IGNORED here: these are the caller's tuples, so the library does not filter
+ *  them, and `total` is the matrix's own row count. */
 gpap_status gpap_probe_tuples(gpap_engine *e, const int32_t *tuples, int64_t n, int32_t k,
                               const gpap_probe_options *opts, gpap_probe **out);
 /** How many k-subsets `pool` has, EXACTLY, without generating any of them — the number to check
  *  a ceiling against BEFORE enumerating. Saturates at INT64_MAX rather than wrapping, because a
  *  wrapped count would compare BELOW a ceiling and let through the very sweep it should refuse.
  *  `pool = NULL` counts over every free literal. Exported because a caller that filters the
- *  RESULTS (gpap.mining does) must still be able to reject an impossible width up front. */
+ *  RESULTS (gpap.mining does) must still be able to reject an impossible width up front.
+ *  Takes the SWEEP'S OWN options (NULL = defaults) rather than a loose flag, so the count and
+ *  the sweep cannot be asked about different enumerations — only `same_var` is read. */
 int64_t gpap_probe_count(gpap_engine *e, const int32_t *pool, int32_t pool_n, int32_t k,
-                         int32_t distinct_vars);
+                         const gpap_probe_options *opts);
 void gpap_probe_free(gpap_probe *p);
 void gpap_probe_stats_get(const gpap_probe *p, gpap_probe_stats *out);
 /** The conflicting tuples, (conflicts, k) row-major DIMACS literals. Writes
@@ -317,7 +337,10 @@ void gpap_probe_stats_get(const gpap_probe *p, gpap_probe_stats *out);
 gpap_status gpap_probe_conflicts(const gpap_probe *p, int32_t *out, int64_t capacity);
 
 /** DIMACS literals whose variable the formula's unit flush left undetermined — what is worth
- *  probing at all. Pass out=NULL to query the count. */
+ *  probing at all. `count` is IN/OUT when `out` is non-NULL: pass the capacity of `out`, receive
+ *  how many were written. Pass out=NULL to query the count alone (`*count` is then ignored on
+ *  entry). Too small a capacity is GPAP_ERR_ARG — the two-call query-then-fill pattern is the
+ *  intended use and cannot overrun, but a caller who guessed a size must hear about it. */
 gpap_status gpap_free_literals(gpap_engine *e, int32_t *out, int32_t *count);
 /** Fold PROVEN units into the cached flush state in place, so later probes see a narrowed
  *  formula without it being rebuilt. Sound only if the literals really are entailed — this does
@@ -354,7 +377,8 @@ gpap_status gpap_selection_set(gpap_engine *e, int32_t slot, const int32_t *rows
  * fully-assigned row). `max_rows` = 0 checks EVERY selected row and is what a caller should
  * pass; a positive bound checks a PREFIX, and then "0 unsound" is a statement about that
  * prefix rather than about the rows the caller received. Cost is per row and scales with the
- * formula (measured 0.13-0.84% of a sampling chunk at full coverage). */
+ * formula — a small fraction of the chunk it rides on, measured in
+ * docs/findings/INSIGHTS.md. */
 gpap_status gpap_check_sound(gpap_engine *e, int32_t slot, int32_t max_rows,
                              int32_t *n_unsound_out);
 
@@ -366,10 +390,17 @@ gpap_status gpap_var_bits(gpap_engine *e, int32_t slot, const int32_t *cols, int
  * min(selection count, max_rows) rule. */
 gpap_status gpap_assignment_rows(gpap_engine *e, int32_t slot, int8_t *out_host,
                                  int32_t max_rows);
-/* (K,) int8 each; either pointer may be NULL. */
-gpap_status gpap_flags(gpap_engine *e, int8_t *active_out, int8_t *conflict_out);
-/* (K,) int32 unit-propagation implications of the last launch (assigned minus decisions). */
-gpap_status gpap_num_propagated(gpap_engine *e, int32_t *out_host);
+/* (K,) int8 each; either pointer may be NULL. `capacity` is the row capacity of the non-NULL
+ * buffers: these write K entries, so a capacity below gpap_engine_k() is GPAP_ERR_ARG rather
+ * than a silent truncation OR a heap smash. It is not optional and there is no 0-means-K
+ * spelling, because the whole point is that the caller states the size it actually allocated —
+ * every other readout call here takes one, and these two did not (this one segfaulted a harness
+ * that passed a 1-byte buffer). */
+gpap_status gpap_flags(gpap_engine *e, int8_t *active_out, int8_t *conflict_out,
+                       int32_t capacity);
+/* (K,) int32 unit-propagation implications of the last launch (assigned minus decisions).
+ * `capacity` as above. */
+gpap_status gpap_num_propagated(gpap_engine *e, int32_t *out_host, int32_t capacity);
 /* (rows, M) int32 sat_count (= non-falsified literal count) per ORIGINAL clause, for `n_rows`
  * explicit row indices — inspection/tests. Long clauses read their packed word; binary and unit
  * clauses are synthesized from the row's assignment bitmap (identical values on non-conflicted
@@ -438,7 +469,22 @@ int32_t gpap_resident_warps(int device);
 int32_t gpap_dispatch_wave(int32_t num_clauses, int32_t batch, int device);
 
 const char *gpap_last_error(void);
+
+/* The library's semantic version, e.g. "0.1.0" — the CMake project version, not a second
+ * literal that has to be bumped in step with it. It says which RELEASE this is, and nothing
+ * about which BUILD: use gpap_build_id() for that. */
 const char *gpap_version(void);
+
+/* Identity of this exact BUILD: "<version>+<16 hex>", where the hex fingerprints the bytes of
+ * the loaded libgpap — kernels, sizing rules, propagate loops and all. "<version>+unknown" if
+ * the library cannot locate its own file (static link, stripped dl info).
+ *
+ * Use this, never gpap_version(), as the key of anything that CACHES a measurement: a version
+ * literal changes only when someone remembers to change it, so a cache keyed on it scores a
+ * REBUILT engine as a hit — which is how a rival comparison came to pair a current rival against
+ * a months-old GPAP (docs/findings/INSIGHTS.md). Cheap: the file is hashed once, on first call,
+ * and the result is cached for the process. */
+const char *gpap_build_id(void);
 
 #ifdef __cplusplus
 }

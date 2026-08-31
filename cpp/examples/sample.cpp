@@ -36,6 +36,9 @@ int main(int argc, char **argv) {
         //                                   // per chunk, but propagation does more of the work,
         //                                   // which wins on tightly constrained formulas
         //   opts.k            = 65536;      // pin the batch size; 0 (default) sizes it to VRAM
+        //   opts.verify       = true;       // re-check on the GPU that every returned row is a
+        //                                   // real model. OFF by default, like every other face:
+        //                                   // it is a self-test, not part of producing samples.
 
         gpap::Sampler sampler(argv[1], opts);
         // What it chose for you, for the record — none of this had to be supplied.

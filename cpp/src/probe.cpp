@@ -156,7 +156,7 @@ class Combinations {
     bool done_ = false;
 };
 
-const gpap_probe_options kDefaults = {0.0, 0, 0, 1, 0};   /* refuse_over_max off */
+const gpap_probe_options kDefaults = {};   /* every field's default IS 0 — see the header */
 
 /* Tuples one launch can hold: the engine's own per-row state plus the (batch, k) int64 decision
  * matrix this entry point allocates and the sampler's path never does. ONE model, the shared one —
@@ -189,7 +189,7 @@ gpap_status probe_chunk(gpap_engine *e, const std::vector<int64_t> &tuples, int3
                                                  * flags are rebuilt here (RESET_RESTORE_PLAN §9) */
     GPAP_TRY(gpap_engine_apply_clean(e, tuples.data(), k));
     flags.resize(static_cast<size_t>(rows));
-    GPAP_TRY(gpap_flags(e, nullptr, flags.data()));
+    GPAP_TRY(gpap_flags(e, nullptr, flags.data(), rows));
     for (int32_t r = 0; r < rows; ++r) {
         if (!flags[static_cast<size_t>(r)]) continue;
         for (int32_t j = 0; j < k; ++j)
@@ -285,6 +285,7 @@ gpap_status build_pool(gpap_engine *e, const int32_t *pool, int32_t pool_n,
 
 extern "C" gpap_status gpap_free_literals(gpap_engine *e, int32_t *out, int32_t *count) {
     if (!e || !count) return GPAP_ERR_ARG;
+    const int32_t capacity = out ? *count : 0;      /* IN/OUT: what the caller allocated */
     const int32_t n = e->num_vars;
     std::vector<int8_t> assign(static_cast<size_t>(2) * static_cast<size_t>(std::max(n, 0)));
     if (n > 0) GPAP_TRY(gpap_engine_flushed_assignment(e, assign.data()));
@@ -295,6 +296,13 @@ extern "C" gpap_status gpap_free_literals(gpap_engine *e, int32_t *out, int32_t 
          * a reason that is already known. */
         if (assign[static_cast<size_t>(2 * v)] || assign[static_cast<size_t>(2 * v + 1)]) continue;
         if (out) {
+            /* Bounds-checked BEFORE the write, not after the loop: the point is to not have
+               written past the caller's buffer by the time we notice. */
+            if (found + 2 > capacity) {
+                set_error("gpap_free_literals: out holds %d literals, the formula has at least "
+                          "%d free (query with out=NULL first)", capacity, found + 2);
+                return GPAP_ERR_ARG;
+            }
             out[found] = v + 1;
             out[found + 1] = -(v + 1);
         }
@@ -334,8 +342,8 @@ extern "C" gpap_status gpap_probe_combinations(gpap_engine *e, const int32_t *po
     GPAP_TRY(build_pool(e, pool, pool_n, &lits));
 
     auto *p = new gpap_probe();
-    const int64_t total = count_candidates(lits, k, o.distinct_vars != 0, e->num_vars);
-    Combinations gen(lits, k, o.distinct_vars != 0);
+    const int64_t total = count_candidates(lits, k, o.same_var == 0, e->num_vars);
+    Combinations gen(lits, k, o.same_var == 0);
     const gpap_status rc = run_sweep(
         e, k, total, o,
         [&gen](std::vector<int64_t> &c, int64_t want) { return gen.next_chunk(c, want); }, p);
@@ -348,7 +356,9 @@ extern "C" gpap_status gpap_probe_tuples(gpap_engine *e, const int32_t *tuples, 
                                          int32_t k, const gpap_probe_options *opts,
                                          gpap_probe **out) {
     if (!e || !out || k < 1 || n < 0 || (n > 0 && !tuples)) return GPAP_ERR_ARG;
-    const gpap_probe_options o = opts ? *opts : kDefaults;
+    const gpap_probe_options o = opts ? *opts : kDefaults;   /* `same_var` is not read here: the
+                                                             * tuples are the caller's, so we probe
+                                                             * exactly the rows given (documented) */
     /* Validate the WHOLE matrix before any GPU work. An out-of-range literal must not reach the
      * kernel: internal indices past the end of a row's assignment bitmap make `atomic_or` write
      * into a LATER ROW's words, so one bad tuple silently corrupts a different tuple's answer and
@@ -382,11 +392,12 @@ extern "C" gpap_status gpap_probe_tuples(gpap_engine *e, const int32_t *tuples, 
 }
 
 extern "C" int64_t gpap_probe_count(gpap_engine *e, const int32_t *pool, int32_t pool_n,
-                                    int32_t k, int32_t distinct_vars) {
+                                    int32_t k, const gpap_probe_options *opts) {
     if (!e || k < 1) return 0;
+    const gpap_probe_options o = opts ? *opts : kDefaults;
     std::vector<int64_t> lits;
     if (build_pool(e, pool, pool_n, &lits) != GPAP_OK) return 0;
-    return count_candidates(lits, k, distinct_vars != 0, e->num_vars);
+    return count_candidates(lits, k, o.same_var == 0, e->num_vars);
 }
 
 extern "C" void gpap_probe_free(gpap_probe *p) { delete p; }

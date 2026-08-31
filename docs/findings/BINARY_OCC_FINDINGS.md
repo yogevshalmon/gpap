@@ -145,7 +145,7 @@ post-CLEAN calibrated) stay.
   `sound=True`.
 - **The per-row balance flipped**: on b12-c50 the TRAIL term (4·(N+72) ≈ 337 KB/row) now
   dominates the packed words (147 KB/row). The trail's N bound is the soundness proof
-  (`trail_cap_for`), not a knob.
+  (`gpap_trail_cap`, cpp/src/calibrate.cpp), not a knob.
 - Dispatch: the rule still keys off TOTAL M — its input did not move, so kernel choices are
   identical to pre-change, and the wave-vs-scalar tradeoff is about occ entries per trail
   literal, which segregation does not change. The full forced-kernel M-ladder re-check rides

@@ -36,9 +36,24 @@ constexpr size_t kReadoutSliceBytes = 256u << 20;   /* bound a (rows, 2N) readou
 
 inline unsigned ceil_div(int64_t a, int64_t b) { return (unsigned)((a + b - 1) / b); }
 
+/* The trajectory kernel's VSCAN constant is read only under `WAVE and not SOFT`, so the other
+ * (wave, soft) pairs are compiled ONCE, at v0 — asking for v1 there would be asking for a cubin
+ * that is deliberately not shipped. Mirrors build_kernels.py::vscan_is_read; the two spellings
+ * are gated together by tests/test_kernel_table.py. */
+/* THE kernel choice for a batch of K rows: an explicit $GPAP_KERNEL pin first, otherwise the
+ * measured dispatch rule. ONE definition — gpap_engine_reset and gpap_engine_set_mode(AUTO) both
+ * call it, because a second copy of it in set_mode silently dropped the env pin until the next
+ * reset, contradicting the promise made where env_mode is read. */
+gpap_mode resolve_mode(gpap_engine *e, int32_t K) {
+    if (e->env_mode != GPAP_MODE_AUTO) return e->env_mode;
+    return gpap_dispatch_wave(e->num_clauses, K, e->device_ordinal) ? GPAP_MODE_WAVE
+                                                                    : GPAP_MODE_SCALAR;
+}
+
 std::string traj_key(int32_t shift, int wave, int vscan, int soft) {
+    const int v = (wave && !soft) ? (vscan ? 1 : 0) : 0;
     return "trajectory.s" + std::to_string(shift) + ".w" + std::to_string(wave) + ".v" +
-           std::to_string(vscan) + ".f" + std::to_string(soft);
+           std::to_string(v) + ".f" + std::to_string(soft);
 }
 
 /* Accumulate one (K,) int32 per-launch counter into its int64 device accumulator (no sync). */
@@ -136,10 +151,13 @@ extern "C" gpap_status gpap_engine_create(const gpap_formula *f, const gpap_engi
     if (!f || !out) return GPAP_ERR_ARG;
     *out = nullptr;
     /* All-zero, i.e. exactly what a C caller writing `gpap_engine_options o = {0}` gets — the
-     * header documents both spellings as "the defaults" and they must not differ. This field
-     * used to be -1 here, so passing NULL silently turned the warp-wide decision scan OFF while
-     * `{0}` left it on (worth 12-19% on wave instances, same picks either way). */
-    const gpap_engine_options defaults = {0, GPAP_MODE_SCALAR, 0, 0};
+     * header documents both spellings as "the defaults" and they must not differ. Two fields have
+     * been caught breaking that: `vscan` was -1 here, so NULL silently turned the warp-wide
+     * decision scan OFF while `{0}` left it on; and `mode` was GPAP_MODE_SCALAR, which was zero,
+     * so the raw C face was the only consumer that never dispatched. GPAP_MODE_AUTO is 0 now, so
+     * this line and `{0}` agree by construction rather than by remembering to keep them in step.
+     * What each cost: docs/findings/INSIGHTS.md. */
+    const gpap_engine_options defaults = {0, GPAP_MODE_AUTO, 0, 0};
     const gpap_engine_options o = opts ? *opts : defaults;
     const int device = o.device;
     GPAP_CU(cuInit(0));
@@ -186,10 +204,20 @@ extern "C" gpap_status gpap_engine_create(const gpap_formula *f, const gpap_engi
         e->mode = e->auto_mode ? GPAP_MODE_SCALAR : o.mode;
         /* 0 = default, 1 = on, -1 = off. The zero value MUST mean the default: a C caller
          * writing `gpap_engine_options o = {0}` would otherwise silently lose the warp-wide
-         * decision scan (worth 12-19% on wave instances) while the header promises otherwise. */
+         * decision scan while the header promises otherwise (INSIGHTS.md has what that cost). */
         e->vscan = o.vscan < 0 ? 0 : 1;
         const char *ce = std::getenv("GPAP_CLEAN");
         e->clean_enabled = (ce && ce[0] == '0') ? 0 : 1;
+        /* GPAP_KERNEL=scalar|wave forces the propagate kernel, for a forced-kernel A/B. Read in
+         * the CORE, beside GPAP_CLEAN, so it reaches every consumer -- it used to be resolved in
+         * the Python wrapper alone, which is the same shape of hole that left the C face without
+         * dispatch. Applied where AUTO resolves (gpap_engine_reset), so it overrides only the
+         * engine's OWN choice: a caller that pinned a mode keeps it, and a later
+         * set_mode(GPAP_MODE_AUTO) hands the choice back to the env rather than losing it. */
+        const char *ke = std::getenv("GPAP_KERNEL");
+        e->env_mode = (ke && std::strcmp(ke, "scalar") == 0)  ? GPAP_MODE_SCALAR
+                      : (ke && std::strcmp(ke, "wave") == 0)  ? GPAP_MODE_WAVE
+                                                              : GPAP_MODE_AUTO;
         e->nw = std::max(1, (2 * f->num_vars + 31) / 32);
         e->trail_cap = gpap_trail_cap(f->num_vars);   /* THE rule, in calibrate.cpp */
 
@@ -258,12 +286,17 @@ extern "C" gpap_status gpap_engine_set_mode(gpap_engine *e, gpap_mode mode) {
      * kernel mid-measurement, and a test that pinned one has to be able to give it up. */
     e->auto_mode = (mode == GPAP_MODE_AUTO) ? 1 : 0;
     if (!e->auto_mode) e->mode = mode;
-    else if (e->K > 0) e->mode = gpap_dispatch_wave(e->num_clauses, e->K, e->device_ordinal)
-                                     ? GPAP_MODE_WAVE : GPAP_MODE_SCALAR;
+    else if (e->K > 0) e->mode = resolve_mode(e, e->K);   /* the env pin survives, per resolve_mode */
     return GPAP_OK;
 }
 
 extern "C" gpap_mode gpap_engine_mode(const gpap_engine *e) { return e ? e->mode : GPAP_MODE_SCALAR; }
+extern "C" int32_t gpap_engine_auto(const gpap_engine *e) {
+    /* auto_mode alone is not the answer: $GPAP_KERNEL pins through it (env_mode), and a caller
+     * that would then "helpfully" set_mode() a dispatch of its own is exactly what the env
+     * override exists to prevent. */
+    return (e && e->auto_mode && e->env_mode == GPAP_MODE_AUTO) ? 1 : 0;
+}
 extern "C" int32_t gpap_engine_shift(const gpap_engine *e) { return e ? e->shift : 0; }
 extern "C" int32_t gpap_engine_k(const gpap_engine *e) { return e ? e->K : 0; }
 extern "C" int32_t gpap_engine_num_vars(const gpap_engine *e) { return e ? e->num_vars : 0; }
@@ -307,9 +340,7 @@ extern "C" gpap_status gpap_engine_reset(gpap_engine *e, int32_t K) {
     e->K = K;
     /* Resolve the kernel for THIS K. Cheap (a constant compare unless M is small) and it is the
      * one place every entry point passes through, which is the whole point of putting it here. */
-    if (e->auto_mode)
-        e->mode = gpap_dispatch_wave(e->num_clauses, K, e->device_ordinal) ? GPAP_MODE_WAVE
-                                                                           : GPAP_MODE_SCALAR;
+    if (e->auto_mode) e->mode = resolve_mode(e, K);
     for (int i = 0; i < GPAP_SLOTS; ++i) { e->slots[i].rows_valid = false; e->slots[i].count = 0; }
     if (!e->flush_ready) return GPAP_OK;                 /* construction path: caller seeds */
     if (e->clean_enabled && e->packed_clean_rows >= K) {
@@ -365,16 +396,27 @@ extern "C" gpap_status gpap_engine_recache_flush(gpap_engine *e) {
 static gpap_status apply_dev_common(gpap_engine *e, uintptr_t decisions_dev, int32_t L,
                                     int clean) {
     if (!e || L < 0 || (L > 0 && !decisions_dev)) return GPAP_ERR_ARG;
-    if (L == 0) return GPAP_OK;                     /* no assumptions: nothing to propagate */
+    /* The per-launch counters describe THE LAST CALL, and reset() does not clear them, so a
+     * zero-width apply has to — otherwise it reports the previous apply's implications as its
+     * own. This sits ABOVE the L == 0 return for that reason: the early return was added when
+     * L == 0 became legal, and it initially skipped this. */
     GPAP_TRY(use_ctx(e));
-    /* No width argument: the trail is bounded by the variable count, not by how many literals
-     * were assumed (dedup — see gpap_trail_cap). Passing L here made a wide apply permanently
-     * inflate the per-row footprint. */
-    GPAP_TRY(ensure_state(e, e->K));
-    /* Inactive rows are left unwritten by the kernel; stale values would corrupt the sums. */
     GPAP_TRY(e->nprops.zero());
     GPAP_TRY(e->nops.zero());
     GPAP_TRY(e->ndecs.zero());
+    if (L == 0) return GPAP_OK;                     /* no assumptions: nothing to propagate */
+    /* Same guard the packed readouts carry, for the same reason: after a CLEAN launch the packed
+     * words are the BASELINE while the bitmap holds the fixpoint, so propagating again would
+     * decrement baseline clause counts against literals already assigned — a state no launch
+     * ever produced, and one nothing downstream could detect. reset() is what puts the pair back
+     * in agreement, and every in-tree caller already resets per chunk; this makes the contract
+     * enforced rather than merely documented. */
+    GPAP_TRY(gpap::engine_reject_if_packed_is_baseline(e, "gpap_engine_apply"));
+    /* No width argument: the trail is bounded by the variable count, not by how many literals
+     * were assumed (dedup — see gpap_trail_cap). Passing L here made a wide apply permanently
+     * inflate the per-row footprint. (Inactive rows are left unwritten by the kernel, which is
+     * why the counters above are zeroed before every launch.) */
+    GPAP_TRY(ensure_state(e, e->K));
 
     /* Dirty from here. A CLEAN launch that RUNS TO COMPLETION restores its rows to baseline,
      * so the claim is put back after the last GPAP_TRY; any early return leaves it dropped,
@@ -414,7 +456,15 @@ extern "C" gpap_status gpap_engine_apply_dev(gpap_engine *e, uintptr_t decisions
 
 extern "C" gpap_status gpap_engine_apply(gpap_engine *e, const int64_t *decisions_host,
                                          int32_t L) {
-    if (!e || !decisions_host || L <= 0) return GPAP_ERR_ARG;
+    if (!e || L < 0 || (L > 0 && !decisions_host)) return GPAP_ERR_ARG;
+    /* L == 0 is legal and is a no-op, matching gpap_engine_apply_dev — and matching
+     * gpap_check_sets, whose header says an EMPTY assumption set is a legal set (it asks "is the
+     * formula itself conflicting", which is a question with an answer). The host entry points
+     * used to reject it while the device one accepted it, so the same input was valid or invalid
+     * depending on where the caller's memory happened to live.
+     * It is handled ONLY in apply_dev_common: a short-circuit here skipped that function's
+     * counter zeroing, so a zero-width apply reported the PREVIOUS apply's implications. */
+    if (L == 0) return apply_dev_common(e, 0, 0, 0);
     GPAP_TRY(use_ctx(e));
     GPAP_TRY(stage(e->staging_a, decisions_host, (size_t)e->K * L * sizeof(int64_t)));
     return gpap_engine_apply_dev(e, (uintptr_t)e->staging_a.ptr, L);
@@ -422,7 +472,8 @@ extern "C" gpap_status gpap_engine_apply(gpap_engine *e, const int64_t *decision
 
 extern "C" gpap_status gpap_engine_apply_clean(gpap_engine *e, const int64_t *decisions_host,
                                                int32_t L) {
-    if (!e || !decisions_host || L <= 0) return GPAP_ERR_ARG;
+    if (!e || L < 0 || (L > 0 && !decisions_host)) return GPAP_ERR_ARG;
+    if (L == 0) return apply_dev_common(e, 0, 0, 1);                         /* as above */
     if (!e->clean_enabled) return gpap_engine_apply(e, decisions_host, L);   /* GPAP_CLEAN=0 */
     GPAP_TRY(use_ctx(e));
     GPAP_TRY(stage(e->staging_a, decisions_host, (size_t)e->K * L * sizeof(int64_t)));
@@ -443,6 +494,12 @@ extern "C" gpap_status gpap_engine_trajectory_dev(gpap_engine *e, uintptr_t orde
         for (int i = 0; i < GPAP_SLOTS; ++i) e->slots[i].rows_valid = false;
         return GPAP_OK;
     }
+    /* Entry point 2 propagates from the same packed words entry point 1 does, so it needs the
+     * same guard: after a CLEAN launch those words are the baseline while the bitmap holds the
+     * fixpoint, and a trajectory on that pair would decrement baseline clause counts against
+     * literals already TRUE. It is worse here than for apply, because the line below then records
+     * the pair as CONSISTENT — so nothing downstream, `--verify-sound` included, could notice. */
+    GPAP_TRY(gpap::engine_reject_if_packed_is_baseline(e, "gpap_engine_trajectory"));
     GPAP_TRY(ensure_state(e, e->K));
     GPAP_TRY(e->nprops.zero());
     GPAP_TRY(e->nops.zero());

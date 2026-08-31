@@ -622,7 +622,7 @@ class GPUSampler:
         accumulated into `verify_sound_s` and EXCLUDED from every rate, exactly as the output
         projection is, so enabling it cannot move samples/s. Cost is per completed row and
         scales with the formula, so a large instance pays more than a small one (measured
-        0.13-0.84% of a chunk).
+        a fraction of a percent of the chunk it rides on).
         """
         if isinstance(random_var, str):
             raise ValueError(f"random_var={random_var!r} is not a mode: pass a bool. Per-formula "
@@ -676,6 +676,7 @@ class GPUSampler:
         chunk = 0
         all_valid = True
         gpu_unsound = 0          # rows that were 'fully+active' yet a clause had sat_count==0
+        sound_rows = 0           # rows the re-check actually covered — a verdict's evidence
                                  # (must be 0); only populated when verify_sound is on
         distinct: set[tuple[int, ...]] = set()
         keep_rows = collect or verify_clauses is not None
@@ -742,14 +743,15 @@ class GPUSampler:
                     # selection, so it is valid.) Redundant with `active`, which is cleared the
                     # instant a clause empties; that is why it is off by default rather than a
                     # tax on every run.
-                    # EVERY completed row, never a prefix: the 4096-row cap it used to carry was
-                    # sizing a (rows, M) int32 slice that this path shipped to the HOST (~3.3 GB
-                    # on b05-c50). The check has been one device flag per row since, so the cap
-                    # bounded nothing but the coverage — it left the claim standing on as little
-                    # as 4.8% of what a chunk emitted. Full coverage measures 0.13-0.84% of a
-                    # chunk, and it is billed to `verify_s`, outside every rate.
+                    # EVERY completed row, never a prefix: the 4096-row cap it used to carry
+                    # was sizing a (rows, M) int32 host transient that this path deleted long
+                    # ago. The check has been one device flag per row since, so the cap bounded
+                    # nothing but the COVERAGE — it left the claim standing on a small fraction
+                    # of what a chunk emitted. Full coverage is a fraction of a percent of the
+                    # chunk, billed to `verify_s`, outside every rate. Numbers: INSIGHTS.md.
                     _tv = time.perf_counter()
                     gpu_unsound += self.engine.check_sound(slot=0, max_rows=0)
+                    sound_rows += n_done          # what the verdict below is a statement ABOUT
                     verify_s += time.perf_counter() - _tv
                 have = cfg_bits_n[cfg]
                 if out_cap and n_done and have < out_cap:
@@ -829,8 +831,14 @@ class GPUSampler:
             "n_distinct": len(distinct) if keep_rows else None,
             # Tri-state, never a bool: "off" is not "unsound", and a consumer that folds the
             # two publishes an un-run check as a failure (the `unique_est_status` lesson).
-            "sound_check": ("off" if not verify_sound else
+            # "off" also covers REQUESTED-BUT-NEVER-REACHED: the check runs per chunk over the
+            # rows that chunk completed, so a run that completes none (0% success, or a
+            # --time-limit cut before the first completion) never calls it — and reporting that
+            # as "ok" is the same conflation one state further along, an un-run check published
+            # as a passing one. `sound_rows_checked` is the evidence behind the verdict.
+            "sound_check": ("off" if not (verify_sound and sound_rows) else
                             ("ok" if gpu_unsound == 0 else "UNSOUND")),
+            "sound_rows_checked": (sound_rows if verify_sound else None),
             "unsound_rows": (gpu_unsound if verify_sound else None),
             "verify_sound_s": verify_s,
         }

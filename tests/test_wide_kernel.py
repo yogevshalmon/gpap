@@ -31,7 +31,12 @@ def _sample(clauses, nv, cfg, *, force_wide=False, seed=17, chunks=6, k_cap=128)
     out = smp.sample(10 ** 9, configs=[cfg], max_chunks=chunks, collect=True,
                      verify_sound=True,
                      verify_clauses=clauses)
-    assert out["all_valid"] and out["sound_check"] == "ok"
+    assert out["all_valid"]
+    # "ok" iff rows were actually checked. `sound_check` is "off" when the run completed NO row,
+    # because a verdict with no evidence is not a verdict — asserting "ok" here used to pass on a
+    # run that emitted nothing, which is how test_wide_matches_base_random came to compare two
+    # empty model sets for five instances.
+    assert out["sound_check"] == ("ok" if out["sound_rows_checked"] else "off")
     return sorted(tuple(m) for m in out["models"]), out, smp.engine.shift
 
 
@@ -49,16 +54,22 @@ def test_wide_matches_base_small():
 
 
 def test_wide_matches_base_random():
-    """Random mixed-length CNFs: forced-wide model set == base packed model set."""
+    """Random mixed-length CNFs: forced-wide model set == base packed model set.
+
+    The instances are deliberately UNDER-constrained (clause/var ~1, width 2-4, no units). The
+    test used to draw 2-4x as many clauses including units, and every one of its five instances
+    yielded ZERO models — so it asserted that two empty sets are equal, five times, and would
+    have passed against a wide kernel that emitted nothing at all. Each instance now delivers
+    hundreds of models, which is asserted so the comparison cannot silently go vacuous again."""
     rng = random.Random(3)
     for i in range(5):
         nv = rng.randint(8, 16)
-        clauses = []
-        for _ in range(rng.randint(2 * nv, 4 * nv)):
-            vs = rng.sample(range(1, nv + 1), rng.randint(1, min(4, nv)))
-            clauses.append([v if rng.random() < 0.5 else -v for v in vs])
+        clauses = [[v if rng.random() < 0.5 else -v
+                    for v in rng.sample(range(1, nv + 1), rng.randint(2, min(4, nv)))]
+                   for _ in range(nv)]
         m_wide, ow, _ = _sample(clauses, nv, (True, 2, False), force_wide=True, seed=100 + i)
         m_base, ob, _ = _sample(clauses, nv, (True, 2, False), seed=100 + i)
+        assert ow["n_models"] > 0, "vacuous: this instance yields no models to compare"
         assert m_wide == m_base
         assert ow["n_models"] == ob["n_models"]
 

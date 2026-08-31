@@ -112,25 +112,35 @@ def _canonical(obj):
 def _core_build_id() -> str:
     """Fingerprint of the libgpap BUILD — the bytes, not the version it advertises.
 
-    `_core_provenance()` reads `gpap_version()`, which is the hardcoded literal "0.1.0"
-    (cpp/src/runtime.cpp) and has never changed, so keying the cache on it made a REBUILT engine
-    a cache HIT — exactly the case the key exists to miss. A stale arm is not a stale number, it
-    is a wrong one: the 2026-08-27 wave rewrite is 1.80x at the same K, so a rival re-run against
-    a pre-rewrite cache would publish today's rival subprocess against last month's GPAP.
+    THE fingerprint is the core's own `gpap_build_id()`; this is a thin call, not a second
+    implementation. It exists because keying the cache on `gpap_version()` — the literal "0.1.0"
+    for the project's whole life — made a REBUILT engine a cache HIT, exactly the case the key
+    exists to miss. A stale arm is not a stale number, it is a wrong one: a kernel rewrite can
+    move GPAP's rate by more than the effect being published, so a rival re-run against a
+    pre-rewrite cache pairs a current rival subprocess with a months-old GPAP.
+    (docs/findings/WAVE_SHUFFLE_FINDINGS.md has the figure.)
     """
-    import hashlib
     try:
         from gpap.engine import _core
-        path = getattr(_core.load(), "_name", None)
-        if not path or not os.path.isfile(path):
-            return "unknown"
-        h = hashlib.sha1()
-        with open(path, "rb") as f:
-            for chunk in iter(lambda: f.read(1 << 20), b""):
-                h.update(chunk)
-        return f"{os.path.basename(path)}:{h.hexdigest()[:16]}"
+        build = _core.build_id()
     except Exception:                       # noqa: BLE001 — no engine, no GPAP arm to cache
         return "unknown"
+    # The core reports "<version>+unknown" when it cannot locate its own file (static link,
+    # stripped dl info). That is a STABLE string across every rebuild, i.e. exactly the constant
+    # key this helper exists to avoid — and it looks like a real fingerprint, so it would fail
+    # silently. Fall back to hashing the library file ourselves; if that is not possible either,
+    # say "unknown" and let the caller's own disable-on-unknown path handle it.
+    if not build.endswith("+unknown"):
+        return build
+    import hashlib
+    path = getattr(_core.load(), "_name", None)
+    if not path or not os.path.isfile(path):
+        return "unknown"
+    h = hashlib.sha1()
+    with open(path, "rb") as f:
+        for chunk in iter(lambda: f.read(1 << 20), b""):
+            h.update(chunk)
+    return f"{os.path.basename(path)}:{h.hexdigest()[:16]}"
 
 
 def gpap_cache_key(sampled_file: str, task: dict) -> str:
@@ -143,12 +153,12 @@ def gpap_cache_key(sampled_file: str, task: dict) -> str:
         for chunk in iter(lambda: f.read(1 << 20), b""):
             h.update(chunk)
     env = {"file_sha1": h.hexdigest(), "task": task}
-    try:                                    # a result from another engine build or GPU is NOT ours
-        from gpap.sampling.pipeline import _core_provenance
-        env["core"] = _core_provenance()
-    except Exception:                       # noqa: BLE001
-        env["core"] = "unknown"
-    env["build"] = _core_build_id()         # the engine BINARY, since "core" cannot change
+    # ONE engine-identity field. It used to be two — `core` (gpap_version(), a literal that never
+    # changed) plus `build` (a local hash of the .so, added because of that) — and now that both
+    # resolve to gpap_build_id() they would hash the same string twice under two names, with a
+    # comment claiming one of them cannot change. A reader who trusts that comment and drops the
+    # "redundant" field brings the stale-arm bug straight back.
+    env["build"] = _core_build_id()
     try:
         import torch
         env["gpu"] = torch.cuda.get_device_name(0) if torch.cuda.is_available() else "cpu"

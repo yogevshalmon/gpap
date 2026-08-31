@@ -21,6 +21,7 @@ import torch
 
 from gpap.engine.calibrate import resolve_k_cap
 from gpap.mining import mine_entailed
+from gpap.sampling.metrics import merge_sound_check
 
 from gpap.sampling.sampler import GPUSampler
 
@@ -235,10 +236,14 @@ def describe_config(cfg) -> str:
 
 
 def _core_provenance() -> str:
-    """Which engine build produced a result, for the results JSON: "libgpap <version>"."""
+    """Which engine BUILD produced a result, for the results JSON: "libgpap <build id>".
+
+    The build id, not the version: the version has read "0.1.0" for the project's whole life
+    while the engine changed underneath it, so a row stamped with it said nothing about what
+    ran. Two rows that disagree now genuinely came from different libraries."""
     try:
         from gpap.engine import _core
-        return f"libgpap {_core.version()}"
+        return f"libgpap {_core.build_id()}"
     except Exception:       # noqa: BLE001 — provenance must never break a run
         return "unknown"
 
@@ -514,7 +519,13 @@ def sample_clauses(nv, clauses, support, device, *, simplify=True, els=True, n_t
     # number the run would have reported without `--out`. (The sampler's own `cfg_stats` wall
     # already excludes it, but only on the adaptive path — a pinned single config has none.)
     proj_s = float(t.get("out_project_s") or 0.0)
-    wall = time.perf_counter() - t0 - proj_s
+    # The soundness re-check is a SELF-TEST, not sampling, and its contract is that turning it on
+    # cannot move a published rate. Same shape as `proj_s` above and the same reason it has to be
+    # subtracted HERE: the sampler's per-config wall already excludes it, but that stamp is only
+    # taken on the adaptive path, so a PINNED single config -- the mode every measurement uses --
+    # falls through to `n_models / wall` and would carry the check.
+    verify_s = float(t.get("verify_sound_s") or 0.0)
+    wall = time.perf_counter() - t0 - proj_s - verify_s
     # Engine provenance for the results JSON: WHICH packed split and WHICH kernel variant actually
     # ran, and at what K. Captured here — after the (possible) post-mining rebuild, before the
     # coverage pass lowers K. This is the evidence that a headline number came from the sum-trick
@@ -686,14 +697,20 @@ def sample_clauses(nv, clauses, support, device, *, simplify=True, els=True, n_t
             "support_size": t["support_size"],
             # `sound_check` is OPT-IN (`verify_sound`), so its third value is "off" — a run that
             # did not check is NOT a run that failed, and a consumer folding the two into a bool
-            # publishes the first as the second. Reported from the timed run, which is the one
-            # that produced the samples; the coverage run's verdict only stands in when the timed
-            # run emitted nothing to check.
-            "sound_check": (t.get("sound_check", "off")
-                            if t.get("sound_check", "off") != "off"
-                            else c.get("sound_check", "off")),
+            # publishes the first as the second.
+            # UNSOUND DOMINATES, over both runs. Preferring the timed run's verdict silently
+            # discarded the coverage run's, and since `unsound_rows` sums BOTH, the row could say
+            # `sound_check: "ok"` beside `unsound_rows: 7` — and every consumer branches on the
+            # string. The coverage run is not a lesser witness: it samples the same formula under
+            # a DIFFERENT config and batch, which is exactly where a config-specific bug shows.
+            "sound_check": merge_sound_check(t.get("sound_check"), c.get("sound_check")),
+            "sound_rows_checked": (((t.get("sound_rows_checked") or 0)
+                                    + (c.get("sound_rows_checked") or 0))
+                                   if verify_sound else None),
             "unsound_rows": ((t.get("unsound_rows") or 0) + (c.get("unsound_rows") or 0)
                              if verify_sound else None),
+            "verify_sound_s": (float(t.get("verify_sound_s") or 0.0)
+                               + float(c.get("verify_sound_s") or 0.0)) if verify_sound else None,
             "cpu_sound": c.get("all_valid"), "models": c.get("models", []),
             "n_distinct": c.get("n_distinct"), "n_collected": n_coll,
             # Sample OUTPUT (present when out_cap>0): `samples` = numpy uint8 (n, S) 0/1 matrix of

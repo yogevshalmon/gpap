@@ -248,6 +248,59 @@ def _wave_propagate(st_row, ab_row, trail_row, occ_off_ptr, occ_mid_ptr, occ_cls
     return head, tail, conflict, nops
 
 @triton.jit
+def _seed_and_propagate(st_row, ab_row, trail_row, dec_ptr, k,
+                        occ_off_ptr, occ_mid_ptr, occ_cls_ptr,
+                        active_ptr, conflict_ptr, nprops_ptr, nops_ptr, ndecs_ptr,
+                        B, TRAIL_CAP,
+                        SHIFT: tl.constexpr, WAVE: tl.constexpr, W: tl.constexpr):
+    """THE body of entry point 1: seed row k's decisions, propagate to fixpoint, write the row's
+    flags and its three counters. Returns `tail`, the trail depth the CLEAN tail needs.
+
+    Shared by _bcp_fixpoint_kernel and _bcp_fixpoint_clean_kernel. It used to be duplicated
+    VERBATIM into the second one under a comment asking the reader to keep the two in lockstep,
+    which is a request no reader can be relied on to honour. The two must agree EXACTLY: CLEAN
+    mode's whole gate (tests/test_clean_mode.py) is that a clean launch reaches state identical
+    to a plain one, so a divergence here would not be a slowdown, it would be a wrong answer --
+    caught after the fact by a fuzz test rather than prevented. `@triton.jit` helpers are inlined,
+    so this costs nothing: the emitted SASS is unchanged."""
+    conflict = B * 0            # runtime-typed int32 scalars (loop-carried)
+    tail = B * 0
+    head = B * 0
+    nops = B * 0
+
+    # --- seed: assign each decision literal + queue it (occ decrements happen below) ---
+    for j in range(0, B):
+        lit64 = tl.load(dec_ptr + k * B + j)
+        if (lit64 >= 0) & (conflict == 0):
+            lit = lit64.to(tl.int32)
+            w = tl.load(ab_row + (lit >> 5))        # lit / lit^1 share this word
+            if (w & (1 << ((lit ^ 1) & 31))) != 0:  # contradicts existing / earlier seed
+                conflict = 1
+            elif (w & (1 << (lit & 31))) == 0:      # skip duplicates
+                tl.store(ab_row + (lit >> 5), w | (1 << (lit & 31)))
+                tl.store(trail_row + tail, lit)
+                tail += 1
+    ndecs = tail                # seeds assigned so far ARE the decisions
+
+    if WAVE:
+        head, tail, conflict, nops = _wave_propagate(
+            st_row, ab_row, trail_row, occ_off_ptr, occ_mid_ptr, occ_cls_ptr,
+            head, tail, conflict, nops, TRAIL_CAP, SHIFT, W)
+    else:
+        head, tail, conflict, nops = _propagate(
+            st_row, ab_row, trail_row, occ_off_ptr, occ_mid_ptr, occ_cls_ptr,
+            head, tail, conflict, nops, TRAIL_CAP, SHIFT)
+
+    if conflict != 0:
+        tl.store(conflict_ptr + k, 1)
+        tl.store(active_ptr + k, 0)
+    tl.store(nprops_ptr + k, tail)
+    tl.store(nops_ptr + k, nops)
+    tl.store(ndecs_ptr + k, ndecs)
+    return tail
+
+
+@triton.jit
 def _bcp_fixpoint_kernel(
     st_ptr,        # (K, M)  int32 packed clause state (row-private per program)
     ab_ptr,        # (K, NW) int32 assignment BITMAP (bit l = literal l TRUE)
@@ -268,44 +321,10 @@ def _bcp_fixpoint_kernel(
 ):
     k = tl.program_id(0).to(tl.int64)
     if tl.load(active_ptr + k) != 0:
-        st_row = st_ptr + k * M
-        ab_row = ab_ptr + k * NW
-        trail_row = trail_ptr + k * TRAIL_CAP
-
-        conflict = B * 0            # runtime-typed int32 scalars (loop-carried)
-        tail = B * 0
-        head = B * 0
-        nops = B * 0
-
-        # --- seed: assign each decision literal + queue it (occ decrements happen below) ---
-        for j in range(0, B):
-            lit64 = tl.load(dec_ptr + k * B + j)
-            if (lit64 >= 0) & (conflict == 0):
-                lit = lit64.to(tl.int32)
-                w = tl.load(ab_row + (lit >> 5))        # lit / lit^1 share this word
-                if (w & (1 << ((lit ^ 1) & 31))) != 0:  # contradicts existing / earlier seed
-                    conflict = 1
-                elif (w & (1 << (lit & 31))) == 0:      # skip duplicates
-                    tl.store(ab_row + (lit >> 5), w | (1 << (lit & 31)))
-                    tl.store(trail_row + tail, lit)
-                    tail += 1
-        ndecs = tail                # seeds assigned so far ARE the decisions
-
-        if WAVE:
-            head, tail, conflict, nops = _wave_propagate(
-                st_row, ab_row, trail_row, occ_off_ptr, occ_mid_ptr, occ_cls_ptr,
-                head, tail, conflict, nops, TRAIL_CAP, SHIFT, W)
-        else:
-            head, tail, conflict, nops = _propagate(
-                st_row, ab_row, trail_row, occ_off_ptr, occ_mid_ptr, occ_cls_ptr,
-                head, tail, conflict, nops, TRAIL_CAP, SHIFT)
-
-        if conflict != 0:
-            tl.store(conflict_ptr + k, 1)
-            tl.store(active_ptr + k, 0)
-        tl.store(nprops_ptr + k, tail)
-        tl.store(nops_ptr + k, nops)
-        tl.store(ndecs_ptr + k, ndecs)
+        _seed_and_propagate(st_ptr + k * M, ab_ptr + k * NW, trail_ptr + k * TRAIL_CAP,
+                            dec_ptr, k, occ_off_ptr, occ_mid_ptr, occ_cls_ptr,
+                            active_ptr, conflict_ptr, nprops_ptr, nops_ptr, ndecs_ptr,
+                            B, TRAIL_CAP, SHIFT, WAVE, W)
 
 @triton.jit
 def _risk(st_row, ab_row, occ_off_ptr, occ_mid_ptr, occ_cls_ptr, lit, SHIFT: tl.constexpr):
@@ -348,7 +367,10 @@ def _bcp_trajectory_kernel(
     SHIFT: tl.constexpr,
     WAVE: tl.constexpr,                   # 1 = warp-wide wavefront propagate (experimental)
     W: tl.constexpr,                      # wavefront lane width (power of 2)
-    VSCAN: tl.constexpr,                  # 1 = warp-wide decision scan (both modes; GPAP_VSCAN=0 off)
+    VSCAN: tl.constexpr,                  # 1 = warp-wide decision scan. Only WAVE and only
+                                          # !SOFT reads it (see the guard below), so those
+                                          # combinations are not specialized on it at all
+                                          # -- cpp/tools/build_kernels.py::vscan_is_read.
 ):
     """The WHOLE trajectory in one launch: repeatedly pick the next B still-free variables in
     `order`, assign each a hash-random polarity, and propagate to fixpoint.
@@ -546,48 +568,15 @@ def _bcp_fixpoint_clean_kernel(
     selection api) must use the plain kernel — after this one, the state IS the baseline.
     Flags and the (K,) counters survive; they are the result.
 
-    The seed loop and the propagate dispatch are duplicated VERBATIM from
-    _bcp_fixpoint_kernel — keep them in lockstep (the original is deliberately untouched so
-    its 29 shipped cubins stay byte-identical)."""
+    Seed and propagate are _seed_and_propagate — the SAME code the plain kernel runs, not a copy
+    of it kept in step by hand. Only the restore below is this kernel's own."""
     k = tl.program_id(0).to(tl.int64)
     if tl.load(active_ptr + k) != 0:
         st_row = st_ptr + k * M
-        ab_row = ab_ptr + k * NW
         trail_row = trail_ptr + k * TRAIL_CAP
-
-        conflict = B * 0
-        tail = B * 0
-        head = B * 0
-        nops = B * 0
-
-        for j in range(0, B):
-            lit64 = tl.load(dec_ptr + k * B + j)
-            if (lit64 >= 0) & (conflict == 0):
-                lit = lit64.to(tl.int32)
-                w = tl.load(ab_row + (lit >> 5))
-                if (w & (1 << ((lit ^ 1) & 31))) != 0:
-                    conflict = 1
-                elif (w & (1 << (lit & 31))) == 0:
-                    tl.store(ab_row + (lit >> 5), w | (1 << (lit & 31)))
-                    tl.store(trail_row + tail, lit)
-                    tail += 1
-        ndecs = tail
-
-        if WAVE:
-            head, tail, conflict, nops = _wave_propagate(
-                st_row, ab_row, trail_row, occ_off_ptr, occ_mid_ptr, occ_cls_ptr,
-                head, tail, conflict, nops, TRAIL_CAP, SHIFT, W)
-        else:
-            head, tail, conflict, nops = _propagate(
-                st_row, ab_row, trail_row, occ_off_ptr, occ_mid_ptr, occ_cls_ptr,
-                head, tail, conflict, nops, TRAIL_CAP, SHIFT)
-
-        if conflict != 0:
-            tl.store(conflict_ptr + k, 1)
-            tl.store(active_ptr + k, 0)
-        tl.store(nprops_ptr + k, tail)
-        tl.store(nops_ptr + k, nops)
-        tl.store(ndecs_ptr + k, ndecs)
-
+        tail = _seed_and_propagate(st_row, ab_ptr + k * NW, trail_row,
+                                   dec_ptr, k, occ_off_ptr, occ_mid_ptr, occ_cls_ptr,
+                                   active_ptr, conflict_ptr, nprops_ptr, nops_ptr, ndecs_ptr,
+                                   B, TRAIL_CAP, SHIFT, WAVE, W)
         _clean_packed(st_row, init_ptr, trail_row, occ_off_ptr, occ_mid_ptr, occ_cls_ptr,
                       tail, M, W)

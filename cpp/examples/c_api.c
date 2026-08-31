@@ -50,8 +50,8 @@ static int demo_assumptions(void) {
 
     int8_t active[2], conflict[2];
     int32_t implied[2];
-    CHECK("flags", gpap_flags(e, active, conflict));
-    CHECK("num_propagated", gpap_num_propagated(e, implied));
+    CHECK("flags", gpap_flags(e, active, conflict, K));
+    CHECK("num_propagated", gpap_num_propagated(e, implied, K));
 
     /* The full assignment of every row: (K, 2N) int8, 1 where that literal is TRUE. Row-major,
      * literal l of row k at [k * 2N + l] — so variable v is TRUE at 2(v-1) and FALSE at 2(v-1)+1. */
@@ -127,7 +127,9 @@ static int demo_sampling(const char *path, int32_t K, int32_t B, int64_t seed) {
     int32_t mask_id = 0, models = 0, unsound = -1;
     CHECK("pair_mask_create", gpap_pair_mask_create(e, NULL, 0, &mask_id));   /* all variables */
     CHECK("select_complete", gpap_select_complete(e, mask_id, /*slot=*/0, &models));
-    CHECK("check_sound", gpap_check_sound(e, /*slot=*/0, 4096, &unsound));    /* must be 0 */
+    /* max_rows = 0 = EVERY selected row. A positive bound checks a PREFIX, so "0 unsound" would
+     * then be a claim about that prefix and not about the rows this program just counted. */
+    CHECK("check_sound", gpap_check_sound(e, /*slot=*/0, /*max_rows=*/0, &unsound));
 
     printf("entry point 2 — trajectory sampling (K=%d, B=%d, %d decision rounds):\n", K, B, rounds);
     printf("  %d models (%.1f%% of trajectories), unsound rows: %d\n", models,

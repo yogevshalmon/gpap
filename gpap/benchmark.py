@@ -55,6 +55,7 @@ import time
 # gpap/cli.py's wrapper would be absent on exactly the campaign path it was written to protect
 # (`--time-limit 0` here is also the rival subprocess's timeout).
 from gpap.cli import CIRCUIT_EXTS, _NONNEG_INT, _POS_INT, _POS_SECS, _k_cap_arg
+from gpap.sampling.metrics import sound_verdict
 
 SCHEMA = 3          # results-JSON schema version (docs/BENCHMARKING.md §7)
 #   1: original flat rows
@@ -825,9 +826,9 @@ def _format_row(r, args, multi_enc, has_circuits, quality, show_unif, format_uni
     # kernel provenance: w/s = wave/scalar propagate, 16 or 8 = the packed split's SHIFT
     krn = f"{eng.get('mode', '?')[0]}{eng.get('shift', '')}" if eng else "—"
     # Three outcomes, three glyphs: "-" is "not checked", which is neither OK nor BAD.
-    _sc = r.get("sound_check")
-    if _sc is None:                            # a row recorded before the key existed
-        _sc = ("ok" if r["gpu_sound"] else "UNSOUND") if "gpu_sound" in r else "off"
+    # The verdict (legacy `gpu_sound` rows included) comes from the ONE definition in
+    # gpap.sampling.metrics, which eval/artifact/paper_tables.py reads the same rows with.
+    _sc = sound_verdict(r)
     snd = ("BAD" if _sc == "UNSOUND" or r.get("cpu_sound") is False else
            "OK" if _sc == "ok" else "-")
     line += f"{krn:>5}{snd:>4}"

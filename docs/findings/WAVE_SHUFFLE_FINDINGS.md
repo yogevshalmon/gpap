@@ -62,7 +62,8 @@ invisible (same indices, computed cheaper): fixpoints, conflicts, models, counte
 - Count-terminated pinned-K identity (`--k-cap 20000`, b8, seed 5, `--n-time 100`):
   **bit-identical `n_models` + success** on b03-c25 (1872), s1196-c25 (3469), b12-c25 (101),
   b04-c25 (3665).
-- Full pytest suite green (`tl.gather` compiles through the AOT path; 33 cubins; mining
+- Full pytest suite green (`tl.gather` compiles through the AOT path; 33 cubins at the time,
+  27 since the duplicate VSCAN specializations were dropped 2026-08-31; mining
   kernel-invariance + clean-mode sabotage tests included).
 - `gpap mine` b12-c50 emits the IDENTICAL 9,890 mined clauses in both arms.
 

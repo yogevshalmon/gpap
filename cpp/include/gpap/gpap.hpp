@@ -14,7 +14,8 @@
  *
  * That is the whole API for the flagship use case. The sampler sizes the GPU batch to the free
  * VRAM, picks the faster kernel variant, orders decisions so propagation does the work, runs as
- * many chunks as it takes, and checks on the device that every row it returns is a real model.
+ * many chunks as it takes, and — when SampleOptions::verify is set — re-checks on the device
+ * that every row it returns is a real model.
  * Variables and literals are DIMACS (1-based, +v true / -v false) — the same numbers as the file.
  *
  * The other entry point, testing many assumption sets at once:
@@ -69,9 +70,11 @@ inline void check(gpap_status st, const char *what) {
  *  Both variants are bit-identical in their results; only the speed differs. */
 enum class Mode { Auto = GPAP_MODE_AUTO, Scalar = GPAP_MODE_SCALAR, Wave = GPAP_MODE_WAVE };
 
-/** Engine construction options; every default is the sensible one.
- *  NOTE: `mode` defaults to Auto here, where the raw C ABI defaults to scalar — C++ callers get
- *  the dispatch for free, C callers pick a mode themselves. The choice never changes results. */
+/** Engine construction options; every default is the sensible one — the same defaults the raw C
+ *  ABI gives a NULL options pointer, which is the point: `mode` is Auto on BOTH faces, so no
+ *  consumer has to know to ask for the dispatch. (The C ABI's zero value was once Scalar, and
+ *  this note used to tell C callers to pick a mode themselves; both are fixed.)
+ *  The choice never changes results, only speed. */
 struct Options {
     int device = 0;
     Mode mode = Mode::Auto;
@@ -190,6 +193,9 @@ class Engine {
         check(gpap_engine_set_mode(h_, static_cast<gpap_mode>(m)), "gpap_engine_set_mode");
     }
     Mode mode() const { return static_cast<Mode>(gpap_engine_mode(h_)); }
+    /** Is the engine still choosing its kernel per reset(K)? (Nothing pinned one — not
+     *  options, not set_mode, not $GPAP_KERNEL.) */
+    bool auto_dispatch() const { return gpap_engine_auto(h_) != 0; }
     std::int32_t shift() const { return gpap_engine_shift(h_); }
     std::int32_t k() const { return gpap_engine_k(h_); }
     std::int32_t num_vars() const { return gpap_engine_num_vars(h_); }
@@ -197,12 +203,19 @@ class Engine {
     bool flush_conflict() const { return gpap_engine_flush_conflict(h_) != 0; }
 
     // ---------------------------------------------------------------- entry points
-    /** Make `mode()` truthful for a batch of `K` rows before the first reset. Nothing else needs
-     *  it: gpap_engine_reset resolves Mode::Auto itself, for every consumer of the ABI rather than
-     *  for the wrappers that remember to ask. This USED to be where the rule was applied, and a
-     *  core-side consumer (gpap_probe_combinations) duly ran SCALAR forever. A no-op when a mode
-     *  was pinned; the rule and its calibration live in gpap_dispatch_wave. */
-    void plan_for(std::int32_t K) { check(gpap_engine_reset(h_, K), "gpap_engine_reset"); }
+    /** Which kernel a batch of `K` rows will run — a PURE query, unlike the Python twin's
+     *  namesake it does not touch engine state. Nothing needs to call it before sampling:
+     *  gpap_engine_reset resolves Mode::Auto itself, for every consumer of the ABI rather than
+     *  for the wrappers that remember to ask (this USED to be where the rule was applied, and a
+     *  core-side consumer, gpap_probe_combinations, duly ran SCALAR forever). Returns the pinned
+     *  mode when one is pinned — by options, by set_mode, or by $GPAP_KERNEL.
+     *  ⚠️ It used to be a second spelling of reset(): a caller who read "pure query" and used it
+     *  mid-run silently discarded every pending readout slot and paid a full K*M broadcast. */
+    Mode plan_for(std::int32_t K) const {
+        if (!gpap_engine_auto(h_)) return mode();
+        return gpap_dispatch_wave(gpap_engine_num_clauses(h_), K, device_)
+                   ? Mode::Wave : Mode::Scalar;
+    }
 
     /** Restore K rows to the cached post-units-flush state (and resolve Mode::Auto for that K). */
     void reset(std::int32_t K) { check(gpap_engine_reset(h_, K), "gpap_engine_reset"); }
@@ -307,14 +320,14 @@ class Engine {
     /** (K,) active and conflict flags. */
     std::pair<std::vector<std::int8_t>, std::vector<std::int8_t>> flags() {
         std::vector<std::int8_t> a(static_cast<size_t>(k())), c(static_cast<size_t>(k()));
-        check(gpap_flags(h_, a.data(), c.data()), "gpap_flags");
+        check(gpap_flags(h_, a.data(), c.data(), k()), "gpap_flags");
         return {std::move(a), std::move(c)};
     }
 
     /** (K,) unit-propagation implications of the last launch (assigned minus decisions). */
     std::vector<std::int32_t> num_propagated() {
         std::vector<std::int32_t> out(static_cast<size_t>(k()));
-        check(gpap_num_propagated(h_, out.data()), "gpap_num_propagated");
+        check(gpap_num_propagated(h_, out.data(), k()), "gpap_num_propagated");
         return out;
     }
 
@@ -357,6 +370,9 @@ inline std::int64_t row_bytes(std::int32_t M, std::int32_t N, std::int32_t trail
 inline std::int32_t default_k_cap(int device = 0) { return gpap_default_k_cap(device); }
 
 inline std::string version() { return gpap_version(); }
+/** Identity of this exact BUILD ("<version>+<hex of the library's bytes>"). Key a cache
+ *  of measurements on THIS, never on version() — see the C header. */
+inline std::string build_id() { return gpap_build_id(); }
 
 /** Can this engine run that formula at all? The packed clause word has two field splits (16|16
  *  and 8|24) and a formula fits one of them or neither; constructing an Engine on a formula that
@@ -409,7 +425,7 @@ struct SampleOptions {
      *  OFF by default: it is a self-test, not part of producing samples — a row is only counted
      *  when it is active and fully assigned, which already means no clause was emptied. Turn it
      *  on in tests, or in a run whose output will be published. When on it checks EVERY emitted
-     *  row (measured 0.13-0.84% of a chunk, growing with the formula), and `Sampler::sample`
+     *  row (a fraction of a percent of the chunk, growing with the formula), and `Sampler::sample`
      *  throws if any row fails. Matches gpap.sampling's `verify_sound`, which is also off by
      *  default — the two faces must not disagree about what a default run does. */
     bool verify = false;
@@ -537,7 +553,9 @@ class Sampler {
 
         // --- batch size ----------------------------------------------------------------
         K_ = opts_.k > 0 ? opts_.k : auto_k(info, opts_);
-        engine_.plan_for(K_);          // resolve wave/scalar now, so mode() is true before sample()
+        engine_.reset(K_);             // resolve wave/scalar now, so mode() is true before sample()
+                                       // (reset, not plan_for: the latter is a pure query and
+                                       //  resolves nothing -- run_chunk resets again anyway)
         // A model must have EVERY variable assigned, so completion is tested over all of them.
         mask_all_ = engine_.pair_mask();
     }
@@ -625,11 +643,12 @@ class Sampler {
         return v;
     }
 
-    /** K from the free VRAM, matching the Python sampler's kill-switch-validated model: the
-     *  conservative analytic bound, then the fused-trajectory boost (a fused chunk builds no
-     *  per-round decision masks, so its real footprint is one (K,M) packed word plus a small
-     *  per-variable allowance). This hardware spills to host RAM rather than failing, so the
-     *  model deliberately over-reserves — an optimistic K silently halves throughput. */
+    /** K from the free VRAM, matching the Python sampler's kill-switch-validated model:
+     *  min(the analytic bound over gpap_row_bytes, the batch cap). ONE number — the "fused
+     *  boost" that used to multiply this is gone, along with the 1.57x-over per-row model it
+     *  existed to undo. Hardware that spills to host RAM rather than failing is why the bound is
+     *  the exact allocation list and not an estimate: an optimistic K silently halves throughput
+     *  instead of raising anything. */
     static std::int32_t auto_k(const gpap_formula_info &info, const SampleOptions &o) {
         /* SampleOptions::k_cap: 0 = auto (this GPU's VRAM), >0 = verbatim, <0 = uncapped.
          * gpap_compute_k_safe reads cap<=0 as "no cap", which is what the negative case wants. */
@@ -930,6 +949,8 @@ class Prober {
         std::int32_t n = 0;
         check(gpap_free_literals(engine_.handle(), nullptr, &n), "gpap_free_literals");
         std::vector<std::int32_t> out(static_cast<std::size_t>(std::max(n, 0)));
+        /* `n` is now the CAPACITY on the way in and the count on the way out — the same value
+           here, since the vector was sized from the query. */
         if (n > 0) check(gpap_free_literals(engine_.handle(), out.data(), &n), "gpap_free_literals");
         return out;
     }
@@ -938,9 +959,14 @@ class Prober {
     Probe probe(std::int32_t k, const ProbeBudget &budget = ProbeBudget()) {
         return sweep(nullptr, 0, k, budget);
     }
-    /** Probe every `k`-subset of `pool` (DIMACS literals). */
+    /** Probe every `k`-subset of `pool` (DIMACS literals). An EMPTY pool is rejected rather than
+     *  silently swept: `std::vector::data()` is nullptr when empty, and nullptr is the ABI's
+     *  sentinel for "every free literal" — so a caller whose filter left nothing would have got
+     *  the LARGEST possible sweep (~1e11 tuples at k=3 on an unrolled circuit) instead of none. */
     Probe probe(const std::vector<std::int32_t> &pool, std::int32_t k,
                 const ProbeBudget &budget = ProbeBudget()) {
+        if (pool.empty()) throw Error(GPAP_ERR_ARG, "gpap::Prober::probe: the pool is empty — "
+                                      "call probe(k) if you meant every free literal");
         return sweep(pool.data(), static_cast<std::int32_t>(pool.size()), k, budget);
     }
 
@@ -948,12 +974,15 @@ class Prober {
      *  rather than against a materialized enumeration, which for a wide pool at k=3 is terabytes.
      *  Saturates at INT64_MAX instead of wrapping. */
     std::int64_t count(const std::vector<std::int32_t> &pool, std::int32_t k,
-                       bool distinct_vars = true) {
+                       const ProbeBudget &budget = ProbeBudget()) {
+        if (pool.empty()) return 0;
+        const gpap_probe_options o = to_options(budget);
         return gpap_probe_count(engine_.handle(), pool.data(),
-                                static_cast<std::int32_t>(pool.size()), k, distinct_vars ? 1 : 0);
+                                static_cast<std::int32_t>(pool.size()), k, &o);
     }
-    std::int64_t count(std::int32_t k, bool distinct_vars = true) {
-        return gpap_probe_count(engine_.handle(), nullptr, 0, k, distinct_vars ? 1 : 0);
+    std::int64_t count(std::int32_t k, const ProbeBudget &budget = ProbeBudget()) {
+        const gpap_probe_options o = to_options(budget);
+        return gpap_probe_count(engine_.handle(), nullptr, 0, k, &o);
     }
 
     /** Probe an explicit (n, k) row-major matrix of DIMACS literals — for a caller that builds
@@ -993,7 +1022,7 @@ class Prober {
         o.seconds = b.seconds;
         o.max_tuples = b.max_tuples;
         o.batch = b.batch;
-        o.distinct_vars = b.distinct_vars ? 1 : 0;
+        o.same_var = b.distinct_vars ? 0 : 1;
         o.refuse_over_max = b.refuse_over_max ? 1 : 0;
         return o;
     }

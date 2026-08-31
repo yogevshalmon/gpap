@@ -24,8 +24,13 @@ using gpap::set_error;
 
 /* ------------------------------------------------------------------ helpers */
 
-static inline int32_t lit_index(int32_t ext) {
-    return 2 * (std::abs(ext) - 1) + (ext > 0 ? 0 : 1);
+/* DIMACS -> 2N index for a formula of `nv` variables, or -1 if the literal is 0 or out of
+ * range. THE conversion is gpap::lit_index_from_dimacs (gpap_internal.hpp) — this is only the
+ * int32 narrowing the builder's arrays want, and it is safe because the caller has already
+ * rejected every negative result. The builder used to carry its own std::abs() copy that took
+ * the magnitude BEFORE the range check, which is undefined behaviour at INT32_MIN. */
+static inline int32_t lit_index(int32_t ext, int32_t nv) {
+    return (int32_t)gpap::lit_index_from_dimacs(ext, nv);
 }
 
 /* The inverse: 2N literal index -> signed DIMACS literal. */
@@ -125,8 +130,8 @@ static gpap_status build(int32_t num_vars, const int32_t *flat, const int32_t *l
         const int32_t *lits = keep_ptr[c];
         uint32_t sum = 0;
         for (int32_t i = 0; i < n; ++i) {
-            const int32_t li = lit_index(lits[i]);
-            if (li < 0 || li >= num_lits) {
+            const int32_t li = lit_index(lits[i], num_vars);
+            if (li < 0) {                          /* 0, or a variable past num_vars */
                 set_error("literal %d out of range for num_vars=%d", lits[i], num_vars);
                 delete f;
                 return GPAP_ERR_ARG;
@@ -157,7 +162,7 @@ static gpap_status build(int32_t num_vars, const int32_t *flat, const int32_t *l
         const int32_t n = keep_len[c];
         const int32_t *lits = keep_ptr[c];
         if (n == 1) {
-            f->unit_lits.push_back(lit_index(lits[0]));
+            f->unit_lits.push_back(lit_index(lits[0], num_vars));
         } else if (n == 2) {
             /* Binary payloads carry GPAP_OCC_BIN_TAG (the sign bit): a literal index needs at
              * most 24 bits (the 8|24 envelope's 2N ceiling), and a long payload is a clause
@@ -166,14 +171,15 @@ static gpap_status build(int32_t num_vars, const int32_t *flat, const int32_t *l
              * kernel classify an entry from the value it has already loaded instead of gathering
              * this segment's occ_mid through an extra shuffle gather in its hottest loop.
              * occ_mid still bounds the scalar loop split, the CLEAN restore and the SOFT scan. */
-            const int32_t a = lit_index(lits[0]), b = lit_index(lits[1]);
+            const int32_t a = lit_index(lits[0], num_vars), b = lit_index(lits[1], num_vars);
             f->occ_clauses[(size_t)bin_cur[(size_t)(a ^ 1)]++] = b | GPAP_OCC_BIN_TAG;
             f->occ_clauses[(size_t)bin_cur[(size_t)(b ^ 1)]++] = a | GPAP_OCC_BIN_TAG;
             f->bin_pairs.push_back(a < b ? a : b);
             f->bin_pairs.push_back(a < b ? b : a);
         } else {
             for (int32_t i = 0; i < n; ++i)
-                f->occ_clauses[(size_t)long_cur[(size_t)(lit_index(lits[i]) ^ 1)]++] = long_id;
+                f->occ_clauses[(size_t)long_cur[(size_t)(lit_index(lits[i], num_vars) ^ 1)]++] =
+                    long_id;
             ++long_id;
         }
     }
