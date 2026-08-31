@@ -44,6 +44,26 @@ def instances():
     return insts
 
 
+def test_degeneracy_flag_finds_subcube_solution_sets(instances):
+    """A solution set that is a full SUBCUBE (every support var pinned or free) is one on which
+    EVERY sampler is uniform by construction — the don't-care filler produces those bits, not the
+    config under test — so the campaign must be able to screen it out of a headline median. The
+    old `vacuous` flag only caught `accept.all()`, its all-free special case, which the generator
+    never produces inside the default |S| window."""
+    from eval.uniformity.fuzz_uniformity import _degeneracy
+
+    assert _degeneracy(np.array([[a, b, 1] for a in (0, 1) for b in (0, 1)],
+                                dtype=np.uint8)) == {"free_dim": 2, "subcube": True}
+    assert _degeneracy(np.array([[0, 0, 1], [0, 1, 1], [1, 0, 1]],
+                                dtype=np.uint8)) == {"free_dim": 2, "subcube": False}
+    for inst in instances:                       # every generated instance carries the verdict
+        meta = _degeneracy(inst.sols)
+        assert inst.meta["subcube"] == meta["subcube"]
+        assert inst.meta["free_dim"] == meta["free_dim"] <= len(inst.support)
+        # the flag must agree with the definition on real generated sets
+        assert meta["subcube"] == (inst.S == (1 << meta["free_dim"]))
+
+
 def test_oracle_is_self_consistent(instances):
     """Every enumerated solution must satisfy the formula, and the count must be reproducible.
 

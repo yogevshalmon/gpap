@@ -105,6 +105,32 @@ def test_simplify_bench_abc_is_equivalent(tmp_path, name, target_mode):
     chk = bench_equiv_check(src, dst, 25, 5, target_mode=target_mode)
     assert chk["ok"], f"{name}: ABC copy accepts a different set ({chk})"
     assert chk["hits_src"] == chk["hits_dst"]
+    assert chk["outputs_ok"] and chk["outputs"] > 0, "the output-equality half must have content"
+
+
+def test_bench_equiv_check_catches_a_sabotaged_copy_at_a_rare_pin(tmp_path):
+    """The gate must not be able to pass by comparing nothing.
+
+    At a `rare` target the acceptance probability is below 1/(n_words*64), so BOTH acceptance
+    words are all-zero and comparing only them returns ok=True whatever the circuit does — every
+    ABC row of the recorded ISCAS-85 rival campaign passed that way (hits [0, 0, 32768]). The
+    check therefore compares every primary output; this pins that a functional change is caught
+    even in the regime where the acceptance half is vacuous."""
+    from gpap.circuits.abc_backend import bench_equiv_check
+    src = os.path.join("benchmarks/circuits/bench/comb", "c432.bench")
+    lines, done, out = open(src).read().splitlines(), False, []
+    for line in lines:                                  # flip exactly one gate's function
+        if not done and "NAND(" in line:
+            line, done = line.replace("NAND(", "AND(", 1), True
+        out.append(line)
+    assert done, "no NAND gate to sabotage"
+    dst = str(tmp_path / "c432_sabotaged.bench")
+    open(dst, "w").write("\n".join(out) + "\n")
+    chk = bench_equiv_check(src, dst, 1, 5, target_mode="rare")
+    assert chk["accept_ok"], "precondition: at a rare pin the acceptance halves agree (0 vs 0)"
+    assert chk["hits_src"] == 0 and chk["hits_dst"] == 0
+    assert not chk["ok"] and not chk["outputs_ok"], "a sabotaged circuit must NOT pass the gate"
+    assert chk["mismatched"], "the failing outputs must be named in the row"
 
 
 def test_simplify_bench_abc_output_is_parseable_and_primitive(tmp_path):

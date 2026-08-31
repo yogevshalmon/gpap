@@ -172,6 +172,30 @@ def test_rival_zero_buckets_are_symmetric(tmp_path):
     assert v["gm"] == pytest.approx(10.0)     # only the one finite ratio
 
 
+def test_rival_unmeasured_unique_is_not_a_gpap_zero(tmp_path):
+    """`unique_per_s_est` is None/0 when the OFF-timing coverage run collected nothing, which is
+    NOT "GPAP produced nothing" — the timed run's `n_models` says that. Reading the first as the
+    second published b11-c25 (42 models at a rare pin, ~15x the rival) as an outright LOSS."""
+    rows = [
+        {"name": "b11", "variant": "raw", "hts": {"unique_per_s": 0.05},        # not measured
+         "gpap": {"unique_per_s_est": None, "unique_est_status": "no-coverage-sample",
+                  "n_models": 42}},
+        {"name": "b11old", "variant": "raw", "hts": {"unique_per_s": 0.05},     # pre-status row
+         "gpap": {"unique_per_s_est": 0.0, "n_models": 42}},
+        {"name": "z", "variant": "raw", "hts": {"unique_per_s": 10.0},          # genuine zero
+         "gpap": {"unique_per_s_est": 0.0, "n_models": 0}},
+        {"name": "w", "variant": "raw", "hts": {"unique_per_s": 10.0},
+         "gpap": {"unique_per_s_est": 100.0, "n_models": 7}},
+    ]
+    (tmp_path / "rivals_h.json").write_text(json.dumps({"rows": rows}))
+    v = rival_family(str(tmp_path), "h", "hts")
+    assert v["nomeas"] == 2, "both the new and the legacy shape must be recognised"
+    assert v["gpap0"] == 1, "a real zero is still a loss"
+    assert v["n"] == 2 and v["wins"] == 1     # only w has a comparable ratio; z is the loss
+    # the columns must still add up to the cells
+    assert 1 + v["zero"] + v["gpap0"] + v["both0"] + v["nomeas"] + v["errors"] == v["cells"]
+
+
 def test_rival_retry_row_replaces_rather_than_appends(tmp_path):
     """A resumed harness re-emits a row; appending gave 25 rows in an 18-instance file."""
     rows = [

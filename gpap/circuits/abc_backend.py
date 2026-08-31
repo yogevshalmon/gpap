@@ -300,13 +300,23 @@ def simplify_bench_abc(src: str, dst: str, *, abc: str | None = None,
 
 def bench_equiv_check(src: str, dst: str, cycles: int, seed: int, *, pin_outputs=None,
                       target_mode: str = "random", target=None, n_words: int = 512) -> dict:
-    """Verify that `dst` (an ABC-simplified copy of `src`) accepts EXACTLY the same input
-    sequences as `src` for the pinned target.
+    """Verify that `dst` (an ABC-simplified copy of `src`) computes the SAME OUTPUTS as `src`
+    under identical stimuli — and, in particular, accepts exactly the same input sequences for
+    the pinned target.
 
     Both circuits have the same primary inputs in the same order, so the bit-parallel simulator
-    driven from the same seed feeds them IDENTICAL stimuli — the per-pattern acceptance words
-    must then match bit for bit, which is far stronger than comparing acceptance rates. Returns
-    {ok, hits_src, hits_dst, n} and raises nothing: the caller decides what a mismatch means."""
+    driven from the same seed feeds them IDENTICAL stimuli; every primary output must then match
+    bit for bit, which is far stronger than comparing acceptance rates.
+
+    ⚠️ EVERY OUTPUT is compared, not only the pinned-target acceptance word, and that is the whole
+    point: at a `rare` target the acceptance probability is below 1/(n_words*64) by construction,
+    so both acceptance words are ALL ZERO and comparing them alone returns ok=True having tested
+    nothing. Every ABC row of the recorded ISCAS-85 rival campaign passed the check that way
+    (hits [0, 0, 32768]). Output equality is target-independent and cannot degenerate.
+
+    Returns {ok, outputs_ok, accept_ok, outputs, mismatched, hits_src, hits_dst, n, target}: `ok`
+    is the gate (both halves), and the components are recorded so a row can prove which half had
+    content. Raises nothing: the caller decides what a mismatch means."""
     import numpy as np
     from gpap.circuits.simulate import (_accept_words, _pin_and_target, _popcount, _run_bench,
                                         _topo_gates)
@@ -317,13 +327,21 @@ def bench_equiv_check(src: str, dst: str, cycles: int, seed: int, *, pin_outputs
                                          target)
     # positional correspondence: ABC preserves primary-output ORDER, and write_bench_from_aig
     # emits OUTPUT() in that order — so output j of dst is output j of src.
+    if len(c_dst[1]) != len(c_src[1]):          # positional correspondence is the premise
+        return {"ok": False, "outputs_ok": False, "accept_ok": False,
+                "outputs": len(c_src[1]), "mismatched": ["<output count differs: "
+                                                         f"{len(c_src[1])} -> {len(c_dst[1])}>"],
+                "hits_src": 0, "hits_dst": 0, "n": n_words * 64, "target": {}}
     idx = {o: j for j, o in enumerate(c_src[1])}
     dst_target = {c_dst[1][idx[o]]: v for o, v in pin_target.items()}
-    a = _accept_words(_run_bench(c_src, _topo_gates(c_src), T, n_words,
-                                 rng=np.random.default_rng(seed)), pin_target)
-    b = _accept_words(_run_bench(c_dst, _topo_gates(c_dst), T, n_words,
-                                 rng=np.random.default_rng(seed)), dst_target)
-    return {"ok": bool(np.array_equal(a, b)), "hits_src": _popcount(a), "hits_dst": _popcount(b),
+    out_a = _run_bench(c_src, _topo_gates(c_src), T, n_words, rng=np.random.default_rng(seed))
+    out_b = _run_bench(c_dst, _topo_gates(c_dst), T, n_words, rng=np.random.default_rng(seed))
+    mism = [o for o in c_src[1] if not np.array_equal(out_a[o], out_b[c_dst[1][idx[o]]])]
+    a, b = _accept_words(out_a, pin_target), _accept_words(out_b, dst_target)
+    accept_ok = bool(np.array_equal(a, b))
+    return {"ok": bool(not mism and accept_ok), "outputs_ok": not mism, "accept_ok": accept_ok,
+            "outputs": len(c_src[1]), "mismatched": mism[:8],
+            "hits_src": _popcount(a), "hits_dst": _popcount(b),
             "n": n_words * 64, "target": dst_target}
 
 

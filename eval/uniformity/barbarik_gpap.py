@@ -102,8 +102,8 @@ CONFIGS = {"b8": (True, 8, False), "b1": (True, 1, False), "s1": (False, 1, Fals
            "soft": (True, 8, "soft"), "bsup": (True, None, False)}
 
 # How hard to try to fill one of barbarik's sample orders before recording "no verdict".
-_FILL_ATTEMPTS = 24        # collector calls per order
-_FILL_GIVE_UP = 3          # consecutive calls returning NOTHING -> the instance really is dry
+_FILL_ATTEMPTS = 24        # collector attempts per order
+_FILL_GIVE_UP = 3          # consecutive ATTEMPTS returning NOTHING -> the instance really is dry
 
 
 def _gpap_solutions(input_file, num_solutions, ind_var_list, seed, device, config, k_cap,
@@ -147,8 +147,15 @@ def _gpap_solutions(input_file, num_solutions, ind_var_list, seed, device, confi
     # stopping rule to GPAP's coverage. Retry until the order is filled or the budget is spent;
     # every call is a fresh set of independent chunks, so concatenating them changes no
     # distribution.
+    # An `iid` ATTEMPT ends at its first dry call, so it delivers ~1/(1-p_dry) rows where a
+    # `batch` attempt can fill the whole order in one: the same 24 attempts would cap the iid arm
+    # at a few dozen samples on a low-yield kernel for purely structural reasons — the same bias,
+    # from the other end. Budget iid in CALLS instead. What stops a genuinely dry instance is the
+    # give-up rule below, in 3 attempts either way; this bound only exists so a slow-but-alive
+    # instance cannot spin forever.
     rows, cols, empty = [], None, 0
-    for _ in range(_FILL_ATTEMPTS):
+    for _ in range(_FILL_ATTEMPTS * (num_solutions if draw == "iid" else 1)):
+        before = len(rows)
         if draw == "iid":                      # a fresh chunk == a fresh variable permutation
             for _ in range(num_solutions - len(rows)):
                 b, cols = smp.sample_bits(1, config=(rv, B, la), max_chunks=400)
@@ -162,7 +169,14 @@ def _gpap_solutions(input_file, num_solutions, ind_var_list, seed, device, confi
                 rows.extend(b)
         if len(rows) >= num_solutions:
             break
-        empty = 0 if (b is not None and len(b)) else empty + 1
+        # "Dry" is an ATTEMPT that produced nothing, never merely the last CALL inside it. Keying
+        # off `b` made the counter monotone in the `iid` branch — the only way to reach this line
+        # there is a dry `sample_bits(1)`, so the fill gave up after 3 dry calls ANYWHERE in the
+        # 24-attempt budget even while the calls between them were delivering rows. That charged
+        # our collector's stopping rule to GPAP on exactly the low-yield kernels the retry exists
+        # for, and it did so only for the arm whose independence premise the guarantee is stated
+        # under. Both draws now obey the rule `_FILL_GIVE_UP` states.
+        empty = 0 if len(rows) > before else empty + 1
         if empty >= _FILL_GIVE_UP:              # genuinely producing nothing, not merely rarely
             break
     bits = rows

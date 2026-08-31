@@ -330,6 +330,84 @@ def test_barbarik_harness_silences_upstream_rm_noise_and_nothing_else(tmp_path, 
     assert shim.path.join("a", "b") == os.path.join("a", "b")   # attribute forwarding
 
 
+def test_barbarik_fill_gives_up_on_dry_attempts_not_dry_calls(monkeypatch):
+    """The collector's stopping rule must not be charged to the sampler, and must not depend on
+    the DRAW.
+
+    `_FILL_GIVE_UP` counts *consecutive attempts that produced nothing*. Keying it off the last
+    CALL made the counter monotone in the `iid` branch — the only way to reach it there is a dry
+    `sample_bits(1)`, so a fill that was delivering rows was abandoned after 3 dry calls anywhere
+    in the 24-attempt budget and the order came back "GPAP produced 5/50" -> a no-verdict row.
+    That shrank coverage for exactly one arm: the i.i.d. one, whose independence premise
+    Barbarik's guarantee is stated under.
+    """
+    import sys
+    import types
+
+    import numpy as np
+
+    import eval.uniformity.barbarik_gpap as bg
+
+    cols = [1, 2, 3]
+
+    class Stub:
+        """Mirrors sample_bits' own rule: 3 consecutive empty chunks -> it returns nothing."""
+        p_dry = 0.5
+
+        def __init__(self):
+            self.rng = np.random.default_rng(11)
+
+        @classmethod
+        def from_clauses(cls, *a, **k):
+            return cls()
+
+        def sample_bits(self, n, config=None, max_chunks=400):
+            rows, empty = [], 0
+            while len(rows) < n and empty < 3:
+                if self.rng.random() < Stub.p_dry:
+                    empty += 1
+                    continue
+                empty = 0
+                rows.extend([np.ones(len(cols), dtype=np.uint8)] * min(3, n - len(rows)))
+            return (np.array(rows) if rows else None), cols
+
+    class CNFStub:
+        def __init__(self, from_file=None):
+            self.nv, self.clauses = 4, [[1, 2]]
+
+    monkeypatch.setitem(sys.modules, "torch", types.SimpleNamespace(device=lambda s: s))
+    monkeypatch.setitem(sys.modules, "pysat", types.ModuleType("pysat"))
+    pf = types.ModuleType("pysat.formula")
+    pf.CNF = CNFStub
+    monkeypatch.setitem(sys.modules, "pysat.formula", pf)
+    sm = types.ModuleType("gpap.sampling.sampler")
+    sm.GPUSampler = Stub
+    monkeypatch.setitem(sys.modules, "gpap.sampling.sampler", sm)
+
+    def fills(draw, p_dry, trials=12):
+        Stub.p_dry = p_dry
+        ok = 0
+        for t in range(trials):
+            try:
+                got = bg._gpap_solutions("f.cnf", 50, cols, t, "cpu", (True, 8, False), 4096,
+                                         draw=draw)
+                ok += len(got) == 50
+            except RuntimeError:
+                pass
+        return ok / trials
+
+    for p_dry in (0.4, 0.6):                    # a LOW-YIELD kernel, not a dead one
+        assert fills("batch", p_dry) == 1.0, "the batch arm must fill an order it can fill"
+        assert fills("iid", p_dry) == 1.0, (
+            f"the iid arm gave up at p_dry={p_dry} while the batch arm filled — the collector's "
+            f"stopping rule, not the sampler's yield")
+    # a genuinely dry instance must still be abandoned immediately, in both draws
+    Stub.p_dry = 1.0
+    for draw in ("batch", "iid"):
+        with pytest.raises(RuntimeError, match="produced 0/50"):
+            bg._gpap_solutions("f.cnf", 50, cols, 1, "cpu", (True, 8, False), 4096, draw=draw)
+
+
 @needs_gpu
 def test_config_breakdown_keys_stay_legacy_formatted():
     """The results-JSON config keys must not gain the enum repr — rows recorded before the enums

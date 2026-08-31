@@ -106,7 +106,10 @@ def run_gpap(cnf, n_time, device, time_limit=60.0, n_cov=1000):
     g = sample_file(cnf, device, n_time=n_time, n_cov=n_cov, configs=CIRCUIT_PORTFOLIO,
                     time_limit=time_limit, seed=5)
     return {"sps": g["samples_per_s"], "sps_e2e": g.get("sps_e2e_total"),
-            "unique_per_s_est": g.get("unique_sps_est"), "success": g["success_rate"],
+            "unique_per_s_est": g.get("unique_sps_est"),
+            # None means NOT MEASURED (the off-timing coverage run collected nothing on a
+            # very-low-success instance), never "produced nothing" — `n_models` is the second.
+            "unique_est_status": g.get("unique_est_status"), "success": g["success_rate"],
             "n_models": g["n_models"], "distinct_frac": (g["n_distinct"] / len(g["models"])
                                                          if g.get("models") else None),
             "wall_total_s": g["wall_total_s"],

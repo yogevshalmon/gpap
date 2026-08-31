@@ -354,7 +354,11 @@ def main():
             continue
         # BOTH sides get the same circuit: 'abc' hands the rival the ABC-optimized .bench too,
         # gated by a bit-exact simulation equivalence check (eval/rivals/rival_common.py).
-        src, vinfo = prepare_variant(src0, variant, tmp, cycles=args.cycles,
+        # Check at the depth the RUN uses: native mode runs a combinational circuit at T=1 (their
+        # setup), miter mode unrolls args.cycles. Passing args.cycles unconditionally checked a
+        # depth the comparison never exercises.
+        T_chk = args.cycles if (args.mode == "miter" or args.circuit_type == "seq") else 1
+        src, vinfo = prepare_variant(src0, variant, tmp, cycles=T_chk,
                                      seed=args.target_seed, target_mode=args.target)
         if vinfo.get("error"):
             print(f"{name:<10}{variant:>6}  circuit variant unusable: {vinfo['error'][:60]}",
@@ -433,17 +437,23 @@ def main():
         pa = sim["p_accept"] or sim.get("p_accept_lt", 0.0)
         pa_s = f"{pa:.2e}" if sim["p_accept"] else f"<{pa:.0e}"
         pin_desc = pin_desc if len(pin_desc) <= 14 else pin_desc[:11] + "..."   # keep the columns
+        # `unique_per_s_est` is None when the off-timing coverage run collected nothing (not when
+        # GPAP produced nothing — `n_models` says that), so it must print as "n/a" and take no
+        # part in a ratio, rather than being coerced to a zero that reads as a loss.
+        uq = g.get("unique_per_s_est")
+        uq_s = f"{uq:,.0f}" if uq is not None else "n/a"
         if "error" in dem:
             print(f"{name:<10}{variant:>6}{pin_desc:>14}{pa_s:>10}  DEMOTIC FAILED: "
-                  f"{dem['error'][:38]} | GPAP u/s~={g['unique_per_s_est']:,.0f} "
+                  f"{dem['error'][:38]} | GPAP u/s~={uq_s} "
                   f"succ={100 * g['success']:.0f}%", flush=True)
             continue
-        ratio = (g["unique_per_s_est"] / dem["unique_per_s"] if dem["unique_per_s"]
-                 else float("inf"))
-        rt = f"{ratio:,.1f}x" if ratio != float("inf") else "GPAP"
+        ratio = (None if uq is None else
+                 (uq / dem["unique_per_s"] if dem["unique_per_s"] else float("inf")))
+        rt = ("n/a" if ratio is None else
+              (f"{ratio:,.1f}x" if ratio != float("inf") else "GPAP"))
         print(f"{name:<10}{variant:>6}{pin_desc:>14}{pa_s:>10}{dem['unique']:>10,}"
               f"{dem['runtime_s']:>7.1f}s{dem['unique_per_s']:>10,.0f}"
-              f"{g['unique_per_s_est']:>11,.0f}{g['sps']:>11,.0f}"
+              f"{uq_s:>11}{g['sps']:>11,.0f}"
               f"{100 * g['success']:>6.0f}%{rt:>10}", flush=True)
     if len(args.circuit_variants) > 1:
         print("\ncircuit variants (both sides get the SAME circuit; abc = sequential-AIG "

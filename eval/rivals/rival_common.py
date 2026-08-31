@@ -11,7 +11,9 @@ if only GPAP sees the ABC-optimized circuit the encoder's win is silently credit
            primitive-gate .bench (gpap.circuits.abc_backend.simplify_bench_abc)
 
 and gates the swap on a bit-exact simulation check: both circuits are fed identical stimuli and
-must accept exactly the same input sequences for the pinned target.
+must produce identical words on EVERY primary output (and so, in particular, accept exactly the
+same input sequences for the pinned target). Comparing only the acceptance word is vacuous at a
+rare pin — both sides are all-zero there — which is why the gate is output equality.
 
 Honest limit, worth stating in any write-up: the rivals can only be given the SEQUENTIAL
 optimization. GPAP's `abc` encoder also runs a pass AFTER unrolling, where the cross-frame
@@ -21,6 +23,7 @@ Measured on the ITC'99/ISCAS-89 benches, the sequential-only pass is nearly free
 ANDs, s386 166 -> 113), so in practice the rivals see essentially the same circuit either way —
 which is itself the point: their gap is not an encoding artifact.
 """
+import functools
 import os
 import subprocess
 
@@ -62,8 +65,17 @@ def prepare_variant(src: str, variant: str, tmpdir: str, *, cycles: int, seed: i
         return src, {**info, "error": f"{type(e).__name__}: {e}"}
     info["equiv_ok"] = chk["ok"]
     info["equiv_hits"] = [chk["hits_src"], chk["hits_dst"], chk["n"]]
+    # WHICH half of the check had content, recorded per row. The acceptance-word half is
+    # vacuous at a rare target (both words all-zero, 0 hits on both sides — the state of every
+    # ABC row in the recorded ISCAS-85 campaign), so the OUTPUT-equality half is what actually
+    # gates the swap; a row that shows `equiv_outputs` proves the gate was not comparing nothing.
+    info["equiv_outputs"] = chk.get("outputs")
+    info["equiv_outputs_ok"] = chk.get("outputs_ok")
+    info["equiv_accept_ok"] = chk.get("accept_ok")
     if not chk["ok"]:
-        return src, {**info, "error": "ABC copy is NOT equivalent on the pinned target"}
+        why = ("outputs differ on " + ", ".join(map(str, chk.get("mismatched") or []))
+               if not chk.get("outputs_ok") else "acceptance differs on the pinned target")
+        return src, {**info, "error": f"ABC copy is NOT equivalent: {why}"}
     return dst, info
 
 
@@ -96,6 +108,31 @@ def _canonical(obj):
     return json.dumps(obj, sort_keys=True, separators=(",", ":"), default=str)
 
 
+@functools.lru_cache(maxsize=1)
+def _core_build_id() -> str:
+    """Fingerprint of the libgpap BUILD — the bytes, not the version it advertises.
+
+    `_core_provenance()` reads `gpap_version()`, which is the hardcoded literal "0.1.0"
+    (cpp/src/runtime.cpp) and has never changed, so keying the cache on it made a REBUILT engine
+    a cache HIT — exactly the case the key exists to miss. A stale arm is not a stale number, it
+    is a wrong one: the 2026-08-27 wave rewrite is 1.80x at the same K, so a rival re-run against
+    a pre-rewrite cache would publish today's rival subprocess against last month's GPAP.
+    """
+    import hashlib
+    try:
+        from gpap.engine import _core
+        path = getattr(_core.load(), "_name", None)
+        if not path or not os.path.isfile(path):
+            return "unknown"
+        h = hashlib.sha1()
+        with open(path, "rb") as f:
+            for chunk in iter(lambda: f.read(1 << 20), b""):
+                h.update(chunk)
+        return f"{os.path.basename(path)}:{h.hexdigest()[:16]}"
+    except Exception:                       # noqa: BLE001 — no engine, no GPAP arm to cache
+        return "unknown"
+
+
 def gpap_cache_key(sampled_file: str, task: dict) -> str:
     """Identity of one GPAP measurement. Includes the file's CONTENT, not its path — the rival
     harnesses write their inputs into per-run temp dirs, so paths differ every invocation while
@@ -111,6 +148,7 @@ def gpap_cache_key(sampled_file: str, task: dict) -> str:
         env["core"] = _core_provenance()
     except Exception:                       # noqa: BLE001
         env["core"] = "unknown"
+    env["build"] = _core_build_id()         # the engine BINARY, since "core" cannot change
     try:
         import torch
         env["gpu"] = torch.cuda.get_device_name(0) if torch.cuda.is_available() else "cpu"

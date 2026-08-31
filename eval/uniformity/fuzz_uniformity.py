@@ -128,6 +128,27 @@ class Instance:
         return head + "".join(" ".join(map(str, c)) + " 0\n" for c in self.clauses)
 
 
+def _degeneracy(sols) -> dict:
+    """Is this solution set one on which EVERY sampler is uniform by construction?
+
+    A set that is a full SUBCUBE — every support variable either pinned to a constant by the
+    formula or completely free — is sampled by the don't-care FILLER (a plain RNG over the free
+    columns), not by the trajectory sampler under test: measured, `gpap:b1` and `gpap:b8` return
+    bit-identical TV and p on such an instance, so the arm is not exercised at all. It is the same
+    degeneracy as the vacuous pins (`accept.all()`), which is just its `free_dim == |support|`
+    special case, and the same one the paper's tables screen out of every headline. Keeping the
+    instances is right (a sampler that cannot be uniform on a free hypercube is broken) — counting
+    them inside a headline median is not.
+
+    Rows are DISTINCT assignments, so |S| == 2^free_dim holds exactly when the set is the full
+    product of its free columns. Reported per instance so the summary can bucket on it.
+    """
+    if sols.size == 0:
+        return {"free_dim": 0, "subcube": False}
+    free_dim = int((sols.max(axis=0) != sols.min(axis=0)).sum())
+    return {"free_dim": free_dim, "subcube": bool(int(sols.shape[0]) == (1 << free_dim))}
+
+
 def gen_random_cnf(rng, s_window, nv_range=(12, 18), k_choices=(3, 4)) -> "Instance | None":
     """A random k-CNF over every variable. The clause/variable ratio is drawn wide and the
     instance kept only if |S| lands in the window — rejection sampling is simpler and less
@@ -145,7 +166,7 @@ def gen_random_cnf(rng, s_window, nv_range=(12, 18), k_choices=(3, 4)) -> "Insta
     if not (s_window[0] <= sols.shape[0] <= s_window[1]):
         return None
     return Instance("", "cnf", nv, clauses, list(range(1, nv + 1)), sols,
-                    {"k": k, "ratio": round(ratio, 2), "m": m})
+                    {"k": k, "ratio": round(ratio, 2), "m": m, **_degeneracy(sols)})
 
 
 _TSEITIN = {
@@ -258,7 +279,7 @@ def gen_circuit(rng, s_window, k_range=(10, 15), gate_range=(10, 40),
                      # s526 at T=25 (CLAUDE.md). Kept — a sampler that cannot be uniform on a free
                      # hypercube is badly broken — but reported separately, never as evidence
                      # about CONSTRAINED sampling.
-                     "vacuous": bool(accept.all())})
+                     "vacuous": bool(accept.all()), **_degeneracy(sols)})
 
 
 def generate(rng, count, kinds, s_window, max_tries=400, sup_min=0, k_range=(10, 15)):
@@ -335,7 +356,11 @@ def sample_pipeline(inst: Instance, path, n: int, seed: int, portfolio_name: str
     from gpap.sampling.pipeline import portfolio as _portfolio
     from gpap.sampling.pipeline import sample_file
     t0 = time.perf_counter()
-    info = sample_file(path, torch.device(device), n_time=min(n, 5000), out_cap=n, seed=seed,
+    # ASK FOR `n`, the same sample size every other arm is scored at. `out_cap` can only deliver
+    # `min(out_cap, n_models)` rows, so a smaller `n_time` silently capped this arm's sample —
+    # and TV shrinks like sqrt(|S|/n), so a pipeline scored at 5,000 rows against CMSGen's 100|S|
+    # read ~6x worse with zero real skew. Sample size is not a free knob in a TV comparison.
+    info = sample_file(path, torch.device(device), n_time=n, out_cap=n, seed=seed,
                        configs=_portfolio(portfolio_name, allow_soft=allow_soft),
                        n_cov=0, uniformity="off", time_limit=120.0)
     dt = time.perf_counter() - t0
@@ -567,16 +592,44 @@ def main(argv=None):
 
     # ------------------------------------------------------------------ summary
     names = list(rows[0]["samplers"]) if rows else []
+    # SCREEN FIRST, THEN AGGREGATE (the paper's rule, CLAUDE.md ground rules). On a full-subcube
+    # instance the emitted bits come from the don't-care FILLER rather than from the config under
+    # test — two different configs return bit-identical statistics there — so such a cell is
+    # evidence about neither sampler and must not sit inside a headline median. It is the same
+    # screen the vacuous pins get, found per instance rather than by name.
+    deg = [r for r in rows if (r.get("meta") or {}).get("subcube")]
+    con = [r for r in rows if not (r.get("meta") or {}).get("subcube")]
     print("\n=== summary ===")
+    if deg:
+        shown = ", ".join(r["instance"] for r in deg[:6]) + (" ..." if len(deg) > 6 else "")
+        print(f"  EXCLUDED from the medians: {len(deg)}/{len(rows)} instance(s) whose solution "
+              f"set is a full SUBCUBE (every support var pinned or free ⇒ every sampler is "
+              f"uniform there by construction): {shown}")
     for name in names:
         if name.startswith("ctl:"):
             continue
-        vs = [r["samplers"][name]["verdict"] for r in rows]
-        tvs = [r["samplers"][name]["tv_median"] for r in rows
+        vs = [r["samplers"][name]["verdict"] for r in con]
+        tvs = [r["samplers"][name]["tv_median"] for r in con
                if r["samplers"][name]["tv_median"] is not None]
+        # Realised sample size as a fraction of what this arm was ASKED for. TV falls like
+        # sqrt(|S|/n), so arms scored at different n are NOT comparable and a short arm reads as
+        # a skewed one — print it beside the TV instead of leaving it invisible.
+        got = [r["samplers"][name]["emitted"] / (r["n"] * len(seeds)) for r in con if r["n"]]
+        nfrac = f"  n {min(got):.0%}-{max(got):.0%}" if got else ""
+        if not tvs:
+            print(f"  {name:<12} no data{nfrac}")
+            continue
         print(f"  {name:<12} ok {vs.count('ok'):>3}/{len(vs)}  skew {vs.count('SKEW'):>3}  "
               f"unsound {vs.count('UNSOUND'):>3}  TV med {np.median(tvs):.4f} "
-              f"max {max(tvs):.4f}" if tvs else f"  {name:<12} no data")
+              f"max {max(tvs):.4f}{nfrac}")
+    if deg:
+        print("  subcube instances (reported, never pooled):")
+        for name in names:
+            if name.startswith("ctl:"):
+                continue
+            vs = [r["samplers"][name]["verdict"] for r in deg]
+            print(f"    {name:<12} ok {vs.count('ok'):>3}/{len(vs)}  skew {vs.count('SKEW'):>3}  "
+                  f"unsound {vs.count('UNSOUND'):>3}")
     # Controls. The negative control is a genuine PASS/FAIL gate on the statistics; the positive
     # controls are not — they measure the test's POWER at this n, which is the number a reader
     # needs to interpret every "ok" above ("ok" means "no skew detectable at this sensitivity",
@@ -603,9 +656,9 @@ def main(argv=None):
         for name in names:
             if name == "cmsgen" or name.startswith("ctl:"):
                 continue
-            both = sum(1 for r in rows if r["samplers"][name]["verdict"] == "SKEW"
+            both = sum(1 for r in con if r["samplers"][name]["verdict"] == "SKEW"
                        and r["samplers"]["cmsgen"]["verdict"] == "SKEW")
-            only = sum(1 for r in rows if r["samplers"][name]["verdict"] == "SKEW"
+            only = sum(1 for r in con if r["samplers"][name]["verdict"] == "SKEW"
                        and r["samplers"]["cmsgen"]["verdict"] != "SKEW")
             print(f"  {name} vs cmsgen: both skew {both}, {name}-only {only}")
     if flags:

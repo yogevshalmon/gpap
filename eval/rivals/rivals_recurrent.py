@@ -300,7 +300,12 @@ def run_gpap(bench_file, T, pin_outputs, target, seeds, n_time, device, time_lim
             g = sample_file(cnf_path, device, n_time=n_time, n_cov=n_cov,
                             configs=CIRCUIT_PORTFOLIO, time_limit=time_limit, seed=s)
             runs.append({"seed": s, "sps": g["samples_per_s"], "sps_e2e": g.get("sps_e2e_total"),
-                         "unique_per_s_est": g.get("unique_sps_est") or 0.0,
+                         # KEEP None. `or 0.0` turned "the coverage run collected nothing" into
+                         # "GPAP produced nothing", and every consumer buckets a zero as an
+                         # outright loss — b11-c25 at a rare pin delivered models at ~15x the
+                         # rival's rate and was published as a loss to it.
+                         "unique_per_s_est": g.get("unique_sps_est"),
+                         "unique_est_status": g.get("unique_est_status"),
                          "success": g["success_rate"], "n_models": g["n_models"],
                          # engine provenance per row, same as the CMSGen sweeps: gpu_sound is
                          # the on-device model check, dec/s + impl/s let the zero-search screen
@@ -312,7 +317,14 @@ def run_gpap(bench_file, T, pin_outputs, target, seeds, n_time, device, time_lim
         os.unlink(cnf_path)
     med = lambda k: statistics.median(r[k] for r in runs)
     med0 = lambda k: statistics.median((r.get(k) or 0.0) for r in runs)
-    return {"seeds": runs, "unique_per_s_est": med("unique_per_s_est"), "sps": med("sps"),
+    # The unique estimate is median over the seeds that HAVE one; None (not 0.0) when no seed
+    # produced a coverage sample, so a consumer can tell "not measured" from "produced nothing".
+    uq = [r["unique_per_s_est"] for r in runs if r["unique_per_s_est"] is not None]
+    return {"seeds": runs,
+            "unique_per_s_est": (statistics.median(uq) if uq else None),
+            "unique_est_status": ("ok" if uq else
+                                  (runs[0].get("unique_est_status") or "no-coverage-sample")),
+            "sps": med("sps"),
             "success": med("success"), "n_vars": b.nv, "n_clauses": len(b.clauses),
             "gpu_sound": all(r.get("gpu_sound") is not False for r in runs),
             "decisions_per_s": med0("decisions_per_s"),
@@ -459,17 +471,25 @@ def main():
             json.dump(out, open(args.output, "w"), indent=1)                  # to leave nothing
         pa = sim["p_accept"] if sim["p_accept"] else sim.get("p_accept_lt", 0.0)
         pa_s = f"{pa:.2e}" if sim["p_accept"] else f"<{pa:.0e}"
+        # None = the off-timing coverage run collected nothing, i.e. NOT MEASURED. It is not a
+        # zero: `n_models` says whether GPAP produced anything, and on a rare pin it routinely
+        # did while this estimate did not exist.
+        uq = g.get("unique_per_s_est")
+        uq_s = f"{uq:,.0f}" if uq is not None else "n/a"
         if "error" in rcs:
             print(f"{name:<10}{variant:>6}{pin_desc:>12}{pa_s:>10}  RCS FAILED: "
-                  f"{rcs['error'][:44]} | GPAP u/s~={g['unique_per_s_est']:,.0f} "
+                  f"{rcs['error'][:44]} | GPAP u/s~={uq_s} "
                   f"succ={100 * g['success']:.0f}%", flush=True)
             continue
-        ratio = (g["unique_per_s_est"] / rcs["unique_per_s"] if rcs["unique_per_s"]
-                 else float("inf"))
+        ratio = (None if uq is None else
+                 (uq / rcs["unique_per_s"] if rcs["unique_per_s"] else float("inf")))
+        rt = ("      n/a" if ratio is None else            # rival silent -> no ratio,
+              "     GPAP" if ratio == float("inf") else    # an outright win, not "inf"
+              f"{ratio:>9.1f}x")
         at_t = f"{rcs['unique_at_T']:,}" if rcs.get("unique_at_T") is not None else "—"
         print(f"{name:<10}{variant:>6}{pin_desc:>12}{pa_s:>10}{rcs['unique']:>11,}{at_t:>9}"
               f"{rcs['runtime_s']:>6.1f}s{rcs['unique_per_s']:>10,.0f}"
-              f"{g['unique_per_s_est']:>11,.0f}{100 * g['success']:>6.0f}%{ratio:>9.1f}x",
+              f"{uq_s:>11}{100 * g['success']:>6.0f}%{rt}",
               flush=True)
     if len(args.circuit_variants) > 1:
         print("\ncircuit variants (BOTH sides get the same circuit; abc = sequential-AIG "
