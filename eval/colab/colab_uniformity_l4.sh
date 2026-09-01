@@ -43,14 +43,16 @@ $PY eval/uniformity/fuzz_uniformity.py \
     --pipelines default circuit circuit+soft \
     --controls 0.0 0.05 0.10 \
     ${CMS_ARGS[@]+"${CMS_ARGS[@]}"} \
-    --out "$OUT/uniformity_campaign.json" 2>&1 | tail -40
+    --out "$OUT/uniformity_campaign.json" 2>&1 | tail -40 \
+    || echo "[warn] fuzz_uniformity returned non-zero (unsound emission or a FAILED negative control)"
 echo "UNIFORMITY_FUZZ_DONE"
 
 echo "########## SOFT PORTFOLIO PRICE  $(date -Is)"
 $PY eval/profile_soft_portfolio.py \
     --glob 'benchmarks/circuits/bench/seq/*.bench' \
     --encoder abc --abc-opt fast --cycles 25 --target rare \
-    --reps 2 --out "$OUT/soft_profile.json" 2>&1 | tail -40
+    --reps 2 --out "$OUT/soft_profile.json" 2>&1 | tail -40 \
+    || echo "[warn] profile_soft_portfolio returned non-zero"
 echo "SOFT_PROFILE_DONE"
 
 echo "UNIFORMITY_SUITE_COMPLETE"

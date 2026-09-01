@@ -196,6 +196,45 @@ def test_rival_unmeasured_unique_is_not_a_gpap_zero(tmp_path):
     assert 1 + v["zero"] + v["gpap0"] + v["both0"] + v["nomeas"] + v["errors"] == v["cells"]
 
 
+def test_rival_zero_search_cell_is_screened_not_scored(tmp_path):
+    """A rival cell whose GPAP side did NO search (zero decisions, zero implications, models
+    emitted) measures the instance, not either sampler — a seed-mismatched b13 cell once carried
+    a 4.7e9x ratio this way. It leaves through its own `free` column, exactly as in Table 1."""
+    rows = [
+        {"name": "ok", "variant": "raw", "demotic": {"unique_per_s": 10.0},
+         "gpap": {"unique_per_s_est": 100.0, "n_models": 5,
+                  "decisions_per_s": 1e7, "implications_per_s": 1e9}},
+        {"name": "b13", "variant": "raw", "demotic": {"unique_per_s": 1e-3},
+         "gpap": {"unique_per_s_est": 4.7e6, "n_models": 1000,
+                  "decisions_per_s": 0, "implications_per_s": 0}},
+    ]
+    (tmp_path / "rivals_x.json").write_text(json.dumps({"rows": rows}))
+    v = rival_family(str(tmp_path), "x", "demotic")
+    assert v["free"] == 1 and v["gm"] == pytest.approx(10.0), \
+        "the free-hypercube cell entered the geomean"
+    assert v["n"] == 1 and v["wins"] == 1
+    # the columns still sum to the cells
+    assert 1 + v["zero"] + v["gpap0"] + v["both0"] + v["nomeas"] + v["errors"] + v["free"] \
+        + v["misaligned"] == v["cells"]
+
+
+def test_rival_misaligned_row_is_excluded_and_counted(tmp_path):
+    """Table 2's text says constraint alignment is VERIFIED per row (`pin_check_ok`). A row that
+    FAILED that check compared two different tasks; whatever its ratio measures, it is not the
+    samplers — so it must leave through its own bucket, not sit silently inside the geomean."""
+    rows = [
+        {"name": "ok", "variant": "raw", "pin_check_ok": True,
+         "demotic": {"unique_per_s": 10.0}, "gpap": {"unique_per_s_est": 100.0}},
+        {"name": "bad", "variant": "raw", "pin_check_ok": False,
+         "demotic": {"unique_per_s": 1e-6}, "gpap": {"unique_per_s_est": 1e6}},  # a 1e12x "win"
+    ]
+    (tmp_path / "rivals_x.json").write_text(json.dumps({"rows": rows}))
+    v = rival_family(str(tmp_path), "x", "demotic")
+    assert v["misaligned"] == 1
+    assert v["gm"] == pytest.approx(10.0) and v["n"] == 1, \
+        "a row that failed the alignment check entered the ledger"
+
+
 def test_rival_retry_row_replaces_rather_than_appends(tmp_path):
     """A resumed harness re-emits a row; appending gave 25 rows in an 18-instance file."""
     rows = [
@@ -206,6 +245,60 @@ def test_rival_retry_row_replaces_rather_than_appends(tmp_path):
     (tmp_path / "rivals_h.json").write_text(json.dumps({"rows": rows}))
     v = rival_family(str(tmp_path), "h", "hts")
     assert v["cells"] == 1 and v["errors"] == 0 and v["gm"] == pytest.approx(5.0)
+
+
+# --------------------------------------------------------------- summary.md, the same ledger
+
+def test_summary_md_counts_zeros_the_papers_way(tmp_path):
+    """`summary.md`'s win column used to test `ratio >= 1`, which counts a CMSGen-zero row
+    (ratio == inf) as a win while showing no CMSGen=0 column at all — their zeros inside our
+    wins, ours in a column, the exact asymmetry the paper's ledger exists to prevent."""
+    from eval.eval_plots import write_summary
+    stage(tmp_path, "s", [
+        row("win.bench"),                                     # finite win
+        row("lose.bench", sps=1e3),                           # finite loss (ratio 0.1)
+        row("theirzero.bench", cms=0, cms_sps=0),             # CMSGen silent -> inf
+        row("ourzero.bench", models=0, sps=0),                # we are silent -> 0.0
+    ], tag="s")
+    stages = {"s": json.loads((tmp_path / "s.json").read_text())}
+    out = Path(write_summary(stages, str(tmp_path), str(tmp_path))).read_text()
+    line = next(ln for ln in out.splitlines() if ln.startswith("| s |"))
+    cells = [c.strip() for c in line.split("|")]
+    hdr = next(ln for ln in out.splitlines() if ln.startswith("| stage |"))
+    cols = [c.strip() for c in hdr.split("|")]
+    got = dict(zip(cols, cells))
+    assert got["wins"] == "2/4", got            # win + CMSGen-zero, over finite + both zeros
+    assert got["CMSGen=0"] == "1" and got["GPAP=0"] == "1", got
+
+
+
+
+def test_uniformity_screens_subcube_instances(tmp_path):
+    """The campaign's own summary excludes full-subcube instances from its medians (the
+    don't-care filler, not the config under test, draws the bits there — two configs return
+    bit-identical statistics). Table 4 must apply the SAME screen, or the paper's median can
+    disagree with the tool that produced the data."""
+    from eval.artifact.paper_tables import uniformity
+    rows = [
+        {"kind": "circuit", "meta": {"subcube": False},
+         "samplers": {"gpap:b8": {"tv_median": 0.10, "verdict": "ok", "unsound": 0}}},
+        {"kind": "circuit", "meta": {"subcube": True},         # filler-only: not evidence
+         "samplers": {"gpap:b8": {"tv_median": 0.00, "verdict": "ok", "unsound": 0}}},
+    ]
+    p = tmp_path / "u.json"
+    p.write_text(json.dumps({"rows": rows, "args": {"alpha": 1e-3}}))
+    uni, args = uniformity([str(p)])
+    a = uni[("gpap:b8", "circuit")]
+    assert a["n"] == 1 and a["tv"] == pytest.approx(0.10), \
+        "the subcube instance diluted the aggregate"
+    assert args["_subcube_excluded"] == 1
+
+
+def test_prop_rates_has_no_row_when_every_cell_is_degenerate(tmp_path):
+    """Table 3 must describe the runs Table 1 kept. When the screens remove EVERY cell of a
+    family, the honest Table 3 row is no row — not a quiet fallback to the screened cells."""
+    d = stage(tmp_path, "s", [row("b02.bench"), row("b05.bench")])       # all vacuous pins
+    assert prop_rates(d, "s", "tseitin") is None
 
 
 # --------------------------------------------------------------------- vacuous pins

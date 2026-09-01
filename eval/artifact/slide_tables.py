@@ -22,7 +22,7 @@ import sys
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
 from eval.artifact.paper_tables import (cms_family, prop_rates,  # noqa: E402
-                               rival_family, stage_encoders)
+                               rival_family, stage_encoders, uniformity)
 
 # (stem, human label) in the order they should appear
 CMS_STAGES = [
@@ -106,10 +106,10 @@ def main():
     # ---------------------------------------------------------------- frame 1: vs CMSGen
     a(r"\begin{frame}{Appendix: every CMSGen family measured on the L4}")
     a(r"  \centering \scriptsize")
-    a(r"  \begin{tabular}{@{}lllrrrrrr@{}}")
+    a(r"  \begin{tabular}{@{}lllrrrrrrrrr@{}}")
     a(r"    \toprule")
-    a(r"    family & targets & enc & inst & \textbf{GPAP$/$CMSGen} & wins & C$=$0 & G$=$0 "
-      r"& both \\")
+    a(r"    family & targets & enc & inst & $n$ & \textbf{GPAP$/$CMSGen} & wins & C$=$0 & G$=$0 "
+      r"& both & free & vac \\")
     a(r"    \midrule")
     # A stage that ran out of budget mid-family must not look like a complete one. The family's
     # own maximum instance count is the expected size; anything short of it is marked.
@@ -134,19 +134,23 @@ def main():
             if v["gm"] and v["n_gm"] < 3:
                 g += r"$^{\ddagger}$"
             a(f"    {label} & {tgtx} & {(enc or '---').replace('_', chr(92) + '_')} & "
-              f"{v['inst']}{mark} & {g} & "
-              f"{v['wins']}/{v['n']} & {v['inf']} & {v['gpap0']} & {v['both0']} \\\\")
+              f"{v['inst']}{mark} & {v['n_gm']} & {g} & "
+              f"{v['wins']}/{v['n']} & {v['inf']} & {v['gpap0']} & {v['both0']} & "
+              f"{v['free']} & {v['vac']} \\\\")
     a(r"    \bottomrule")
     a(r"  \end{tabular}")
     a(r"  \\[0.7em]")
     a(r"  \rem{\textbf{" + f"{total_cells} cells, {total_inst} instance-slots, {n_skip} skipped, "
       f"{n_err} errors" + r"}. GPU \textbf{" + gpu + r"}, CPU \textbf{" + cpu_s + r"}.")
-    a(r"  Geomeans already EXCLUDE \texttt{b02/b05/b07/s526} (outputs constant at $T{=}25$, so"
-      r"  pinning is a tautology) and any instance that samples with zero search.")
+    a(r"  \keyw{vac} = vacuous pins (\texttt{b02/b05/b07/s526}: outputs constant at $T{=}25$, so"
+      r"  pinning is a tautology); \keyw{free} = zero-search cells (samples with no decisions and"
+      r"  no implications). Both measure the instance, not the sampler, so neither enters the"
+      r"  geomean --- the paper's rule, imported.")
     a(r"  \keyw{The zero columns are symmetric}: \keyw{C$=$0} instances CMSGen could not sample"
       r"  (our wins), \bad{G$=$0} instances \emph{we} could not (our losses), \keyw{both} neither"
-      r"  could. None has a finite ratio, so none enters a geomean --- and the four counts plus"
-      r"  the geomean's instances sum to \keyw{inst}.")
+      r"  could. None has a finite ratio, so none enters a geomean --- and every column adds up:"
+      r"  $n + \text{C}{=}0 + \text{G}{=}0 + \text{both} + \text{free} + \text{vac} ="
+      r"  \text{inst}$, checkable row by row.")
     a(r"  $^{\ddagger}$geomean over ${<}3$ instances (CMSGen scored zero on the rest):"
       r"  an illustration, \bad{not an estimate}.")
     if partial:
@@ -193,7 +197,8 @@ def main():
         # to 1.49x, and a deck that prints two different numbers for one claim is exactly the
         # failure this generator exists to prevent.
         rates = [v["gpap"] for v in prop.values() if v and v["n"] >= 3]
-        spread = max(rates) / min(rates)
+        # a partial sweep can leave every prop row under n=3 — no spread claim then, not a crash
+        spread = (max(rates) / min(rates)) if rates else float("nan")
         a(r"  \rem{GPAP's rate is from the packed-word kernel; CMSGen's from \emph{its own}"
           r"  counters (\texttt{--statsevery}). \good{GPAP holds ${\sim}10^{9}$ implications$/$s"
           r"  on every family} --- spread only $" + f"{spread:.2f}" + r"\times$ --- while the"
@@ -207,19 +212,20 @@ def main():
     # ---------------------------------------------------------------- frame 3: vs rivals
     a(r"\begin{frame}{Appendix: every GPU rival measured on the L4}")
     a(r"  \centering \scriptsize")
-    a(r"  \begin{tabular}{@{}llrrrrrrrr@{}}")
+    a(r"  \begin{tabular}{@{}llrrrrrrrrrr@{}}")
     a(r"    \toprule")
     a(r"    rival & protocol & cells & GPAP$/$rival & wins & R$=$0 & G$=$0 & both & "
-      r"u$/$s n$/$a & failed \\")
+      r"u$/$s n$/$a & free & mis. & failed \\")
     a(r"    \midrule")
     for stem, key, rival, proto in RIVAL_STAGES:
         v = riv.get(stem)
         if not v:
-            a(f"    {rival} & {proto} & \\multicolumn{{8}}{{c}}{{\\bad{{not run}}}} \\\\")
+            a(f"    {rival} & {proto} & \\multicolumn{{10}}{{c}}{{\\bad{{not run}}}} \\\\")
             continue
         a(f"    {rival} & {proto} & {v['cells']} & {fmt(v['gm'])} & "
           f"{v['wins']}/{v['n']} & {v['zero']} & {v['gpap0']} & {v['both0']} & "
-          f"{v.get('nomeas', 0)} & {v['errors']} \\\\")
+          f"{v.get('nomeas', 0)} & {v.get('free', 0)} & {v.get('misaligned', 0)} & "
+          f"{v['errors']} \\\\")
     a(r"    \bottomrule")
     a(r"  \end{tabular}")
     a(r"  \\[0.7em]")
@@ -230,25 +236,21 @@ def main():
       r"  \keyw{both} neither did --- none has a finite ratio, all are counted."
       r"  \keyw{u$/$s n$/$a} our unique$/$s could not be MEASURED (the off-timing coverage"
       r"  run collected nothing while the timed run delivered models): not evidence in"
-      r"  either direction, so it is neither a win nor a loss.}")
+      r"  either direction, so it is neither a win nor a loss."
+      r"  \keyw{free} = the cell sampled with NO search (the instance, not the sampler);"
+      r"  \bad{mis.} = the per-row constraint-alignment check failed. Both are excluded,"
+      r"  and every column sums to \keyw{cells}.}")
     a(r"\end{frame}")
     a("")
     # ---------------------------------------------------------------- frame 4: uniformity
-    uni = json.load(open(args.uniformity)) if args.uniformity and os.path.isfile(args.uniformity) \
-        else None
+    # The aggregation is paper_tables.uniformity — IMPORTED, like every other rule on the deck.
+    # This frame restated it once (its own tv-median and skew counts), which meant the one screen
+    # the paper applies (full-subcube instances, where the don't-care filler and not the config
+    # draws the bits) would have been missing HERE and the deck's medians would quietly disagree
+    # with Table 4 over the same JSON.
+    uni, uni_args = (uniformity([args.uniformity])
+                     if args.uniformity and os.path.isfile(args.uniformity) else (None, {}))
     if uni:
-        agg = {}
-        for r in uni.get("rows", []):
-            for nm, sm in (r.get("samplers") or {}).items():
-                k = (nm, r.get("kind"))
-                e = agg.setdefault(k, {"tv": [], "skew": 0, "n": 0, "uns": 0})
-                e["tv"].append(sm.get("tv_median"))
-                e["n"] += 1
-                e["uns"] += sm.get("unsound") or 0
-                e["skew"] += (sm.get("verdict") == "SKEW")
-        def med(xs):
-            xs = sorted(x for x in xs if x is not None)
-            return xs[len(xs) // 2] if xs else float("nan")
         # the rows worth a slide: the shipped configs, the opt-in `soft`, the B ladder, the
         # rival, and BOTH controls (without which "no skew" means nothing)
         order = ["ctl:uniform", "ctl:tv0.05", "gpap:b1", "gpap:b8", "gpap:soft",
@@ -262,11 +264,14 @@ def main():
         a(r"     & median TV & skewed & median TV & skewed \\")
         a(r"    \midrule")
         for nm in order:
-            c, n = agg.get((nm, "circuit")), agg.get((nm, "cnf"))
+            c, n = uni.get((nm, "circuit")), uni.get((nm, "cnf"))
             if not (c or n):
                 continue
             def cell(e):
-                return (f"${med(e['tv']):.4f}$", f"{e['skew']}/{e['n']}") if e else ("---", "---")
+                if not e:
+                    return "---", "---"
+                tv = "---" if e["tv"] is None else f"${e['tv']:.4f}$"
+                return tv, f"{e['reject']}/{e['n']}"
             (ct, cs), (nt, ns) = cell(c), cell(n)
             label = nm.replace("_", r"\_")
             hi = r"\bad" if nm == "gpap:soft" else (r"\rem" if nm.startswith("ctl") else "")
@@ -276,13 +281,16 @@ def main():
         a(r"    \bottomrule")
         a(r"  \end{tabular}")
         a(r"  \\[0.7em]")
-        n_inst = len(uni.get("rows", []))
-        uns = sum(e["uns"] for e in agg.values())
-        seeds = uni.get("args", {}).get("seeds")
-        alpha = uni.get("args", {}).get("alpha")
+        n_inst = max((e["n"] for e in uni.values()), default=0)
+        n_sub = uni_args.get("_subcube_excluded") or 0
+        uns = sum(e["unsound"] for e in uni.values())
+        seeds = uni_args.get("seeds")
+        alpha = uni_args.get("alpha")
         cap = [
             r"  \rem{", str(n_inst),
-            r" generated instances whose ENTIRE solution set is enumerated by brute force, so "
+            (f" generated instances ({n_sub} full-subcube ones excluded, as in the paper)"
+             if n_sub else " generated instances"),
+            r" whose ENTIRE solution set is enumerated by brute force, so "
             r"the target is known exactly; $\chi^2$ over ", str(seeds),
             r" seeds, Fisher-combined, $\alpha=", str(alpha), r"$. \good{", str(uns),
             r" unsound emissions}. \keyw{The controls calibrate the instrument}: "

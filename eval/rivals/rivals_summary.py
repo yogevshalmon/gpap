@@ -22,7 +22,7 @@ import os
 import sys
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
-from eval.artifact.paper_tables import gm, unique_unmeasured                 # noqa: E402
+from eval.artifact.paper_tables import gm, unique_unmeasured, zero_search    # noqa: E402
 
 
 # stem -> (key in the row holding the rival's numbers, human label)
@@ -62,8 +62,14 @@ def collect(d, stem, key, variant=None):
             # Every cell lands in exactly ONE bucket, so the printed columns SUM to the cell
             # count. They used not to: a both-zero cell had ratio None like a rival-zero cell and
             # was printed "GPAP only" — the label an outright win carries — while entering
-            # neither count.
-            if nomeas:
+            # neither count. The buckets and their order are paper_tables.rival_family's, so
+            # this table and Table 2 answer the same question over the same rows:
+            # misaligned -> free (zero-search) -> nomeas -> the zero ledger.
+            if r.get("pin_check_ok") is False:
+                rec["kind"] = "misaligned"              # the two sides ran DIFFERENT constraints
+            elif "decisions_per_s" in g and zero_search(g):
+                rec["kind"] = "free"                    # no search happened: the instance, not us
+            elif nomeas:
                 rec["kind"] = "nomeas"
             elif rec["rival"] and gpap:
                 rec["ratio"], rec["kind"] = gpap / rec["rival"], "ratio"
@@ -96,6 +102,8 @@ def report_one(d, variant, markdown):
         both = kinds.count("both0")
         nm = kinds.count("nomeas")
         errs = kinds.count("error")
+        fr = kinds.count("free")
+        mis = kinds.count("misaligned")
         # Count wins the way eval/artifact/paper_tables.py does, or the deck and the paper disagree in
         # print. A cell the rival scored ZERO on is an outright win and belongs in BOTH sides of
         # the fraction; a cell WE scored zero on is an outright loss and belongs in the
@@ -107,8 +115,9 @@ def report_one(d, variant, markdown):
         # The columns must ADD UP to the cell count, or a reader cannot check what was dropped.
         print(f"\n=== {label}   n={len(rows)}  geomean={fmt(gm(ratios), 'x')}  "
               f"GPAP wins {wins}/{n}  rival-scored-0: {only}  GPAP-scored-0: {gz}  "
-              f"both-scored-0: {both}  u/s-unmeasured: {nm}  rival-errored: {errs}"
-              f"   [{len(ratios)}+{only}+{gz}+{both}+{nm}+{errs}={len(rows)}]")
+              f"both-scored-0: {both}  u/s-unmeasured: {nm}  no-search: {fr}  "
+              f"pin-misaligned: {mis}  rival-errored: {errs}"
+              f"   [{len(ratios)}+{only}+{gz}+{both}+{nm}+{fr}+{mis}+{errs}={len(rows)}]")
         if markdown:
             print("\n| instance | p_acc | rival u/s | GPAP u/s | ratio |\n|---|---|---|---|---|")
         for (name, var), r in rows.items():
@@ -116,6 +125,10 @@ def report_one(d, variant, markdown):
             pa = f"{r['p_accept']:.1e}" if r["p_accept"] else "—"
             if r["kind"] == "error":
                 rival, ratio = f"FAILED: {r['error'][:30]}", "—"
+            elif r["kind"] == "misaligned":
+                rival, ratio = "—", "MISALIGNED"
+            elif r["kind"] == "free":
+                rival, ratio = fmt(r["rival"]), "no search"
             elif r["kind"] == "nomeas":
                 rival, ratio = fmt(r["rival"]), "not measured"
             elif r["kind"] == "rival0":

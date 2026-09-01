@@ -284,6 +284,11 @@ def main(argv=None):
     if args.only:
         keep = {tuple(k.split("/")) for k in args.only}
         work = [w for w in work if (w[0], w[1], w[2]) in keep]
+        # MERGE BY KEY, as the help says: a re-measurement replaces the old row. Without this,
+        # --resume skipped the named cells (already "done") and a run without --resume threw
+        # away every OTHER row — either way the pass could not do what it exists for.
+        rows = [r for r in rows if (r["family"], r["instance"], r["encoder"]) not in keep]
+        done -= keep
     for i, (fam, inst, enc, src, kind, cycles, pin) in enumerate(work):
         if (fam, inst, enc) in done:
             continue

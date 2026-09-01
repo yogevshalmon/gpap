@@ -293,8 +293,9 @@ def build(args):
          r"\begin{table}[t]", r"  \centering", r"  \small",
          r"  \caption{\textbf{The price of the uniformity guarantee.} The entire "
          r"GPAP-vs-CMSGen matrix run twice on the same machine, differing only in whether the "
-         r"portfolio may select \texttt{soft} (soft global lookahead), which an exact-oracle "
-         r"test rejects it on 64 of 65 circuits. Ratios are safe$/$soft, so $<1$ favours the rejected configuration. "
+         r"portfolio may select \texttt{soft} (soft global lookahead), which Barbarik rejects "
+         r"on 64 of the 65 circuit instances it can sample. Ratios are safe$/$soft, so $<1$ "
+         r"favours the rejected configuration. "
          r"The all-cells column is diluted by construction --- where the bandit would not choose "
          r"\texttt{soft}, both arms run identical configurations and contribute $1.0\times$ --- "
          r"so the column restricted to cells it did choose is the real cost.}",
