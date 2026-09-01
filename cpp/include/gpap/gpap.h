@@ -56,6 +56,7 @@ typedef enum {
 
 typedef struct gpap_formula gpap_formula;
 typedef struct gpap_engine gpap_engine;
+typedef struct gpap_sampler gpap_sampler;
 
 /* ------------------------------------------------------------------ formula */
 
@@ -384,6 +385,184 @@ gpap_status gpap_free_literals(gpap_engine *e, int32_t *out, int32_t *count);
  *  formula without it being rebuilt. Sound only if the literals really are entailed — this does
  *  not check, it assumes; that is the caller's proof to have. */
 gpap_status gpap_assume_units(gpap_engine *e, const int32_t *lits, int32_t n);
+
+/* ------------------------------------------------------------------ sampling
+ *
+ * THE solution-sampling chunk loop — reset(K) + trajectory + completion count, the adaptive
+ * config bandit over it, and the honest accounting around both. It lives HERE for the same
+ * reason the checking loop (check.cpp) and the probe sweep (probe.cpp) do: a rule callers can
+ * observe must have one home. This loop used to be written twice — gpap::Sampler in the C++
+ * header and Python's GPUSampler — and the two had drifted apart in capability (no structured
+ * order or portfolio on the C++ face: instances Python sampled fine returned nothing), in
+ * accounting (the C++ rate charged delivery and the soundness self-test to the sampling clock),
+ * and in defaults (a C++ default run could silently flip the non-uniform soft polarity on).
+ *
+ * The sampler BORROWS an engine, exactly as gpap_check_sets and gpap_probe_combinations do; it
+ * adds packaging, not a second engine path. Not thread-safe (the engine is not); the engine
+ * must outlive the sampler, and nothing else may drive that engine between create and free.
+ *
+ * DETERMINISM: a run is a pure function of (formula, options, configs, seed) — the RNG and the
+ * shuffle are the library's own (splitmix64-seeded xoshiro256**, in-house Fisher-Yates), never
+ * std::mt19937/std::shuffle, whose draws differ across standard libraries. Delivery draws
+ * nothing from that stream, so asking for rows cannot change which models a seed finds. */
+
+/* One portfolio entry: how a trajectory decides. */
+typedef struct {
+    int32_t random_order;  /* 1 = uniform-random free variable (CMSGen's Algorithm 1; diverse).
+                            * 0 = first free variable in index order — the gate-DAG order on a
+                            *     Tseitin CNF; wins the search-heavy "service" family, where a
+                            *     random order keeps picking variables propagation would have
+                            *     implied anyway. */
+    int32_t batch;         /* decisions per propagation round (B); < 1 is clamped to 1.
+                            * B >= |support| makes the surviving rows EXACT rejection sampling
+                            * (exactly uniform); smaller B interleaves propagation and weights
+                            * solutions by their attraction basin. */
+    int32_t soft;          /* 1 = in-kernel risk-aware polarity (prefer the value less likely to
+                            * conflict). A big success-rate win on tight/deep circuits (b03-c25:
+                            * 10% -> 88%) and NOT UNIFORM — it biases the distribution by
+                            * construction; Barbarik rejects it on 64 of the 65 circuit
+                            * instances it can sample. Use for "many solutions fast,
+                            * distribution does not matter", never for a distribution claim.
+                            * The Python face spells this opt-in `--allow-soft` and prints a
+                            * warning. docs/findings/UNIFORMITY_FINDINGS.md par. 4b. */
+} gpap_sample_config;
+
+/* Why the run stopped. TARGET is the good case; the rest are safety valves, and which one fired
+ * matters (a time-capped run and a hopeless run report the same count and opposite facts). */
+typedef enum {
+    GPAP_SAMPLE_STOP_TARGET = 0,     /* n_target delivered (after the measurement window) */
+    GPAP_SAMPLE_STOP_TIME = 1,       /* time_limit_s elapsed */
+    GPAP_SAMPLE_STOP_CHUNKS = 2,     /* max_chunks ran */
+    GPAP_SAMPLE_STOP_ZERO_YIELD = 3, /* nothing found after every config + grace (and the
+                                      * lookahead retry, when enabled) — target unreachable */
+    GPAP_SAMPLE_STOP_UNSAT = 4       /* the construction flush already conflicted: the formula
+                                      * PROVABLY has no models (not merely none found) */
+} gpap_sample_stop;
+
+/* Per-RUN options for gpap_sampler_run — the knobs a caller re-decides per call (the seed and
+ * the batch cap live on the HANDLE: create/reseed/set_k). {0} == NULL == every default, per the
+ * ground rule: each field's zero is its default, and fields whose useful default is "on" are
+ * named for the OPT-OUT. */
+typedef struct {
+    int64_t max_chunks;        /* 0 = unbounded */
+    int64_t keep_cap;          /* rows KEPT per config for gpap_sampler_bits: 0 = none (count
+                                * only — the timed-run spelling), -1 = unlimited, else the cap.
+                                * Kept rows are gathered as they appear; the gather wall is
+                                * billed to deliver_s, never to sampling_s. */
+    double  time_limit_s;      /* 0 = no limit (checked between chunks) */
+    int32_t min_measure_chunks;/* some config must accumulate >= this many chunks before the
+                                * target may stop the run (a single chunk's rate is +-1.9x
+                                * run-to-run noise); 0 -> 1 */
+    int32_t grace_chunks;      /* zero-yield stop: give up only after every config ran once
+                                * (cold start) PLUS this many chunks with nothing found.
+                                * "This chunk was empty" is not a signal at a 0.01% success
+                                * rate; 0 -> 2 */
+    int32_t verify;            /* 1 = re-check ON DEVICE that every completed row satisfies
+                                * every clause (a self-test, off by default on every face).
+                                * Covers EVERY completed row; wall billed to verify_s, counts
+                                * in sound_rows_checked / unsound_rows. The C ABI REPORTS,
+                                * never aborts — the faces decide whether to throw. */
+    int32_t retry_with_lookahead; /* 1 = after a zero-yield window, flip `soft` once and try
+                                * again before giving up (rescues b12-class instances that
+                                * yield ONLY under the risk polarity). OFF by default and named
+                                * for what it opts into: the flip turns the NON-UNIFORM
+                                * polarity on — silently, on exactly the hard instances whose
+                                * rows a caller is most likely to publish. stats.retried /
+                                * lookahead_used say whether it fired. */
+    int32_t support_only;      /* 1 = decide ONLY phase 1 (the support) and count rows whose
+                                * support is complete; 0 (default) = decide every variable. */
+} gpap_sampler_options;
+
+/* Per-config outcome — the bandit's evidence, and the breakdown both faces report. */
+typedef struct {
+    int64_t models;     /* completed rows this config produced */
+    int64_t attempts;   /* trajectories it ran (chunks x K) */
+    int64_t chunks;
+    int64_t kept_rows;  /* rows held for gpap_sampler_bits (<= keep_cap) */
+    int64_t decs;       /* decision literals, from the engine's own counters */
+    int64_t props;      /* literals assigned (decisions + implications) */
+    double  wall_s;     /* sampling wall attributed to this config (delivery/verify excluded) */
+} gpap_config_stats;
+
+/* What a run did. sampling_s is THE clock every rate divides by; deliver_s (kept-row gathers)
+ * and verify_s (the soundness self-test) are billed apart so that neither asking for rows nor
+ * asking for verification can move samples/s — the contract gpap.sampling documents as
+ * out_project_s / verify_sound_s. */
+typedef struct {
+    int64_t n_models;            /* completed rows over all configs */
+    int64_t attempts;            /* trajectories over all configs */
+    int64_t chunks;
+    int64_t n_support_complete;  /* rows whose PHASE-1 variables completed (== n_models when
+                                  * the support is a true independent support; == n_models by
+                                  * definition when there is no support) */
+    int64_t sound_rows_checked;  /* rows the verify re-check covered — the EVIDENCE behind a
+                                  * soundness verdict; 0 with verify on means the check never
+                                  * ran (nothing completed), which is NOT a passing verdict */
+    int64_t unsound_rows;        /* rows that failed it (must be 0) */
+    int32_t best_config;         /* index into configs: highest models/wall among configs with
+                                  * >= min_measure_chunks (falling back to the best-measured
+                                  * rate) — whose kept rows gpap_sampler_bits(-1) returns */
+    int32_t dominant_config;     /* index: most models produced */
+    int32_t stop;                /* gpap_sample_stop */
+    int32_t timed_out;           /* 1 = stopped on time_limit_s short of n_target */
+    int32_t retried;             /* 1 = the zero-yield lookahead retry fired */
+    int32_t lookahead_used;      /* the soft flag the FINAL window ran with (retry flips it) */
+    int32_t rounds_max;          /* max decision rounds any chunk reported */
+    double  rounds_mean;         /* mean over chunks */
+    double  sampling_s;          /* the chunk loop alone */
+    double  deliver_s;           /* kept-row gathers (keep_cap > 0) */
+    double  verify_s;            /* the soundness self-test (verify = 1) */
+} gpap_sample_stats;
+
+/* Create a sampler over `e`. The engine must outlive the sampler; nothing else may drive it
+ * while the sampler exists (chunk loops assume the state they left). Reads the engine's shape
+ * for the batch: K = min(gpap_compute_k_safe over live free VRAM, the k_cap below) unless
+ * pinned by set_k. `k_cap`: 0 = gpap_default_k_cap, > 0 verbatim, < 0 uncapped.
+ * `seed` seeds the handle's RNG once; runs CONTINUE the stream (reseed restarts it). */
+gpap_status gpap_sampler_create(gpap_engine *e, int64_t seed, int32_t k_cap,
+                                gpap_sampler **out);
+void gpap_sampler_free(gpap_sampler *s);
+
+/* The resolved batch (rows per chunk). */
+int32_t gpap_sampler_k(const gpap_sampler *s);
+/* Pin the batch (the Python face's pin_batch; the warmup runs at K <= 1024 through this).
+ * k <= 0 restores the calibrated value. */
+gpap_status gpap_sampler_set_k(gpap_sampler *s, int32_t k);
+/* Restore the RNG to a known point, as after create with options.seed = seed. */
+gpap_status gpap_sampler_reseed(gpap_sampler *s, int64_t seed);
+
+/* Decision phase 1: 0-based variable indices decided (and completion-counted) first. The faces
+ * pass the formula's `c ind` support here — the engine does not retain the formula, so the
+ * sampler cannot read it itself. NULL/0 = no support: a single phase over every variable.
+ * Out-of-range indices are rejected (an index past N corrupts a LATER row's bitmap). */
+gpap_status gpap_sampler_set_support(gpap_sampler *s, const int32_t *vars, int32_t n);
+/* Columns of the kept rows: 0-based variables, in output order. NULL/0 (default) = every
+ * variable. Takes effect at the NEXT run; gpap_sampler_bits reads with the column width its
+ * own run was gathered under, so a change here cannot misshape an existing collection. */
+gpap_status gpap_sampler_set_columns(gpap_sampler *s, const int32_t *cols, int32_t n);
+
+/* Run the loop until `n_target` models are found, a valve fires, or — with more than one
+ * config — the bandit's measurement window completes. `configs` is the PORTFOLIO: each chunk
+ * runs ONE config at full K, cold-starting each once (even past n_target: a big-K GPU meets
+ * the target in one chunk, and a config never measured is a config never discoverable), then
+ * decaying-epsilon-greedy on measured models/wall with a 20x plausibility filter, exploiting
+ * the winner once the target is met until min_measure_chunks accumulate. ONE config = no
+ * bandit: the pinned-measurement mode. Kept rows are bucketed PER CONFIG so the emitted set is
+ * ONE sampler's, never a mixture of the bandit's arms (a mixture is a uniformity question).
+ * Resets `stats`/buckets from any previous run on this handle; the RNG continues (reseed to
+ * restart it). n_target <= 0 with one config runs nothing; with a portfolio it still cold-
+ * starts every config once. `opts` are THIS run's knobs (NULL = every default). */
+gpap_status gpap_sampler_run(gpap_sampler *s, int64_t n_target,
+                             const gpap_sample_config *configs, int32_t n_configs,
+                             const gpap_sampler_options *opts, gpap_sample_stats *stats_out);
+
+/* Per-config breakdown of the last run; `i` in [0, n_configs). */
+gpap_status gpap_sampler_config_stats(const gpap_sampler *s, int32_t i, gpap_config_stats *out);
+/* Kept rows of config `i` (-1 = stats.best_config, the delivery rule), as (rows, n_cols)
+ * row-major 0/1 uint8 over the set_columns order. Writes min(kept_rows, capacity) ROWS and
+ * leaves the rest of `out` untouched — pass the capacity you allocated, read back what
+ * config_stats.kept_rows says. */
+gpap_status gpap_sampler_bits(const gpap_sampler *s, int32_t i, uint8_t *out, int64_t capacity);
 
 /* ------------------------------------------------------------------ selections + readout */
 

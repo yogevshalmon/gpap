@@ -67,8 +67,14 @@ for (std::size_t i = 0; i < sols.size(); ++i)
 The sampler sizes the GPU batch to free VRAM, picks the propagate kernel, orders decisions so
 propagation does the work, and runs as many chunks as the target needs. Variables and literals
 are **DIMACS** — the same numbers as in the `.cnf` file. `SampleOptions` covers the rest
-(`seed`, `time_limit_s`, `max_keep`, `variables`, `batch`, `lookahead`, `auto_retry`, `device`,
-`k`, `k_cap`, `verify`).
+(`seed`, `time_limit_s`, `max_chunks`, `max_keep`, `variables`, `portfolio`, `var_order`,
+`batch`, `lookahead`, `retry_with_lookahead`, `device`, `k`, `k_cap`, `verify`,
+`min_measure_chunks`).
+
+**The loop itself lives in the library** (`gpap_sampler_*`, `src/sample.cpp`), shared verbatim
+with the Python face — chunks, the adaptive config bandit, the stop valves and the accounting
+are ONE implementation, so the two faces cannot drift and, at the same seed and a single
+config, they find the *same* models (gated by `tests/test_face_parity.py`).
 
 `verify` re-checks on the device that every returned row really satisfies every clause. It is
 **off by default**, on every face — it is a self-test, not part of producing samples: a row is
@@ -76,11 +82,16 @@ only counted when it is active and fully assigned, which already means no clause
 Set it in tests, or in a run whose output will be published; `Sampler::sample` then throws if any
 row fails.
 
-`auto_retry` (on by default) is worth knowing about: if the configured settings find nothing in
-the first few chunks, it flips the in-kernel risk polarity once before giving up. On b12 unrolled
-50 cycles that is the difference between **0 solutions and ~1100/s** — both `batch=8` and
-`batch=1` return nothing there while the risk polarity succeeds at 3%. It is one retry, not a
-search; the Python pipeline runs a proper adaptive portfolio over the same knobs.
+Two levers matter when a formula yields nothing under the defaults, and they are different in
+kind. `portfolio = gpap::default_portfolio()` races the three uniformity-safe configs the
+Python pipeline runs by default (random B=8 / random B=1 / structured B=1) as a throughput
+bandit — it is what samples the search-heavy instances a single random-order config cannot,
+and only the winning config's rows are returned. `retry_with_lookahead` (**off** by default)
+instead flips the in-kernel risk polarity once after a zero-yield window: on b12 unrolled 50
+cycles that is the difference between 0 solutions and ~1100/s — but the risk polarity is **not
+uniform** (Barbarik rejects it on 64 of the 65 circuit instances it can sample), which is why
+it is opt-in here exactly as `--allow-soft` is on the Python side. `Solutions::lookahead_used()`
+says whether any returned rows came from it.
 
 The other entry point — testing many assumption sets in one launch, which is the primitive the
 whole engine exists for:
@@ -158,10 +169,12 @@ small host buffer; a `(K, M)` or `(K, N)` transient never crosses the bus.
 them from the problem they solve, with a worked 6-row example. Read it before driving `gpap::Engine`
 directly; `gpap::Sampler` handles all of it for you.
 
-What tier 1 deliberately does *not* do is the Python pipeline's per-instance work: the adaptive
-config portfolio, entailed-clause mining, preprocessing, uniformity readout and the circuit
-front-ends all live in `gpap.sampling` / `gpap.circuits`. The C++ side is the engine plus a
-straightforward sampling loop over it.
+What tier 1 deliberately does *not* do is the Python pipeline's formula-level work:
+entailed-clause mining, ELS/unit-closure preprocessing, the uniformity readout and the circuit
+front-ends all live in `gpap.sampling` / `gpap.circuits`. The mechanism — the chunk loop, the
+config bandit, the batch sizing, the accounting — is the library's and both faces share it;
+the policy (what to mine, which portfolio to hand it, what to report) stays where it can
+change weekly without an ABI in the way.
 
 ## Using it from Python
 
@@ -187,6 +200,8 @@ include/gpap/gpap.h      the C ABI — the stable boundary, and all a C consumer
 include/gpap/gpap.hpp    header-only C++: tier 1 (Sampler/AssumptionChecker) over tier 2 (RAII)
 src/formula.cpp          DIMACS tokenizer (+ `c ind` support), occurrence CSR, packed word
 src/engine.cpp           state ownership, reset/flush cache, the two entry points, counters
+src/sample.cpp           THE sampling loop both faces share: chunks + config bandit + valves +
+                         kept-row buckets + delivery/verify accounting (gpap_sampler_*)
 src/readout.cpp          selections, on-device soundness, bit gathers, assignment rows
 src/calibrate.cpp        the memory model, K sizing and THE wave/scalar dispatch rule
 src/probe.cpp            combinatorial probing: every k-subset of a literal set, paged + budgeted

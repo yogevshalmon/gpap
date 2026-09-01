@@ -138,7 +138,17 @@ finds anything there (3.1% success, ~1100 models/s). A C++ caller would have rea
 formula is hard" when the same library solves it. The portfolio deliberately stays in Python, so
 tier 1 got the bounded version: **one** retry with the polarity flipped before giving up
 (`SampleOptions::auto_retry`, on by default, reported through `Solutions::retried()`). Measured:
-0 → 11,141 solutions at 1111/s on the default settings. This is the same lesson as the
+0 → 11,141 solutions at 1111/s on the default settings.
+
+> ⚠️ **Superseded 2026-09-01.** The portfolio no longer "stays in Python": the whole sampling
+> loop moved into the core (`cpp/src/sample.cpp`, `gpap_sampler_*`) and BOTH faces are
+> marshalling over it, so tier 1 races the same portfolio the pipeline does
+> (`SampleOptions::portfolio` / `gpap::default_portfolio()`). And `auto_retry` is now
+> `retry_with_lookahead`, **default OFF**: the flip it performs turns the soft polarity on —
+> Barbarik-rejected on 64/65 circuit instances — which Python had made opt-in (`--allow-soft`
+> + a printed warning) while this default silently enabled it. The rename-not-reverse is the
+> options-struct ground rule (a compile error instead of a silent flip). The b12 rescue is one
+> field away, and `Solutions::lookahead_used()` still reports it. This is the same lesson as the
 regime-dependence finding for `soft` — a lever that is net-negative in one regime must stay
 reachable, not be discarded.
 

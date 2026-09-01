@@ -246,6 +246,9 @@ The cap is a saturation limit, not a safety one: on the cards measured, 4× the 
 
 - **Two entry points** — `apply_and_propagate` (with `check_sets`, the probe and `apply_clean`
   over it) and `run_trajectory` — plus readout. Application code never touches row state.
+  The sampling chunk loop over entry point 2 (chunks, the config bandit, stop valves, kept-row
+  buckets, accounting) is also the core's — `gpap_sampler_*` in `cpp/src/sample.cpp` — so the
+  Python and C++ sampler faces are marshalling over one shared implementation.
 - **`conflict` and `active` are exact** on every row. A non-conflicted row holds the exact BCP
   fixpoint; a conflicted row's partial state is unspecified (§4).
 - **Every emitted model is verifiable** by anyone: a full assignment satisfying every clause,

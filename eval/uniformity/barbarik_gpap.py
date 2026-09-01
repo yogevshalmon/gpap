@@ -116,8 +116,8 @@ def _gpap_solutions(input_file, num_solutions, ind_var_list, seed, device, confi
     `draw` decides WHERE the samples come from, and the distinction is not cosmetic:
 
       * "batch" — one chunk, `num_solutions` of its surviving rows. This is what the shipped tool
-        delivers. Rows in a chunk share ONE variable permutation (`_run_chunk` draws `priority`
-        per chunk, not per row) and differ only in their polarity hash, so they are i.i.d. only
+        delivers. Rows in a chunk share ONE variable permutation (the core loop shuffles the
+        order per chunk, not per row) and differ only in their polarity hash, so they are i.i.d. only
         CONDITIONAL on that order. Their marginal is the sampler's distribution; their joint is
         not a product.
       * "iid" — one chunk per sample, so every sample gets a fresh permutation and the batch is

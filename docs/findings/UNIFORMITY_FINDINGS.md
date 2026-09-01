@@ -613,7 +613,8 @@ failing to sample within the cost budget.
 
 ### Batch delivery vs the i.i.d. premise — measured, not assumed
 
-`_run_chunk` draws ONE variable permutation per chunk and shares it across all K rows (only the
+The chunk loop (now the core's — `cpp/src/sample.cpp`; `GPUSampler._run_chunk` when this was
+measured) draws ONE variable permutation per chunk and shares it across all K rows (only the
 polarity hash is per-row), so delivered samples are i.i.d. only CONDITIONAL on that order, while
 barbarik's guarantee is stated for independent draws. Against the exact oracle, 8 generated circuit
 instances x 3 seeds at n = 100|S|:
