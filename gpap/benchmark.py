@@ -55,13 +55,16 @@ import time
 # gpap/cli.py's wrapper would be absent on exactly the campaign path it was written to protect
 # (`--time-limit 0` here is also the rival subprocess's timeout).
 from gpap.cli import CIRCUIT_EXTS, _NONNEG_INT, _POS_INT, _POS_SECS, _k_cap_arg
-from gpap.sampling.metrics import merge_sound_check, sound_verdict
+from gpap.sampling.pipeline import merge_sound_check, sound_verdict
 
-SCHEMA = 3          # results-JSON schema version (docs/BENCHMARKING.md §7)
+SCHEMA = 4          # results-JSON schema version (docs/BENCHMARKING.md §7)
 #   1: original flat rows
 #   2: + encode_s / encoder / sim_baseline / per_seed
 #   3: + one row per (instance, ENCODER) with `enc_key`; engine provenance (`engine`); CMSGen
 #      work-rate stats + emission mode (`cms_*`); error rows; resumable incremental output
+#   4: - `uniformity` (the readout left the library for eval/uniformity/; nothing read the key,
+#      so a schema-3 file still reads correctly — the bump records WHEN the column stopped
+#      being produced, which is what a reader comparing two campaigns needs)
 
 
 # --------------------------------------------------------------------------- CMSGen runner
@@ -295,10 +298,6 @@ def _build_argparser():
     ap.add_argument("--mine", choices=["auto", "on", "off"], default="auto",
                     help="entailed-clause mining: 'auto' (on, except ABC-encoded CNFs — their "
                          "backbone is already gone) | 'on' (force) | 'off'")
-    ap.add_argument("--uniformity", choices=["off", "fast", "exact"], default="off",
-                    help="per-instance uniformity readout: 'off' (default — costs an extra "
-                         "sampling pass per instance) | 'fast' (repeat-rate check, gross skew "
-                         "only, no solver work) | 'exact' (chi-square on enumerable spaces)")
     ap.add_argument("--twise", action="store_true",
                     help="also compute 2-wise coverage (the CMSGen paper's spread metric, "
                          "O(S^2) — opt-in; auto-enables n_cov=2000 if --n-cov unset)")
@@ -405,7 +404,6 @@ def _dimacs_header(path):
 def main(argv=None):
     import numpy as np
     import torch
-    from gpap.sampling.metrics import distinct_projections, format_uniformity, two_wise_coverage
     from gpap.sampling.pipeline import soft_warning, describe_portfolio, portfolio as _portfolio, sample_file
 
     ap = _build_argparser()
@@ -425,7 +423,6 @@ def main(argv=None):
     mine = {"auto": "auto", "on": True, "off": False}[args.mine]
     specs = parse_encoder_specs(args.encoders, args.encoder, args.abc_opt)
     os.makedirs(args.scratch, exist_ok=True)       # converted CNFs + CMSGen samplefiles land here
-    show_unif = args.uniformity != "off"           # gates the unif column
     has_circuits = any(f.endswith(CIRCUIT_EXTS) for f in files)
     multi_enc = len(specs) > 1
     cms_patched = bool(args.cmsgen) and cmsgen_supports_nowrite(args.cmsgen)
@@ -507,10 +504,8 @@ def main(argv=None):
         hdr += f"{'uniq/s~':>10}"
     if args.twise:
         hdr += f"{'2wiseG':>8}"
-    if show_unif:
-        hdr += f"{'unif':>9}"
     if args.sim_baseline:
-        hdr += f"{'p_acc':>9}{'rej/s':>11}{'amp':>9}"
+        hdr += f"{'p_acc':>9}{'rej/s':>15}{'amp':>9}"
     hdr += f"{'krn':>5}{'snd':>4}"
     if args.cmsgen:
         hdr += f"{'CMS/s':>10}{'Cdec/s':>9}{'Cimpl/s':>9}{'GPAP/CMS':>10}{'e2e/CMS':>9}"
@@ -535,8 +530,7 @@ def main(argv=None):
                    "target": args.target if is_circuit else None,
                    "seed": args.seed, "n_time": args.n_time, "time_limit": args.time_limit}
             try:
-                r = _run_one(path0, row, args, device, portfolio, mine, quality,
-                             sample_file, two_wise_coverage, distinct_projections)
+                r = _run_one(path0, row, args, device, portfolio, mine, quality, sample_file)
             except KeyboardInterrupt:
                 raise
             except Exception as e:  # noqa: BLE001 — one bad instance must never kill the suite
@@ -555,8 +549,7 @@ def main(argv=None):
                 print(f"{lbl:<24} SKIPPED: {r['skipped']}", flush=True)
                 continue
             total_sols += r["n_models"]
-            print(_format_row(r, args, multi_enc, has_circuits, quality, show_unif,
-                              format_uniformity), flush=True)
+            print(_format_row(r, args, multi_enc, has_circuits, quality), flush=True)
 
     suite_wall = time.perf_counter() - t_suite
     good = [r for r in results if not r.get("error") and not r.get("skipped")]
@@ -624,8 +617,59 @@ def _gpu_info(device):
             "cuda": torch.version.cuda}
 
 
-def _run_one(path0, row, args, device, portfolio, mine, quality,
-             sample_file, two_wise_coverage, distinct_projections):
+# ------------------------------------------------------------------ the quality-pass metrics
+# Both are computed OFF the throughput timing path (the timed run is collect=False): folding
+# reconstruction/dedup into the timed run understates GPU throughput up to 10x, measured. They
+# live here, in the suite driver, because the SUITE is what reports them — the library samples.
+
+
+def distinct_projections(models, support):
+    """Count DISTINCT support-projections among `models` (support = 1-based vars). Returns
+    (n_distinct, n_models). This is the "unique solutions" verification metric: it confirms the
+    sampler emits genuinely distinct solutions rather than re-emitting one. Run on the SAME
+    collected set for GPAP and CMSGen, so the distinct COUNTS are directly comparable."""
+    if not models:
+        return 0, 0
+    seen = set()
+    for m in models:
+        s = set(m)
+        seen.add(tuple(v if v in s else -v for v in support))
+    return len(seen), len(models)
+
+
+def two_wise_coverage(models, support):
+    """% of sampling-var pairs whose all 4 (±,±) joint polarities appear in the sample — the
+    combinatorial-testing COVERAGE metric the CMSGen paper reports (does the sample spread over
+    the space?). NOT a uniformity test; opt-in (`--twise`) for paper comparisons.
+
+    Vectorised: one (S,n)x(n,S) matmul gives the 11-counts per pair; the 10/01/00 counts follow
+    from the column sums (the old per-pair Python loop was O(S^2 n) and dominated the quality
+    pass on wide supports). support: 1-based vars."""
+    import numpy as np
+
+    S = len(support)
+    if S < 2 or not models:
+        return 0.0
+    idx = {v: i for i, v in enumerate(support)}
+    M = np.zeros((len(models), S), dtype=np.float32)
+    for r, m in enumerate(models):
+        s = set(m)
+        for v in support:
+            if v in s:
+                M[r, idx[v]] = 1.0
+    n = M.shape[0]
+    c11 = (M.T @ M).round().astype(np.int64)       # sgemm; exact for counts < 2^24
+    s1 = M.sum(axis=0).round().astype(np.int64)
+    c10 = s1[:, None] - c11
+    c01 = s1[None, :] - c11
+    c00 = n - s1[:, None] - s1[None, :] + c11
+    ok = (c11 > 0) & (c10 > 0) & (c01 > 0) & (c00 > 0)
+    iu = np.triu_indices(S, k=1)
+    total = iu[0].size
+    return 100.0 * int(ok[iu].sum()) / total if total else 0.0
+
+
+def _run_one(path0, row, args, device, portfolio, mine, quality, sample_file):
     """One (instance, encoder) cell: convert -> optional rejection baseline -> GPAP (x seeds)
     -> optional CMSGen. Returns the result row. Raises only on unexpected failures (the caller
     turns those into an error row); expected 'cannot run this instance' conditions (packed
@@ -685,7 +729,7 @@ def _run_one(path0, row, args, device, portfolio, mine, quality,
                             k_cap=args.k_cap, verify_cpu=args.verify_cpu,
                             verify_sound=args.verify_sound,
                             configs=portfolio, max_chunks=args.max_chunks, seed=s,
-                            mine=mine, uniformity=args.uniformity, time_limit=args.time_limit)
+                            mine=mine, time_limit=args.time_limit)
         except ValueError as e:                    # the engine's packed-envelope rejection
             if "packed envelope" not in str(e):
                 raise
@@ -713,7 +757,7 @@ def _run_one(path0, row, args, device, portfolio, mine, quality,
         "gpap_sps": g["samples_per_s"], "gpap_sps_e2e": g.get("sps_e2e_total"),
         "n_models": g["n_models"], "wall_timed_s": g["wall_timed_s"],
         "wall_total_s": g["wall_total_s"], "chunk_capped": g.get("chunk_capped"),
-        "uniformity": g.get("uniformity"), "sim_baseline": sim,
+        "sim_baseline": sim,
         # "ok" | "UNSOUND" | "off" — see gpap.sampling.sampler. NOT a bool: "off" (the check
         # was not run) must not read as either verdict.
         "succ": g["success_rate"], "sound_check": sound,
@@ -813,7 +857,7 @@ def _run_one(path0, row, args, device, portfolio, mine, quality,
     return row
 
 
-def _format_row(r, args, multi_enc, has_circuits, quality, show_unif, format_uniformity):
+def _format_row(r, args, multi_enc, has_circuits, quality):
     eng = r.get("engine") or {}
     line = f"{r['name'][:22]:<24}"
     if multi_enc:
@@ -838,8 +882,6 @@ def _format_row(r, args, multi_enc, has_circuits, quality, show_unif, format_uni
         line += f"{uq:>10}"
     if args.twise:
         line += f"{(r.get('twise_gpap') or 0):>7.1f}%"
-    if show_unif:
-        line += f"{format_uniformity(r.get('uniformity')):>9}"
     if args.sim_baseline:
         sim = r.get("sim_baseline")
         if sim is None:
@@ -847,14 +889,14 @@ def _format_row(r, args, multi_enc, has_circuits, quality, show_unif, format_uni
         elif sim["hits"]:
             amp = r.get("amplification") or 0.0
             amps = f"{amp:,.0f}x" if amp < 1e6 else f"{amp:.0e}x"
-            line += f"{sim['p_accept']:>9.1e}{sim['accepted_per_s']:>11,.0f}{amps:>9}"
+            line += f"{sim['p_accept']:>9.1e}{sim['accepted_per_s']:>15,.0f}{amps:>9}"
         else:                                      # no hit seen: rejection is unusable here
-            line += f"{'<' + format(sim['p_accept_lt'], '.0e'):>9}{'~0':>11}{'inf':>9}"
+            line += f"{'<' + format(sim['p_accept_lt'], '.0e'):>9}{'~0':>15}{'inf':>9}"
     # kernel provenance: w/s = wave/scalar propagate, 16 or 8 = the packed split's SHIFT
     krn = f"{eng.get('mode', '?')[0]}{eng.get('shift', '')}" if eng else "—"
     # Three outcomes, three glyphs: "-" is "not checked", which is neither OK nor BAD.
     # The verdict (legacy `gpu_sound` rows included) comes from the ONE definition in
-    # gpap.sampling.metrics, which eval/artifact/paper_tables.py reads the same rows with.
+    # gpap.sampling.pipeline, which eval/artifact/paper_tables.py reads the same rows with.
     _sc = sound_verdict(r)
     snd = ("BAD" if _sc == "UNSOUND" or r.get("cpu_sound") is False else
            "OK" if _sc == "ok" else "-")

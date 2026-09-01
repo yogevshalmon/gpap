@@ -68,8 +68,8 @@ cross-build number when pinning is impossible.
 
 The timed run is `collect=False`: models stay on the device, and the per-chunk soundness check is
 the only readout inside the window. Everything that delivers samples — the bit projection that
-`--out` writes, `distinct_projections`, the coverage and uniformity readouts — runs off the timing
-path and is billed separately (`out_project_s`, `phases_diag`). Rivals report **unique**
+`--out` writes, `distinct_projections`, the coverage pass and the soundness self-test — runs off
+the timing path and is billed separately (`out_project_s`, `phases_diag`). Rivals report **unique**
 solutions/s; `unique_sps_est = raw × distinct_frac` is computed the same way, off the path.
 `distinct_frac ≈ 1.0` on every non-tiny space; on tiny circuit spaces the count is the honest
 number (b06-c5 has 64 solutions in total).
@@ -163,5 +163,7 @@ generator imports them ([`paper/README.md`](paper/README.md)). In prose:
 
 ## 9. Result JSON is versioned
 
-`gpap bench` writes `"schema": 3`. Plots and comparisons key off it, so a schema change is a
-version bump, never a silent field rename.
+`gpap bench` writes `"schema": 4`. Plots and comparisons key off it, so a schema change is a
+version bump, never a silent field rename. Schema 4 dropped the `uniformity` column: the readout
+moved out of the library into `eval/uniformity/` (nothing ever read the key, so schema-3 files
+still read correctly — the bump records when the column stopped being produced).

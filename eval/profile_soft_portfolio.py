@@ -120,7 +120,7 @@ def main(argv=None):
                 try:
                     info = sample_file(tmp, torch.device("cuda"), n_time=args.n_time, n_cov=0,
                                        configs=arms[arm], time_limit=args.time_limit,
-                                       seed=args.seed, uniformity="off")
+                                       seed=args.seed)
                     per[arm].append({"sps": info["samples_per_s"], "e2e": info["sps_e2e_total"],
                                      "succ": info["success_rate"], "models": info["n_models"],
                                      "B": info["tuned_b"], "la": str(info["tuned_la"])})

@@ -5,8 +5,9 @@
 > the reduction helps CaDiCaL but not kissat) and is not pursued. The code this file describes
 > (`gpap/solver/inprocess.py`, `scripts/preprocess_solve.py`, …) exists only in git history, on
 > the branch named below. Two things survived into the shipping tree: ELS as a *sampling*
-> preprocess (`gpap/sampling/preprocess.py`, a measured ~1.4–1.5× win there, on by default) and
-> the full-BCP-closure implication sweep as `gpap.implications`. Summary in
+> preprocess (`gpap/sampling/preprocess.py`, a measured ~1.4–1.5× win there, on by default). The
+> full-BCP-closure implication sweep shipped for a while as `gpap.implications` and was REMOVED
+> 2026-09-01, unused. Summary in
 > [INSIGHTS.md](INSIGHTS.md), "Retired application directions".
 
 Branch: `pysat_cadical_inprocess_intg`. Companion to the clause-addition and vivify findings

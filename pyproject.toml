@@ -25,11 +25,12 @@ dependencies = [
 # shipped library links libcuda alone, so nothing here is needed to RUN the engine. It ships
 # with torch on Linux/Colab, so this extra is usually already satisfied.
 build = ["triton>=3.2"]       # rebuilding cpp/kernels/*.py into cubins (>=3.2: tl.gather)
-# `--uniformity exact` enumerates the projected solution space with a SAT solver; everything
-# else parses and runs without python-sat (the DIMACS parser is the core's — gpap.engine
-# .read_dimacs). The `.dev0` in the specifier is LOAD-BEARING: python-sat publishes only
-# pre-releases for recent CPython, and PEP 440 makes pip ignore pre-releases unless the
-# specifier itself names one — a plain `>=0.1.8` fails to resolve on a clean recent Python.
+# The evaluation layer's exact-oracle uniformity tools (eval/uniformity/) enumerate a projected
+# solution space with a SAT solver; the LIBRARY itself parses and runs without python-sat (the
+# DIMACS parser is the core's — gpap.engine.read_dimacs). The `.dev0` in the specifier is
+# LOAD-BEARING: python-sat publishes only pre-releases for recent CPython, and PEP 440 makes pip
+# ignore pre-releases unless the specifier itself names one — a plain `>=0.1.8` fails to resolve
+# on a clean recent Python.
 solver = ["python-sat>=0.1.8.dev0"]
 eval = ["matplotlib>=3.7", "python-sat>=0.1.8.dev0"]    # eval/ plots + rival/oracle harnesses
 dev = ["pytest>=7.4", "ruff>=0.4", "python-sat>=0.1.8.dev0"]

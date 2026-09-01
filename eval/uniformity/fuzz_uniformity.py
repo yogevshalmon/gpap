@@ -32,7 +32,7 @@ Two things are checked per (instance, sampler, config, seed):
   SOUNDNESS  every emitted row must be in the enumerated solution set. A miss is a hard failure,
              and a far more serious one than skew.
   UNIFORMITY chi-square GOF + total variation against uniform over all |S| solutions
-             (gpap.sampling.metrics.uniformity_stats, mode "exact"). Independent seeds are
+             (eval/uniformity/metrics.py `uniformity_stats`, mode "exact"). Independent seeds are
              combined with Fisher's method, because a single p=0.01 is noise, not a finding.
 
 Sensitivity note, and the reason this exists alongside Barbarik: at the CMSGen paper's own
@@ -60,7 +60,7 @@ import numpy as np
 REPO_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))  # eval/<sub>/ -> repo
 sys.path.insert(0, REPO_ROOT)
 
-from gpap.sampling.metrics import chi2_sf, uniformity_stats  # noqa: E402
+from eval.uniformity.metrics import chi2_sf, uniformity_stats  # noqa: E402
 
 # Configs are (random_var, B, lookahead) exactly as gpap.sampling.pipeline defines them. All three
 # CIRCUIT_PORTFOLIO members are swept by default: the bandit picks one per instance in production,
@@ -362,7 +362,7 @@ def sample_pipeline(inst: Instance, path, n: int, seed: int, portfolio_name: str
     # read ~6x worse with zero real skew. Sample size is not a free knob in a TV comparison.
     info = sample_file(path, torch.device(device), n_time=n, out_cap=n, seed=seed,
                        configs=_portfolio(portfolio_name, allow_soft=allow_soft),
-                       n_cov=0, uniformity="off", time_limit=120.0)
+                       n_cov=0, time_limit=120.0)
     dt = time.perf_counter() - t0
     bits, cols = info.get("samples"), info.get("cols")
     if bits is None or len(bits) == 0:

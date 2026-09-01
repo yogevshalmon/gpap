@@ -252,8 +252,8 @@ by setting B=8 (now the default in `gpap/benchmark.py`). A larger-VRAM card's bi
 ## Next steps
 
 All four landed: the cross-GPU run ([CROSS_GPU_FINDINGS.md](CROSS_GPU_FINDINGS.md)); BCP-closure
-ELS as an analysis product (`gpap.implications` — strictly stronger than the sampler's
-binary-clause edges, not yet wired in: [MINING_FINDINGS.md](MINING_FINDINGS.md)); niche detection
+ELS as an analysis product (strictly stronger than the sampler's binary-clause edges, never wired
+in — and the module that held it has since been removed: [MINING_FINDINGS.md](MINING_FINDINGS.md)); niche detection
 as the per-instance config bandit (above); and Barbarik with both controls
 ([UNIFORMITY_FINDINGS.md](UNIFORMITY_FINDINGS.md) §4b).
 

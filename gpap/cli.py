@@ -74,7 +74,7 @@ _SOUND_LABEL = {"ok": "OK", "UNSOUND": "*** UNSOUND ***", "off": "not run (--ver
 def _sound_label(info):
     """The printed verdict — `sound_verdict` is the ONE rule, shared with the bench table and
     the paper tables so a console line and a published cell cannot disagree."""
-    from gpap.sampling.metrics import sound_verdict
+    from gpap.sampling.pipeline import sound_verdict
     return _SOUND_LABEL[sound_verdict(info)]
 
 
@@ -168,7 +168,6 @@ def _sample_run(args, device, path, tmp, encode_s):
     """The body of `gpap sample`, after the environment checks and the circuit conversion —
     split out so the converted temp CNF is unlinked on every exit path."""
     import json
-    from gpap.sampling.metrics import format_uniformity
     from gpap.sampling.pipeline import (describe_config, describe_portfolio,
                                         portfolio as _portfolio, sample_file, soft_warning)
 
@@ -182,7 +181,7 @@ def _sample_run(args, device, path, tmp, encode_s):
     mine = {"auto": "auto", "on": True, "off": False}[args.mine]
     info = sample_file(path, device, n_time=args.n, n_cov=args.n_cov, out_cap=out_cap,
                        seed=args.seed, simplify=not args.no_simplify, els=not args.no_els, mine=mine,
-                       uniformity=args.uniformity, configs=portfolio, k_cap=args.k_cap,
+                       configs=portfolio, k_cap=args.k_cap,
                        verify_sound=args.verify_sound,
                        # 0 = no cap (the pipeline reads None that way); as a literal 0 it would
                        # expire the sampling loop before its first chunk and report "0 models".
@@ -228,8 +227,6 @@ def _sample_run(args, device, path, tmp, encode_s):
         m = info["mined"]
         print(f"  mined {m['n_units']} units / {m['n_binary']} binary / {m['n_ternary']} ternary "
               f"in {m['seconds']:.1f}s")
-    if info.get("uniformity") is not None:
-        print(f"  uniformity: {format_uniformity(info['uniformity'], verbose=True)}")
     if args.sim_baseline:
         # The rejection-sampling rival: random inputs + bit-parallel circuit simulation, no CNF.
         # Perfectly uniform by construction — its only weakness is p_accept. See simulate.py.
@@ -399,7 +396,13 @@ def _cmd_mine(args):
             # nothing new appears, so it is not the total it will probe; saying "up to N" there
             # invited exactly the comparison that made the totals look impossible.
             per = " per fixpoint round" if w == 1 else ""
-            over = f"  > --max-tuples {ceiling:,}" if (ceiling > 0 and n > ceiling) else ""
+            # ...and for the wider widths the count is an UPPER BOUND, because width 1 runs first
+            # and its proven units shrink the free-literal pool. Saying "> --max-tuples N" flat
+            # asserted a truncation the SAME run then contradicted two lines later with
+            # "[exhaustive]" (measured on 10.sk_1_46: plan 277,512 > 200,000, actually probed
+            # 56,112/56,112). A plan line may warn; it may not state a result.
+            over = (f"  > --max-tuples {ceiling:,} unless an earlier width shrinks the pool"
+                    if (ceiling > 0 and n > ceiling) else "")
             print(f"  width {w}: {n:,} candidates{per}{over}")
 
         res = mine_entailed(nv, clauses, device,
@@ -509,7 +512,7 @@ def _cmd_bench(args):
             "--time-limit", str(args.time_limit), "--n-cov", str(args.n_cov),
             "--portfolio", args.portfolio,
             "--encoder", args.encoder, "--abc-opt", args.abc_opt, "--mine", args.mine,
-            "--uniformity", args.uniformity, "--target", args.target,
+            "--target", args.target,
             "--cycles", str(args.cycles), "--seed", str(args.seed),
             "--k-cap", str(args.k_cap)]
     if args.seeds:
@@ -736,12 +739,6 @@ def main(argv=None):
     s.add_argument("--mine", choices=["auto", "on", "off"], default="auto",
                    help="entailed-clause mining: 'auto' (on, bounded by a 5s total budget) | "
                         "'on' (force, ignores the size gate) | 'off'")
-    s.add_argument("--uniformity", choices=["off", "fast", "exact"], default="off",
-                   help="uniformity readout: 'off' (default — the readout costs an extra "
-                        "sampling pass) | 'fast' (repeat-rate check: l2_ratio, ~1.0 = uniform, "
-                        ">1.5 = certified skew; no solver work) | 'exact' (also enumerate small "
-                        "solution spaces and run a chi-square test vs uniform — the sensitive "
-                        "check). Real certificates on big spaces: eval/uniformity/barbarik_gpap.py")
     _add_encoder_args(s)
     s.add_argument("--sim-baseline", action="store_true",
                    help="(circuit inputs) also measure the REJECTION-SAMPLING rival: random "
@@ -866,10 +863,6 @@ def main(argv=None):
     b.add_argument("--no-els", action="store_true",
                    help="disable equivalent-literal substitution (ON by default; pass this to "
                         "reproduce a run made before it became the default)")
-    b.add_argument("--uniformity", choices=["off", "fast", "exact"], default="off",
-                   help="per-instance uniformity readout: 'off' (default — costs an extra "
-                        "sampling pass) | 'fast' (repeat-rate check) | 'exact' (chi-square on "
-                        "enumerable spaces)")
     b.add_argument("--twise", action="store_true",
                    help="also compute 2-wise coverage (the CMSGen paper's spread metric; needs "
                         "the --n-cov quality pass — auto-enables n_cov=2000 if unset)")

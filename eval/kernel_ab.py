@@ -89,7 +89,7 @@ def run_arm(kernel, cnf, device, configs, *, n_time, time_limit, k_cap, max_chun
     os.environ["GPAP_KERNEL"] = kernel
     try:
         g = sample_file(cnf, device, n_time=n_time, n_cov=0, configs=configs,
-                        time_limit=time_limit, seed=seed, uniformity="off", mine="off",
+                        time_limit=time_limit, seed=seed, mine="off",
                         k_cap=k_cap, max_chunks=max_chunks, verify_sound=verify_sound)
     except Exception as e:                      # noqa: BLE001 — envelope rejection, OOM, ...
         return {"error": f"{type(e).__name__}: {e}"[:300]}

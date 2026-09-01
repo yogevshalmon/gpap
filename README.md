@@ -125,16 +125,14 @@ reachable, so the CNF stays SAT, but adversarial for rejection. `--sim-check` si
 emitted sample through the original circuit and verifies the pinned outputs: an
 encoder-independent, end-to-end soundness check.
 
-**Uniformity.** Opt-in (default `off` — the readout costs an extra sampling pass, so it is not
-run unless asked for). `--uniformity fast` prints a one-line **repeat-rate check**: draw ~2k
-samples and see whether some solutions repeat far more often than any uniform sampler would
-allow (`l2_ratio` ≈ 1 is uniform-consistent, > 1.5 is `SKEWED`; collision-free samples report
-the implied solution-space floor — no solver work, catches gross bias only). Two deeper levels:
+**Uniformity.** A uniformity number is a CLAIM about a distribution, and the honest ones need
+either the whole solution set or conditional sampling — so `gpap sample` does not make one, and
+the tools that do live in [`eval/uniformity/`](eval/uniformity/):
 
-- `--uniformity exact` — enumerate the projected solution space when small (≤4096 solutions) and
-  run a real goodness-of-fit test: chi-square p-value + total-variation distance over all `|S|`
-  solutions (e.g. `TV=0.136 chi2(255)=236 p=0.792 [exact: n=2,000 over |S|=256]`). This is the
-  sensitive check — subtle instance-dependent bias invisible to the repeat-rate check shows here.
+- `eval/uniformity/fuzz_uniformity.py` — the **exact oracle**: generate small random CNFs and
+  Tseitin circuits whose solution set can be enumerated EXHAUSTIVELY, then run GPAP and CMSGen on
+  identical files with negative and positive controls, and report chi-square + total-variation
+  distance over all `|S|` solutions. The sensitive test: subtle instance-dependent bias shows here.
 - `eval/uniformity/barbarik_gpap.py` — a standalone harness running the
   [Barbarik](https://github.com/meelgroup/barbarik) (AAAI'19) conditional-sampling tester with
   GPAP hooked in-process (SPUR as the trusted reference); the only way to *certify* uniformity on
@@ -289,9 +287,8 @@ C++ consumers start at [`cpp/README.md`](cpp/README.md) — same engine, two fac
 cpp/              # THE ENGINE CORE — libgpap: C ABI + C++ wrapper, shared by both faces
 gpap/
   engine/         # the Python face of the core (ctypes) over libgpap
-  sampling/       # THE FLAGSHIP — sampler, pipeline (e2e flow), preprocess, metrics, output
+  sampling/       # THE FLAGSHIP — sampler, pipeline (e2e flow), preprocess, output
   circuits/       # .bench / AIGER parse, unroll, Tseitin, pin -> projected-sampling CNF
-  implications.py # what each literal implies: failed literals, HBR, equivalent literals
   mining.py       # entailed-clause mining over the core's probe primitive
   paths.py        # where built/fetched artifacts live (repo-local; see below)
   cli.py          # `gpap` subcommands

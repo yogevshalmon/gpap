@@ -53,10 +53,12 @@ Applications consume the engine ONLY through these:
        eng.run_trajectory(order, n_support, B, seed, soft=...)
        eng.active / eng.assignment               # fully-assigned active rows are models
 
-Anything else on BCPEngine is accessors (`sat_rows`, work counters) — do not reach into
-`_packed`/`_abits` from application code. Correctness: BCP fixpoints are confluent; the
-kernels are validated against a pure-Python reference BCP (tests/reference_bcp.py) and every
-emitted model is externally verifiable (clause satisfaction; tests do both).
+Anything else on BCPEngine is accessors (`sat_rows`, work counters) — do not reach into the
+private `_core` handle from application code. (This line used to name `_packed`/`_abits`; those
+tensors went with the PyTorch path, and the row state now lives inside the C++ core, reachable
+only through the selection API.) Correctness: BCP fixpoints are confluent; the kernels are
+validated against a pure-Python reference BCP (tests/reference_bcp.py) and every emitted model
+is externally verifiable (clause satisfaction; tests do both).
 """
 from gpap.engine.formula import (
     CnfFormula,

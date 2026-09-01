@@ -25,7 +25,7 @@ from eval.uniformity.fuzz_uniformity import (
     sample_control,
     sample_gpap,
 )
-from gpap.sampling.metrics import uniformity_stats
+from eval.uniformity.metrics import uniformity_stats
 
 # One fixed seed: a regression gate must fail for a code reason, never for a draw reason.
 FUZZ_SEED = 20260730

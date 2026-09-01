@@ -134,8 +134,15 @@ and the CLOSURE — everything that literal implies. The closure is what three a
     hyper-binary        every `m` in closure(l) IS the clause (~l|m)
     equivalent literals l == m exactly when each is in the other's closure
 
-`gpap/implications.py`. One launch, one row per literal — on a CPU each literal is a separate
-propagation, which is why solvers probe only roots of the binary implication graph.
+One launch, one row per literal — on a CPU each literal is a separate propagation, which is why
+solvers probe only roots of the binary implication graph.
+
+⚠️ **The module that packaged this (`gpap/implications.py`) was REMOVED 2026-09-01** — it had no
+consumer (nothing in the pipeline, the CLI or the eval layer read it) and an unused module in the
+library is surface to maintain and to get wrong. The measurements below stand; re-deriving them
+needs `AssumptionChecker.check_assumptions(..., assignments=True)` over one literal per row, which
+is all the module ever was. Its one live consumer, the `derivable` drop level, moved verbatim into
+`gpap/mining.py` as `_derivable_mask`.
 
 **This also explains the 96%.** A binary `(~a|~b)` found by probing the PAIR is the same clause
 width-1 hands you directly when `~b` is in closure(a) — at `P` cost instead of `C(P,2)`. The k-subset
@@ -156,9 +163,9 @@ for mining it always is. NOT yet wired into the sampler; that is a behaviour cha
 gate. (An earlier note records 2.81x more equivalences than CaDiCaL's `decompose` — a different
 baseline; do not carry that number into this comparison.)
 
-⚠️ The closure is dense, `P x 2N` bits — 11 MB on b03-c25 but ~3.5 GB on a big HWMCC unroll — so
-`implications()` refuses a pool it cannot hold rather than reserving it. A chunked reducer form is
-the obvious extension.
+⚠️ The closure is dense, one BYTE per `(pool literal, literal)` pair — 82.5 MiB on b03-c25 (7,588
+free literals x 2N=11,402) and tens of GB on a big HWMCC unroll. Anything rebuilding this must
+CHECK the size before reserving it; the removed module refused a pool it could not hold.
 
 ## The RESET is the bottleneck, not the propagate (2026-08-19)
 

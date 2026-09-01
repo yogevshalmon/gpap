@@ -262,9 +262,13 @@ class GPUSampler:
     # re-implements any of it.
 
     def _push_support(self, sup) -> None:
-        """Hand the decision phase-1 variable set to the core, once per DISTINCT set: a pair
-        mask lives until the engine dies (see gpap.h), so re-pushing an identical support every
-        sample() call would leak one mask per call."""
+        """Hand the decision phase-1 variable set to the core, skipping an unchanged one.
+
+        Re-setting the SAME support is already a no-op IN THE CORE — that is where the rule
+        lives, because a pair mask lives until the engine dies (see gpap.h) and both faces
+        re-push on every call. This cache only saves the ctypes round-trip, so it is allowed to
+        be COARSER than the core's test (which canonicalises the set) and never finer: a key
+        miss costs one no-op call, and there is no key hit the core would have acted on."""
         key = tuple(sup) if sup else None
         if self._sup_pushed != key:
             self._smp.set_support(list(sup) if sup else None)
@@ -445,12 +449,13 @@ class GPUSampler:
         return np.zeros(1, dtype=np.int64)
 
     def reseed(self, seed: int) -> None:
-        """Restore BOTH RNG streams to a known point (see `_gen` / `_proj_gen`).
+        """Restore EVERY RNG stream to a known point.
 
         The warmup calls this so the timed run is deterministic from `seed` alone. It exists as a
-        method because there are several streams to restore (the core's sampling stream, the
-        delivery fill, the host reconstruction fills) and a caller that reseeds only the one it
-        knows about silently loses that determinism for the others."""
+        method because there are THREE streams to restore and they live in three places — the
+        core's sampling stream (`gpap_sampler_reseed`), the delivery fill (`_proj_gen`) and the
+        host reconstruction fills (`_pyrng`) — so a caller that reseeds only the one it knows
+        about silently loses that determinism for the others."""
         self._smp.reseed(seed)
         self._proj_gen.manual_seed(seed ^ 0x5EED_0117)
         import random as _random

@@ -65,10 +65,6 @@ cpp/                       # THE ENGINE CORE — libgpap (C ABI + header-only C+
 examples/                  # RUNNABLE examples, both faces: sample_solutions.py +
                            #   check_assumptions.py (python) + a README pointing at cpp/examples/
 gpap/
-  implications.py          # what each literal IMPLIES — one width-1 sweep, three readers:
-                           #   failed literals, hyper-binary resolvents, equivalent literals
-                           #   (`equivalence_edges` CAN feed preprocess's ELS; strictly stronger
-                           #   than its binary-clause edges, 1.11-1.32x more vars removed)
   mining.py                # entailed-clause mining — the STRATEGY (widths, fixpoint,
                            #   subsumption vs the BASELINE-REDUCED formula, `_Subsumption`)
                            #   over the core's probe primitive; `gpap mine` fronts it
@@ -91,9 +87,10 @@ gpap/
     pipeline.py            # sample_file / sample_clauses: the full e2e flow + the portfolios
                            #   (VarOrder/Lookahead enums + SamplingConfig NamedTuple, so a config
                            #   documents itself; `portfolio(name, allow_soft=)` is the accessor)
+                           #   + `sound_verdict`/`merge_sound_check`, THE tri-state readers, which
+                           #   live beside the code that WRITES `sound_check`
                            #   DEFAULTS: see "Sampling defaults" below
     preprocess.py          # unit_closure / equivalent_literal_substitution (ELS) primitives
-    metrics.py             # distinct/two-wise + UNIFORMITY (exact chi2/TV or collision l2_ratio)
     output.py              # compact sample writers (bits / npy / dimacs) — GPU bit-projection out
   circuits/
     bench.py               # parse/unroll/Tseitin/pin .bench -> projected-sampling CNF
@@ -103,6 +100,8 @@ gpap/
     simulate.py            # bit-parallel sim: REJECTION baseline (p_accept), rare targets, sim-check
   cli.py                   # `gpap` subcommands (sample / bench / circuit2cnf / info)
   benchmark.py             # the `gpap bench` suite driver (in-package so it works installed)
+                           #   + the quality-pass metrics (distinct_projections / two_wise_coverage
+                           #   — COVERAGE, not uniformity; the SUITE reports them, not the library)
 eval/                      # the experiment layer: run_full_eval.sh (staged/resumable terminal
                            #   sweep) + eval_plots.py + rivals_{demotic,recurrent,hts}.py +
                            #   rivals_setup.sh + rival_common.py (THE fairness policy: circuit
@@ -116,7 +115,9 @@ eval/                      # the experiment layer: run_full_eval.sh (staged/resu
                            #   + barbarik_gpap.py (CM_test; gpap|pipe|cmsgen|spur under test,
                            #   spur = the NEGATIVE CONTROL) + barbarik_screen.py (WHICH instances
                            #   the test can speak about) + barbarik_table.py (THE eligibility rule,
-                           #   imported by paper_tables) + fuzz_uniformity.py (exact-oracle fuzzing)
+                           #   imported by paper_tables) + fuzz_uniformity.py (exact-oracle
+                           #   fuzzing) + metrics.py (THE uniformity statistics: chi2/TV/collision
+                           #   + enumerate_projections — deliberately NOT in the library)
                            #   + the cross-GPU Colab driver + colab_supervisor.py (survives the
                            #   ~1h VM lifetime: mirror every cycle, reseed, resume)
                            #   PAPER OUTPUT: paper_tables.py is THE generator (all exclusion
@@ -402,7 +403,7 @@ kernels are the only path — the oracle is `tests/reference_bcp.py`).
 
 ```bash
 scripts/build_core.sh                 # build libgpap (kernels AOT + cmake); `gpap info` verifies
-pytest -m "not gpu and not slow"      # host-side logic smoke (parsers/preprocess/circuits/metrics
+pytest -m "not gpu and not slow"      # host-side logic smoke (parsers/preprocess/circuits/stats
                                       #   run anywhere; ALL engine/sampler tests need CUDA+triton
                                       #   and self-skip without them)
 pytest                                # full suite (gpu tests skip off-CUDA; slow = deep unrolls)
@@ -457,7 +458,7 @@ with the flags above. Validation and per-instance numbers: docs/findings/MINING_
   published as a passing one. `sound_rows_checked` is the evidence; it is what a verdict is a
   statement about. (It caught a real one: `test_wide_matches_base_random` had been comparing two
   EMPTY model sets on five instances and asserting `"ok"` over them.) ⚠️ **UNSOUND DOMINATES when
-  the timed and coverage runs are merged** (`metrics.merge_sound_check`) — preferring the timed
+  the timed and coverage runs are merged** (`pipeline.merge_sound_check`) — preferring the timed
   run's verdict published `sound_check: "ok"` beside a non-zero `unsound_rows`, and every
   consumer branches on the string.
   Its wall is `verify_sound_s`, EXCLUDED from every rate exactly as `out_project_s` is, so
@@ -468,7 +469,7 @@ with the flags above. Validation and per-instance numbers: docs/findings/MINING_
   ⚠️ It used to run unconditionally on a **4096-row prefix** of each chunk, a cap that sized a
   (rows, M) host transient deleted long ago — so it bounded only the COVERAGE, leaving
   "0 unsound" standing on as little as **4.8% of what a chunk emitted**. ⚠️ The old key was
-  `gpu_sound` (a bool) and recorded rows still carry it. **`gpap.sampling.metrics.sound_verdict`
+  `gpu_sound` (a bool) and recorded rows still carry it. **`gpap.sampling.pipeline.sound_verdict`
   is THE reader** (legacy shape included) and `merge_sound_check` THE fold: the bench table, the
   CLI, the Colab driver, the rival harnesses and `paper_tables` all import them. They were six
   open-coded string compares, of which only two handled the legacy key — so a resumed campaign
@@ -521,21 +522,21 @@ ABC wins 1.8-5.7× on most and unlocks b14 (0→24 models/s), but the rare-pin
 success can COLLAPSE under dc2/fraig (b13 1.00→0.00 succ = 0.0001×, s386 0.22×, s1196 0.62×)
 — don't report suite geomeans across encoders without the split (see INSIGHTS).
 
-**Uniformity readout** (`--uniformity off|fast|exact`, default **off** — the readout costs an
-extra sampling pass, so it is opt-in; always off the timing path).
-`fast` = repeat-rate check only, NO solver work: distribution-free `l2_ratio` = p̂₂·d — >1.5
-certifies skew for ANY |S| (uniform ⇒ ||p||₂² = 1/|S| ≤ 1/d); ≤1 prints OK but is a GROSS-skew
-check only (it does NOT see b06-c4-class subtle bias, l2 1.14 there); collision-free prints the
-95% birthday floor on |S|. `exact` adds
-enumeration (≤4096 sols / 2s / M≤200k) + chi2 p (needs n≥5·|S|) + TV over ALL |S| solutions + an
-observed⊆enumerated soundness cross-check — the sensitive test (catches TV=0.17 at p=0.000);
-when the space/formula defeats enumeration it falls back to the repeat-rate line with an
-honest "barbarik for certification" hint (`enum_status` capped/timeout/skipped-large).
+**Uniformity lives in `eval/uniformity/`, NOT in the library** (removed from the pipeline/CLI
+2026-09-01, at the user's direction: "the uniformity claim can come from the eval/uniformity
+scripts"). A uniformity number is a CLAIM about a distribution and the honest ones need the whole
+solution set (enumeration) or conditional sampling (Barbarik) — neither is something `gpap sample`
+can do on the way past, and shipping a cheap proxy beside the sampler invited reading it as a
+certificate. The library samples; `eval/uniformity/` makes the claims. `eval/uniformity/metrics.py`
+holds the statistics (`uniformity_stats` exact/collision modes, `chi2_sf` — native, no scipy —
+and `enumerate_projections`), gated by tests/test_uniformity_stats.py. The exact-oracle campaign
+is `fuzz_uniformity.py`; the gross-skew `l2_ratio` = p̂₂·d heuristic (>1.5 certifies skew for ANY
+|S|, since uniform ⇒ ||p||₂² = 1/|S| ≤ 1/d) survives there as `uniformity_stats`' collision mode
+and is a GROSS-skew check only — it does NOT see b06-c4-class subtle bias (l2 1.14 there).
 Certificates on big spaces = conditional sampling = Barbarik (`eval/uniformity/barbarik_gpap.py`, GPAP
 hooked in-process OR `--sampler cmsgen`, SPUR reference; defaults are the CMSGen paper's
 ε=0.3/η=1.8/δ=0.1 ⇒ 1,872 samples/instance = 36 rounds × (1+1+50), accept band [0.05, 0.95],
-38× cheaper than ε=0.1/η=0.9; `--explain` prints the derivation). chi2 sf is native
-(`metrics._gammq`) — no scipy dep.
+38× cheaper than ε=0.1/η=0.9; `--explain` prints the derivation).
 ⚠️ **THE PARAMETERS ARE A CHOICE AND THERE ARE TWO**: the CMSGen paper's ε=0.3/η=1.8/δ=0.1
 (1,872 samples, band [0.05, 0.95], rejects TV ≥ 0.90) and barbarik's OWN default ε=0.1/η=0.9/δ=0.05
 (70,596 samples, bands ≈±0.21, rejects TV ≥ 0.45) — different tests, never pooled
@@ -600,8 +601,8 @@ the per-chunk permutation and trajectory seed — the first version of this shar
 silently changed which models a run found at the same `--seed` (invisible to the no-change gate,
 which runs without `--out`). Its wall is `out_project_s`, excluded from every rate — the
 per-config stamp alone is not enough, since a PINNED single config has no per-config wall.
-⚠️ `phases` sums to `wall_total_s`; the opt-in readouts (`--n-cov`, `--uniformity`,
-`--verify-sound`) are billed to `phases_diag`, OUTSIDE it — so `sps_e2e_total` is the same number
+⚠️ `phases` sums to `wall_total_s`; the opt-in readouts (`--n-cov`, `--verify-sound`) are
+billed to `phases_diag`, OUTSIDE it — so `sps_e2e_total` is the same number
 whether or not the self-test ran. `verify_sound_s` was subtracted from the timed phase and billed
 to NEITHER, breaking the sum by exactly the check on every VERIFY_SOUND=1 campaign row; gated by
 tests/test_cli_contracts.py's `verify` parametrization. docs/findings/CLI_DELIVERY_FINDINGS.md.
