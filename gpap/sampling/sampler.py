@@ -23,7 +23,11 @@ decision depth is (heavily-propagating structured formulas → few decisions →
 Design knobs (the throughput vs. success-rate tradeoff):
   decisions_per_round : assign B free vars at once. B=1 = textbook DPLL (most rounds,
                         highest success rate); B>1 = a random restriction (fewer rounds,
-                        more dead-ends).
+                        more dead-ends). DEFAULT 8 — the same number every other entry point
+                        already used (`gpap::SampleOptions::batch`, `sample_bits`,
+                        `pipeline.sample_clauses(b=)`, `gpap bench --b`, and the first entry of
+                        DEFAULT_PORTFOLIO). It was 1 here and only here, so a direct
+                        GPUSampler user got a different sampler from every other face.
   random_var          : pick a random free var per sample (diverse) vs. the first free
                         one (cheap, low-index-biased).
 
@@ -491,7 +495,7 @@ class GPUSampler:
         self,
         n_target: int,
         *,
-        decisions_per_round: int = 1,
+        decisions_per_round: int = 8,
         random_var: bool = True,
         max_chunks: int | None = None,
         collect: bool = True,
@@ -524,6 +528,16 @@ class GPUSampler:
         n_support_complete counts trajectories that fixed the whole support without conflict
         (equals n_models when the support is a true independent support). If `verify_clauses`
         is given, every fully-assigned model is independently checked and `all_valid` is set.
+
+        `decisions_per_round` (B) defaults to **8**, matching `gpap::SampleOptions::batch`,
+        `sample_bits`, `pipeline.sample_clauses(b=)`, `gpap bench --b` and DEFAULT_PORTFOLIO's
+        first entry — it was 1 on this method alone, so a direct library caller silently got a
+        different sampler from the one every other face runs. B is also a UNIFORMITY knob and
+        the change moves the default the safe way: against the exact oracle, B=8's median TV is
+        0.156 to B=1's 0.315, and B >= |support| is exactly uniform
+        (docs/findings/UNIFORMITY_FINDINGS.md). Pass `decisions_per_round=1` for the old
+        behaviour — B=1 still wins on success rate on tight/deep circuits, which is why the
+        portfolios carry it as an arm.
 
         `random_var`: True = random decision order (diverse), False = structured/index order
         (follows the gate DAG — completes search-heavy residuals). Per-formula adaptation is the

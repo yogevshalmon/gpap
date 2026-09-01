@@ -304,3 +304,41 @@ def test_emitted_rows_are_sound(tmp_path):
     for row in mat:                      # every emitted row must EXTEND to a full model
         assert s.solve(assumptions=[v if b else -v for v, b in zip(cols, row)])
     s.delete()
+
+
+def test_the_two_faces_agree_on_the_decision_batch_default():
+    """B has ONE default, and every face has to spell it the same.
+
+    `GPUSampler.sample` defaulted to B=1 while `gpap::SampleOptions::batch`, `sample_bits`,
+    `sample_clauses(b=)`, `gpap bench --b` and DEFAULT_PORTFOLIO's first entry all said 8 — so a
+    direct library caller silently got a different sampler from the one the pipeline, the CLI
+    and the C++ face all run, on the knob that is both a throughput AND a uniformity lever.
+    Nothing catches that by construction: it is five independent literals, so it needs a test.
+
+    Reads the C++ default out of the header text on purpose — no CUDA, no build required, and
+    the header is the thing an out-of-tree C++ caller actually gets.
+    """
+    import inspect
+    import re
+    from pathlib import Path
+
+    from gpap.sampling.pipeline import DEFAULT_PORTFOLIO, sample_clauses
+    from gpap.sampling.sampler import GPUSampler
+
+    def default(fn, name):
+        return inspect.signature(fn).parameters[name].default
+
+    hpp = (Path(__file__).resolve().parents[1] / "cpp/include/gpap/gpap.hpp").read_text()
+    m = re.search(r"std::int32_t\s+batch\s*=\s*(\d+)\s*;", hpp)
+    assert m, "SampleOptions::batch default not found — did the field move?"
+
+    spellings = {
+        "gpap::SampleOptions::batch": int(m.group(1)),
+        "GPUSampler.sample(decisions_per_round=)": default(GPUSampler.sample,
+                                                           "decisions_per_round"),
+        "GPUSampler.sample_bits(config=)": default(GPUSampler.sample_bits, "config")[1],
+        "pipeline.sample_clauses(b=)": default(sample_clauses, "b"),
+        "DEFAULT_PORTFOLIO[0].decisions_per_round": DEFAULT_PORTFOLIO[0].decisions_per_round,
+    }
+    assert len(set(spellings.values())) == 1, \
+        "the faces disagree on the default decision batch: " + repr(spellings)
