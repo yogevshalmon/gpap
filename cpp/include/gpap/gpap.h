@@ -469,8 +469,12 @@ typedef struct {
                                 * polarity on — silently, on exactly the hard instances whose
                                 * rows a caller is most likely to publish. stats.retried /
                                 * lookahead_used say whether it fired. */
-    int32_t support_only;      /* 1 = decide ONLY phase 1 (the support) and count rows whose
-                                * support is complete; 0 (default) = decide every variable. */
+    int32_t support_only;      /* 1 = decide ONLY phase 1 (the support); 0 (default) = decide
+                                * every variable. n_models counts FULLY assigned rows either way
+                                * -- and so does what gpap_sampler_bits returns -- so on a
+                                * formula whose free variables outlive the support this reports
+                                * (and delivers) far fewer rows than it produced. The
+                                * support-complete count is the separate n_support_complete. */
 } gpap_sampler_options;
 
 /* Per-config outcome — the bandit's evidence, and the breakdown both faces report. */

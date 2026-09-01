@@ -378,7 +378,7 @@ class Engine {
 
 /** Bytes available for new allocations on `device` (free VRAM minus a driver reserve).
  *  `fraction` is the ONLY headroom left in the sizing path now that gpap_row_bytes is the exact
- *  allocation list, and 0.80 is what EVERY other face uses — Sampler::kMemFraction,
+ *  allocation list, and 0.80 is what EVERY other face uses — the sampler's own auto-K (cpp/src/sample.cpp),
  *  gpap_check_chunk_size, the probe batch, and Python's gpu_mem_available. This default used to
  *  be 0.75, so a tier-2 C++ caller writing the natural
  *  `compute_k_safe(info.num_long, info.num_vars, mem_available())` silently got a 6% smaller
@@ -647,45 +647,18 @@ class Sampler {
         run_opts_.retry_with_lookahead = opts_.retry_with_lookahead ? 1 : 0;
         check(gpap_sampler_create(engine_.handle(), opts_.seed, opts_.k_cap, &h_),
               "gpap_sampler_create");
-        if (opts_.k > 0) check(gpap_sampler_set_k(h_, opts_.k), "gpap_sampler_set_k");
-
-        /* --- decision phase 1: the declared independent support ---------------------- */
-        /* `support` is 0-based (tier 2). A `c ind` line naming a variable the header never
-         * declared is dropped rather than trusted — it would otherwise become an out-of-range
-         * column. The head/tail split itself is the core's. */
-        std::vector<std::int32_t> support;
-        for (std::int32_t v : formula_.support())
-            if (v >= 0 && v < n_vars_) support.push_back(v);
-        if (!support.empty())
-            check(gpap_sampler_set_support(h_, support.data(),
-                                           static_cast<std::int32_t>(support.size())),
-                  "gpap_sampler_set_support");
-        n_support_ = support.empty() ? n_vars_ : static_cast<std::int32_t>(support.size());
-
-        /* --- what to report ---------------------------------------------------------- */
-        /* Default: the support (projected sampling), else all variables — DIMACS out here,
-         * 0-based columns into the core. */
-        vars_ = opts_.variables;
-        if (vars_.empty()) {
-            if (support.empty()) {
-                vars_.resize(static_cast<std::size_t>(n_vars_));
-                std::iota(vars_.begin(), vars_.end(), 1);
-            } else {
-                vars_.reserve(support.size());
-                for (std::int32_t v : support) vars_.push_back(v + 1);
-            }
-        } else {
-            for (std::int32_t v : vars_)
-                if (v < 1 || v > n_vars_)
-                    throw Error(GPAP_ERR_ARG, "SampleOptions::variables: variable out of range");
+        /* Everything past the create can throw -- an out-of-range SampleOptions::variables is
+         * plain user error, and the support's pair mask is a device allocation. A constructor
+         * that throws never runs ~Sampler(), so without this the handle leaks AND the borrowed
+         * engine keeps the kernel this sampler pinned. */
+        try {
+            init_from_options();
+        } catch (...) {
+            reset_handle();
+            throw;
         }
-        std::vector<std::int32_t> cols;
-        cols.reserve(vars_.size());
-        for (std::int32_t v : vars_) cols.push_back(v - 1);
-        check(gpap_sampler_set_columns(h_, cols.data(),
-                                       static_cast<std::int32_t>(cols.size())),
-              "gpap_sampler_set_columns");
     }
+
 
     Sampler(const Sampler &) = delete;
     Sampler &operator=(const Sampler &) = delete;
@@ -740,6 +713,48 @@ class Sampler {
     const Formula &formula() const noexcept { return formula_; }
 
   private:
+    /* The fallible half of construction; see the try/catch in the ctor. */
+    void init_from_options() {
+        if (opts_.k > 0) check(gpap_sampler_set_k(h_, opts_.k), "gpap_sampler_set_k");
+
+        /* --- decision phase 1: the declared independent support ---------------------- */
+        /* `support` is 0-based (tier 2). A `c ind` line naming a variable the header never
+         * declared is dropped rather than trusted — it would otherwise become an out-of-range
+         * column. The head/tail split itself is the core's. */
+        std::vector<std::int32_t> support;
+        for (std::int32_t v : formula_.support())
+            if (v >= 0 && v < n_vars_) support.push_back(v);
+        if (!support.empty())
+            check(gpap_sampler_set_support(h_, support.data(),
+                                           static_cast<std::int32_t>(support.size())),
+                  "gpap_sampler_set_support");
+        n_support_ = support.empty() ? n_vars_ : static_cast<std::int32_t>(support.size());
+
+        /* --- what to report ---------------------------------------------------------- */
+        /* Default: the support (projected sampling), else all variables — DIMACS out here,
+         * 0-based columns into the core. */
+        vars_ = opts_.variables;
+        if (vars_.empty()) {
+            if (support.empty()) {
+                vars_.resize(static_cast<std::size_t>(n_vars_));
+                std::iota(vars_.begin(), vars_.end(), 1);
+            } else {
+                vars_.reserve(support.size());
+                for (std::int32_t v : support) vars_.push_back(v + 1);
+            }
+        } else {
+            for (std::int32_t v : vars_)
+                if (v < 1 || v > n_vars_)
+                    throw Error(GPAP_ERR_ARG, "SampleOptions::variables: variable out of range");
+        }
+        std::vector<std::int32_t> cols;
+        cols.reserve(vars_.size());
+        for (std::int32_t v : vars_) cols.push_back(v - 1);
+        check(gpap_sampler_set_columns(h_, cols.data(),
+                                       static_cast<std::int32_t>(cols.size())),
+              "gpap_sampler_set_columns");
+    }
+
     static Options engine_options(const SampleOptions &o) {
         Options e;
         e.device = o.device;

@@ -585,8 +585,11 @@ the per-chunk permutation and trajectory seed — the first version of this shar
 silently changed which models a run found at the same `--seed` (invisible to the no-change gate,
 which runs without `--out`). Its wall is `out_project_s`, excluded from every rate — the
 per-config stamp alone is not enough, since a PINNED single config has no per-config wall.
-⚠️ `phases` sums to `wall_total_s`; the opt-in readouts (`--n-cov`, `--uniformity`) are billed to
-`phases_diag`, OUTSIDE it. docs/findings/CLI_DELIVERY_FINDINGS.md.
+⚠️ `phases` sums to `wall_total_s`; the opt-in readouts (`--n-cov`, `--uniformity`,
+`--verify-sound`) are billed to `phases_diag`, OUTSIDE it — so `sps_e2e_total` is the same number
+whether or not the self-test ran. `verify_sound_s` was subtracted from the timed phase and billed
+to NEITHER, breaking the sum by exactly the check on every VERIFY_SOUND=1 campaign row; gated by
+tests/test_cli_contracts.py's `verify` parametrization. docs/findings/CLI_DELIVERY_FINDINGS.md.
 
 Benchmark suite driver (`gpap/benchmark.py`, schema-3 JSON; thin table over
 `gpap.sampling.pipeline`; the glob may mix CNFs with circuits — .bench/.aig/.aag are converted

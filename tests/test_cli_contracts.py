@@ -163,16 +163,25 @@ def test_delivery_bound_holds_when_a_valve_other_than_the_clock_stops_the_run(tm
 
 @needs_gpu
 @pytest.mark.parametrize("extra", [{}, {"uniformity": "fast"}, {"uniformity": "exact"},
-                                   {"n_cov": 300}], ids=["off", "fast", "exact", "cov"])
+                                   {"n_cov": 300}, {"verify_sound": True}],
+                         ids=["off", "fast", "exact", "cov", "verify"])
 def test_phases_account_for_the_whole_reported_wall(tmp_path, extra):
     """`phases` summed to more than `wall_total_s` by exactly the output pass, which was stamped
-    into one and left out of the other — so the honest e2e rate read ~1.5x high."""
+    into one and left out of the other — so the honest e2e rate read ~1.5x high.
+
+    The `verify` case is the same hole one field along: `verify_sound_s` was subtracted from the
+    timed phase and billed to NO phase, so the sum fell SHORT by the self-test on every run of a
+    campaign (VERIFY_SOUND=1 is the eval default) while `sps_e2e_total` still carried it."""
     from gpap.sampling.pipeline import sample_file
     info = sample_file(_cnf(tmp_path, SMALL), torch.device("cuda"), n_time=300, out_cap=300,
                        k_cap=64, time_limit=30.0, mine=False, **extra)
     # The opt-in READOUTS are billed to `phases_diag`, outside `wall_total_s` — parametrized
     # because the invariant first held only in the configuration the test happened to use.
     assert sum(info["phases"].values()) == pytest.approx(info["wall_total_s"], rel=0.05)
+    # ...and an opt-in readout must be VISIBLE in phases_diag, not merely absent from `phases`:
+    # billing it to neither would satisfy the sum above while losing the cost entirely.
+    if extra.get("verify_sound"):
+        assert info["phases_diag"]["verify_sound"] == pytest.approx(info["verify_sound_s"])
 
 
 @needs_gpu

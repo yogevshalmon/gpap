@@ -55,7 +55,7 @@ import time
 # gpap/cli.py's wrapper would be absent on exactly the campaign path it was written to protect
 # (`--time-limit 0` here is also the rival subprocess's timeout).
 from gpap.cli import CIRCUIT_EXTS, _NONNEG_INT, _POS_INT, _POS_SECS, _k_cap_arg
-from gpap.sampling.metrics import sound_verdict
+from gpap.sampling.metrics import merge_sound_check, sound_verdict
 
 SCHEMA = 3          # results-JSON schema version (docs/BENCHMARKING.md §7)
 #   1: original flat rows
@@ -341,10 +341,10 @@ def _build_argparser():
                          "success barely drops; B>=16 over-constrains and collapses success)")
     ap.add_argument("--k-cap", type=_k_cap_arg, default="auto",
                     help="ceiling on the per-chunk batch K. 'auto' (default) is the library's "
-                         "cap, identical on every GPU "
-                         "(throughput is ~linear in K); no-op at or below the reference "
-                         "budget. Pass an int to FIX the cap — what a cross-GPU A/B needs, "
-                         "since 'auto' deliberately differs per card")
+                         "cap, identical on every GPU (throughput is ~linear in K, but the "
+                         "cap only binds for small M — above that the analytic VRAM bound is "
+                         "lower). Pass an int to FIX the cap, e.g. to reproduce a sweep "
+                         "recorded under an older, per-card cap")
     ap.add_argument("--no-simplify", dest="simplify", action="store_false", default=True)
     ap.add_argument("--no-els", action="store_true",
                     help="disable equivalent-literal substitution (ON by default: sound and "
@@ -447,13 +447,25 @@ def main(argv=None):
             # torch/Triton-JIT engine), so say so rather than let it into a summary unnoticed.
             from gpap.sampling.pipeline import _core_provenance
             here = _core_provenance()
-            stale = sorted({(r.get("engine") or {}).get("core") or "pre-libgpap (torch engine)"
-                            for r in results
-                            if (r.get("engine") or {}).get("core") not in (None, here)
-                            or ((r.get("engine") or {}).get("core") is None and r.get("engine"))})
-            if stale:
+            others = {(r.get("engine") or {}).get("core") or "pre-libgpap (torch engine)"
+                      for r in results
+                      if (r.get("engine") or {}).get("core") not in (None, here)
+                      or ((r.get("engine") or {}).get("core") is None and r.get("engine"))}
+            # A REBUILD of the same version is not a different engine. The stamp is the build id
+            # (a fingerprint of the .so bytes), which is what makes two libraries distinguishable
+            # -- but it also changes on every rebuild, and a staged campaign rebuilds libgpap on
+            # each fresh VM. Warning "delete the file" there would discard a whole sweep for
+            # nothing, so a same-version rebuild is a note and only a VERSION change is loud.
+            ver = lambda c: c.split("+", 1)[0]          # noqa: E731 -- "libgpap 0.3.0"
+            rebuilt = sorted(c for c in others if ver(c) == ver(here))
+            changed = sorted(c for c in others if ver(c) != ver(here))
+            if rebuilt:
+                print(f"[resume] note: {args.output} has rows from another BUILD of "
+                      f"{ver(here)} ({', '.join(rebuilt)}); same version, appending.",
+                      file=sys.stderr)
+            if changed:
                 print(f"[resume] WARNING: {args.output} contains rows from another engine "
-                      f"({', '.join(stale)}); this run appends {here}. Delete the file to "
+                      f"({', '.join(changed)}); this run appends {here}. Delete the file to "
                       f"re-measure everything on one engine.", file=sys.stderr)
         except Exception as e:  # noqa: BLE001
             print(f"[resume] could not read {args.output} ({e}); starting fresh", file=sys.stderr)
@@ -688,6 +700,14 @@ def _run_one(path0, row, args, device, portfolio, mine, quality,
     if len(runs) > 1 and g["samples_per_s"]:
         spread = (runs[-1]["samples_per_s"] - runs[0]["samples_per_s"]) / (2 * g["samples_per_s"])
     sup1 = g["sup1"]                       # metadata from the pipeline's single parse
+    # The soundness verdict is folded over EVERY seed, not read off the median-throughput run:
+    # `per_seed` carries no verdict, so an UNSOUND on any other seed used to vanish from the row
+    # entirely and verify_artifact's gate -- the one check that is never waived -- passed over it.
+    # UNSOUND dominates (merge_sound_check); "off" stays None-valued so a run that never checked
+    # is not published as a clean zero.
+    sound = merge_sound_check(*(sound_verdict(r) for r in runs))
+    checked = sum(int(r.get("sound_rows_checked") or 0) for r in runs)
+    unsound = sum(int(r.get("unsound_rows") or 0) for r in runs)
     row.update({
         "nv": g["nv"], "M": g["n_clauses"], "support": len(sup1),
         "gpap_sps": g["samples_per_s"], "gpap_sps_e2e": g.get("sps_e2e_total"),
@@ -696,8 +716,12 @@ def _run_one(path0, row, args, device, portfolio, mine, quality,
         "uniformity": g.get("uniformity"), "sim_baseline": sim,
         # "ok" | "UNSOUND" | "off" — see gpap.sampling.sampler. NOT a bool: "off" (the check
         # was not run) must not read as either verdict.
-        "succ": g["success_rate"], "sound_check": g.get("sound_check", "off"),
-        "unsound_rows": g.get("unsound_rows"), "cpu_sound": g.get("cpu_sound"),
+        "succ": g["success_rate"], "sound_check": sound,
+        # `sound_rows_checked` is the EVIDENCE: a verdict is a statement ABOUT some number of
+        # rows, and "ok" over zero checked rows is not a pass.
+        "unsound_rows": unsound if sound != "off" else None,
+        "sound_rows_checked": checked if sound != "off" else None,
+        "cpu_sound": g.get("cpu_sound"),
         "n_distinct": g["n_distinct"], "n_collected": g.get("n_collected"),
         "unique_sps_est": g.get("unique_sps_est"), "assigns_per_s": g.get("assigns_per_s"),
         "decisions_per_s": g.get("decisions_per_s"),
@@ -713,7 +737,10 @@ def _run_one(path0, row, args, device, portfolio, mine, quality,
         row["sps_spread_frac"] = spread
         row["per_seed"] = [{"seed": r["seed"], "sps": r["samples_per_s"],
                             "sps_e2e": r.get("sps_e2e_total"), "succ": r["success_rate"],
-                            "n_models": r["n_models"], "wall_timed_s": r["wall_timed_s"]}
+                            "n_models": r["n_models"], "wall_timed_s": r["wall_timed_s"],
+                            # so the row above can be traced back to WHICH seed failed
+                            "sound_check": sound_verdict(r),
+                            "unsound_rows": r.get("unsound_rows")}
                            for r in runs]
     if sim is not None and sim.get("hits"):
         row["amplification"] = ((g["success_rate"] / sim["p_accept"]) if sim["p_accept"] else 0.0)

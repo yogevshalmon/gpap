@@ -32,7 +32,6 @@ K is auto-sized to the GPU (capped by default to stay off the host-RAM spill cli
 `gpap/__init__.py`, which always runs before this module (see there for the measurement).
 """
 import contextlib
-import time
 
 import numpy as np
 import torch
@@ -40,12 +39,33 @@ import torch
 from gpap.engine import _core as _gcore
 from gpap.engine.formula import CnfFormula
 from gpap.engine.bcp_engine import BCPEngine
-from gpap.engine.calibrate import (
-    compute_k_safe,
-    dispatch_mode,
-    gpu_mem_available,
-    resolve_k_cap,
-)
+from gpap.engine.calibrate import resolve_k_cap
+
+
+# The core spells "no limit" as 0, so `max_chunks or 0` / `max_seconds or 0.0` turned a SPENT
+# budget into an UNBOUNDED run -- the exact inversion of what the caller asked for, and silent.
+# `None` is the only spelling of "no limit" here; a 0 is a real, exhausted budget.
+_NO_LIMIT = 0
+
+
+def _chunk_budget(v):
+    """`None` = unbounded. The core cannot express "run zero chunks", so a non-positive budget
+    is refused rather than silently promoted to unbounded."""
+    if v is None:
+        return _NO_LIMIT
+    if int(v) < 1:
+        raise ValueError(f"max_chunks must be >= 1 (got {v}); pass None for no limit")
+    return int(v)
+
+
+def _time_budget(v):
+    """`None` = unbounded. A SPENT budget (0.0, the natural value of `limit - elapsed`) clamps to
+    a tiny positive number so the core's `time_limit_s > 0` valve still fires and the run stops
+    after one chunk, instead of reading as no limit at all."""
+    if v is None:
+        return 0.0
+    return float(v) if float(v) > 0 else 1e-9
+
 
 class GPUSampler:
     """Batched GPU sampler: K parallel randomized BCP-completions per chunk."""
@@ -107,7 +127,6 @@ class GPUSampler:
         # never overridden — gpap_engine_auto guards it, in the core).
         self._smp = _gcore.Sampler(self.engine._core, seed=(seed if seed is not None else 0),
                                    k_cap=(-1 if k_cap is None else int(k_cap)))
-        self._K_init = self._smp.k
         self._sup_pushed = "unset"     # last support handed to the core (see _push_support)
 
     # ---------------------------------------------------------------- THE batch size
@@ -456,7 +475,8 @@ class GPUSampler:
         self._push_support(self.support)
         self._smp.set_columns(self._gather_cols(plan))
         self._smp.run(int(n_target), [(rv, B, la in ("soft", "fsoft"))],
-                      max_chunks=(max_chunks or 0), time_limit_s=(max_seconds or 0.0),
+                      max_chunks=_chunk_budget(max_chunks),
+                      time_limit_s=_time_budget(max_seconds),
                       keep_cap=int(n_target))
         take = min(int(self._smp.config_stats(0).kept_rows), int(n_target))
         raw = (self._smp.bits(0, rows=take) if take
@@ -584,7 +604,7 @@ class GPUSampler:
         # (cpp/src/sample.cpp) — see the class docstring and tests/test_sample_core.py.
         st = self._smp.run(
             int(n_target), [(rv_c, b_c, la_c == "soft") for rv_c, b_c, la_c in plan],
-            max_chunks=(max_chunks or 0), time_limit_s=(max_seconds or 0.0),
+            max_chunks=_chunk_budget(max_chunks), time_limit_s=_time_budget(max_seconds),
             min_measure_chunks=int(min_measure_chunks), keep_cap=keep_cap,
             verify=bool(verify_sound), support_only=not complete)
         self._sync()

@@ -9,7 +9,6 @@ bandit selects on measured wall-clock throughput, so its chunk sequence is machi
 """
 from pathlib import Path
 
-import numpy as np
 import pytest
 import torch
 
@@ -43,7 +42,11 @@ def test_cpp_and_python_faces_draw_identical_models(circuit_cnfs, tmp_path):
 
     nv, cls, sup = _parse_cnf(cnf)
     assert sup, "expected a `c ind` support on a circuit CNF"
-    assert r["out_cols"] == [v for v in sorted(set(sup))] or r["out_cols"], "columns exist"
+    # NOT `== ... or r["out_cols"]`: python reads that as `(a == b) or a`, and a non-empty list
+    # is truthy, so the comparison never ran and a column-ORDER divergence between the faces --
+    # exactly what this file exists to catch -- passed green.
+    assert r["out_cols"] == sorted(set(sup)), \
+        f"faces diverged on the projection columns: {r['out_cols'][:8]} vs {sorted(set(sup))[:8]}"
 
     # Count parity: the stdout header carries found(); n_models is the Python count.
     found_cpp = int(stdout.split(" solutions in ")[0].rsplit("\n", 1)[-1])

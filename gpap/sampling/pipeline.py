@@ -607,7 +607,13 @@ def sample_clauses(nv, clauses, support, device, *, simplify=True, els=True, n_t
     # AFTER the output block: these rows are part of what the run DELIVERS, so the end-to-end wall
     # has to carry their cost. Charging it to `phases` while leaving it out of `wall_total_s` made
     # the two disagree by exactly the output pass, and inflated the reported e2e rate.
-    wall_total = time.perf_counter() - t_start
+    # ...but the soundness re-check is NOT delivery: it is an opt-in SELF-TEST, so it comes out
+    # of the e2e wall the same way it comes out of `wall` above. Leaving it in broke the
+    # `sum(phases) == wall_total_s` invariant by exactly `verify_sound_s` (nothing billed it to a
+    # phase) AND charged the check to `sps_e2e_total` -- the column paired against CMSGen's
+    # subprocess wall -- so a campaign with VERIFY_SOUND=1 published a rate no un-verified run
+    # would have reported. It is billed to `phases_diag` below, beside the other opt-in readouts.
+    wall_total = time.perf_counter() - t_start - verify_s
     sps_e2e_total = t["n_models"] / wall_total if wall_total > 0 else 0.0
     # Everything past this point is a DIAGNOSTIC the caller opted into (--n-cov, --uniformity),
     # not part of delivering samples. Its wall is reported separately, in `phases_diag`, because
@@ -615,6 +621,8 @@ def sample_clauses(nv, clauses, support, device, *, simplify=True, els=True, n_t
     # readout the user asked for on the side. Charging uniformity to `phases` alone left the two
     # disagreeing by exactly its cost.
     phases_diag: dict = {}
+    # The timed run's soundness re-check (the coverage run's is already inside "coverage").
+    phases_diag["verify_sound"] = verify_s
     if n_cov:
         # Bound host RAM: this run RECONSTRUCTS every completed row into python lists, so the batch
         # is a hard requirement, not a preference — pin_batch guarantees it, whereas the old
