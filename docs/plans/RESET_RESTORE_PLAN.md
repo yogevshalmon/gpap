@@ -259,7 +259,7 @@ below.
 1. **CLEAN is a PER-LAUNCH MODE, not the universal path — "copy result" is the crux.** Flags +
    counters (probing, mining incl. the `derivable` launch) are tiny and already emitted: clean
    fits. But `check_assumptions(assignments=/sat_count=)`, the width-1 closure
-   (`gpap/implications.py`, reads every row's assignment bits) and `gpap_assume_units`
+   (the closure sweep, which reads every row's assignment bits) and `gpap_assume_units`
    (reset(1)+apply+**recache_flush** — the POINT is capturing post-apply state) all need the
    state to SURVIVE the launch; copying sat_count out first would write K·M words = the
    broadcast again. Those callers keep today's semantics untouched. `probe_chunk` (and any

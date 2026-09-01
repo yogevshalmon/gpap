@@ -75,10 +75,6 @@ class ProbeBudget:
             return 0.0
         return max(min(limits), 1e-9)               # a spent budget must not read as "unbounded"
 
-    def expired(self, now: float | None = None) -> bool:
-        now = time.perf_counter() if now is None else now
-        return self.deadline is not None and now > self.deadline
-
 
 @dataclass
 class ProbeResult:

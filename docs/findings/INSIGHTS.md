@@ -556,6 +556,23 @@ the bulk path got it 2026-07-03 (+ regression test). Any new engine entry point 
 
 ## Sampler / portfolio
 
+**The uniformity readout left the library; the claim lives in `eval/uniformity/` (2026-09-01).**
+`gpap sample --uniformity fast|exact`, `gpap bench --uniformity` and `gpap/sampling/metrics.py`
+are GONE, at the user's direction. The reasoning is not that the statistics were wrong — they are
+kept verbatim in `eval/uniformity/metrics.py` and still gated (tests/test_uniformity_stats.py) —
+but that a uniformity number is a CLAIM about a distribution, and the honest ones need either the
+whole solution set (enumeration) or conditional sampling (Barbarik). Neither is something a
+sampler can do on the way past: the readout cost an extra sampling pass, `fast` could only ever
+see GROSS skew (it read b06-c4's TV=0.17 as l2_ratio 1.14 = OK), and shipping it beside the
+sampler invited exactly the reading it could not support. What remains in the library is what the
+library can actually stand behind: every emitted row is a real solution (`--verify-sound`), and
+`B >= |support|` is exactly uniform by construction. The evidence layer keeps the exact oracle
+(`fuzz_uniformity.py`) and the certificate (`barbarik_gpap.py` with both controls). Also removed
+in the same pass: `gpap/implications.py`, which no consumer read — its one live user, the
+`derivable` drop level, is now `mining._derivable_mask`. LESSON: an unused module and an
+under-powered statistic are the same kind of liability — surface that has to be right and that
+nothing forces to be.
+
 **Barbarik, re-derived circuit-only with both controls and an eligibility screen (2026-08-28):
 GPAP as shipped is Accepted on 64/66 circuit instances with ZERO Rejects — CMSGen 66/66, the
 exactly uniform reference 66/66, `soft` Rejected 64/65 — and 6/6 vs 6/6 at barbarik's own
@@ -816,8 +833,11 @@ kept only if they PAY" in MINING_FINDINGS.md. LESSON: a proxy that is cheap to r
 to gate on it; this one was gated on for six weeks and had the sign of the effect backwards.
 
 **Uniformity measurement: exact where enumerable, distribution-free skew detection elsewhere,
-Barbarik for certificates (2026-07-11).** The readout (`info["uniformity"]`, off the timing
-path) has three tiers, because they are the only three that exist — and it is OPT-IN
+Barbarik for certificates (2026-07-11).** ⚠️ The SHIPPED READOUT described here was removed
+2026-09-01 (see the entry at the top of this section): tiers 1 and 2 live on in
+`eval/uniformity/metrics.py`, `info["uniformity"]` and the `--uniformity` flags do not. The
+three-tier analysis stands. The readout (off the timing path) had three tiers, because they are
+the only three that exist — and it is OPT-IN
 (`--uniformity off` is the default: even off the timing path the readout costs an extra
 sampling pass, ~seconds of wall on slow instances). `fast` = tier 2 (repeat-rate only, no
 solver work — the cheap explainable number); `exact` = tier 1; the sensitive machinery is a

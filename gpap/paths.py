@@ -12,6 +12,10 @@ works and one that fails halfway with no obvious cause. Keeping them beside the 
 means removing the checkout removes everything it created.
 
 Set `GPAP_HOME` to override (a fast scratch filesystem, a shared read-only tool install).
+
+Only the directories PYTHON reads are accessors here. `scripts/fetch_benchmarks.sh` resolves
+`$GPAP_HOME/benchmarks` itself and nothing imports it back, so there is no `benchmarks_dir()` —
+a second spelling of a path with no reader is just a thing that can drift.
 """
 from __future__ import annotations
 
@@ -48,11 +52,6 @@ def bin_dir() -> Path:
 def src_dir() -> Path:
     """Checkouts of optional third-party sources."""
     return gpap_home() / "src"
-
-
-def benchmarks_dir() -> Path:
-    """Benchmark sets fetched by `scripts/fetch_benchmarks.sh`."""
-    return gpap_home() / "benchmarks"
 
 
 def tool(name: str) -> Path:

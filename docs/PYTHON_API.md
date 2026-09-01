@@ -15,8 +15,8 @@ gpap.sample(path, n)                       tier 0 — one call, samples out
 │     GPUSampler                               warmup, portfolios, contract-timed run)
 ├── gpap.engine.AssumptionChecker              "propagate THESE assumption sets"
 ├── gpap.engine.LiteralProbe                   "probe every k-subset of this literal pool"
-├── gpap.mining / gpap.implications            applications on LiteralProbe: entailed
-│                                                clauses; failed literals, HBR, equivalences
+├── gpap.mining                                an application on LiteralProbe: the clauses
+│                                                a formula already entails
 │
 ├── gpap.engine.BCPEngine / CnfFormula     tier 2 — the engine primitive (torch)
 │     reset(K) / apply_and_propagate / check_sets / run_trajectory + selection readout
@@ -27,8 +27,8 @@ gpap.sample(path, n)                       tier 0 — one call, samples out
 
 **Use the lowest-numbered tier that answers your question.** Sampling: `gpap.sample()` or the
 pipeline. Checking assumption sets: `AssumptionChecker`. Combinatorial probing (failed
-literals, entailed clauses, backbones, lookahead): `LiteralProbe` — `gpap.mining` and
-`gpap.implications` are worked examples of applications built on it. Building a NEW application
+literals, entailed clauses, backbones, lookahead): `LiteralProbe` — `gpap.mining` is a worked
+example of an application built on it. Building a NEW application
 (your own decide/propagate loop, a different readout): `BCPEngine`, the tier the one-call faces
 are themselves written on. Tier 3 is private: its surface tracks the C ABI, not a compatibility
 promise.
@@ -80,7 +80,6 @@ every emitted model is externally verifiable.
 | samples from a CNF / circuit | [`examples/sample_solutions.py`](../examples/sample_solutions.py), `gpap sample` |
 | assumption checking | [`examples/check_assumptions.py`](../examples/check_assumptions.py) |
 | entailed-clause mining | [`examples/mine_clauses.py`](../examples/mine_clauses.py), `gpap mine` |
-| the implication structure of a formula | [`examples/literal_implications.py`](../examples/literal_implications.py) |
 | C++ | [`cpp/examples/`](../cpp/examples/) (tier 1 + raw C ABI) |
 
 ## Deep material

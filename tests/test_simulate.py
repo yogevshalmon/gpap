@@ -134,7 +134,7 @@ def test_rare_target_cnf_is_sat_with_matching_projections(tmp_path):
     p = tmp_path / "and3.bench"
     p.write_text("INPUT(a)\nINPUT(b)\nINPUT(c)\nOUTPUT(y)\ny = AND(a, b, c)\n")
     from gpap.circuits.bench import convert_one, parse_support_labels
-    from gpap.sampling.metrics import enumerate_projections
+    from eval.uniformity.metrics import enumerate_projections
     from pysat.formula import CNF
     cnf_p = str(tmp_path / "and3.cnf")
     convert_one(str(p), cnf_p, 1, seed=5, target_mode="rare", quiet=True)

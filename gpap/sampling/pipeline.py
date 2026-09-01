@@ -10,6 +10,9 @@ of sampling wall, and the sampler's zero-progress stop (0 models after every con
 measured). The headline `samples_per_s` is the best-measured config's steady-state rate
 (`best_rate_sps`); `sps_e2e_total` is the honest end-to-end rate including construction,
 simplification and mining (what a CMSGen comparison must charge).
+
+This module also owns `sound_verdict` / `merge_sound_check`, the tri-state readers for the
+`sound_check` key it writes — one definition, beside the writer, imported by every consumer.
 """
 import logging
 import time
@@ -21,8 +24,6 @@ import torch
 
 from gpap.engine.calibrate import resolve_k_cap
 from gpap.mining import mine_entailed
-from gpap.sampling.metrics import merge_sound_check
-
 from gpap.sampling.sampler import GPUSampler
 
 log = logging.getLogger(__name__)
@@ -30,7 +31,43 @@ log = logging.getLogger(__name__)
 __all__ = ["sample_file", "sample_clauses",
            "portfolio", "describe_portfolio", "PORTFOLIOS", "SamplingConfig", "VarOrder",
            "Lookahead", "DEFAULT_PORTFOLIO", "CIRCUIT_PORTFOLIO", "SINGLE_PORTFOLIOS",
-           "SOFT_CONFIG", "soft_warning", "describe_config"]
+           "SOFT_CONFIG", "soft_warning", "describe_config",
+           "sound_verdict", "merge_sound_check", "SOUND_OK", "SOUND_BAD", "SOUND_OFF"]
+
+
+# --------------------------------------------------------------- the soundness verdict, once
+# A row's on-GPU soundness re-check is a TRI-STATE — "ok" / "UNSOUND" / "off" — and reading it
+# is not a one-liner, because recorded rows carry two schemas. It lives beside the code that
+# WRITES the key (`sample_clauses`'s `sound_check`), and every consumer imports it from here:
+# the bench table, the CLI, the Colab driver, the rival harnesses, the paper tables, the
+# artifact gate. It was six open-coded string comparisons, of which only two remembered the
+# legacy key — so a resumed campaign mixing old and new rows reported a fully verified sweep as
+# "not run", and a legacy FAILURE as a non-verdict.
+SOUND_OK, SOUND_BAD, SOUND_OFF = "ok", "UNSOUND", "off"
+
+
+def sound_verdict(row) -> str:
+    """The tri-state verdict of one recorded row, legacy schema included.
+
+    Pre-2026-08-30 rows carry `gpu_sound: bool` and no `sound_check`; those runs always checked,
+    so a bool IS a verdict there. A row with neither key never checked."""
+    verdict = row.get("sound_check")
+    if verdict in (SOUND_OK, SOUND_BAD, SOUND_OFF):
+        return verdict
+    if "gpu_sound" in row:                       # legacy: the check was unconditional
+        return SOUND_OK if row["gpu_sound"] else SOUND_BAD
+    return SOUND_OFF
+
+
+def merge_sound_check(*verdicts) -> str:
+    """Fold several verdicts into one. UNSOUND DOMINATES, then "ok", then "off".
+
+    Any other order loses a failure: a merge that preferred one run's "ok" published it beside
+    the other run's non-zero `unsound_rows`, and the consumers all branch on the string."""
+    seen = [v for v in verdicts if v]
+    if SOUND_BAD in seen:
+        return SOUND_BAD
+    return SOUND_OK if SOUND_OK in seen else SOUND_OFF
 
 
 def _support_literals(support):
@@ -248,52 +285,6 @@ def _core_provenance() -> str:
         return "unknown"
 
 
-def _uniformity_readout(smp, clauses, sup1, rate, config, mode="fast", target=2000):
-    """The uniformity readout (OFF the timing path; see metrics.py for the statistics).
-
-    mode="fast" (the default): collect a small sample of projections and check their REPEAT
-    behaviour — no SAT solver, no enumeration, one cheap sample_bits call. Catches gross skew
-    (l2_ratio) with zero setup; cannot certify uniformity or see subtle bias.
-    mode="exact": additionally try to ENUMERATE the projected solution space (small formulas
-    only: M <= 200k, <= 4096 projections, <= 2 s); when enumeration completes, run the real
-    goodness-of-fit test (chi-square p + TV) over all |S| solutions + a soundness cross-check.
-
-    The sample size is clamped to ~2 s of the measured steady rate either way (a 100/s stuck
-    instance gets a 256-sample readout, a 1M/s instance its full target in milliseconds)."""
-    from collections import Counter
-    from gpap.sampling.metrics import enumerate_projections, uniformity_stats
-
-    projs, status = (None, "not-attempted")
-    if mode == "exact":
-        if len(clauses) <= 200_000:
-            projs, status = enumerate_projections(clauses, sup1, cap=4096, budget_s=2.0)
-        else:                                      # exact REQUESTED but the formula defeats it —
-            status = "skipped-large"               # the hint must not suggest exact again
-    S = len(projs) if (projs is not None and status == "complete") else None
-    if S is not None:
-        target = min(max(target, 5 * S), 20_000)   # n >= 5*S makes the chi-square p valid
-    if rate:
-        target = max(256, min(target, int(rate * 2.0)))
-    bits, cols = smp.sample_bits(target, config=config, max_chunks=40)
-    if bits is None or len(bits) == 0:
-        return {"mode": "empty", "n": 0, "note": "no samples collected", "enum_status": status}
-    ci = {v: i for i, v in enumerate(cols)}
-    arr = np.ascontiguousarray(np.asarray(bits, dtype=np.uint8)[:, [ci[v] for v in sup1]])
-    packed = np.packbits(arr, axis=1)
-    counter = Counter(packed[i].tobytes() for i in range(packed.shape[0]))
-    unsound = 0
-    if S is not None:
-        pmat = np.array(sorted(projs), dtype=np.uint8)
-        pkeys = {row.tobytes() for row in np.packbits(pmat, axis=1)}
-        unsound = sum(1 for k in counter if k not in pkeys)   # must be 0 (soundness cross-check)
-    out = uniformity_stats(list(counter.values()), int(arr.shape[0]), S=S)
-    out["enum_status"] = status
-    if unsound:
-        out["unsound_projections"] = unsound
-        out["note"] = f"{unsound} observed projections NOT in the enumerated solution set (BUG)"
-    return out
-
-
 def sample_file(path, device, **kw):
     """Run the full sampling pipeline on a DIMACS CNF file (support read from `c ind` lines).
     Returns the same rich dict as sample_clauses; the parse is charged to phases["parse"] and
@@ -322,7 +313,7 @@ def sample_file(path, device, **kw):
 
 
 def sample_clauses(nv, clauses, support, device, *, simplify=True, els=True, n_time=50_000,
-                   n_cov=0, out_cap=0, uniformity="off", n_uni=2000, b=8, k_cap="auto",
+                   n_cov=0, out_cap=0, b=8, k_cap="auto",
                    max_chunks=None, time_limit=60.0, cov_chunks=4,
                    lookahead=False, verify_clauses=None, verify_cpu=False, cov_k_cap=2048,
                    verify_sound=False,
@@ -516,7 +507,7 @@ def sample_clauses(nv, clauses, support, device, *, simplify=True, els=True, n_t
         torch.cuda.synchronize()
     # The projection that fills `--out` runs inside the loop above but is DELIVERY, not sampling:
     # bill it to phases["output"] and keep it out of `wall`, so every rate below is the same
-    # number the run would have reported without `--out`. (The sampler's own `cfg_stats` wall
+    # number the run would have reported without `--out`. (The core's per-config wall
     # already excludes it, but only on the adaptive path — a pinned single config has none.)
     proj_s = float(t.get("out_project_s") or 0.0)
     # The soundness re-check is a SELF-TEST, not sampling, and its contract is that turning it on
@@ -615,11 +606,11 @@ def sample_clauses(nv, clauses, support, device, *, simplify=True, els=True, n_t
     # would have reported. It is billed to `phases_diag` below, beside the other opt-in readouts.
     wall_total = time.perf_counter() - t_start - verify_s
     sps_e2e_total = t["n_models"] / wall_total if wall_total > 0 else 0.0
-    # Everything past this point is a DIAGNOSTIC the caller opted into (--n-cov, --uniformity),
-    # not part of delivering samples. Its wall is reported separately, in `phases_diag`, because
-    # `phases` has to sum to `wall_total_s` and `sps_e2e_total` must not be dragged down by a
-    # readout the user asked for on the side. Charging uniformity to `phases` alone left the two
-    # disagreeing by exactly its cost.
+    # Everything past this point is a DIAGNOSTIC the caller opted into (--n-cov,
+    # --verify-sound), not part of delivering samples. Its wall is reported separately, in
+    # `phases_diag`, because `phases` has to sum to `wall_total_s` and `sps_e2e_total` must not
+    # be dragged down by a readout the user asked for on the side. Charging one of them to
+    # `phases` alone left the two disagreeing by exactly its cost.
     phases_diag: dict = {}
     # The timed run's soundness re-check (the coverage run's is already inside "coverage").
     phases_diag["verify_sound"] = verify_s
@@ -639,21 +630,10 @@ def sample_clauses(nv, clauses, support, device, *, simplify=True, els=True, n_t
                     max_chunks=cov_chunks, collect=True, verify_clauses=vc,
                     lookahead=tuned_la, verify_sound=verify_sound) if n_cov else {})
     phases_diag["coverage"] = (time.perf_counter() - _tcov) if n_cov else 0.0
-    # Uniformity readout, OPT-IN (default "off": it costs an extra ~2s sampling pass even off the
-    # timing path). "fast" = collision/repeat check only (no solver work, gross-skew detector).
-    # "exact" adds enumeration + chi-square on small spaces (the sensitive test — subtle bias like
-    # b06-c4's TV=0.17 is only visible here). See _uniformity_readout / metrics.py.
+    # The DECLARED support, as DIMACS variables: the width of every emitted row. Reported beside
+    # `support_size` (what is left ACTIVE after simplify/ELS) because the two differ and only the
+    # pair explains an output file's column count.
     sup1 = [v + 1 for v in (support or range(nv))]
-    uni = None
-    phases_diag["uniformity"] = 0.0
-    if uniformity and uniformity != "off":
-        _tu = time.perf_counter()
-        try:
-            uni = _uniformity_readout(smp, clauses, sup1, sps, (tuned_rv, tuned_b, tuned_la),
-                                      mode=uniformity, target=int(n_uni))
-        except Exception as e:  # noqa: BLE001 — a diagnostic must never kill the run
-            uni = {"mode": "error", "note": f"{type(e).__name__}: {e}"}
-        phases_diag["uniformity"] = time.perf_counter() - _tu
     # Was the formula PROVED to have no models? Both detectors are already in hand and neither
     # reached the caller before: preprocessing returning None (`_unsat_sampler`), and the engine's
     # construction-time units flush conflicting. Without this an UNSAT instance is reported as
@@ -682,7 +662,6 @@ def sample_clauses(nv, clauses, support, device, *, simplify=True, els=True, n_t
     return {"samples_per_s": sps, "success_rate": succ,
             "nv": nv, "n_clauses": len(clauses),              # ORIGINAL sizes (pre-simplify)
             "sup1": sup1,
-            "uniformity": uni,                                # opt-in readout (see metrics.py)
             "sps_e2e_total": sps_e2e_total,                   # incl. construction+simplify+mining
             "phases": phases,                                 # DELIVERY phases; these sum to wall_total_s
             "phases_diag": phases_diag,                       # opt-in readouts, OUTSIDE wall_total_s

@@ -15,7 +15,7 @@ import torch
 import gpap.engine.probe
 from gpap.engine import core_available
 from gpap.engine.probe import LiteralProbe, ProbeBudget
-from gpap.mining import _Subsumption, mine_entailed
+from gpap.mining import _derivable_mask, _Subsumption, mine_entailed
 from gpap.sampling.pipeline import sample_clauses
 from tests.reference_combinations import combinations
 
@@ -28,6 +28,27 @@ def _random_cnf(rng, nv, nc, kmax=3):
     return [[rng.choice([-1, 1]) * v for v in rng.sample(range(1, nv + 1),
                                                          rng.randint(2, min(kmax, nv)))]
             for _ in range(nc)]
+
+
+def _brute_models(nv, clauses):
+    """Every satisfying assignment, as sets of DIMACS literals. Brute force, small `nv`."""
+    out = []
+    for bits in it.product([False, True], repeat=nv):
+        asg = {(i + 1) if b else -(i + 1) for i, b in enumerate(bits)}
+        if all(any(l in asg for l in c) for c in clauses):
+            out.append(asg)
+    return out
+
+
+def _entailed_binaries(nv, mods):
+    """Every binary clause true in every model — the ORACLE's notion of entailed, no engine."""
+    lits = [s * v for v in range(1, nv + 1) for s in (1, -1)]
+    out = []
+    for i, a in enumerate(lits):
+        for b in lits[i + 1:]:
+            if abs(a) != abs(b) and all((a in m) or (b in m) for m in mods):
+                out.append([a, b])
+    return out
 
 
 # ------------------------------------------------------------------ the enumerator
@@ -560,3 +581,85 @@ class TestMiningPipelineDefaults:
         if mi["gain"] is not None and mi["kept"]:
             assert mi["gain"] > 1.0, "clauses were kept, so the guard must have seen a gain"
         assert info["sound_check"] == "ok", "the run must be sound whether or not the clauses were kept"
+
+
+# -------------------------------------------- the `derivable` drop level (_derivable_mask)
+
+class TestDerivable:
+    """`drop="derivable"`: a clause propagation can already do EVERY job of.
+
+    The quantifier is the whole content of the filter — a clause `(l1|...|lk)` forces `lj` when
+    the other k-1 literals are false, and only when propagation covers ALL k of those directions
+    does dropping it cost the consumer nothing. See docs/findings/MINING_FINDINGS.md.
+    """
+
+    def test_a_transitively_derivable_clause_is_detected(self):
+        """(-1|3) is entailed and NOT subsumed, but 1 propagates 3 through (-1|2) and (-2|3) --
+        i.e. 1 -> 2 -> 3 -- so unit propagation produces the clause on demand."""
+        cls = [[-1, 2], [-2, 3], [4, 5]]
+        mask = _derivable_mask([[-1, 3], [4, 5]], cls, 5, DEV)
+        assert bool(mask[0]), "(-1|3) is derivable through the chain 1 -> 2 -> 3"
+
+    def test_a_genuine_clause_survives(self):
+        """(1|2) where neither literal propagates the other has to be kept."""
+        cls = [[1, 2, 3], [1, 2, -3], [4, 5]]
+        mask = _derivable_mask([[1, 2]], cls, 5, DEV)
+        assert not bool(mask[0]), "(1|2) is a real two-clause inference, not a shortcut"
+
+    def test_units_are_never_marked_derivable(self):
+        """A mined unit (u) came from probing ~u, which was probed only because it was FREE — so
+        propagation cannot already force u, and the test would be vacuous."""
+        mask = _derivable_mask([[1], [2]], [[1, 2], [-1, 3], [2, -3]], 3, DEV)
+        assert not mask.any()
+
+    def test_drop_levels_are_a_ladder(self):
+        """Each level removes a superset of the one before it."""
+        cls = [[-4], [-1, -2, 4], [-1, -3, 4], [5, 6], [-5, 6], [5, -6], [2, 3], [1, 7]]
+        got = {}
+        for lvl in ("none", "subsumed", "derivable"):
+            r = mine_entailed(7, cls, DEV, widths=(1, 2), seconds=30.0, drop=lvl)
+            got[lvl] = {tuple(sorted(c)) for c in r.clauses}
+        assert got["derivable"] <= got["subsumed"] <= got["none"]
+
+    def test_what_it_drops_really_is_covered_in_every_direction(self):
+        """The property the filter promises, against an oracle that shares no code with the engine.
+
+        A marked clause must be REPLACEABLE: for every one of its literals, assuming the others
+        false must already conflict or force it. The candidates are every ENTAILED binary clause,
+        computed by brute force over the truth table — so the fuzz feeds the filter exactly the
+        population it is meant to thin, without asking the engine what is entailed."""
+        from tests.reference_bcp import lit_idx, ref_bcp
+
+        rng = random.Random(7)
+        checked = 0
+        for _ in range(30):
+            nv = rng.randint(3, 6)
+            cls = _random_cnf(rng, nv, rng.randint(3, 9))
+            mods = _brute_models(nv, cls)
+            if not mods:
+                continue
+            cands = _entailed_binaries(nv, mods)
+            if not cands:
+                continue
+            for c, marked in zip(cands, _derivable_mask(cands, cls, nv, DEV)):
+                if not marked:
+                    continue
+                checked += 1
+                for j, want in enumerate(c):
+                    conflict, assigned = ref_bcp(
+                        cls, [lit_idx(-x) for k, x in enumerate(c) if k != j])
+                    assert conflict or lit_idx(want) in assigned, \
+                        f"{c} was dropped but nothing re-derives its {want:+d} direction"
+        assert checked, "the fuzz produced no marked clauses, so it proved nothing"
+
+    def test_a_one_way_implication_is_kept(self):
+        """The case that makes the quantifier matter, small enough to read by hand.
+
+        Probing 1 gives 5 and 6, and only THEN does (-5|-6|2) go unit and force 2 — so (-1|2) is
+        entailed. The reverse does not propagate: assuming -2 leaves (-5|-6), not a unit, so -1 is
+        never forced. One direction covered, one not, and the clause has to stay — dropping it
+        would remove a propagation the consumer had."""
+        base = [[-1, 5], [-1, 6], [-5, -6, 2], [3, 4]]
+        assert not bool(_derivable_mask([[-1, 2]], base, 6, DEV)[0])
+        # ...while a clause whose BOTH directions propagate is still dropped
+        assert bool(_derivable_mask([[-1, 3]], [[-1, 2], [-2, 3], [4, 5]], 5, DEV)[0])

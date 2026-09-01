@@ -50,7 +50,6 @@ def main(path: str) -> int:
     # ---- other things worth knowing about --------------------------------------------------
     #   gpap.sample(path, n=..., full_models=True)   -> full DIMACS models instead of bits
     #   gpap.sample(path, n=..., max_samples=1000)   -> cap what is kept on the host
-    #   gpap.sample(path, n=..., uniformity="exact") -> add a uniformity readout (extra pass)
     #   gpap.sample_clauses(nv, clauses, n=...)      -> an in-memory clause list
     #   gpap.sample_circuit("b10.bench", cycles=25)  -> unroll a circuit and sample its inputs
     return 0

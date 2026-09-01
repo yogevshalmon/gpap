@@ -29,7 +29,11 @@ __all__ = ["sample", "sample_clauses", "sample_circuit", "MAX_SAMPLES", "__versi
 # (`info["cols"]` names them), which is both the cheap artifact and the one people want: it is
 # GPU-projected, so only those bits cross the bus, ~10x cheaper than rebuilding full N-variable
 # assignments on the host. Pass full_models=True for the old list[list[DIMACS literal]] form.
-MAX_SAMPLES = 100_000    # default ceiling on rows materialized to host RAM
+#: Default ceiling on rows RETURNED. It bounds what the caller gets, on both return shapes; the
+#: PEAK host RAM of the `full_models=True` path is bounded separately, by the coverage run's own
+#: batch and chunk caps (`pipeline.sample_clauses`'s `cov_k_cap` / `cov_chunks`), because a chunk
+#: is the smallest unit of work and is never abandoned half-written.
+MAX_SAMPLES = 100_000
 
 
 def sample(path, n=50_000, *, device=None, seed=5, max_samples=MAX_SAMPLES,
@@ -44,7 +48,8 @@ def sample(path, n=50_000, *, device=None, seed=5, max_samples=MAX_SAMPLES,
     `max_samples`); `info["cols"]` gives each column's original DIMACS variable. Collecting them
     happens OFF the timing path, so `info["samples_per_s"]` is unaffected. `full_models=True`
     switches to the coverage pass's full DIMACS models instead (list[list[int]], the historical
-    return) — more informative, considerably more expensive."""
+    return) — more informative, considerably more expensive, and bounded by the SAME
+    `min(n, max_samples)`."""
     from gpap.sampling.pipeline import sample_file
     return _samples(sample_file, (path, _resolve_device(device)), n, seed, max_samples,
                     full_models, kw)
@@ -98,7 +103,12 @@ def _samples(fn, args, n, seed, max_samples, full_models, kw):
     kw.setdefault(key, max(0, min(int(n), int(max_samples))))
     info = fn(*args, n_time=n, seed=seed, **kw)
     if full_models:
-        return info.pop("models"), info
+        # TRUNCATE to what was asked for. A chunk is the smallest unit of work, so the coverage
+        # run overshoots its target by up to one batch — `n=50, max_samples=10` came back with
+        # 2,048 full models, while the bit path (capped in the pipeline) honoured the same
+        # numbers exactly. One ceiling, both shapes: the cap is `kw[key]`, so an explicitly
+        # passed `n_cov` still wins, exactly as it does for `out_cap`.
+        return info.pop("models")[:int(kw[key])], info
     info.pop("models", None)
     s, cols = info.get("samples"), info.get("cols")
     if s is None:      # out_cap=0 explicitly, or a path that collected nothing

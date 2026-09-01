@@ -134,7 +134,9 @@ run (`--n-cov`) was in neither.
 
 Delivery phases now sum to `wall_total_s`; the opt-in readouts are billed to `phases_diag`,
 outside it, so `sps_e2e_total` is not dragged down by a diagnostic the user asked for on the side.
-Gated by a parametrized test over `{off, fast, exact, n_cov}`.
+Gated by a parametrized test over the readouts that still exist — `{off, n_cov, verify_sound}`
+(the `uniformity` readout was removed from the library 2026-09-01; the invariant it exposed is
+about ANY opt-in readout, which is why the parametrization, not the specific flag, is the gate).
 
 ## 5. Silent no-ops and unvalidated arguments
 

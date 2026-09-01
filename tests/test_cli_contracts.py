@@ -162,9 +162,8 @@ def test_delivery_bound_holds_when_a_valve_other_than_the_clock_stops_the_run(tm
 
 
 @needs_gpu
-@pytest.mark.parametrize("extra", [{}, {"uniformity": "fast"}, {"uniformity": "exact"},
-                                   {"n_cov": 300}, {"verify_sound": True}],
-                         ids=["off", "fast", "exact", "cov", "verify"])
+@pytest.mark.parametrize("extra", [{}, {"n_cov": 300}, {"verify_sound": True}],
+                         ids=["off", "cov", "verify"])
 def test_phases_account_for_the_whole_reported_wall(tmp_path, extra):
     """`phases` summed to more than `wall_total_s` by exactly the output pass, which was stamped
     into one and left out of the other — so the honest e2e rate read ~1.5x high.
@@ -175,8 +174,9 @@ def test_phases_account_for_the_whole_reported_wall(tmp_path, extra):
     from gpap.sampling.pipeline import sample_file
     info = sample_file(_cnf(tmp_path, SMALL), torch.device("cuda"), n_time=300, out_cap=300,
                        k_cap=64, time_limit=30.0, mine=False, **extra)
-    # The opt-in READOUTS are billed to `phases_diag`, outside `wall_total_s` — parametrized
-    # because the invariant first held only in the configuration the test happened to use.
+    # The opt-in READOUTS (--n-cov, --verify-sound) are billed to `phases_diag`, outside
+    # `wall_total_s` — parametrized because the invariant first held only in the one
+    # configuration the test happened to use.
     assert sum(info["phases"].values()) == pytest.approx(info["wall_total_s"], rel=0.05)
     # ...and an opt-in readout must be VISIBLE in phases_diag, not merely absent from `phases`:
     # billing it to neither would satisfy the sum above while losing the cost entirely.
@@ -214,7 +214,7 @@ def test_zero_models_on_a_satisfiable_formula_says_why(tmp_path, capsys, monkeyp
 
     def _fake(path, device, **kw):
         return {"samples_per_s": 0.0, "success_rate": 0.0, "nv": 3, "n_clauses": 4,
-                "sup1": [1, 2, 3], "uniformity": None, "sps_e2e_total": 0.0, "phases": {},
+                "sup1": [1, 2, 3], "sps_e2e_total": 0.0, "phases": {},
                 "n_models": 0, "chunk_capped": True, "wall_timed_s": 1.0, "wall_total_s": 1.0,
                 "mined": None, "support_size": 3, "gpu_sound": True, "unsat": False,
                 "samples": np.zeros((0, 3), np.uint8), "cols": [1, 2, 3], "wire_map": {},
@@ -342,3 +342,24 @@ def test_the_two_faces_agree_on_the_decision_batch_default():
     }
     assert len(set(spellings.values())) == 1, \
         "the faces disagree on the default decision batch: " + repr(spellings)
+
+
+@needs_gpu
+def test_full_models_honours_the_same_row_ceiling_as_the_bit_path(tmp_path):
+    """`gpap.sample(..., full_models=True)` returned a whole COVERAGE CHUNK regardless of what
+    was asked for — `n=50, max_samples=10` came back with 2,048 models, while the bit path
+    honoured the same two numbers exactly. A chunk is the smallest unit of work, so the overshoot
+    is intrinsic; what was wrong is that only one of the two return shapes was capped."""
+    import gpap
+    cls = [[1, 2], [-1, 3]]
+    bits, bi = gpap.sample_clauses(4, cls, n=50, max_samples=10)
+    models, mi = gpap.sample_clauses(4, cls, n=50, max_samples=10, full_models=True)
+    # Both COLLECTED something first — otherwise `<= 10` would hold on two empty results and
+    # this would be a test of nothing (the trap the C++ review already caught once).
+    assert bi["n_models"] and mi["n_collected"], "precondition: the run produced rows to cap"
+    # The ceiling is exact on both shapes: min(what was asked for, what was collected).
+    assert len(bits) == min(10, bi["n_models"]) == 10
+    assert len(models) == min(10, mi["n_collected"]) == 10
+    # ...and an EXPLICIT collection request still wins over the default ceiling.
+    more, xi = gpap.sample_clauses(4, cls, n=50, max_samples=10, full_models=True, n_cov=3000)
+    assert len(more) == min(3000, xi["n_collected"]) > 10

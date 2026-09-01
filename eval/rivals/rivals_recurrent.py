@@ -69,7 +69,7 @@ from eval.rivals.rival_common import (CACHE_MISS, VARIANTS, cache_peek,  # noqa:
                                       run_at_batch, variant_note)
 
 from gpap import paths
-from gpap.sampling.metrics import merge_sound_check, sound_verdict
+from gpap.sampling.pipeline import merge_sound_check, sound_verdict
 
 RIVAL_DEFAULT = str(paths.src_dir() / "Recurrent-CircuitSAT-Sampler")
 # Per-SUBPROCESS wall cap for the rival, default 300 s = 5x the 60 s sampling budget GPAP gets

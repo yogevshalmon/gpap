@@ -50,11 +50,10 @@ REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 if REPO_ROOT not in sys.path:
     sys.path.insert(0, REPO_ROOT)
 
-from gpap.sampling.metrics import sound_verdict
+from gpap.sampling.pipeline import sound_verdict
 from gpap.sampling.sampler import GPUSampler   # sets expandable_segments
 from gpap.engine.calibrate import default_k_cap
-from gpap.benchmark import cmsgen_sample
-from gpap.sampling.metrics import distinct_projections, two_wise_coverage
+from gpap.benchmark import cmsgen_sample, distinct_projections, two_wise_coverage
 from gpap.sampling.pipeline import sample_file as gpap_sample
 
 

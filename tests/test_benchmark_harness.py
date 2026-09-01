@@ -330,3 +330,39 @@ class TestCliHelpRenders:
             main(["--help"])
         assert e.value.code == 0
 
+
+class TestQualityPassMetrics:
+    """The quality pass's two metrics, now that they live in the suite driver rather than the
+    library: distinct-projection COUNTING and 2-wise COVERAGE. Neither is a uniformity test —
+    that claim is `eval/uniformity/`'s (barbarik + the exact-oracle fuzz)."""
+
+    def test_two_wise_vectorized_matches_bruteforce(self):
+        import itertools
+        import random
+
+        from gpap.benchmark import two_wise_coverage
+
+        rng = random.Random(9)
+        support = [2, 5, 7, 9]                          # 1-based vars, non-contiguous
+        models = [[v if rng.random() < 0.5 else -v for v in support] for _ in range(40)]
+        got = two_wise_coverage(models, support)
+        # brute-force reference: a pair is covered iff all 4 joint polarities appear
+        covered = total = 0
+        for a, b in itertools.combinations(range(len(support)), 2):
+            total += 1
+            seen = {(support[a] in set(m), support[b] in set(m)) for m in models}
+            covered += len(seen) == 4
+        assert got == pytest.approx(100.0 * covered / total)
+        assert two_wise_coverage([], support) == 0.0
+        assert two_wise_coverage(models, [3]) == 0.0    # S < 2
+
+    def test_distinct_projections_counts_the_projection_not_the_model(self):
+        """Two models that agree on the SUPPORT are one distinct sample — that is the whole
+        point of the metric, and the reason it is computed over the support rather than the
+        full assignment."""
+        from gpap.benchmark import distinct_projections
+
+        sup = [1, 2]
+        models = [[1, 2, 3], [1, 2, -3], [1, -2, 3]]     # first two share the projection (1, 2)
+        assert distinct_projections(models, sup) == (2, 3)
+        assert distinct_projections([], sup) == (0, 0)

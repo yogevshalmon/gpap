@@ -31,7 +31,9 @@ from dataclasses import dataclass, field
 from typing import NamedTuple
 
 import numpy as np
+import torch
 
+from gpap.engine.checker import AssumptionChecker
 from gpap.engine.probe import LiteralProbe, ProbeBudget
 
 log = logging.getLogger(__name__)
@@ -255,16 +257,70 @@ def mine_entailed(num_vars: int, clauses: list, device, *, pool: list | None = N
     return res
 
 
+def _derivable_mask(clauses, base_clauses, num_vars: int, device) -> np.ndarray:
+    """Which of `clauses` can propagation over `base_clauses` fully replace? (n,) bool.
+
+    A clause `(l1|...|lk)` does k separate JOBS: when the other k-1 literals are false it forces
+    the remaining one, and which job fires depends on the search. This marks a clause only when
+    propagation over `base_clauses` covers EVERY one of them — for each j, assuming the other
+    literals false either conflicts (the consumer gets a backtrack, at least as informative) or
+    already forces `lj`. Then the clause adds no propagation power in any direction and a consumer
+    that wants a minimal formula can drop it.
+
+    ⚠️ Derivable is NOT the same as useless. A derivable clause still SHORTENS the derivation, and
+    GPAP's sampler is propagation-bound, so keeping them is measured at +29-43% end-to-end. Drop
+    them for a consumer that wants a minimal formula (a CDCL preprocessor), not for one that wants
+    speed. That is why `mine_entailed(drop=...)` defaults to keeping them.
+
+    ⚠️ CONSERVATIVE, deliberately. Requiring all k jobs makes this weaker than the literature's
+    transitive reduction for hyper-binary resolvents, which can treat one direction as enough
+    because it runs on the binary implication graph, where a binary clause IS both of its edges.
+    Our reference is the PROPAGATION relation, which also holds implications squeezed out of long
+    clauses going unit, and those are one-way: `(-1|5),(-1|6),(-5|-6|2)` propagates 1 => 2 but not
+    -2 => -1, because the backward step would have to conclude "not both 5 and 6" and unit
+    propagation can only conclude a single literal. Measured with a one-direction-is-enough rule
+    instead: 95.4% vs 60.7% dropped on b03-c25, 54.5% vs 20.3% on b09-c25 — i.e. a THIRD of the
+    mined wide clauses have a live direction the weaker rule silently discards. Never a soundness
+    question either way (every mined clause is entailed, so the model set is unchanged whatever is
+    dropped) — only propagation strength. docs/findings/MINING_FINDINGS.md.
+
+    One batched launch: `sum(len(c) for c in clauses)` assumption sets.
+    """
+    wide = [list(c) for c in clauses if len(c) > 1]
+    out = np.zeros(len(clauses), dtype=bool)
+    if not wide:
+        return out
+    ck = AssumptionChecker.from_clauses(int(num_vars), [list(c) for c in base_clauses], device)
+    sets, tag = [], []
+    for ci, cl in enumerate(wide):
+        for j, want in enumerate(cl):
+            sets.append([-int(x) for k, x in enumerate(cl) if k != j])
+            tag.append((ci, int(want)))
+    res = ck.check_assumptions(sets, assignments=True)
+    conflict = res["conflict"].cpu().numpy()
+    asg = res["assignment"]
+    # DIMACS literal -> internal 2N index (+v -> 2(v-1), -v -> 2(v-1)+1).
+    cols = torch.as_tensor([2 * (abs(w) - 1) + (0 if w > 0 else 1) for _, w in tag],
+                           device=asg.device)
+    forced = asg[torch.arange(len(tag), device=asg.device), cols].bool().cpu().numpy()
+    hit = conflict | forced
+    # EVERY job must be covered, not just one (see the docstring). Count per clause.
+    wide_pos = [i for i, c in enumerate(clauses) if len(c) > 1]
+    owner = np.array([ci for ci, _ in tag], dtype=np.int64)
+    jobs = np.bincount(owner, minlength=len(wide))
+    done = np.bincount(owner, weights=hit, minlength=len(wide))
+    out[np.asarray(wide_pos, dtype=np.int64)[jobs == done]] = True
+    return out
+
+
 def _drop_derivable(res: MiningResult, num_vars: int, clauses: list, device) -> None:
     """Remove the clauses propagation already derives, judged against what the caller will HAVE.
 
     That is the input formula plus the mined UNITS — not the input alone. A caller takes the whole
     result, so the units are part of the context a wider clause has to earn its place against;
     judging against the input alone understates the redundancy (on b03-c25, 53% vs 96%)."""
-    from gpap.implications import derivable_mask
-
     units = [c for c in res.clauses if len(c) == 1]
-    mask = derivable_mask(res.clauses, list(clauses) + units, num_vars, device)
+    mask = _derivable_mask(res.clauses, list(clauses) + units, num_vars, device)
     kept = [c for c, red in zip(res.clauses, mask) if not red]
     res.derivable = int(mask.sum())
     res.clauses = kept
