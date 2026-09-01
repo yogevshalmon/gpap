@@ -215,6 +215,15 @@ in `docs/findings/`. Do not put a dated measurement or a card name back into a s
    far as they go: a trajectory is a function of the seed and its row index, so the narrower
    run's models are a PREFIX of the wider one's). Pin the batch before comparing counts —
    `pin_batch` / `gpap_sampler_set_k` / the example's `--k`.
+   ⚠️ **The two faces must also agree on DEFAULTS, not just on the loop.** `GPUSampler.sample`
+   defaulted to `decisions_per_round=1` while `gpap::SampleOptions::batch`, `sample_bits`,
+   `sample_clauses(b=)`, `gpap bench --b` and `DEFAULT_PORTFOLIO[0]` all said 8 — five
+   independent literals, so a DIRECT library caller silently got a different sampler from every
+   other face, on a knob that is both throughput AND uniformity (exact-oracle median TV: B=8
+   0.156 vs B=1 0.315; B ≥ |support| is exactly uniform). Now 8 everywhere and gated by
+   tests/test_cli_contracts.py::test_the_two_faces_agree_on_the_decision_batch_default, which
+   reads the C++ default out of the header text (no CUDA, no build). No recorded sweep moves:
+   every one went through the pipeline or the CLI, which always passed 8 explicitly.
    The RNG is the core's (xoshiro/Fisher-Yates, stdlib-independent);
    ⚠️ recorded rows from before the port replay under torch seeds and are not
    seed-comparable — re-baseline, docs/BENCHMARKING.md §3. The C++ face gained
