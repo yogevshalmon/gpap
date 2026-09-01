@@ -5,7 +5,8 @@
 // --portfolio races the library's default config portfolio (random B=8 / random B=1 /
 // structured B=1) as a throughput bandit — what the Python pipeline runs by default, and what
 // samples the search-heavy instances the single default config cannot. Without it the run is a
-// single config and DETERMINISTIC: same seed, same solutions.
+// single config and DETERMINISTIC: same seed, same solutions — as long as the BATCH is the
+// same, which --k N pins (the default sizes it to live free VRAM).
 //
 // Everything that makes GPAP fast — the batch size, the propagate kernel, the decision order,
 // the chunk loop — is chosen by gpap::Sampler. There is no K to pick and no tuning to do; the
@@ -15,20 +16,32 @@
 //   g++ -std=c++17 sample.cpp -lgpap -o gpap_sample
 #include <cstdio>
 #include <cstdlib>
+#include <string>
+#include <vector>
 
 #include "gpap/gpap.hpp"
 
 int main(int argc, char **argv) {
-    // Pull the one flag out first so the positional arguments stay simple.
+    // Pull the flags out first so the positional arguments stay simple.
     bool portfolio = false;
+    std::int32_t pin_k = 0;                     // 0 = size the batch to free VRAM
     std::vector<const char *> pos;
     for (int i = 1; i < argc; ++i) {
-        if (std::string(argv[i]) == "--portfolio") portfolio = true;
-        else pos.push_back(argv[i]);
+        const std::string a = argv[i];
+        if (a == "--portfolio") { portfolio = true; continue; }
+        if (a != "--k") { pos.push_back(argv[i]); continue; }
+        // A flag that takes a value must SAY SO when it does not get one. Falling through to
+        // the positional list instead would make `--k` the out.txt path and write a file
+        // called "--k".
+        if (i + 1 >= argc || std::atoi(argv[i + 1]) < 1) {
+            std::fprintf(stderr, "%s: --k needs a positive batch size\n", argv[0]);
+            return 2;
+        }
+        pin_k = std::atoi(argv[++i]);
     }
     if (pos.empty()) {
         std::fprintf(stderr, "usage: %s formula.cnf [n_solutions] [seed] [out.txt] "
-                             "[--portfolio]\n", argv[0]);
+                             "[--portfolio] [--k N]\n", argv[0]);
         return 2;
     }
     const char *cnf = pos[0];
@@ -39,6 +52,10 @@ int main(int argc, char **argv) {
         gpap::SampleOptions opts;
         opts.seed = pos.size() > 2 ? std::atoll(pos[2]) : 5;
         if (portfolio) opts.portfolio = gpap::default_portfolio();
+        // --k pins the batch. The default sizes it to LIVE free VRAM, so it is not part of the
+        // seed: two runs of the same formula and seed on a differently loaded card draw
+        // different numbers of trajectories. Pin it whenever runs have to be comparable.
+        opts.k = pin_k;
         // Keep only what we are going to look at: 10 to print, or everything if writing a file.
         // Solutions are found on the GPU either way; this caps what is copied back to the host.
         opts.max_keep = out_path ? static_cast<std::size_t>(want) : 10;

@@ -29,7 +29,7 @@ extern "C" int64_t gpap_check_chunk_size(gpap_engine *e, int64_t n_sets, int64_t
      * sampler's path never does. Read against LIVE free memory each call. */
     const int64_t per_row = gpap_row_bytes(e->num_long, e->num_vars, e->trail_cap) +
                             8ll * std::max<int64_t>(max_lits, 1);
-    const int64_t budget = gpap_mem_available(e->device_ordinal, 0.80);
+    const int64_t budget = gpap_mem_available(e->device_ordinal, gpap::kMemFraction);
     int64_t k = per_row > 0 ? budget / per_row : 1;
     k = std::min<int64_t>(k, gpap_default_k_cap(e->device_ordinal));
     k = std::max<int64_t>(k, 1);

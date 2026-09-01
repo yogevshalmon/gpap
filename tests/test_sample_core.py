@@ -3,9 +3,10 @@ level through gpap.engine._core — no GPUSampler, no pipeline.
 
 The loop this exercises used to be written twice (gpap::Sampler and Python's GPUSampler); it now
 has ONE home, and these tests pin the properties both faces rely on: rows are externally
-verifiable models, a run is a deterministic function of the seed, delivery and the soundness
-self-test stay OFF the sampling clock (and off the RNG stream), and each stop valve reports
-which valve fired.
+verifiable models, a run is a deterministic function of the seed AT A FIXED BATCH (every
+sampler here pins `k_cap`, because K is otherwise the analytic bound over live free VRAM),
+delivery and the soundness self-test stay OFF the sampling clock (and off the RNG stream), and
+each stop valve reports which valve fired.
 """
 import random
 
@@ -238,3 +239,86 @@ def test_set_k_pins_the_batch():
     assert st.attempts % 64 == 0
     s.set_k(0)
     assert s.k == auto
+
+
+def test_a_guard_reports_its_own_failure_not_the_previous_one():
+    """An argument error must EXPLAIN ITSELF.
+
+    `gpap_last_error()` is a thread-local that nothing clears, and both faces append it to every
+    non-OK status. A guard that returned a bare code therefore handed the caller the PREVIOUS
+    call's message — measured across sampler objects, so asking `config_stats` before any run
+    was answered with an out-of-range variable in a formula that sampler had never seen.
+    """
+    rng = random.Random(53)
+    clauses = _sat_cnf(rng)
+    stale = _sampler(clauses, 24, seed=5)
+    with pytest.raises(Exception) as first:                 # noqa: PT011 -- seeds the thread-local
+        stale.set_columns([0, 999])
+    assert "set_columns" in str(first.value)
+
+    s = _sampler(clauses, 24, seed=5)
+    with pytest.raises(Exception) as e:                     # noqa: PT011
+        s.config_stats(0)                                   # no run yet
+    assert "config_stats" in str(e.value) and "999" not in str(e.value), str(e.value)
+
+    s.run(200, [B8], keep_cap=5)
+    with pytest.raises(Exception) as e2:                    # noqa: PT011
+        s.bits(9, rows=1)                                   # only one config exists
+    assert "out of range" in str(e2.value) and "999" not in str(e2.value), str(e2.value)
+
+
+def test_freeing_the_sampler_does_not_touch_a_dead_engine():
+    """`gpap_sampler_free` must not dereference the engine it BORROWED.
+
+    The engine-outlives-the-sampler precondition holds by construction in C++ and by reference
+    in Python — but a reference only orders destruction under REFCOUNTING. The cycle collector
+    and interpreter shutdown finalize in arbitrary order, and a traceback that captured a
+    sampler frame is a cycle, so the engine really can go first. `free` used to read
+    `engine->mode` there to hand the kernel choice back: a heap-use-after-free that ASan aborts
+    on and that a plain build would silently get away with.
+
+    Freeing the engine handle first is exactly what the collector can do, so this reproduces it
+    without depending on gc ordering. Under a sanitizer build it is the whole test."""
+    rng = random.Random(59)
+    clauses = _sat_cnf(rng)
+    f = _core.Formula.from_clauses(24, clauses)
+    e = _core.Engine(f)
+    s = _core.Sampler(e, k_cap=256, seed=5)
+    s.run(200, [B8])                       # a run resolves AUTO, so the sampler holds a pin
+    lib = _core.load()
+    lib.gpap_engine_free(e._h)             # the collector got to the engine first
+    e._h = None                            # ...and its own __del__ is now a no-op
+    del s                                  # must free cleanly, reading nothing through e
+    import gc
+    gc.collect()
+
+
+def test_the_sampler_never_overrides_an_explicit_kernel_pin():
+    """The sampler pins the propagate kernel to its own batch so a short reset elsewhere cannot
+    switch kernels mid-measurement — but only when the choice is ITS to make.
+
+    Once it has pinned, `gpap_engine_auto` is false for its OWN pin too, so "did someone else
+    take the choice" cannot be read off that flag alone; the sampler remembers which kernel it
+    left and stands down as soon as the engine no longer holds it. Without that it re-dispatched
+    over a caller's pin on every set_k, silently changing the kernel under a forced-kernel A/B.
+    """
+    rng = random.Random(61)
+    clauses = _sat_cnf(rng)                    # tiny M: the sampler resolves SCALAR at a big K
+    f = _core.Formula.from_clauses(24, clauses)
+    e = _core.Engine(f)
+    assert e.auto_dispatch, "fixture: the engine must start on AUTO"
+    s = _core.Sampler(e, seed=1)               # default cap => big batch => scalar for this M
+    assert e.mode == "scalar" and not e.auto_dispatch, e.mode
+
+    e.set_mode("wave")                         # the CALLER takes the choice back, after us
+    s.set_k(1024)
+    assert e.mode == "wave", "set_k re-dispatched over a caller's pin"
+    s.run(100, [B8])
+    assert e.mode == "wave", "a run re-dispatched over a caller's pin"
+
+    f2 = _core.Formula.from_clauses(24, clauses)   # pinned BEFORE the sampler exists
+    e2 = _core.Engine(f2)
+    e2.set_mode("wave")
+    s2 = _core.Sampler(e2, seed=1)
+    s2.run(100, [B8])
+    assert e2.mode == "wave", "a pre-existing pin was overridden"

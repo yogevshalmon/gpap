@@ -26,18 +26,27 @@ DEV = torch.device("cuda") if CUDA else torch.device("cpu")
 
 
 def test_cpp_and_python_faces_draw_identical_models(circuit_cnfs, tmp_path):
-    """Same formula, seed, config and cap => identical model count AND identical kept rows."""
+    """Same formula, seed, config and BATCH => identical model count AND identical kept rows.
+
+    The batch is pinned on both sides on purpose. K defaults to the analytic bound over LIVE
+    free VRAM, so it is not a function of the seed: the two faces run in separate processes and
+    a busy card sizes them differently. Left unpinned, this passed only because the instance is
+    small enough for the batch CAP to bind on both — on a smaller card the counts would diverge
+    for a reason that is not a divergence between the faces, which is the opposite of what this
+    file is for. (Rows stay identical either way: a trajectory depends on the seed and its row
+    index, so the narrower run's completions are a prefix of the wider one's.)"""
     from gpap.sampling.sampler import GPUSampler
     _need(SAMPLE_BIN)
     cnf = Path(circuit_cnfs["b03-c5"]["path"])
-    want, seed = 2000, 11
+    want, seed, K = 2000, 11, 8192
 
     # C++ face: the example binary, single default config (random order, B=8), out file kept.
-    rows_cpp, stdout = _run_sampler(cnf, tmp_path / "cpp", n=want, seed=seed)
+    rows_cpp, stdout = _run_sampler(cnf, tmp_path / "cpp", n=want, seed=seed, k=K)
     assert rows_cpp, "the C++ face found nothing — the comparison would be vacuous"
 
-    # Python face: same seed, same single config, same auto cap; rows via the delivery path.
+    # Python face: same seed, same single config, same pinned batch; rows via the delivery path.
     smp = GPUSampler.from_cnf_file(str(cnf), DEV, seed=seed)
+    smp.pin_batch(K)
     r = smp.sample(want, decisions_per_round=8, random_var=True, collect=False, out_cap=want)
 
     nv, cls, sup = _parse_cnf(cnf)

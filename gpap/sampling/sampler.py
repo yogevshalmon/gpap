@@ -60,10 +60,11 @@ def _chunk_budget(v):
 
 def _time_budget(v):
     """`None` = unbounded. A SPENT budget (0.0, the natural value of `limit - elapsed`) clamps to
-    a tiny positive number so the core's `time_limit_s > 0` valve still fires and the run stops
-    after one chunk, instead of reading as no limit at all."""
+    a tiny positive number so the core's `time_limit_s > 0` valve still fires at all, instead of
+    reading as no limit. The valve is checked BEFORE each chunk, so a spent budget buys ZERO
+    further chunks — which is what a caller who has already used its time asked for."""
     if v is None:
-        return 0.0
+        return _NO_LIMIT
     return float(v) if float(v) > 0 else 1e-9
 
 
