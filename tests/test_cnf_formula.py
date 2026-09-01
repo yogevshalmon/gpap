@@ -278,13 +278,17 @@ class TestOccTagAndSplitAgree:
         self._check(f)
 
 
-@pytest.mark.skipif(not _core.available(), reason="libgpap not built (see cpp/README.md)")
 def read_support(path):
     """The 0-based independent support the core parsed out of `c ind` / `cr`.
 
     `Formula.support` is a method on the facade; this goes at the ABI so the parser is what is
     under test. Shared by both support-line test classes — there is one reader, not one per
-    class."""
+    class, and so the "needs the library" guard is one IMPERATIVE skip here rather than a
+    decorator per class. A `skipif` MARK on this function is what CI caught: pytest only honours
+    marks on collected items, so on a helper it silently guards nothing and every caller raised
+    GpapError on a tree with no libgpap."""
+    if not _core.available():
+        pytest.skip("libgpap not built (see cpp/README.md)")
     f = _core.Formula.from_file(str(path))
     n = ctypes.c_int32(0)
     _core.load().gpap_formula_support(f._h, None, ctypes.byref(n))
