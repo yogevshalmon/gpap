@@ -209,6 +209,12 @@ def cms_family(d, stem, encoder):
     rows, cells = select_cells(payload, encoder)
     if not rows:
         return None
+    # ABSENT is not ZERO (the sound_check lesson, again): a row with no cms arm at all — a
+    # GPAP-only sweep, e.g. an engine A/B re-measurement — must not be read as "CMSGen scored 0"
+    # and counted as an outright win over a tool that never ran. A stage with no CMSGen arm has
+    # no Table 1 row; the zero ledger below is only for rows where the comparison actually ran.
+    if not any("cms_n_samples" in r or r.get("cms_sps") is not None for r in rows):
+        return None
 
     def scored(r, key):
         return (r.get(key) or 0) > 0

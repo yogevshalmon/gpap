@@ -563,9 +563,12 @@ def write_summary(stages, out_dir, src_dir):
         # this did) shows their zeros as wins while never showing the zeros as zeros.
         fin = [r["ratio"] for r in best.values()
                if r.get("ratio") and r["ratio"] > 0 and r["ratio"] != float("inf")]
-        n_c0 = sum(1 for r in best.values()
+        # ABSENT is not ZERO: only rows that CARRY a cms arm enter the ledger — a GPAP-only
+        # sweep (no --cmsgen) must read "no comparison", never "wins n/n over CMSGen=0 x n".
+        cmsr = [r for r in best.values() if "cms_n_samples" in r or r.get("cms_sps") is not None]
+        n_c0 = sum(1 for r in cmsr
                    if (r.get("n_models") or 0) > 0 and not (r.get("cms_n_samples") or 0))
-        n_g0 = sum(1 for r in best.values()
+        n_g0 = sum(1 for r in cmsr
                    if (r.get("cms_n_samples") or 0) > 0 and not (r.get("n_models") or 0))
         n_win = sum(1 for x in fin if x >= 1) + n_c0
         n_cmp = len(fin) + n_c0 + n_g0
@@ -580,10 +583,12 @@ def write_summary(stages, out_dir, src_dir):
                 ab = f"{other} {r:.2f}x vs {base} (wins {wins}/{len(items)})"
         pen = _gm([r.get("cms_write_penalty") for r in rows])
         nv = f"**{gm_nv:.1f}x**" if (gm_nv and gm and abs(gm_nv - gm) > 1e-9) else "—"
+        led = (f"{n_win}/{n_cmp} | {n_c0} | {n_g0}" if cmsr
+               else "— | — | —")                          # no cms arm ran: no ledger to print
         lines.append(f"| {stage} | {len(rows)} | {len(best)} | {n_skip} | {n_err} | "
                      f"{'+'.join(encs) or '—'} | {f'{gm:.1f}x' if gm else '—'} | {nv} | "
                      f"{f'{gm_row:.1f}x' if gm_row else '—'} | "
-                     f"{n_win}/{n_cmp} | {n_c0} | {n_g0} | {ab} | "
+                     f"{led} | {ab} | "
                      f"{f'{pen:.1f}x' if pen else '—'} |")
     # skipped/error detail — a sweep that silently dropped instances is not a result
     detail = []
