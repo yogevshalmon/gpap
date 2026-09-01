@@ -366,3 +366,94 @@ class TestQualityPassMetrics:
         models = [[1, 2, 3], [1, 2, -3], [1, -2, 3]]     # first two share the projection (1, 2)
         assert distinct_projections(models, sup) == (2, 3)
         assert distinct_projections([], sup) == (0, 0)
+
+
+class TestTableAlignment:
+    """The bench table's two layout invariants, over every combination of optional columns.
+
+    Three width bugs have shipped in this file, in TWO distinct classes, and each class needs
+    its own check:
+
+      SAME TOTAL WIDTH  the three sim-baseline branches must agree on their field widths. One of
+                        them kept the pre-widening `rej/s` width, shifting `amp`/`krn`/`snd` and
+                        every CMSGen column 4 characters left on exactly the rows where the
+                        instance was not a circuit.
+      NO GLUED CELLS    a value that exactly FILLS its right-aligned field leaves no separating
+                        space and runs into its left neighbour (`5.0e-01143,498,947` for `p_acc`
+                        + a 9-digit accepted/s; `0.1s12,234,239` for `t_enc` + an 8-digit unique
+                        rate). Total width is unchanged, so the first check cannot see it — but
+                        two glued cells are ONE whitespace token instead of two, and neither the
+                        header labels nor the row's own cells contain spaces, so comparing token
+                        counts against the header detects it without restating a single width.
+    """
+
+    class _Args:                                   # only the flags the formatters read
+        def __init__(self, **kw):
+            self.seeds = self.twise = self.sim_baseline = self.cmsgen = None
+            self.__dict__.update(kw)
+
+    # At the wide end of the range campaigns ACTUALLY produce — a mid-range row would pass
+    # while the suite's own output did not, and a max-out-every-field row would demand widths
+    # for numbers we never print. `unique_sps_est` and `accepted_per_s` are the two values
+    # observed gluing (b03-c4: `0.1s12,234,239`; a 9-digit accepted/s under `p_acc`); the rest
+    # are the documented maxima from `_format_header` (rates 6e7 samples/s, M 1e6 on a b14-c25
+    # tseitin unroll, sols 1e7, the documented ceiling, plus the `<` chunk-capped marker).
+    ROW = {
+        "name": "registerlesSwap-c50", "enc_key": "abc:fast", "nv": 999_999, "M": 1_000_000,
+        "support": 65536, "gpap_sps": 62_345_678.0, "gpap_sps_e2e": 51_234_567.0,
+        "decisions_per_s": 6.7e7, "implications_per_s": 2.4e9, "succ": 1.0,
+        "n_models": 10_000_000, "chunk_capped": True, "wall_timed_s": 123.4,
+        "wall_total_s": 234.5, "sps_spread_frac": 0.42, "encode_s": 123.4,
+        "unique_sps_est": 12_234_239.0, "twise_gpap": 100.0, "mined": {"n_units": 1},
+        "engine": {"mode": "wave", "shift": 16}, "sound_check": "ok",
+        "cms_sps": 1_234_567.0, "cms_decisions_per_s": 5.4e6,
+        "cms_implications_per_s": 5.4e6, "ratio": 1234.56, "ratio_e2e": 999.99,
+        "twise_cms": 100.0,
+    }
+
+    @pytest.mark.parametrize("multi_enc", [False, True])
+    @pytest.mark.parametrize("has_circuits", [False, True])
+    @pytest.mark.parametrize("quality", [False, True])
+    @pytest.mark.parametrize("flags", [
+        {}, {"seeds": [1, 2]}, {"twise": True}, {"sim_baseline": True},
+        {"cmsgen": "/bin/true"}, {"twise": True, "cmsgen": "/bin/true"},
+        {"seeds": [1, 2], "twise": True, "sim_baseline": True, "cmsgen": "/bin/true"},
+    ])
+    def test_row_width_matches_header_width(self, multi_enc, has_circuits, quality, flags):
+        from gpap.benchmark import _format_header, _format_row
+
+        args = self._Args(**flags)
+        hdr = _format_header(args, multi_enc, has_circuits, quality)
+        # Three sim_baseline shapes, because they are three separate format branches and only
+        # one of them was ever exercised by a manual eyeball.
+        for sim in (None,
+                    {"hits": 7, "p_accept": 4.9e-4, "accepted_per_s": 162_912_098.0},
+                    {"hits": 0, "p_accept_lt": 1e-9}):
+            row = dict(self.ROW, sim_baseline=sim, amplification=2047.0)
+            line = _format_row(row, args, multi_enc, has_circuits, quality)
+            why = f"(sim={None if sim is None else sim['hits']})\n{hdr}\n{line}"
+            assert len(line) == len(hdr), \
+                f"row is {len(line) - len(hdr):+d} chars off the header {why}"
+            assert len(line.split()) == len(hdr.split()), \
+                f"{len(hdr.split()) - len(line.split())} cell(s) ran together {why}"
+
+    def test_both_invariants_actually_fire(self):
+        """A gate nobody has seen fail is a gate that might be checking nothing. Each check is
+        shown rejecting the shape it exists for — one row too long, one row with a glued cell
+        that is exactly the right length."""
+        from gpap.benchmark import _format_header, _format_row
+
+        args = self._Args(sim_baseline=True)
+        hdr = _format_header(args, False, False, False)
+        # (a) overflow past the field: 15 digits + commas is well past `rej/s`.
+        over = dict(self.ROW, amplification=2047.0,
+                    sim_baseline={"hits": 1, "p_accept": 0.5, "accepted_per_s": 1e14})
+        assert len(_format_row(over, args, False, False, False)) > len(hdr)
+        # (b) EXACTLY filling the field: same total width, one token short. This is the shape
+        #     the length check cannot see, and it is what shipped twice.
+        glued = dict(self.ROW, amplification=2047.0,
+                     sim_baseline={"hits": 1, "p_accept": 0.5,
+                                   "accepted_per_s": 162_912_098.0 * 1000})  # 15 chars w/ commas
+        line = _format_row(glued, args, False, False, False)
+        assert len(line) == len(hdr), "precondition: this row is the RIGHT length"
+        assert len(line.split()) < len(hdr.split()), "...but two of its cells ran together"

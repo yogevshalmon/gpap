@@ -57,7 +57,7 @@ import time
 from gpap.cli import CIRCUIT_EXTS, _NONNEG_INT, _POS_INT, _POS_SECS, _k_cap_arg
 from gpap.sampling.pipeline import merge_sound_check, sound_verdict
 
-SCHEMA = 4          # results-JSON schema version (docs/BENCHMARKING.md §7)
+SCHEMA = 4          # results-JSON schema version (docs/BENCHMARKING.md §9)
 #   1: original flat rows
 #   2: + encode_s / encoder / sim_baseline / per_seed
 #   3: + one row per (instance, ENCODER) with `enc_key`; engine provenance (`engine`); CMSGen
@@ -489,28 +489,7 @@ def main(argv=None):
           f"| n_time={args.n_time:,} (limit {args.time_limit:g}s/inst) n_cov={args.n_cov:,} "
           f"| cmsgen={cms_note}{enc_note}\n{len(files)} benchmarks x {len(specs)} encoder(s)\n")
 
-    hdr = f"{'instance':<24}"
-    if multi_enc:
-        hdr += f"{'enc':>10}"
-    # Widths sized for the real range: rates reach 6e7 samples/s and sols 1e7 on shallow
-    # circuits, and a column that overflows silently glues itself to its neighbour.
-    hdr += (f"{'N':>7}{'M':>8}{'|sup|':>6}{'GPAP/s':>13}{'e2e/s':>13}"
-            f"{'dec/s':>9}{'impl/s':>9}{'succ%':>6}{'sols':>12}{'t_slv':>7}{'t_tot':>7}")
-    if args.seeds:
-        hdr += f"{'±%':>5}"
-    if has_circuits:
-        hdr += f"{'t_enc':>7}"
-    if quality:
-        hdr += f"{'uniq/s~':>10}"
-    if args.twise:
-        hdr += f"{'2wiseG':>8}"
-    if args.sim_baseline:
-        hdr += f"{'p_acc':>9}{'rej/s':>15}{'amp':>9}"
-    hdr += f"{'krn':>5}{'snd':>4}"
-    if args.cmsgen:
-        hdr += f"{'CMS/s':>10}{'Cdec/s':>9}{'Cimpl/s':>9}{'GPAP/CMS':>10}{'e2e/CMS':>9}"
-        if args.twise:
-            hdr += f"{'2wiseC':>7}"
+    hdr = _format_header(args, multi_enc, has_circuits, quality)
     print(hdr)
     print("-" * len(hdr))
 
@@ -758,7 +737,7 @@ def _run_one(path0, row, args, device, portfolio, mine, quality, sample_file):
         "n_models": g["n_models"], "wall_timed_s": g["wall_timed_s"],
         "wall_total_s": g["wall_total_s"], "chunk_capped": g.get("chunk_capped"),
         "sim_baseline": sim,
-        # "ok" | "UNSOUND" | "off" — see gpap.sampling.sampler. NOT a bool: "off" (the check
+        # "ok" | "UNSOUND" | "off" — see gpap.sampling.pipeline. NOT a bool: "off" (the check
         # was not run) must not read as either verdict.
         "succ": g["success_rate"], "sound_check": sound,
         # `sound_rows_checked` is the EVIDENCE: a verdict is a statement ABOUT some number of
@@ -857,6 +836,41 @@ def _run_one(path0, row, args, device, portfolio, mine, quality, sample_file):
     return row
 
 
+def _format_header(args, multi_enc, has_circuits, quality):
+    """The table header. It lives beside `_format_row`, in the same optional-column order,
+    because the only thing that makes either of them right is that the two agree.
+
+    Widths are sized for the range the columns actually reach: rates 6e7 samples/s, sols 1e7 on
+    shallow circuits (plus the `<` chunk-capped marker), M 1e6 on a b14-c25 tseitin unroll. A
+    value that overflows its field does not error — it glues itself to the neighbour on its
+    left, and the table still looks like a table. That has shipped three times (`rej/s` under a
+    9-digit accepted/s; `uniq/s~` under an 8-digit unique rate; and the no-circuit branch left
+    at the pre-widening `rej/s` width, which shifted every column to its right by 4), so the
+    range above is not a guideline: it is what tests/test_benchmark_harness.py::TestTableAlignment
+    renders, and widening a value means widening its label here in the same edit."""
+    hdr = f"{'instance':<24}"
+    if multi_enc:
+        hdr += f"{'enc':>10}"
+    hdr += (f"{'N':>7}{'M':>8}{'|sup|':>6}{'GPAP/s':>13}{'e2e/s':>13}"
+            f"{'dec/s':>9}{'impl/s':>9}{'succ%':>6}{'sols':>13}{'t_slv':>7}{'t_tot':>7}")
+    if args.seeds:
+        hdr += f"{'±%':>5}"
+    if has_circuits:
+        hdr += f"{'t_enc':>7}"
+    if quality:
+        hdr += f"{'uniq/s~':>13}"
+    if args.twise:
+        hdr += f"{'2wiseG':>8}"
+    if args.sim_baseline:
+        hdr += f"{'p_acc':>9}{'rej/s':>15}{'amp':>9}"
+    hdr += f"{'krn':>5}{'snd':>4}"
+    if args.cmsgen:
+        hdr += f"{'CMS/s':>10}{'Cdec/s':>9}{'Cimpl/s':>9}{'GPAP/CMS':>10}{'e2e/CMS':>9}"
+        if args.twise:
+            hdr += f"{'2wiseC':>7}"
+    return hdr
+
+
 def _format_row(r, args, multi_enc, has_circuits, quality):
     eng = r.get("engine") or {}
     line = f"{r['name'][:22]:<24}"
@@ -870,7 +884,7 @@ def _format_row(r, args, multi_enc, has_circuits, quality):
     sols_s = f"{r['n_models']:,}" + ("<" if r.get("chunk_capped") else "")
     line += (f"{r['nv']:>7}{r['M']:>8}{r['support']:>6}"
              f"{r['gpap_sps']:>13,.0f}{r.get('gpap_sps_e2e') or 0:>13,.0f}{dps:>9}{ips:>9}"
-             f"{100*r['succ']:>5.0f}%{mn}{sols_s:>11}"
+             f"{100*r['succ']:>5.0f}%{mn}{sols_s:>12}"
              f"{r['wall_timed_s']:>6.1f}s{r['wall_total_s']:>6.1f}s")
     if args.seeds:
         sp = r.get("sps_spread_frac")
@@ -879,13 +893,13 @@ def _format_row(r, args, multi_enc, has_circuits, quality):
         line += f"{r['encode_s']:>6.1f}s" if r.get("encode_s") is not None else f"{'—':>7}"
     if quality:
         uq = f"{r['unique_sps_est']:,.0f}" if r.get("unique_sps_est") else "—"
-        line += f"{uq:>10}"
+        line += f"{uq:>13}"
     if args.twise:
         line += f"{(r.get('twise_gpap') or 0):>7.1f}%"
     if args.sim_baseline:
         sim = r.get("sim_baseline")
         if sim is None:
-            line += f"{'—':>9}{'—':>11}{'—':>9}"
+            line += f"{'—':>9}{'—':>15}{'—':>9}"
         elif sim["hits"]:
             amp = r.get("amplification") or 0.0
             amps = f"{amp:,.0f}x" if amp < 1e6 else f"{amp:.0e}x"
