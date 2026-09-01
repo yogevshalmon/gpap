@@ -533,6 +533,15 @@ extern "C" gpap_status gpap_engine_trajectory_dev(gpap_engine *e, uintptr_t orde
         return GPAP_ERR_ARG;
     }
     GPAP_TRY(use_ctx(e));
+    /* ABOVE the P == 0 return, for the reason apply_dev_common's counter zeroing sits above its
+     * L == 0 one: the per-launch counters describe THE LAST CALL and reset() does not clear them,
+     * so a zero-width launch that skipped this would report the PREVIOUS trajectory's work as its
+     * own. Both entry points had the same early return added for the same degenerate formula (one
+     * whose variables unit propagation already determined); only one of them zeroed. */
+    GPAP_TRY(e->nprops.zero());
+    GPAP_TRY(e->nops.zero());
+    GPAP_TRY(e->ndecs.zero());
+    GPAP_TRY(e->nrounds.zero());
     if (P == 0) {
         /* Nothing to decide (a formula whose variables are all determined, e.g. after unit
          * propagation): every active row is already a complete model. */
@@ -547,10 +556,6 @@ extern "C" gpap_status gpap_engine_trajectory_dev(gpap_engine *e, uintptr_t orde
      * the pair as CONSISTENT — so nothing downstream, `--verify-sound` included, could notice. */
     GPAP_TRY(gpap::engine_reject_if_packed_is_baseline(e, "gpap_engine_trajectory"));
     GPAP_TRY(ensure_state(e, e->K));
-    GPAP_TRY(e->nprops.zero());
-    GPAP_TRY(e->nops.zero());
-    GPAP_TRY(e->ndecs.zero());
-    GPAP_TRY(e->nrounds.zero());
     e->packed_clean_rows = 0;       /* a trajectory dirties without a restorable record */
     e->abits_diverged = 0;          /* ...but it leaves packed and abits CONSISTENT */
 
