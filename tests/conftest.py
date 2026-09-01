@@ -11,8 +11,15 @@ import pytest
 import torch
 
 CUDA = torch.cuda.is_available()
+#: Every path into the checkout is anchored HERE, never on the process's working directory.
+#: `pytest tests/` from anywhere but the repo root used to fail 32 tests with FileNotFoundError
+#: on hardcoded `benchmarks/...` strings — and one of them (the occ/split check over a real
+#: benchmark) `pytest.skip`ped instead, so from the wrong directory it disappeared in silence
+#: rather than failing. Test modules import these two names.
 REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 BENCH_DIR = os.path.join(REPO_ROOT, "benchmarks", "circuits", "bench")
+SEQ_DIR = os.path.join(BENCH_DIR, "seq")
+COMB_DIR = os.path.join(BENCH_DIR, "comb")
 
 
 # Sequential circuits × unroll depths (kept small for CI) + a deep-cascade c25 (slow), plus two

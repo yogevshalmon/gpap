@@ -14,6 +14,7 @@ import pytest
 from gpap.engine import _core
 from gpap.engine.formula import CnfFormula, ext_lit_to_lit_index, lit_index_negation
 from tests.reference_formula import ReferenceFormula
+from tests.conftest import REPO_ROOT
 
 TEST_DATA_DIR = os.path.join(os.path.dirname(__file__), "test_data")
 SIMPLE = [[-1, 2], [1, -2, 3], [-1, -2], [-3]]     # (~1|2), (1|~2|3), (~1|~2), (~3)
@@ -270,7 +271,7 @@ class TestOccTagAndSplitAgree:
 
     def test_on_a_real_benchmark(self):
         import pathlib
-        cnf = sorted(pathlib.Path("benchmarks/sampling").glob("*.cnf"))
+        cnf = sorted((pathlib.Path(REPO_ROOT) / "benchmarks" / "sampling").glob("*.cnf"))
         if not cnf:
             pytest.skip("no benchmark CNFs in the checkout")
         f = _core.Formula.from_file(str(cnf[0]))

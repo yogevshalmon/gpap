@@ -21,7 +21,7 @@ from gpap.circuits.abc_backend import abc_available, find_abc
 from gpap.circuits.aig2cnf import build_cnf_aig, convert_aig_one, simulate_aig
 from gpap.circuits.aiger import read_aiger
 
-BENCH = "benchmarks/circuits/bench/seq"
+from tests.conftest import SEQ_DIR as BENCH
 
 # 2 inputs, 1 latch (reset 0), 1 output = ~latch; latch chases and(and(i0,i1), latch).
 AAG_SEQ = """aag 5 2 1 1 2

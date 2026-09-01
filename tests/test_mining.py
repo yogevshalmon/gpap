@@ -243,13 +243,22 @@ class TestMining:
     def test_random_formulas_stay_model_preserving(self):
         from pysat.solvers import Minisat22
         rng = random.Random(7)
+        mined = 0
         for _ in range(10):
             nv = rng.randint(6, 14)
             clauses = _random_cnf(rng, nv, rng.randint(2 * nv, 5 * nv))
             with Minisat22(bootstrap_with=clauses) as s:
                 if not s.solve():
                     continue                                  # UNSAT input: mining may derive it
-            self._check_entailed(nv, clauses, pool=list(range(min(nv, 6))))
+            # DIMACS literals, both polarities of the first few variables. It used to be
+            # `range(min(nv, 6))`, which starts at 0 — not a literal at all, silently dropped by
+            # the free-variable filter, so the pool was one variable short and one-sided.
+            k = min(nv, 6)
+            pool = [sign * v for v in range(1, k + 1) for sign in (1, -1)]
+            mined += len(self._check_entailed(nv, clauses, pool=pool).clauses)
+        # `_check_entailed` compares model sets only when something WAS mined, so a miner that
+        # returned nothing would satisfy every assertion in it, ten times over.
+        assert mined, "nothing was mined on any instance: the entailment check never ran"
 
     def test_widths_are_selectable(self):
         clauses = [[1, 2], [1, -2], [-1, -3, -4], [-1, -3, 4]]
@@ -403,6 +412,7 @@ class TestSubsumption:
         # (-1 | -2) is given. Any triple containing it -- (-1 | -2 | x) -- is implied by it.
         clauses = [[-1, -2], [1, 3], [2, 3], [-3, 4], [-3, -4], [5, 6], [-5, 6], [5, -6]]
         res = mine_entailed(8, clauses, DEV, widths=(1, 2, 3), seconds=30.0)
+        assert res.clauses, "nothing mined — a filter that dropped EVERYTHING would pass this"
         known = {tuple(sorted(c)) for c in clauses}
         for cl in res.clauses:
             t = tuple(sorted(cl))
@@ -468,6 +478,7 @@ class TestSubsumptionFilter:
         """The property mining promises, on random formulas: nothing it returns is subsumed by the
         formula it was mined from (reduced by the baseline), and everything it returns is entailed."""
         rng = random.Random(11)
+        checked = 0
         for _ in range(40):
             nv = rng.randint(4, 12)
             clauses = [c for c in ([list({rng.choice([1, -1]) * rng.randint(1, nv)
@@ -482,7 +493,11 @@ class TestSubsumptionFilter:
             for cl in res.clauses:
                 t = tuple(sorted(cl))
                 if len(t) > 1:                      # width 1 is provably never subsumed
+                    checked += 1
                     assert not sub.subsumes(t), f"emitted {t}, which the formula subsumes"
+        # Most of these random formulas mine units only, and a unit is skipped above — so
+        # without this the loop can run 40 instances and test the filter on nothing.
+        assert checked, "the fuzz produced no wide clause: the subsumption check never ran"
 
     def test_mining_is_kernel_invariant(self):
         """What mining RETURNS must not depend on which propagate kernel ran.

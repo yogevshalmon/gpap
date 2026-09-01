@@ -2,9 +2,11 @@
 
 The semantic oracle is the pure-Python reference BCP (reference_bcp.py — BCP fixpoints are
 confluent, so agreement is exact), plus external CPU verification of every sampled model
-(_satisfies / PySAT in the miner test). Reproducibility: the fused trajectory consumes the
-torch RNG once per chunk (order + seed), so same-seed runs are bit-identical.
+(_satisfies / PySAT in the miner test). Reproducibility: the chunk loop draws its order
+and trajectory seed from the CORE sampler's own RNG (cpp/src/sample.cpp), so at a fixed batch
+same-seed runs are bit-identical — see tests/test_sample_core.py for that contract itself.
 """
+import os
 import random
 
 import pytest
@@ -16,6 +18,7 @@ from gpap.engine import core_available
 from gpap.sampling.sampler import GPUSampler, _satisfies
 
 from tests.reference_bcp import ref_bcp, assigned_set
+from tests.conftest import SEQ_DIR
 
 CUDA = torch.cuda.is_available()
 AVAIL = CUDA and core_available()
@@ -81,7 +84,7 @@ def test_fixpoint_matches_reference_multistep():
 def test_fixpoint_matches_reference_circuit(tmp_path):
     """Reference A/B on a real unrolled circuit (deep propagation cascades)."""
     from gpap.circuits.bench import parse_bench, build_cnf, write_dimacs
-    circ = parse_bench("benchmarks/circuits/bench/seq/s386.bench")
+    circ = parse_bench(os.path.join(SEQ_DIR, "s386.bench"))
     b, support, _, _ = build_cnf(circ, T=3, seed=1)
     p = tmp_path / "s386c3.cnf"
     write_dimacs(str(p), b, support)
@@ -157,7 +160,7 @@ def test_fused_phase_boundary(tmp_path):
     support fully determines the rest, a huge B must keep ~full success, not collapse (the
     pre-fix straddle bug measured 100%->0% here)."""
     from gpap.circuits.bench import parse_bench, build_cnf, write_dimacs
-    circ = parse_bench("benchmarks/circuits/bench/seq/s386.bench")
+    circ = parse_bench(os.path.join(SEQ_DIR, "s386.bench"))
     b, support, _, _ = build_cnf(circ, T=2, seed=1)
     p = tmp_path / "s386c2.cnf"
     write_dimacs(str(p), b, support)

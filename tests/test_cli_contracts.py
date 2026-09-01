@@ -228,6 +228,72 @@ def test_zero_models_on_a_satisfiable_formula_says_why(tmp_path, capsys, monkeyp
     assert "UNSAT" not in out                    # the opposite fact must not be implied
 
 
+# ------------------------------------------------------------- the soundness tri-state
+
+class TestSoundVerdict:
+    """`pipeline.sound_verdict` / `merge_sound_check` — THE reader and THE fold.
+
+    Every consumer branches on the string: the bench table, the CLI, the Colab driver, the rival
+    harnesses and paper_tables all import these two. They replaced six open-coded comparisons, of
+    which only two handled the legacy key — so a resumed campaign reported a fully verified sweep
+    as "not run", and a legacy FAILURE as a non-verdict. Neither function had a test.
+    """
+
+    def test_the_three_states_are_read_back_verbatim(self):
+        from gpap.sampling.pipeline import SOUND_BAD, SOUND_OFF, SOUND_OK, sound_verdict
+        for state in (SOUND_OK, SOUND_BAD, SOUND_OFF):
+            assert sound_verdict({"sound_check": state}) == state
+
+    def test_a_row_with_no_verdict_at_all_reads_off_not_ok(self):
+        """"not run" is not "passed". This is the conflation the tri-state exists to prevent, so
+        an unrecognised value has to land on `off` rather than being taken at face value."""
+        from gpap.sampling.pipeline import SOUND_OFF, sound_verdict
+        assert sound_verdict({}) == SOUND_OFF
+        assert sound_verdict({"sound_check": "yes"}) == SOUND_OFF     # junk is not a verdict
+        assert sound_verdict({"sound_check": None}) == SOUND_OFF
+
+    def test_the_legacy_bool_is_a_verdict_in_both_directions(self):
+        """Rows recorded before 2026-08-30 carry `gpu_sound: bool` and checked unconditionally,
+        so the bool IS the verdict there — including when it is False, which is the half that was
+        being read as "no verdict"."""
+        from gpap.sampling.pipeline import SOUND_BAD, SOUND_OK, sound_verdict
+        assert sound_verdict({"gpu_sound": True}) == SOUND_OK
+        assert sound_verdict({"gpu_sound": False}) == SOUND_BAD
+        # a row carrying both keys is a NEW row; the new key wins
+        assert sound_verdict({"sound_check": SOUND_OK, "gpu_sound": False}) == SOUND_OK
+
+    def test_unsound_dominates_the_merge(self):
+        """The timed and coverage runs are folded into one published verdict. Preferring either
+        run's "ok" printed it beside the other's non-zero `unsound_rows`."""
+        from gpap.sampling.pipeline import SOUND_BAD, SOUND_OFF, SOUND_OK, merge_sound_check
+        assert merge_sound_check(SOUND_OK, SOUND_BAD) == SOUND_BAD
+        assert merge_sound_check(SOUND_BAD, SOUND_OK) == SOUND_BAD    # order must not matter
+        assert merge_sound_check(SOUND_OFF, SOUND_BAD) == SOUND_BAD
+        # ...and evidence beats absence, in both orders
+        assert merge_sound_check(SOUND_OK, SOUND_OFF) == SOUND_OK
+        assert merge_sound_check(SOUND_OFF, SOUND_OK) == SOUND_OK
+        # nothing ran, or nothing was passed at all
+        assert merge_sound_check(SOUND_OFF, SOUND_OFF) == SOUND_OFF
+        assert merge_sound_check() == SOUND_OFF
+        assert merge_sound_check(None, "") == SOUND_OFF
+
+
+@needs_gpu
+def test_verify_requested_but_never_reached_reads_off(tmp_path):
+    """`--verify-sound` on a run that COMPLETES NOTHING must report "off", not "ok".
+
+    The check runs per chunk over the rows that chunk completed, so a 0%-success run never calls
+    it — and publishing that as a pass is the same conflation one state along: an un-run check
+    printed as a passing one. `sound_rows_checked` is the evidence, so it must be 0 with it.
+    """
+    from gpap.sampling.sampler import GPUSampler
+    smp = GPUSampler.from_clauses(1, [[1], [-1]], torch.device("cuda"), k_cap=16, seed=1)
+    out = smp.sample(10, max_chunks=5, collect=False, verify_sound=True)
+    assert out["n_models"] == 0, "fixture: this run must complete nothing"
+    assert out["sound_rows_checked"] == 0
+    assert out["sound_check"] == "off", "an un-run check must not be published as a passing one"
+
+
 # ------------------------------------------------------------------ writers
 
 @pytest.mark.parametrize("n,c,dtype,scale", [
@@ -342,6 +408,39 @@ def test_the_two_faces_agree_on_the_decision_batch_default():
     }
     assert len(set(spellings.values())) == 1, \
         "the faces disagree on the default decision batch: " + repr(spellings)
+
+
+def test_no_face_turns_on_the_soft_polarity_by_itself():
+    """The Barbarik-rejected soft polarity is OPT-IN on EVERY face, and there are three doors.
+
+    Python's is `--allow-soft` (gated by test_sampler.py::test_soft_is_not_in_any_default_
+    portfolio). The other two are defaults, so nothing catches them by construction: the C++
+    `SampleOptions::retry_with_lookahead`, which shipped as `auto_retry = true` — the flip runs
+    the OTHER polarity, so on a config the bandit left at plain that retry IS soft — and the
+    ctypes binding's own keyword default, which is what every Python caller gets.
+
+    Read out of the header text on purpose, like the decision-batch default beside it: no CUDA,
+    no build, and the header is what an out-of-tree C++ caller actually compiles against.
+    """
+    import inspect
+    import re
+    from pathlib import Path
+
+    from gpap.engine import _core
+
+    hpp = (Path(__file__).resolve().parents[1] / "cpp/include/gpap/gpap.hpp").read_text()
+    m = re.search(r"bool\s+retry_with_lookahead\s*=\s*(true|false)\s*;", hpp)
+    assert m, "SampleOptions::retry_with_lookahead not found — did the field move or revert?"
+    assert m.group(1) == "false", \
+        "gpap::SampleOptions turns the soft-polarity retry on by default (the auto_retry bug)"
+    assert inspect.signature(_core.Sampler.run).parameters["retry_with_lookahead"].default \
+        is False, "the Python binding's own default enables it"
+    # ...and the rename is the guard the ground rule asks for: a caller of the OLD name must not
+    # still compile, or the reversal is invisible to everyone who only relinks. Matched as a
+    # DECLARATION, not as a mention — the header explains the rename in prose right above the
+    # field, and a bare substring search reads that explanation as the bug.
+    assert not re.search(r"^\s*bool\s+auto_retry\b", hpp, re.M), \
+        "the old field name is declared again — a silent flip for callers who only relink"
 
 
 @needs_gpu

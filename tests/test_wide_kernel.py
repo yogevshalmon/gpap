@@ -24,13 +24,37 @@ pytestmark = pytest.mark.skipif(not AVAIL, reason="requires CUDA + a built libgp
 DEV = torch.device("cuda") if CUDA else torch.device("cpu")
 
 
+def _force_wide(smp, seed, k_cap):
+    """Put `smp` on the 8|24 split — BOTH halves of it.
+
+    `GPUSampler` holds two things that name an engine: the `engine` attribute the tests read,
+    and the core sampler handle (`_smp`), which is bound at construction and is what executes
+    every chunk. Rebinding one without the other is silent: nothing raises, the run simply
+    happens somewhere else. The pair is rebuilt here, and `_sample` asserts afterwards that the
+    engine it hands back is the one that propagated.
+    """
+    from gpap.engine import _core as _gcore
+    smp.engine = BCPEngine(smp.formula, force_wide=True)
+    smp._smp = _gcore.Sampler(smp.engine._core, seed=seed,
+                              k_cap=(-1 if k_cap is None else int(k_cap)))
+    smp._sup_pushed = "unset"          # the new handle has been told nothing about the support
+
+
 def _sample(clauses, nv, cfg, *, force_wide=False, seed=17, chunks=6, k_cap=128):
     smp = GPUSampler.from_clauses(nv, clauses, DEV, k_cap=k_cap, seed=seed)
     if force_wide:
-        smp.engine = BCPEngine(smp.formula, force_wide=True)
+        _force_wide(smp, seed, k_cap)
+    props0 = smp.engine.props_total()
     out = smp.sample(10 ** 9, configs=[cfg], max_chunks=chunks, collect=True,
                      verify_sound=True,
                      verify_clauses=clauses)
+    # NON-VACUITY, and the whole reason this helper exists: the engine under test must be the
+    # one that actually propagated. Assigning `smp.engine` alone does NOT redirect the run — the
+    # CORE sampler handle is created in GPUSampler.__init__ over the engine that existed then —
+    # so the swapped-in 8|24 engine sat idle at zero propagations while the original 16|16 one
+    # ran every chunk, and both A/Bs below compared the base split against ITSELF.
+    assert smp.engine.props_total() > props0, \
+        "the engine under test did no work — the run went to a different engine"
     assert out["all_valid"]
     # "ok" iff rows were actually checked. `sound_check` is "off" when the run completed NO row,
     # because a verdict with no evidence is not a verdict — asserting "ok" here used to pass on a
@@ -49,6 +73,9 @@ def test_wide_matches_base_small():
         assert shift_w == 8, "forced wide mode did not engage"
         m_base, ob, shift_b = _sample(clauses, 6, cfg)
         assert shift_b == 16
+        # NON-VACUITY first: two empty model sets are equal, and that is exactly how
+        # test_wide_matches_base_random passed on five instances before it grew this line.
+        assert ow["n_models"] > 0, f"{cfg} produced nothing — the comparison would be vacuous"
         assert m_wide == m_base, f"wide kernel changed the model set for {cfg}"
         assert ow["n_models"] == ob["n_models"]
 

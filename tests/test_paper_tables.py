@@ -375,3 +375,53 @@ def test_a_timeout_does_not_walk_the_whole_batch_ladder():
     best, sweep = run_at_batch(run, 3_000_000, log=lambda *_: None)
     assert "error" in best
     assert len(calls) <= 3, f"walked the ladder on a timeout: {calls}"
+
+
+# --------------------------------------------------------------- one home for the screens
+
+#: The rules that decide which cells a published number is computed over. CLAUDE.md states they
+#: live in `eval/artifact/paper_tables.py` ONCE and that the deck imports them; nothing enforced
+#: it, and "the second tool re-derived the first tool's rule" is the failure mode the whole file
+#: above exists for — a re-derivation drifts silently, and the two tables then disagree about
+#: what was excluded while both look correct.
+SCREENS = ["zero_search", "select_cells", "cms_family", "prop_rates", "rival_family",
+           "encoders_in", "unique_unmeasured", "sound_failed"]
+
+
+def _eval_modules():
+    root = Path(__file__).resolve().parents[1] / "eval"
+    return sorted(p for p in root.rglob("*.py"))
+
+
+def test_each_screening_rule_is_defined_exactly_once_across_eval():
+    """A second definition anywhere under eval/ is the drift itself, whatever it is called."""
+    import ast
+
+    home = Path(__file__).resolve().parents[1] / "eval" / "artifact" / "paper_tables.py"
+    found = {name: [] for name in SCREENS}
+    for path in _eval_modules():
+        for node in ast.parse(path.read_text()).body:
+            if isinstance(node, ast.FunctionDef) and node.name in found:
+                found[node.name].append(path)
+    for name, where in found.items():
+        assert where == [home], (
+            f"{name} is defined in {[str(w.name) for w in where] or 'nowhere'} — it must have "
+            f"exactly one home, {home.name}")
+
+
+@pytest.mark.parametrize("mod", ["slide_tables.py", "soft_price_tables.py"])
+def test_the_other_generators_import_the_paper_rules_rather_than_restating_them(mod):
+    """The deck and the soft-price sweep must be the SAME aggregation, by construction.
+
+    They print numbers a reader compares against the paper's, so a private copy of `cms_family`
+    in either one is a table that can quietly diverge from the one it is supposed to mirror.
+    """
+    import ast
+
+    root = Path(__file__).resolve().parents[1]
+    tree = ast.parse((root / "eval/artifact" / mod).read_text())
+    imported = {alias.name for node in ast.walk(tree)
+                if isinstance(node, ast.ImportFrom) and (node.module or "").endswith("paper_tables")
+                for alias in node.names}
+    assert "cms_family" in imported, \
+        f"{mod} does not import the paper's family aggregation — is it re-deriving it?"
