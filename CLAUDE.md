@@ -208,8 +208,14 @@ in `docs/findings/`. Do not put a dated measurement or a card name back into a s
    the adaptive config bandit, the stop valves, per-config kept-row buckets and the
    delivery/verify accounting — one home, the same lesson as `check.cpp`/`probe.cpp`. Both
    faces (`GPUSampler`, `gpap::Sampler`) are marshalling over it; at one seed + single config
-   they draw IDENTICAL models (gated by tests/test_face_parity.py; the loop's own contract by
-   tests/test_sample_core.py). The RNG is the core's (xoshiro/Fisher-Yates, stdlib-independent);
+   + **one BATCH** they draw IDENTICAL models (gated by tests/test_face_parity.py; the loop's own
+   contract by tests/test_sample_core.py). ⚠️ **K is NOT part of the seed** — it is the analytic
+   bound over LIVE free VRAM, so the same formula and seed in a process already holding device
+   memory runs fewer trajectories and reports a different `n_models` (the rows still agree as
+   far as they go: a trajectory is a function of the seed and its row index, so the narrower
+   run's models are a PREFIX of the wider one's). Pin the batch before comparing counts —
+   `pin_batch` / `gpap_sampler_set_k` / the example's `--k`.
+   The RNG is the core's (xoshiro/Fisher-Yates, stdlib-independent);
    ⚠️ recorded rows from before the port replay under torch seeds and are not
    seed-comparable — re-baseline, docs/BENCHMARKING.md §3. The C++ face gained
    `portfolio`/`var_order` (it could sample NOTHING on the service family before — PhaseService:
@@ -661,10 +667,14 @@ Cross-GPU K-scaling: `eval/colab/colab_sampling_benchmark.py` + `notebooks/gpap_
 
 ## Ground rules (do not re-litigate — see docs/findings/INSIGHTS.md)
 
-- **An ABI break MUST move the soname.** libgpap is 0.2.0 / SOVERSION 1 as of the defaults
-  change; a caller that only RELINKS gets none of the compile errors the renames were chosen for,
-  and under SOVERSION 0 it would have read `GPAP_MODE_WAVE` as scalar and passed an int where a
-  `gpap_probe_options*` is dereferenced. Bump both again on the next break.
+- **An ABI break MUST move the soname; an ADDITIVE change must not.** libgpap is 0.3.0 /
+  SOVERSION 1. The 0.2.0 defaults-and-renames change is what moved SOVERSION 0 -> 1: a caller
+  that only RELINKS gets none of the compile errors the renames were chosen for, and under
+  SOVERSION 0 it would have read `GPAP_MODE_WAVE` as scalar and passed an int where a
+  `gpap_probe_options*` is dereferenced. 0.3.0 ADDED `gpap_sampler_*` and changed no existing
+  symbol or struct, so the soname stayed put and an old binary keeps linking. Move it again on
+  the next break — and keep this line's version current: it is what the next reader compares
+  the header against.
 - **`{0}` MUST equal NULL on every options struct.** Three fields have broken it (`vscan`,
   `mode`, `same_var`) and each was a silent wrong default on the raw C face, which is the ONE
   face with no wrapper to fix it up. So: every field's zero is its default, and where the useful

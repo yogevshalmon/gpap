@@ -401,10 +401,22 @@ gpap_status gpap_assume_units(gpap_engine *e, const int32_t *lits, int32_t n);
  * adds packaging, not a second engine path. Not thread-safe (the engine is not); the engine
  * must outlive the sampler, and nothing else may drive that engine between create and free.
  *
- * DETERMINISM: a run is a pure function of (formula, options, configs, seed) — the RNG and the
- * shuffle are the library's own (splitmix64-seeded xoshiro256**, in-house Fisher-Yates), never
- * std::mt19937/std::shuffle, whose draws differ across standard libraries. Delivery draws
- * nothing from that stream, so asking for rows cannot change which models a seed finds. */
+ * DETERMINISM: a SINGLE-config run at a FIXED BATCH is a pure function of (formula, options,
+ * seed) — the RNG and the shuffle are the library's own (splitmix64-seeded xoshiro256**,
+ * in-house Fisher-Yates), never std::mt19937/std::shuffle, whose draws differ across standard
+ * libraries. Delivery draws nothing from that stream, so asking for rows cannot change which
+ * models a seed finds.
+ * ⚠ THE BATCH IS NOT PART OF THE SEED. K defaults to the analytic bound over LIVE free VRAM
+ * (gpap_compute_k_safe), so the same formula and seed run on a busier card, or in a process
+ * that already holds device memory, draws a DIFFERENT number of trajectories and reports a
+ * different n_models. The rows still agree as far as they go — a trajectory depends on the
+ * seed and its row index, so the narrower run's models are a prefix of the wider one's — but a
+ * comparison of COUNTS has to pin K first (gpap_sampler_set_k, or a k_cap below the analytic
+ * bound). Every measurement protocol in this project pins it for exactly this reason.
+ * A PORTFOLIO run (n_configs > 1) is deliberately NOT reproducible across machines or repeats:
+ * the bandit picks each chunk's config from measured wall-clock throughput, so the chunk
+ * sequence — and with it the sampling stream — is machine-local. Pin ONE config whenever a
+ * measurement or a comparison has to be exact. */
 
 /* One portfolio entry: how a trajectory decides. */
 typedef struct {
@@ -525,6 +537,12 @@ typedef struct {
  * `seed` seeds the handle's RNG once; runs CONTINUE the stream (reseed restarts it). */
 gpap_status gpap_sampler_create(gpap_engine *e, int64_t seed, int32_t k_cap,
                                 gpap_sampler **out);
+/* Frees the sampler and NOTHING ELSE — in particular it does not touch the borrowed engine, so
+ * it is safe to call in a destructor that cannot prove the engine is still alive (a
+ * garbage-collected face has no destruction ORDER to offer). Consequence: if this sampler
+ * resolved the engine's AUTO mode into a concrete kernel, that kernel stays pinned. It is a
+ * pure launch flag — by confluence it can only change speed — but a caller that keeps using
+ * the engine restores per-reset dispatch with gpap_engine_set_mode(e, GPAP_MODE_AUTO). */
 void gpap_sampler_free(gpap_sampler *s);
 
 /* The resolved batch (rows per chunk). */
@@ -538,7 +556,13 @@ gpap_status gpap_sampler_reseed(gpap_sampler *s, int64_t seed);
 /* Decision phase 1: 0-based variable indices decided (and completion-counted) first. The faces
  * pass the formula's `c ind` support here — the engine does not retain the formula, so the
  * sampler cannot read it itself. NULL/0 = no support: a single phase over every variable.
- * Out-of-range indices are rejected (an index past N corrupts a LATER row's bitmap). */
+ * Out-of-range indices are rejected (an index past N corrupts a LATER row's bitmap). Order and
+ * duplicates do not matter: the set is what is read.
+ * SET IT ONCE, right after create. Each DISTINCT support costs a pair mask, and a pair mask
+ * lives until the engine dies (there is no release — see gpap_pair_mask_create), so a caller
+ * that cycles through different supports on one sampler leaks ceil(2N/32) device words per
+ * change. Re-passing the SAME set is free (it is detected and skipped), which is what makes it
+ * safe for a face to push the support on every run. */
 gpap_status gpap_sampler_set_support(gpap_sampler *s, const int32_t *vars, int32_t n);
 /* Columns of the kept rows: 0-based variables, in output order. NULL/0 (default) = every
  * variable. Takes effect at the NEXT run; gpap_sampler_bits reads with the column width its

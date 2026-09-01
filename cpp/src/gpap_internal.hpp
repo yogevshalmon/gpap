@@ -19,6 +19,14 @@ namespace gpap {
 void set_error(const char *fmt, ...);
 const char *get_error();
 
+/* Share of free VRAM one batch of rows may occupy — the ONLY proportional headroom in the
+ * sizing path (the per-row model is exact; the absolute margin is calibrate.cpp's driver
+ * reserve). ONE definition: sampling, probing and batched checking all size their chunk
+ * against the same number, and a retune that reached only one of them would make the same
+ * formula pick different batches depending on which entry point asked. It was a bare 0.80
+ * spelled once per file, under a comment claiming it was the same constant everywhere. */
+constexpr double kMemFraction = 0.80;
+
 /* Guard for PACKED-derived readouts: errors when a CLEAN launch left the baseline behind
  * (defined in engine.cpp, used by readout.cpp). */
 gpap_status engine_reject_if_packed_is_baseline(gpap_engine *e, const char *what);

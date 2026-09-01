@@ -891,8 +891,12 @@ class Sampler:
     (cpp/src/sample.cpp). This is marshalling only — the loop, the bandit, the stop valves and
     the delivery/verify accounting all live in the core, shared with the C++ face.
 
-    The engine must outlive the sampler and nothing else may drive it while the sampler exists;
-    holding a reference here is what makes that true under CPython refcounting."""
+    The engine must outlive the sampler and nothing else may drive it while the sampler exists.
+    The reference held here is what keeps the engine ALIVE for as long as this object can be
+    used. It does NOT order the two destructions — the cycle collector and interpreter shutdown
+    finalize in arbitrary order, and a traceback holding a sampler frame is a cycle — so the
+    core's `gpap_sampler_free` deliberately touches nothing but the sampler
+    (tests/test_sample_core.py::test_freeing_the_sampler_does_not_touch_a_dead_engine)."""
 
     def __init__(self, engine: Engine, *, seed: int = 0, k_cap: int = 0):
         lib = load()

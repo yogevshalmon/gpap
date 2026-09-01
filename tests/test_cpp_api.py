@@ -46,12 +46,17 @@ def _parse_cnf(path: Path):
     return nv, clauses, (support or None)
 
 
-def _run_sampler(cnf: Path, workdir: Path, n=2000, seed=7):
-    """-> (solution rows as DIMACS literals, the binary's stdout)."""
+def _run_sampler(cnf: Path, workdir: Path, n=2000, seed=7, k=0):
+    """-> (solution rows as DIMACS literals, the binary's stdout).
+
+    `k` pins the batch. The default sizes it to LIVE free VRAM, which is NOT part of the seed:
+    comparing counts against another process (test_face_parity) needs both sides on one batch."""
     workdir.mkdir(parents=True, exist_ok=True)
     out = workdir / "sols.txt"
-    r = subprocess.run([str(SAMPLE_BIN), str(cnf), str(n), str(seed), str(out)],
-                       capture_output=True, text=True, timeout=600)
+    cmd = [str(SAMPLE_BIN), str(cnf), str(n), str(seed), str(out)]
+    if k:
+        cmd += ["--k", str(k)]
+    r = subprocess.run(cmd, capture_output=True, text=True, timeout=600)
     assert r.returncode == 0, f"gpap_sample failed:\n{r.stdout}\n{r.stderr}"
     rows = [[int(t) for t in ln.split()] for ln in out.read_text().splitlines() if ln.strip()]
     return rows, r.stdout
@@ -144,7 +149,11 @@ def test_cpp_sampler_projected_support(circuit_cnfs, tmp_path):
 
 
 def test_cpp_sampler_is_deterministic(circuit_cnfs, tmp_path):
-    """A run is a function of the seed alone — same seed, same solutions; different seed, not."""
+    """Same seed, same solutions; different seed, not.
+
+    "A function of the seed" holds at a fixed BATCH, which is what running both arms in one
+    process on one card gives us here — K is auto-sized from live free VRAM, so it is not itself
+    a function of the seed (see gpap.h, and test_face_parity, which pins it across processes)."""
     _need(SAMPLE_BIN)
     cnf = Path(circuit_cnfs["b03-c5"]["path"])
     a, _ = _run_sampler(cnf, tmp_path / "a", n=800, seed=11)

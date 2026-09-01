@@ -436,12 +436,15 @@ enum class VarOrder : std::int32_t {
 /** How the sampler should run. Every field has a working default; `seed` is the only one most
  *  callers set. Sizes and kernel choices are derived from the GPU and the formula.
  *
- *  A default run is DETERMINISTIC: same seed, same library build, same solutions, on any
- *  standard library (the RNG and shuffle are libgpap's own — see cpp/src/sample.cpp). A
- *  `portfolio` run is not machine-reproducible by design: the bandit selects configs on
- *  measured wall-clock throughput. */
+ *  A default run is DETERMINISTIC: same seed, same library build, same BATCH, same solutions,
+ *  on any standard library (the RNG and shuffle are libgpap's own — see cpp/src/sample.cpp).
+ *  Two things are outside that: a `portfolio` run is not machine-reproducible by design (the
+ *  bandit selects configs on measured wall-clock throughput), and `k`/`k_cap` left at 0 size
+ *  the batch from LIVE free VRAM, so a busier card runs a different number of trajectories and
+ *  reports a different `found()`. Pin `k` when runs have to be comparable. */
 struct SampleOptions {
-    /** Reproducibility: a single-config run is a pure function of this seed. */
+    /** Reproducibility: a single-config run at a fixed batch is a pure function of this seed
+     *  (see `k` — the batch is auto-sized from free VRAM and is NOT part of the seed). */
     std::int64_t seed = 0;
     /** Stop after this many seconds of SAMPLING wall even if the target is not met (0 = no
      *  limit). Delivery and verification are billed outside this clock. */
@@ -487,7 +490,11 @@ struct SampleOptions {
      *  `auto_retry = true`; renamed rather than reversed so an out-of-tree caller gets a
      *  compile error, not a silent default change — the library's own ground rule.) */
     bool retry_with_lookahead = false;
-    /** Trajectories per chunk. 0 = size it to the free VRAM (recommended). */
+    /** Trajectories per chunk. 0 = size it to the free VRAM (recommended).
+     *  ⚠ At 0 the batch is NOT part of the seed: it is the analytic bound over LIVE free VRAM,
+     *  so the same formula and seed on a busier card draw a different number of trajectories
+     *  and report a different `found()`. Pin it (here, or `Sampler::set_k`) whenever two runs
+     *  have to be comparable — a cross-machine A/B, a regression gate, a recorded number. */
     std::int32_t k = 0;
     /** Upper bound on the auto-sized K. **0 (default) = the library's batch cap**
      *  (`gpap_default_k_cap`, the same number on every GPU); a positive value is that cap
@@ -772,8 +779,10 @@ class Sampler {
         }
     }
 
-    /* Declaration order is the destruction contract: the handle is declared LAST so it is freed
-     * FIRST — gpap_sampler_free touches the engine it borrowed. */
+    /* ~Sampler() frees the handle in its BODY, before any of these are destroyed, so the
+     * sampler is gone while the engine it borrowed is still alive — the order the ABI asks
+     * for. (gpap_sampler_free no longer depends on it: a destructor cannot verify a borrow,
+     * so it touches nothing but the sampler. Keeping the order right anyway is free.) */
     Formula formula_;
     SampleOptions opts_;
     gpap_sampler_options run_opts_{};            // opts_, translated once for the ABI
