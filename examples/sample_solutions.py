@@ -4,8 +4,11 @@
     python examples/sample_solutions.py [formula.cnf]
 
 There is no batch size to pick and no tuning to do: GPAP sizes the GPU batch to the card and the
-formula, picks the propagate kernel, orders decisions so propagation does the work, and verifies
-on the device that every row it returns satisfies every clause.
+formula, picks the propagate kernel, and orders decisions so propagation does the work.
+
+Every row returned is a model by construction (a trajectory is only counted once it is active
+and fully assigned). The device-side RE-CHECK of that is a separate, opt-in self-test — hence
+`sound-check=off` below; pass `verify_sound=True` to run it.
 """
 import sys
 

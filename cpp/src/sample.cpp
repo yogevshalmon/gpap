@@ -105,6 +105,8 @@ struct gpap_sampler {
     int32_t K_auto = 0;                  /* calibrated at create */
     int32_t K = 0;                       /* effective (set_k overrides) */
     int we_pinned_mode = 0;              /* we resolved AUTO -> hand it back on free */
+    gpap_mode pinned_mode = GPAP_MODE_AUTO;  /* ...and WHICH kernel we left there, so a pin the
+                                              * caller makes AFTERWARDS is distinguishable */
 
     Rng rng, bandit_rng;
 
@@ -144,10 +146,19 @@ int32_t auto_k(gpap_engine *e, int32_t k_cap) {
  * which is what gpap_engine_auto reports. Once WE pinned, engine_auto goes 0, so re-pins after
  * set_k key off we_pinned_mode instead. */
 gpap_status pin_mode(gpap_sampler *s) {
-    if (!gpap_engine_auto(s->e) && !s->we_pinned_mode) return GPAP_OK;
-    s->we_pinned_mode = 1;
+    if (!gpap_engine_auto(s->e)) {
+        /* Someone else owns the choice. Either they pinned BEFORE we existed (we never did), or
+         * they pinned AFTER we did -- which we can see, because e->mode is no longer the kernel
+         * we left there. Checking we_pinned_mode alone was a latch: once set it never cleared,
+         * so every later set_k re-dispatched OVER a caller's pin and free() then reset the
+         * engine to AUTO, silently switching the kernel under a forced-kernel A/B. */
+        if (!s->we_pinned_mode) return GPAP_OK;
+        if (s->e->mode != s->pinned_mode) { s->we_pinned_mode = 0; return GPAP_OK; }
+    }
     const int wave = gpap_dispatch_wave(s->e->num_clauses, s->K, s->e->device_ordinal);
-    return gpap_engine_set_mode(s->e, wave ? GPAP_MODE_WAVE : GPAP_MODE_SCALAR);
+    s->pinned_mode = wave ? GPAP_MODE_WAVE : GPAP_MODE_SCALAR;
+    s->we_pinned_mode = 1;
+    return gpap_engine_set_mode(s->e, s->pinned_mode);
 }
 
 void rebuild_phases(gpap_sampler *s) {
@@ -209,7 +220,8 @@ extern "C" void gpap_sampler_free(gpap_sampler *s) {
     /* Borrower hygiene: if WE resolved AUTO into a concrete kernel, hand the choice back —
      * set_mode(AUTO) re-enables per-reset dispatch (and keeps any $GPAP_KERNEL pin, see
      * gpap_engine_set_mode). A pin the CALLER made is left exactly as found. */
-    if (s->we_pinned_mode) (void)gpap_engine_set_mode(s->e, GPAP_MODE_AUTO);
+    if (s->we_pinned_mode && s->e->mode == s->pinned_mode)
+        (void)gpap_engine_set_mode(s->e, GPAP_MODE_AUTO);
     delete s;
 }
 
@@ -342,9 +354,8 @@ extern "C" gpap_status gpap_sampler_run(gpap_sampler *s, int64_t n_target,
         int retry_soft = 0;                     /* single-config retry state (see below) */
 
         const auto t0 = clock::now();
-        auto sampling_s = [&] {
-            return seconds_between(t0, clock::now()) - st.deliver_s - st.verify_s;
-        };
+        auto elapsed_s = [&] { return seconds_between(t0, clock::now()); };
+        auto sampling_s = [&] { return elapsed_s() - st.deliver_s - st.verify_s; };
 
         for (;;) {
             /* ---- stop valves (between chunks) -------------------------------------- */
@@ -363,7 +374,11 @@ extern "C" gpap_status gpap_sampler_run(gpap_sampler *s, int64_t n_target,
                 st.stop = GPAP_SAMPLE_STOP_CHUNKS;
                 break;
             }
-            if (s->opt.time_limit_s > 0 && sampling_s() >= s->opt.time_limit_s) {
+            /* REAL wall, not sampling_s: this is a promise about how long the call takes.
+             * Charging delivery and the verify self-test to the caller's budget would be wrong,
+             * but so is running past it -- in `gpap bench` the same number is also the rival
+             * subprocess's timeout, and a column has to charge both sides or neither. */
+            if (s->opt.time_limit_s > 0 && elapsed_s() >= s->opt.time_limit_s) {
                 st.stop = GPAP_SAMPLE_STOP_TIME;
                 st.timed_out = st.n_models < n_target ? 1 : 0;
                 break;
@@ -415,7 +430,9 @@ extern "C" gpap_status gpap_sampler_run(gpap_sampler *s, int64_t n_target,
                 }
             }
             const gpap_sample_config &cfg = s->run_cfgs[(size_t)ci];
-            const int soft = cfg.soft || retry_soft;
+            /* FLIP, not OR: a config already running soft would otherwise retry with the
+             * identical polarity and report that a different one was tried. */
+            const int soft = retry_soft ? !cfg.soft : cfg.soft;
 
             /* ---- one chunk --------------------------------------------------------- */
             /* Order: phase 1 (support) then phase 2, each phase shuffled for a random-order
@@ -523,7 +540,8 @@ extern "C" gpap_status gpap_sampler_run(gpap_sampler *s, int64_t n_target,
         st.dominant_config = dom;
         st.best_config = best;
         st.lookahead_used = adaptive ? s->run_cfgs[(size_t)best].soft
-                                     : (s->run_cfgs[0].soft || retry_soft);
+                                     : (retry_soft ? !s->run_cfgs[0].soft
+                                                   : s->run_cfgs[0].soft);
         if (stats_out) *stats_out = st;
         return GPAP_OK;
     });

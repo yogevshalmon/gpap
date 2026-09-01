@@ -161,12 +161,20 @@ def test_zero_yield_gives_up_after_cold_start_plus_grace():
     assert st.retried == 0
 
 
-def test_retry_with_lookahead_flips_once_then_stops():
+@pytest.mark.parametrize("soft0", [False, True], ids=["off-to-on", "on-to-off"])
+def test_retry_with_lookahead_flips_once_then_stops(soft0):
+    """The retry FLIPS the risk polarity — it does not turn it on.
+
+    Both headers say "flipped", but the loop computed `cfg.soft || retry_soft`, so a config
+    already running soft retried with the IDENTICAL polarity: a second full window of the same
+    trajectory, reported as though the other one had been tried. Parametrized because only the
+    on->off direction can tell the two implementations apart."""
     clauses = [[1, 2], [1, -2], [-1, 2], [-1, -2]]
     s = _sampler(clauses, 2, seed=5)
-    st = s.run(100, [B8], retry_with_lookahead=True)
+    st = s.run(100, [(True, 8, soft0)], retry_with_lookahead=True)
     assert _core.SAMPLE_STOP[st.stop] == "zero_yield"
-    assert st.retried == 1 and st.lookahead_used == 1
+    assert st.retried == 1
+    assert st.lookahead_used == (0 if soft0 else 1), "the retry must run the OTHER polarity"
     assert st.chunks == 6, "one full window under each polarity"
 
 
@@ -190,7 +198,7 @@ def test_min_measure_chunks_extends_past_the_target():
     rng = random.Random(37)
     clauses = _sat_cnf(rng)
     s = _sampler(clauses, 24, seed=5)
-    st = s.run(1, [(True, 8, False), (True, 1, False)], min_measure_chunks=3)
+    s.run(1, [(True, 8, False), (True, 1, False)], min_measure_chunks=3)
     assert max(s.config_stats(i).chunks for i in range(2)) >= 3, \
         "the headline rate would rest on a single noisy chunk"
 

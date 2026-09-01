@@ -160,7 +160,6 @@ def k_scaling(path: str, device: torch.device, *, b: int, chunks: int, k_cap: in
     # geometric ladder ending at auto_K: auto_K/2^(n-1) .. auto_K, floored at 256
     ks = sorted({max(256, auto_K >> i) for i in range(n_points)})
     points = []
-    import random as _random
     for k in ks:
         if k > auto_K:
             continue

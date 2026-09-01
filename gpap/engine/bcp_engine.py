@@ -118,8 +118,6 @@ class BCPEngine:
         self._core = _core.Engine(formula.core, device=self._device.index or 0, mode=mode,
                                   force_shift=8 if force_wide else 0)
         self._mode = self._core.requested_mode
-        self._K = 0
-        self._counter_base = (0, 0, 0, 0)
 
     # ------------------------------------------------------------------ configuration
 
@@ -182,7 +180,12 @@ class BCPEngine:
 
     @property
     def K(self) -> int:
-        return self._K
+        """Rows the engine currently holds state for — read from the CORE, not mirrored here.
+
+        The mirror was written only by this class's `reset`, and since the sampling loop moved
+        into libgpap nothing on that path calls it: `K` read 0 after any sampling run and
+        `assignment` handed back an empty (0, 2N) matrix."""
+        return self._core.K
 
     # ------------------------------------------------------------------ entry points
 
@@ -191,7 +194,6 @@ class BCPEngine:
         and resolve the propagate kernel for that batch if the mode is "auto" (done by the core,
         which is what makes the dispatch reach every consumer of the ABI and not just this one)."""
         self._core.reset(K)
-        self._K = int(K)
 
     def apply_and_propagate(self, decisions) -> None:
         """Apply a (K, L) int64 decision tensor/array (-1 = padding) and BCP to fixpoint — ONE
@@ -314,7 +316,7 @@ class BCPEngine:
     def assignment(self) -> torch.Tensor:
         """(K, 2N) int8 (1 = TRUE) — MATERIALIZED from the bitmap on every call; a copy, not the
         live state. Prefer the selection accessors on hot paths."""
-        return self.assignment_rows(np.arange(self._K, dtype=np.int32))
+        return self.assignment_rows(np.arange(self.K, dtype=np.int32))
 
     def assignment_rows(self, row_idx) -> torch.Tensor:
         """(n, 2N) int8 assignments for the selected rows (bool mask or index tensor)."""

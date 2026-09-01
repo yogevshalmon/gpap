@@ -901,7 +901,8 @@ class Sampler:
         check(lib.gpap_sampler_create(engine._h, int(seed), int(k_cap), byref(h)),
               "create sampler")
         self._h = h
-        self._n_cols = engine.num_vars          # kept-row width; set_columns overrides
+        self._n_cols = engine.num_vars          # kept-row width for the NEXT run
+        self._run_cols = self._n_cols           # ...and the width the LAST run gathered under
         self._last: "SampleStats | None" = None
 
     # -------------------------------------------------- knobs
@@ -955,6 +956,10 @@ class Sampler:
         st = SampleStats()
         check(load().gpap_sampler_run(self._h, int(n_target), arr, len(configs), byref(o),
                                       byref(st)), "sampler run")
+        # Snapshot the column width the way the CORE does (gpap_sampler.run_cols_n): it reads
+        # kept rows back at `rows * run_cols_n` bytes, so sizing the destination from the LIVE
+        # mirror would overrun the buffer if `set_columns` narrowed between run and bits.
+        self._run_cols = self._n_cols
         self._last = st
         return st
 
@@ -969,7 +974,9 @@ class Sampler:
         if rows is None:
             idx = int(self._last.best_config) if (i < 0 and self._last is not None) else max(i, 0)
             rows = int(self.config_stats(idx).kept_rows)
-        out = np.zeros((int(rows), self._n_cols), dtype=np.uint8)
+        # zeros, not empty: the core writes min(capacity, kept) rows, so a caller asking for
+        # more than the bucket holds would otherwise read uninitialized memory in the tail.
+        out = np.zeros((int(rows), self._run_cols), dtype=np.uint8)
         if rows:
             check(load().gpap_sampler_bits(self._h, int(i), _p(out, ctypes.c_uint8), int(rows)),
                   "sampler bits")

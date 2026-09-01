@@ -847,7 +847,7 @@ def main(argv=None):
     b.add_argument("--allow-soft", action="store_true",
                    help="add the soft risk-polarity config to the bandit portfolio. Higher "
                         "success on tight/deep circuits, but it BIASES the distribution "
-                        "(Barbarik rejects it on 33 of 35) — opt in only when throughput matters and "
+                        "(Barbarik rejects it on 64 of 65 circuits) — opt in only when throughput matters and "
                         "uniformity does not")
     b.add_argument("--device", default=None)
     b.add_argument("--output", default=None)
