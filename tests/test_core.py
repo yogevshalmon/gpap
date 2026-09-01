@@ -249,6 +249,36 @@ def test_trajectory_counters_agree_with_the_assignment(mode):
     assert int(core.num_propagated().sum()) == c.props - c.decs
 
 
+@pytest.mark.parametrize("entry", ["trajectory", "apply"])
+def test_a_zero_width_launch_does_not_report_the_previous_one(entry):
+    """The per-launch counters describe THE LAST CALL, and reset() does not clear them — so the
+    degenerate launch (an empty decision order, a zero-width apply) has to clear them itself or
+    it publishes the PREVIOUS launch's propagation as its own. Both entry points grew the same
+    early return for the same degenerate formula (one whose variables unit propagation already
+    determined) and only apply zeroed; the trajectory reported stale counters until 2026-09-01.
+
+    It fails against the unfixed library, not merely passes against this one: the first launch
+    is asserted to have produced non-zero work, so `all zero` afterwards is a real transition."""
+    nv, K = 12, 8
+    clauses = [[1, 2, 3], [-1, 4], [-2, -4], [3, -4, 5], [-5, 6], [-6, 7, 8]]
+    core = _core.Engine(_core.Formula.from_clauses(nv, clauses))
+    order = np.arange(nv, dtype=np.int32)
+
+    core.reset(K)
+    core.trajectory(order, nv, 1, 12345)
+    worked = core.num_propagated()
+    assert worked.any(), "the priming launch must do work, or the check below is vacuous"
+
+    core.reset(K)
+    if entry == "trajectory":
+        rounds = core.trajectory(np.empty(0, dtype=np.int32), 0, 1, 999)
+        assert rounds == 0
+    else:
+        core.apply(np.empty((K, 0), dtype=np.int64))
+    assert not core.num_propagated().any(), \
+        f"a zero-width {entry} reported the previous launch's implications"
+
+
 @pytest.mark.slow
 @pytest.mark.parametrize("name", ["b03-c25", "b06-c10", "s386-c10"])
 def test_circuit_models_are_sound(circuit_cnfs, name):

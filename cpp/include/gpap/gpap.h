@@ -194,17 +194,24 @@ gpap_status gpap_engine_apply_dev(gpap_engine *e, uintptr_t decisions_dev, int32
  * The next gpap_engine_reset then skips the K*M state broadcast ("reset-lite"), which is
  * 41-94% of a probe chunk's wall (docs/plans/RESET_RESTORE_PLAN.md). Contract: reset() first,
  * exactly as gpap_engine_apply — and nothing may read post-apply STATE afterwards. What the
- * state readouts see is ASYMMETRIC, because this restores the PACKED words only:
+ * state readouts do is ASYMMETRIC, because this restores the PACKED words only:
  *   flags + counters (gpap_flags, gpap_num_propagated) — the RESULT, always valid;
- *   PACKED readouts  (gpap_sat_rows, gpap_check_sound, gpap_packed_rows) — see the BASELINE,
- *                     so a soundness check after a clean launch judges the wrong state;
  *   ABITS readouts   (gpap_assignment_rows, gpap_var_bits, gpap_select_complete) — see the
  *                     FIXPOINT: the clean tail does not touch the assignment bitmap;
- *   gpap_engine_recache_flush — REFUSED with an error, since that pair is inconsistent and
- *                     caching it would corrupt the flush cache for the life of the engine. Probing/mining and flags-only checking run on
- * this; GPAP_CLEAN=0 in the environment (read at engine create) restores EXACT legacy
- * behaviour — every apply_clean becomes plain apply AND every reset broadcasts — the A/B
- * lever and the escape hatch. */
+ *   PACKED readouts  (gpap_sat_rows, gpap_check_sound) — REFUSED with an error. They would
+ *                     answer from the baseline, i.e. describe no launch that ran, and a
+ *                     soundness verdict on the wrong state is worse than no verdict;
+ *   gpap_engine_recache_flush — REFUSED for the same reason one step on: that pair is
+ *                     inconsistent and caching it would corrupt the flush cache for the life
+ *                     of the engine. Re-run with gpap_engine_apply and recache THAT;
+ *   another launch (gpap_engine_apply, gpap_engine_trajectory) — also REFUSED: it would
+ *                     decrement baseline clause counts against literals already TRUE. Call
+ *                     gpap_engine_reset first, as every chunked caller already does;
+ *   gpap_packed_rows — deliberately NOT refused. It is the raw/debug readout, and returning
+ *                     the baseline is exactly what the CLEAN-mode identity gate checks.
+ * Probing/mining and flags-only checking run on this; GPAP_CLEAN=0 in the environment (read at
+ * engine create) restores EXACT legacy behaviour — every apply_clean becomes plain apply AND
+ * every reset broadcasts — the A/B lever and the escape hatch. */
 gpap_status gpap_engine_apply_clean(gpap_engine *e, const int64_t *decisions_host, int32_t L);
 
 /* Entry point 2 — the whole randomized decide+propagate trajectory per row, one launch.
