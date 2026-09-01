@@ -111,12 +111,19 @@ def main():
         # ---- aggregation traps. One cell per (instance, encoder): there is no best-of ---------
         best = {(r["name"].split(".")[0], r.get("enc_key") or r.get("encoder")): r
                 for r in rows}
+        # The same population as the paper's n_gm: finite ratios, minus vacuous pins AND
+        # zero-search cells (re-derived below). Counting the zero-search cells here made this
+        # warning disagree with the table about how many instances the geomean stands on.
         finite = [r["ratio"] for (k, _e), r in best.items()
                   if r.get("ratio") and math.isfinite(r["ratio"])
-                  and k not in VACUOUS_PINS]
+                  and k not in VACUOUS_PINS
+                  and not ((r.get("n_models") or 0) > 0
+                           and not (r.get("decisions_per_s") or 0)
+                           and not (r.get("implications_per_s") or 0))]
         if 0 < len(finite) < 3:
             warn.append(f"{stem}: geomean stands on only {len(finite)} instance(s) "
-                        f"(CMSGen scored zero on the rest) — flag it, do not quote it")
+                        f"(a small family, or CMSGen scored zero / the screens removed the "
+                        f"rest) — flag it, do not quote it")
 
         # SYMMETRY of the zero ledger. Reporting the instances CMSGen could not sample while
         # dropping the ones WE could not is the single easiest way to publish a flattering table
@@ -218,6 +225,13 @@ def main():
             if errs:
                 warn.append(f"{stem}: {errs}/{len(seen)} rival runs failed "
                             f"(reported, not folded in as zeros)")
+            # A row whose constraint-alignment check FAILED compared two different tasks; the
+            # tables exclude it (paper_tables.rival_family), and it must not go unnoticed here.
+            mis = [r["name"] for r in seen.values() if r.get("pin_check_ok") is False]
+            if mis:
+                fail.append(f"{stem}: {len(mis)} row(s) FAILED the constraint-alignment check "
+                            f"({', '.join(sorted(mis))}) — the two sides were not given the "
+                            f"same task; re-run before publishing")
         ok.append("rivals: error rows counted, never treated as zero")
 
     # ---------------------------------------------------------------- uniformity oracle

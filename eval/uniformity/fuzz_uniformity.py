@@ -670,7 +670,10 @@ def main(argv=None):
         with open(args.out, "w") as f:
             json.dump({"schema": 1, "args": vars(args), "rows": rows}, f, indent=1)
         print(f"\nwrote {args.out}")
-    return 1 if any(v in ("UNSOUND",) for _, _, v, _ in flags) else 0
+    # Non-zero on an UNSOUND emission — and on a FLAGGED NEGATIVE CONTROL, which is worse: it
+    # means the statistics themselves are broken, so every verdict in the output is unvalidated.
+    # Exiting 0 there let a campaign script print its DONE marker over exactly that state.
+    return 1 if (not ctl_ok or any(v in ("UNSOUND",) for _, _, v, _ in flags)) else 0
 
 
 if __name__ == "__main__":

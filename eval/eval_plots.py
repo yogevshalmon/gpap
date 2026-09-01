@@ -30,7 +30,8 @@ import sys
 REPO_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
 sys.path.insert(0, REPO_ROOT)
 
-from eval.artifact.paper_tables import unique_unmeasured   # noqa: E402 — the shared cell rules
+from eval.artifact.paper_tables import (VACUOUS_PINS,  # noqa: E402 — the shared cell rules
+                                        unique_unmeasured, zero_search)
 
 # Categorical palette: fixed slot order, never cycled (blue/orange/aqua/violet). Validated
 # colorblind-safe against the light chart surface (all pairs, OKLab dE>=8) — see the dataviz
@@ -38,11 +39,9 @@ from eval.artifact.paper_tables import unique_unmeasured   # noqa: E402 — the 
 # means the same thing: encoder A / encoder B / CMSGen / rival-or-rejection.
 C_TSEITIN, C_ABC, C_CMS, C_RIVAL = "#2a78d6", "#eb6834", "#1baf7a", "#4a3aa7"
 
-# VACUOUS-PIN instances: at T=25 their last-cycle outputs are CONSTANT for every input sequence,
-# so pinning them is a tautology and "sampling" is a free hypercube — every sampler scores ~100%.
-# Measured effect on the sequential geomeans: seq-c25-rare 58.2x -> 39.1x, seq-c50-rare
-# 26.3x -> 14.0x. They must not sit inside a headline number (see CLAUDE.md, ground rules).
-VACUOUS_PINS = {"b02", "b05", "b07", "s526"}
+# VACUOUS_PINS and zero_search are IMPORTED, never restated: the figures and summary.md quote
+# geomeans a reader will compare against the paper's, so the exclusion rules must be the paper's
+# by construction (a private copy is a rule that drifts — see tests/test_paper_tables.py).
 SURFACE, INK, INK2, GRID = "#fcfcfb", "#0b0b0b", "#52514e", "#d9d8d4"
 ENC_COLOR = {"tseitin": C_TSEITIN, "abc:fast": C_ABC, "abc:full": C_ABC, "abc:auto": C_ABC}
 
@@ -265,16 +264,23 @@ def fig_vs_cmsgen(plt, stage, payload, out_dir):
         if k not in best or r["gpap_sps"] > best[k]["gpap_sps"]:
             best[k] = r
     items = sorted(best.values(), key=lambda r: (r.get("ratio") or 0))
-    gm = _gm([r.get("ratio") for r in items])
+    # The count printed beside the geomean is the geomean's OWN population: a zero-scoring cell
+    # (ratio 0.0 / inf / None) stays on the figure — the dumbbell shows which side was silent —
+    # but cannot enter the geomean, so "over N instances" must not count it (fig_rivals rule).
+    ratios = [r.get("ratio") for r in items
+              if r.get("ratio") and r["ratio"] > 0 and r["ratio"] != float("inf")]
+    gm = _gm(ratios)
     mode = {r.get("cms_mode") for r in items}
     mtxt = ("emission-free on both sides" if mode == {"nowrite"}
             else "CMSGen writes its samples (stock build — handicapped)")
+    n_txt = (f"over {len(ratios)} instances" if len(ratios) == len(items)
+             else f"over {len(ratios)} of {len(items)} instances (the rest scored zero on a side)")
     return _dumbbell(
         plt, [r["name"] for r in items], [r["cms_sps"] for r in items],
         [r["gpap_sps"] for r in items], "CMSGen (1 CPU core)", "GPAP (GPU)", C_CMS, C_TSEITIN,
         xlabel="samples/s (steady state)",
         title=f"GPAP vs CMSGen — {stage}",
-        subtitle=(f"geomean {gm:.1f}x over {len(items)} instances; {mtxt}" if gm else mtxt),
+        subtitle=(f"geomean {gm:.1f}x {n_txt}; {mtxt}" if gm else mtxt),
         path=os.path.join(out_dir, f"vs_cmsgen_{stage}.png"))
 
 
@@ -311,8 +317,10 @@ def fig_work_rates(plt, stage, payload, out_dir):
     ax.grid(True, which="both", color=GRID, lw=0.6, alpha=0.7)
     xs = [r["cms_implications_per_s"] for r in rows]
     ys = [r["implications_per_s"] for r in rows]
-    xd = [r["cms_decisions_per_s"] for r in rows if r.get("cms_decisions_per_s")]
-    yd = [r["decisions_per_s"] for r in rows if r.get("cms_decisions_per_s")]
+    # one filter for BOTH coordinates, or a row with one side missing shifts the pairing
+    dec = [(r["cms_decisions_per_s"], r["decisions_per_s"]) for r in rows
+           if r.get("cms_decisions_per_s") and r.get("decisions_per_s")]
+    xd, yd = ([d[0] for d in dec], [d[1] for d in dec])
     lo = min(xs + ys + xd + yd) * 0.5
     hi = max(xs + ys + xd + yd) * 2
     ax.plot([lo, hi], [lo, hi], "--", color=INK2, lw=1.0, label="parity (y = x)")
@@ -347,10 +355,13 @@ def fig_prop_summary(plt, stages, out_dir):
     """
     fams = []
     for stage, payload in sorted(stages.items()):
+        # One row per instance, chosen by OUR rate — never by `ratio`: keying the argmax on the
+        # published statistic lets CMSGen's number pick which of our runs enters the figure
+        # (the same rule fig_vs_cmsgen and write_summary already follow).
         best = {}
         for r in rows_of(payload):
             k = r["name"].split(".")[0]
-            if k not in best or (r.get("ratio") or 0) > (best[k].get("ratio") or 0):
+            if k not in best or (r.get("gpap_sps") or 0) > (best[k].get("gpap_sps") or 0):
                 best[k] = r
         keep = []
         for k, r in best.items():
@@ -507,6 +518,9 @@ def write_summary(stages, out_dir, src_dir):
               "ship. The per-ROW figure (every instance x every encoder) is given alongside it;",
               "they differ whenever one encoder collapses on an instance the other handles, which",
               "is a real per-instance effect, not an aggregate one.", "",
+              "`wins` is counted the paper's way: finite ratios >= 1 plus the instances CMSGen",
+              "scored ZERO on (our outright wins), over finite + both zero columns — the zeros",
+              "are their own columns, never silently inside a win count.", "",
               "**clean** applies the two exclusions the paper generator applies, for the same",
               "reason — a cell that measures the INSTANCE is not a measurement of the sampler:",
               f"(1) VACUOUS PINS ({', '.join(sorted(VACUOUS_PINS))}), whose last-cycle outputs are",
@@ -515,8 +529,9 @@ def write_summary(stages, out_dir, src_dir):
               "because the support is free after propagation (EPFL 29.0x -> 9.4x). **Quote the",
               "clean column.** `eval/artifact/paper_tables.py` is authoritative; this is the same rule.", "",
               "| stage | rows | inst | skipped | errors | encoders | GPAP/CMSGen (best enc) | "
-              "**clean** | (per row) | wins | GPAP=0 | encoder A/B | CMSGen emission cost |",
-              "|---|---|---|---|---|---|---|---|---|---|---|---|---|"]
+              "**clean** | (per row) | wins | CMSGen=0 | GPAP=0 | encoder A/B "
+              "| CMSGen emission cost |",
+              "|---|---|---|---|---|---|---|---|---|---|---|---|---|---|"]
     for stage, payload in sorted(stages.items()):
         rows = rows_of(payload)
         allr = payload.get("results", [])
@@ -536,19 +551,24 @@ def write_summary(stages, out_dir, src_dir):
             if k not in best or (r.get("gpap_sps") or 0) > (best[k].get("gpap_sps") or 0):
                 best[k] = r
         gm = _gm([r.get("ratio") for r in best.values()])
-        # `clean` = the paper's rule: drop vacuous pins AND cells that sampled without searching
-        # (no decisions, no implications — the support is free after propagation, so the ratio
-        # describes the instance). Detected per row, not by a name list.
+        # `clean` = the paper's rule, IMPORTED (paper_tables.zero_search + VACUOUS_PINS): drop
+        # vacuous pins and cells that sampled without searching — the ratio describes the
+        # instance there, not the sampler.
         gm_nv = _gm([r.get("ratio") for k, r in best.items()
-                     if k.split(".")[0] not in VACUOUS_PINS
-                     and not ((r.get("n_models") or 0) > 0
-                              and not (r.get("decisions_per_s") or 0)
-                              and not (r.get("implications_per_s") or 0))])
-        n_win = sum(1 for r in best.values() if (r.get("ratio") or 0) >= 1)
-        n_cmp = sum(1 for r in best.values() if r.get("ratio") is not None)
-        # our own zeros, stated as plainly as CMSGen's
+                     if k.split(".")[0] not in VACUOUS_PINS and not zero_search(r)])
+        # THE SYMMETRIC LEDGER (paper_tables.cms_family's rule): a CMSGen-zero cell (ratio inf)
+        # is an outright win and a GPAP-zero cell an outright loss — neither has a finite ratio,
+        # so `wins` counts finite wins plus CMSGen's zeros, over finite + both zero columns, and
+        # each zero kind gets its own column. Counting inf inside a plain `ratio >= 1` (what
+        # this did) shows their zeros as wins while never showing the zeros as zeros.
+        fin = [r["ratio"] for r in best.values()
+               if r.get("ratio") and r["ratio"] > 0 and r["ratio"] != float("inf")]
+        n_c0 = sum(1 for r in best.values()
+                   if (r.get("n_models") or 0) > 0 and not (r.get("cms_n_samples") or 0))
         n_g0 = sum(1 for r in best.values()
                    if (r.get("cms_n_samples") or 0) > 0 and not (r.get("n_models") or 0))
+        n_win = sum(1 for x in fin if x >= 1) + n_c0
+        n_cmp = len(fin) + n_c0 + n_g0
         pairs = paired_by_encoder(rows)
         ab = "—"
         if len(encs) >= 2 and pairs:
@@ -563,7 +583,8 @@ def write_summary(stages, out_dir, src_dir):
         lines.append(f"| {stage} | {len(rows)} | {len(best)} | {n_skip} | {n_err} | "
                      f"{'+'.join(encs) or '—'} | {f'{gm:.1f}x' if gm else '—'} | {nv} | "
                      f"{f'{gm_row:.1f}x' if gm_row else '—'} | "
-                     f"{n_win}/{n_cmp} | {n_g0} | {ab} | {f'{pen:.1f}x' if pen else '—'} |")
+                     f"{n_win}/{n_cmp} | {n_c0} | {n_g0} | {ab} | "
+                     f"{f'{pen:.1f}x' if pen else '—'} |")
     # skipped/error detail — a sweep that silently dropped instances is not a result
     detail = []
     for stage, payload in sorted(stages.items()):

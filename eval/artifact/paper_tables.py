@@ -318,8 +318,11 @@ def prop_rates(d, stem, encoder):
     _, cells = select_cells(payload, encoder)
     # Same exclusions as the headline, and for the same reason: a cell that measures the
     # instance measures neither engine. Table 1 and Table 3 must describe the same runs.
+    # No fallback to the unscreened cells: a family whose every cell is degenerate has no
+    # Table 3 row — quietly re-admitting the screened cells there would make Table 3
+    # describe runs Table 1 refused to.
     rows = [r for k, r in cells.items()
-            if k not in VACUOUS_PINS and not zero_search(r)] or list(cells.values())
+            if k not in VACUOUS_PINS and not zero_search(r)]
     # EVERY column is computed over the SAME rows — the ones where all four quantities are
     # positive. Filtering per column instead put an instance like EPFL `bar` (GPAP propagates hard
     # but emits nothing) into the impl/s ratio and not into work-per-sample, which broke the
@@ -356,11 +359,19 @@ def rival_family(d, stem, key):
     seen = {}
     for r in rows:
         seen[(r["name"], r.get("variant", "-"))] = r        # a retry supersedes its error row
-    ratios, errs, zero, gzero, both, free, nomeas = [], 0, 0, 0, 0, 0, 0
+    ratios, errs, zero, gzero, both, free, nomeas, misaligned = [], 0, 0, 0, 0, 0, 0, 0
     for r in seen.values():
         rv, g = r.get(key) or {}, r.get("gpap") or {}
         if rv.get("error"):
             errs += 1
+            continue
+        # Table 2's text says constraint alignment is VERIFIED per row (`pin_check_ok`), so a
+        # row that FAILED that check cannot sit inside the geomean the claim covers: the two
+        # sides were not given the same constraint, and whatever the ratio measures, it is not
+        # the samplers. The harness prints the failure and records it; this is where it is
+        # enforced, and the caveats name the count whenever it is non-zero.
+        if r.get("pin_check_ok") is False:
+            misaligned += 1
             continue
         # Same zero-search screen as Table 1, where the row carries the counters (recorded
         # since 2026-08-23): a support that is FREE after propagation measures the instance,
@@ -388,7 +399,8 @@ def rival_family(d, stem, key):
             ratios.append(ours / rate)
     return {"cells": len(seen), "gm": gm(ratios), "n": len(ratios) + zero + gzero,
             "wins": sum(1 for x in ratios if x >= 1) + zero, "errors": errs, "zero": zero,
-            "gpap0": gzero, "both0": both, "free": free, "nomeas": nomeas}
+            "gpap0": gzero, "both0": both, "free": free, "nomeas": nomeas,
+            "misaligned": misaligned}
 
 
 # ------------------------------------------------------------------ uniformity
@@ -409,7 +421,17 @@ def uni_sort_key(item):
 
 
 def uniformity(paths):
-    """Aggregate the exact-oracle fuzzing campaign per sampler, split by instance kind."""
+    """Aggregate the exact-oracle fuzzing campaign per sampler, split by instance kind.
+
+    SCREEN FIRST, THEN AGGREGATE — the same rule as every other table here, and the campaign's
+    own summary already applies it: an instance whose solution set is a full SUBCUBE (every
+    support variable pinned or free) is sampled by the don't-care FILLER, not by the config
+    under test — two different configs return bit-identical statistics there — so it is
+    evidence about neither sampler. fuzz_uniformity.py stamps `meta.subcube` per instance;
+    excluding those rows here keeps Table 4 in agreement with the tool that produced the data
+    (it used not to, and the paper's median could disagree with the campaign's own printout).
+    The excluded count is reported in `args["_subcube_excluded"]` so the table can state it.
+    """
     rows = []
     args = {}
     for p in paths or []:
@@ -419,6 +441,12 @@ def uniformity(paths):
             args = d.get("args", args)
     if not rows:
         return None, {}
+    n_sub = sum(1 for r in rows if (r.get("meta") or {}).get("subcube"))
+    rows = [r for r in rows if not (r.get("meta") or {}).get("subcube")]
+    args = dict(args)
+    args["_subcube_excluded"] = n_sub
+    if not rows:
+        return None, args
     agg = {}
     for r in rows:
         kind = r.get("kind", "?")
@@ -621,17 +649,18 @@ def build(args):
           + " — these bound the reach of the whole comparison, not of either tool."]
     M += ["", "## Table 2 — GPAP vs the GPU gradient samplers", "",
           "| rival | protocol | cells | GPAP/rival | wins | rival=0 | GPAP=0 | both=0 |"
-          " u/s unmeasured | no-search | rival failed |",
-          "|---|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|"]
+          " u/s unmeasured | no-search | misaligned | rival failed |",
+          "|---|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|"]
     for stem, _, rival, proto in RIVALS:
         v = riv.get(stem)
         if not v:
-            M.append(f"| {rival} | {proto} | — | not run | — | — | — | — | — | — | — |")
+            M.append(f"| {rival} | {proto} | — | not run | — | — | — | — | — | — | — | — |")
             continue
         gs = f"{v['gm']:,.1f}x" if v["gm"] else "—"
         M.append(f"| {rival} | {proto} | {v['cells']} | {gs} | "
                  f"{v['wins']}/{v['n']} | {v['zero']} | {v['gpap0']} | {v['both0']} "
-                 f"| {v.get('nomeas', 0)} | {v.get('free', 0)} | {v['errors']} |")
+                 f"| {v.get('nomeas', 0)} | {v.get('free', 0)} | {v.get('misaligned', 0)} "
+                 f"| {v['errors']} |")
     M += ["",
           "The two protocols are DIFFERENT TASKS and must never be pooled: 'their pins' rows "
           "pin the 1–5 outputs the rival's own table names (rejection-easy by construction — "
@@ -716,9 +745,13 @@ def build(args):
               "how much propagation each instance wastes on conflicted trajectories, not of the "
               "propagator."]
     if uni:
+        sub = uni_args.get("_subcube_excluded") or 0
         M += ["", "## Table 4 — uniformity vs an exact oracle", "",
               f"`alpha={uni_args.get('alpha')}`, {uni_args.get('seeds')} seeds/instance, "
-              f"n = {uni_args.get('n_mult')}x|S| samples.", "",
+              f"n = {uni_args.get('n_mult')}x|S| samples."
+              + (f" {sub} full-subcube instance(s) excluded — every sampler is uniform there "
+                 f"by construction (the don't-care filler, not the config, draws the bits)."
+                 if sub else ""), "",
               "| sampler | kind | instances | median TV | flagged SKEW | unsound |",
               "|---|---|---:|---:|---:|---:|"]
         for (name, kind), a in sorted(uni.items(), key=lambda kv: uni_sort_key(kv[0])):
@@ -846,21 +879,25 @@ def build(args):
           r"while ours includes construction). Rival failures (timeout / no gradient path) are "
           r"counted, never folded in as zeros. As in Table~\ref{tab:cmsgen}, an instance where "
           r"either side emitted nothing carries no finite ratio and is counted separately: "
-          r"\emph{R$=$0} (rival silent), \emph{G$=$0} (GPAP silent), \emph{both}.}",
+          r"\emph{R$=$0} (rival silent), \emph{G$=$0} (GPAP silent), \emph{both}. "
+          r"\emph{free} cells sampled with no search (the instance, not the sampler) and "
+          r"\emph{mis.} rows failed the per-row constraint-alignment check; both are excluded, "
+          r"and every column sums to \emph{cells}.}",
           r"  \label{tab:rivals}",
-          r"  \begin{tabular}{@{}llrrrrrrrr@{}}", r"    \toprule",
+          r"  \begin{tabular}{@{}llrrrrrrrrrr@{}}", r"    \toprule",
           r"    rival & protocol & cells & GPAP/rival & wins & R$=$0 & G$=$0 & both & "
-          r"u$/$s n$/$a & failed \\",
+          r"u$/$s n$/$a & free & mis. & failed \\",
           r"    \midrule"]
     for stem, _, rival, proto in RIVALS:
         v = riv.get(stem)
         if not v:
-            T.append(f"    {rival} & {tex_escape(proto)} & \\multicolumn{{8}}{{c}}{{not run}} \\\\")
+            T.append(f"    {rival} & {tex_escape(proto)} & \\multicolumn{{10}}{{c}}{{not run}} \\\\")
             continue
         g = f"${v['gm']:,.1f}\\times$" if v["gm"] else "---"
         T.append(f"    {rival} & {tex_escape(proto)} & {v['cells']} & {g} & "
                  f"{v['wins']}/{v['n']} & {v['zero']} & {v['gpap0']} & {v['both0']} & "
-                 f"{v.get('nomeas', 0)} & {v['errors']} \\\\")
+                 f"{v.get('nomeas', 0)} & {v.get('free', 0)} & {v.get('misaligned', 0)} & "
+                 f"{v['errors']} \\\\")
     T += [r"    \bottomrule", r"  \end{tabular}", r"\end{table}", ""]
 
     if any(prop.values()):
@@ -965,6 +1002,11 @@ def build(args):
             C.append(f"`{stem}`: {v['both0']} instance(s) defeated **both** samplers "
                      f"({', '.join('`' + n + '`' for n in v['both0_names'])}) — a limit of the "
                      f"comparison, not evidence about either tool.")
+        if v.get("weird"):
+            C.append(f"`{stem}`: {v['weird']} cell(s) where both samplers emitted yet the row "
+                     f"carries no finite `ratio` (a malformed or pre-schema row). They are in "
+                     f"none of the printed columns, so the `inst` identity under Table 1 is "
+                     f"short by exactly this count — fix the rows before publishing.")
     for stem, _, rival, proto in RIVALS:
         v = riv.get(stem)
         if v and v["errors"]:
@@ -974,6 +1016,11 @@ def build(args):
             C.append(f"{rival} ({proto}): **GPAP emitted nothing on {v['gpap0']} instance(s)** "
                      f"that the rival sampled. Losses, excluded from the geomean for lack of a "
                      f"finite ratio — state them.")
+        if v and v.get("misaligned"):
+            C.append(f"{rival} ({proto}): **{v['misaligned']} row(s) FAILED the constraint-"
+                     f"alignment check** (`pin_check_ok: false` — the two sides were not given "
+                     f"the same task). Excluded from every count; re-run those cells before "
+                     f"quoting the family.")
         if v and v.get("nomeas"):
             C.append(f"{rival} ({proto}): {v['nomeas']} cell(s) have no unique/s estimate — the "
                      f"off-timing coverage run collected nothing there, while the timed run did "
