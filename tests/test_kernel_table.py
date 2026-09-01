@@ -97,9 +97,14 @@ def test_every_reachable_kernel_key_resolves():
                 for v in rng.choice(200, 3, replace=False) + 1] for _ in range(4000)]
     formula = _core.Formula.from_clauses(200, clauses)
     order = np.arange(200, dtype=np.int32)
+    launched = 0
     for mode in ("scalar", "wave"):
         for vscan in (0, 1, -1):
             for soft in (False, True):
                 engine = _core.Engine(formula, mode=mode, vscan=vscan)
                 engine.reset(1024)
                 engine.trajectory(order, 200, 8, 7, soft)     # raises if the key is missing
+                launched += 1
+    # The absence of a raise IS the assertion here, so the count is what says the loop ran:
+    # a fixture that stopped reaching the launch would otherwise pass by doing nothing.
+    assert launched == 12, f"only {launched} of the 12 reachable keys were launched"

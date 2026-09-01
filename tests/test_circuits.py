@@ -147,8 +147,9 @@ def test_circuit_reconstruction_els(circuit_cnfs, name):
 def test_circuit_contract_delivers_n_time(circuit_cnfs):
     """A high-success shallow instance delivers the full n_time budget (not chunk-capped)."""
     from gpap.sampling.pipeline import sample_clauses, CIRCUIT_PORTFOLIO
-    nv, clauses, support = _inst(circuit_cnfs, "b02-c1") if "b02-c1" in circuit_cnfs \
-        else _inst(circuit_cnfs, "s386-c1")
+    # s386-c1 by name, not by a fallback: conftest's matrix has no b02, so the old
+    # `"b02-c1" if ... else` branch could only ever take the second arm.
+    nv, clauses, support = _inst(circuit_cnfs, "s386-c1")
     info = sample_clauses(nv, clauses, support, DEV, n_time=5000, n_cov=0, verify_sound=True,
                           configs=CIRCUIT_PORTFOLIO, time_limit=30.0)
     assert info["n_models"] >= 5000 and not info["chunk_capped"]

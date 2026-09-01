@@ -22,7 +22,9 @@ class TestAssumptionChecker:
             [1, 2, 3],     # clause 2 (~x2 OR ~x3) fully falsified -> conflict
             [1, -2, -3],   # clause 1 (~x1 OR x3) fully falsified -> conflict
         ])
-        assert results['conflict'][0].item() is True or bool(results['conflict'][0])
+        # `x.item() is True or bool(x)` was the old spelling: the second disjunct makes the
+        # first unreachable, so the strict identity check it looks like was never performed.
+        assert bool(results['conflict'][0])
         assert bool(results['conflict'][1])
 
     def test_no_conflict(self):

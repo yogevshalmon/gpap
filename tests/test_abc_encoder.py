@@ -15,10 +15,11 @@ from pysat.solvers import Solver
 
 from gpap.circuits.abc_backend import abc_available, build_cnf_abc
 from gpap.circuits.bench import build_cnf, parse_bench, simulate
+from tests.conftest import COMB_DIR, SEQ_DIR
 
 pytestmark = pytest.mark.skipif(not abc_available(), reason="no `abc` binary (scripts/build_abc.sh)")
 
-BENCH = "benchmarks/circuits/bench/seq"
+BENCH = SEQ_DIR
 # Small enough that the projected solution set can be enumerated exhaustively.
 CASES = [("b01", 3), ("b01", 5), ("b02", 4), ("b06", 3), ("b09", 4), ("b03", 2)]
 
@@ -117,7 +118,7 @@ def test_bench_equiv_check_catches_a_sabotaged_copy_at_a_rare_pin(tmp_path):
     check therefore compares every primary output; this pins that a functional change is caught
     even in the regime where the acceptance half is vacuous."""
     from gpap.circuits.abc_backend import bench_equiv_check
-    src = os.path.join("benchmarks/circuits/bench/comb", "c432.bench")
+    src = os.path.join(COMB_DIR, "c432.bench")
     lines, done, out = open(src).read().splitlines(), False, []
     for line in lines:                                  # flip exactly one gate's function
         if not done and "NAND(" in line:

@@ -97,12 +97,28 @@ def test_same_seed_same_bits_and_reseed_restarts_the_stream():
 
 def test_verify_and_delivery_do_not_touch_the_sampling_stream():
     """verify=1 and keep_cap>0 must change NOTHING about which models a seed finds — the
-    delivery-shares-the-RNG bug class (`--out` silently changing the run) pinned at the core."""
+    delivery-shares-the-RNG bug class (`--out` silently changing the run) pinned at the core.
+
+    The two knobs are varied ONE AT A TIME, and the ROWS are compared, not only the counts: two
+    runs that drew different models can agree on how many they drew, which is exactly the shape
+    the host-side version of this bug had (`--out` shifted every later chunk's permutation and
+    the totals stayed plausible)."""
     rng = random.Random(13)
     clauses = _sat_cnf(rng)
+    base = _sampler(clauses, 24, seed=5)
+    st0 = base.run(400, [B8], keep_cap=-1)
+    assert st0.n_models > 0, "fixture produced nothing — the comparisons would be vacuous"
+    rows0 = base.bits(0)
+
+    # (a) VERIFY on: same stream, same rows.
+    v = _sampler(clauses, 24, seed=5)
+    stv = v.run(400, [B8], keep_cap=-1, verify=True)
+    assert (stv.n_models, stv.chunks) == (st0.n_models, st0.chunks)
+    assert np.array_equal(v.bits(0), rows0), "the soundness self-test moved the sampling stream"
+
+    # (b) DELIVERY off entirely: no gather at all, still the same run.
     plain = _sampler(clauses, 24, seed=5).run(400, [B8])
-    loaded = _sampler(clauses, 24, seed=5).run(400, [B8], keep_cap=-1, verify=True)
-    assert (plain.n_models, plain.chunks) == (loaded.n_models, loaded.chunks)
+    assert (plain.n_models, plain.chunks) == (st0.n_models, st0.chunks)
 
 
 # ---------------------------------------------------------------- accounting
@@ -127,8 +143,9 @@ def test_keep_cap_bounds_the_bucket_not_the_count():
     st = s.run(400, [B8], keep_cap=50)
     assert st.n_models > 50, "fixture too small to exercise the cap"
     assert s.config_stats(0).kept_rows == 50
-    got = s.bits(0, rows=7)                       # capacity below kept: prefix, tail untouched
+    got = s.bits(0, rows=7)                       # capacity below kept: the FIRST rows, in order
     assert got.shape == (7, 24)
+    assert np.array_equal(got, s.bits(0)[:7]), "a short read must truncate, not resample"
 
 
 def test_keep_cap_zero_never_gathers():
@@ -226,6 +243,64 @@ def test_support_phase_and_columns():
     ref = full.bits(0)
     assert np.array_equal(got, ref[:, [5, 0, 7]]), \
         "columns must be a pure re-projection of the same models (same seed, same stream)"
+
+
+def test_support_only_stops_after_phase_one():
+    """`support_only` decides phase 1 and nothing else — the "the support determines the rest"
+    mode. Untested until now, and its two outcomes are opposite, so both are pinned.
+
+    A row is still only counted when it is FULLY assigned, so the knob does not weaken what
+    `n_models` means: on a formula whose support really is an independent support the answer is
+    unchanged, and on one where it is not, phase 2 was the only thing assigning the remainder —
+    so nothing completes and the loop gives up, rather than emitting a half-assigned row.
+    """
+    # (a) x3 == x1 AND x2, then x4 == x3 == x5: deciding {x1, x2} propagates the whole tail, so
+    # phase 2 has nothing left to decide and skipping it must cost NOTHING.
+    det = [[-1, -2, 3], [1, -3], [2, -3], [3, -4], [-3, 4], [4, -5], [-4, 5]]
+    for so in (False, True):
+        s = _sampler(det, 5, seed=5)
+        s.set_support([0, 1])
+        st = s.run(200, [B8], keep_cap=-1, support_only=so, max_chunks=4)
+        assert st.n_models == st.attempts > 0, \
+            f"support_only={so}: every trajectory should complete on a determined tail"
+        assert _rows_satisfy(s.bits(0), det)
+    # NOT compared row for row, deliberately: the phase-2 shuffle draws from the same stream, so
+    # the two settings reach different trajectory seeds and legitimately find different models.
+    # (Checked: with a single-variable tail they DO come out bit-identical, which is how an
+    # equality assertion here would pass for a reason that has nothing to do with the claim.)
+
+    # (b) an unrelated clause the support does NOT reach: phase 2 was doing the work.
+    loose = [[1, 2], [3, 4]]
+    s = _sampler(loose, 4, seed=5)
+    s.set_support([0, 1])
+    st = s.run(200, [B8], support_only=True, max_chunks=4)
+    assert st.n_models == 0, "a row with free variables left is not a model and must not count"
+    assert st.n_support_complete > 0, "...but the support phase itself did complete"
+    assert _core.SAMPLE_STOP[st.stop] == "zero_yield"
+    full = _sampler(loose, 4, seed=5)
+    full.set_support([0, 1])
+    assert full.run(200, [B8], max_chunks=4).n_models > 0, \
+        "precondition: with phase 2 the same instance delivers"
+
+
+def test_zero_k_cap_means_the_library_cap_not_uncapped():
+    """The `{0}` ground rule, on the field where the two readings are furthest apart.
+
+    `gpap_sampler_create` takes `k_cap` with 0 = the library cap, >0 verbatim, <0 uncapped —
+    so the zero every caller gets by leaving the field alone has to resolve to the DEFAULT, not
+    to "no limit". Reading it the other way is silent: the run still works, it just runs at a
+    batch nobody chose (83x wider on this formula), which is a different experiment.
+    """
+    rng = random.Random(67)
+    clauses = _sat_cnf(rng)
+    f = _core.Formula.from_clauses(24, clauses)
+    e = _core.Engine(f)
+    zero = _core.Sampler(e, seed=1)                        # the {0} spelling
+    named = _core.Sampler(e, seed=1, k_cap=_core.default_k_cap())
+    uncapped = _core.Sampler(e, seed=1, k_cap=-1)
+    assert zero.k == named.k == _core.default_k_cap()
+    assert uncapped.k > zero.k, \
+        "fixture: uncapped must differ, or 'zero means the cap' proves nothing here"
 
 
 def test_set_k_pins_the_batch():

@@ -668,7 +668,12 @@ def test_the_warp_wide_decision_scan_picks_identically(B):
         for seed in (7, 20260901):
             on, off, scalar = run("wave", 1, seed), run("wave", -1, seed), run("scalar", 0, seed)
             assert on == off, f"wave vscan on/off diverged (B={B}, nv={nv}, seed={seed})"
-            assert on[0] == scalar[0], f"wave and scalar disagree on the count (B={B}, nv={nv})"
+            # The model SETS, not the counts, here too. The decision sequence is a function of
+            # `order`, the still-free set and the per-(chunk, row, var) polarity hash, and the
+            # still-free set is a BCP fixpoint — so the two kernels must pick identically and
+            # complete the same ROWS, not merely as many of them. (Checked over 24 cells before
+            # tightening this: 0 disagreements on the selected rows or their bits.)
+            assert on == scalar, f"wave and scalar diverged on the models (B={B}, nv={nv})"
             compared += 1
             models_seen += on[0]
     assert compared >= 6 and models_seen > 0, \

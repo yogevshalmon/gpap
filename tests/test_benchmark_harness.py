@@ -23,6 +23,7 @@ from gpap.benchmark import (
     parse_encoder_specs,
 )
 from gpap.engine.bcp_engine import clauses_envelope, packed_envelope
+from tests.conftest import SEQ_DIR
 
 
 # --------------------------------------------------------------------- packed envelope
@@ -284,7 +285,7 @@ def test_bench_driver_skips_an_oversized_instance_and_still_writes_json(tmp_path
 
 def test_prepare_variant_raw_is_the_untouched_source(tmp_path):
     from eval.rivals.rival_common import prepare_variant
-    src = "benchmarks/circuits/bench/seq/b03.bench"
+    src = os.path.join(SEQ_DIR, "b03.bench")
     path, info = prepare_variant(src, "raw", str(tmp_path), cycles=5, seed=5)
     assert path == src and info == {"variant": "raw"}
 
@@ -301,7 +302,7 @@ def test_prepare_variant_falls_back_to_raw_when_abc_is_missing(tmp_path, monkeyp
     import gpap.circuits.abc_backend as ab
     from eval.rivals.rival_common import prepare_variant, variant_note
     monkeypatch.setattr(ab, "abc_available", lambda *a, **k: False)
-    src = "benchmarks/circuits/bench/seq/b03.bench"
+    src = os.path.join(SEQ_DIR, "b03.bench")
     path, info = prepare_variant(src, "abc", str(tmp_path), cycles=5, seed=5)
     assert path == src and "no abc binary" in info["error"]
     assert "-> raw" in variant_note(info)

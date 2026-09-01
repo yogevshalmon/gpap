@@ -5,6 +5,7 @@ support projection (extends to a full model), forced vars are pinned, don't-care
 ELS-equivalent columns stay equal. Sampling needs CUDA (packed-kernel-only engine); the
 writer round-trips are host-only.
 """
+import os
 import numpy as np
 import pytest
 import torch
@@ -13,6 +14,7 @@ from pysat.solvers import Solver
 
 from gpap.sampling.sampler import GPUSampler
 from gpap.sampling.output import write_samples
+from tests.conftest import SEQ_DIR
 
 CUDA = torch.cuda.is_available()
 try:
@@ -102,7 +104,11 @@ def test_bits_respects_cap():
     clauses, sup = [[1, 2], [-1, 3], [-2, -3]], [0, 1, 2]
     smp = GPUSampler.from_clauses(3, clauses, DEV, k_cap=256, seed=1, support=sup)
     M, _ = smp.sample_bits(100, config=(True, 1, False), max_chunks=60)
-    assert M.shape[0] <= 100
+    # TWO-sided. `<= 100` alone is satisfied by a delivery path that returns nothing, and
+    # under-delivery is exactly as wrong as over-delivery (see test_cli_contracts.py::
+    # test_delivery_delivers_what_it_collected, which was added after a mutation proved the
+    # one-sided form blind). This instance yields far more than 100, so the cap must BIND.
+    assert M.shape[0] == 100
 
 
 # --------------------------------------------------------------------------- writers round-trip
@@ -131,6 +137,6 @@ def test_writers_roundtrip(tmp_path):
 def test_bench_wire_labels_roundtrip(tmp_path):
     from gpap.circuits.bench import convert_one, parse_support_labels
     cnf = str(tmp_path / "s386.cnf")
-    convert_one("benchmarks/circuits/bench/seq/s386.bench", cnf, 2, 1, pin_outputs=None)
+    convert_one(os.path.join(SEQ_DIR, "s386.bench"), cnf, 2, 1, pin_outputs=None)
     wm = parse_support_labels(cnf)
     assert wm and all("@" in lbl for lbl in wm.values())  # every support var -> wire@cycle

@@ -223,6 +223,7 @@ def test_els_equivalent_vars_stay_equal():
     nv, clauses, sup = _equiv_formula(seed=3)
     smp = GPUSampler.from_clauses(nv, clauses, DEV, k_cap=512, seed=4, support=sup, els=True)
     out = smp.sample(20_000, decisions_per_round=1, max_chunks=60, collect=True)
+    assert out["models"], "no models to check — an ELS bug that emitted nothing would pass"
     for m in out["models"]:
         s = set(m)
         assert (2 in s) == (3 in s), "equivalent vars s2,s3 reconstructed unequal"
@@ -376,7 +377,13 @@ def test_barbarik_fill_gives_up_on_dry_attempts_not_dry_calls(monkeypatch):
     cols = [1, 2, 3]
 
     class Stub:
-        """Mirrors sample_bits' own rule: 3 consecutive empty chunks -> it returns nothing."""
+        """A LOW-YIELD sampler that sometimes returns nothing.
+
+        Deliberately harsher than the real `sample_bits`, whose zero-yield stop is now TOTAL-based
+        in the core (it abandons a fill only when NOTHING has been found). Giving up after 3
+        consecutive empty chunks is what the retired Python loop did; keeping that here makes the
+        collector face the worse of the two, which is the point — the rule under test is the
+        COLLECTOR's, and it must not depend on how generously the sampler behaves."""
         p_dry = 0.5
 
         def __init__(self):
@@ -453,21 +460,28 @@ def test_timed_run_never_gathers_a_model_to_the_host():
 
     Every rival in the paper is timed on generation alone — CMSGen through the patch's
     `--nowrite`, the gradient samplers because their own `timer` wraps the descent loop only.
-    Ours holds because `collect=False` leaves `keep_rows` False, so the (n, N) `var_bits` gather
-    never fires; the writer and the coverage pass run after the clock stops. Assert it instead
-    of trusting the flag: `eval/rivals/check_emission_symmetry.py` checks the same property
+    Ours holds because `collect=False` asks the core for `keep_cap=0`, so no chunk ever gathers
+    a row; the writer and the coverage pass run after the clock stops. Assert it instead of
+    trusting the flag: `eval/rivals/check_emission_symmetry.py` checks the same property
     statically on the rival side, and this is its GPAP half.
+
+    The spy goes on the CORE sampler's `bits`, because that is where the gather lives now. It
+    used to go on `engine.var_bits`, which the sampling path stopped calling when the loop moved
+    into libgpap — measured, a `collect=True` run that reconstructed 256 models called it ZERO
+    times, so the trap could not fire in either branch and this test passed on nothing. Hence
+    the positive control below: the spy must be shown firing when rows really are gathered.
     """
     from gpap.sampling.pipeline import Lookahead
     smp = GPUSampler.from_clauses(4, [[1, 2], [-1, 3], [-2, -3], [2, 3, 4]], DEV, k_cap=256,
                                   seed=1)
+    gathers, real = [], smp._smp.bits
+    smp._smp.bits = lambda *a, **k: (gathers.append(a), real(*a, **k))[1]
 
-    def _boom(*a, **k):
-        raise AssertionError("timed run gathered model rows to the host")
-
-    smp.engine.var_bits = _boom
     r = smp.sample(300, configs=[(True, 1, Lookahead.NONE)], collect=False, max_chunks=4)
-    assert r["n_models"] >= 0                       # ran to completion with the gather disarmed
-    del smp.engine.var_bits
+    assert r["n_models"] > 0, "precondition: the timed run must have produced rows to gather"
+    assert not gathers, "the timed run gathered model rows to the host"
+    assert smp._smp.config_stats(0).kept_rows == 0, "the core kept rows for a timed run"
+
     r2 = smp.sample(50, configs=[(True, 1, Lookahead.NONE)], collect=True, max_chunks=4)
-    assert r2["models"], "collect=True must still gather (the trap above proves the difference)"
+    assert r2["models"], "collect=True must still gather"
+    assert gathers, "the spy never fired even on collect=True — it is watching the wrong call"
