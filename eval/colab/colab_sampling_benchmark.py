@@ -170,8 +170,7 @@ def k_scaling(path: str, device: torch.device, *, b: int, chunks: int, k_cap: in
         smp.pin_batch(k)
         # Reseed per point so every K samples the SAME trajectory distribution — isolates the
         # throughput-vs-K effect from random success-rate noise across the sweep.
-        smp._gen.manual_seed(seed)
-        smp._pyrng = _random.Random(seed)
+        smp.reseed(seed)                    # all streams: core sampling, delivery, host fills
         smp.sample(k, decisions_per_round=b, max_chunks=1, collect=False)  # warmup
         if device.type == "cuda":
             torch.cuda.synchronize()

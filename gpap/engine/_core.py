@@ -129,6 +129,48 @@ class Counters(ctypes.Structure):
     _fields_ = [("ops", c_int64), ("props", c_int64), ("decs", c_int64), ("launches", c_int64)]
 
 
+class SampleConfig(ctypes.Structure):
+    """Mirror of `gpap_sample_config`: one portfolio entry (random_order, batch, soft)."""
+    _fields_ = [("random_order", c_int32), ("batch", c_int32), ("soft", c_int32)]
+
+
+class SamplerOptions(ctypes.Structure):
+    """Mirror of `gpap_sampler_options` — the PER-RUN knobs of gpap_sampler_run (seed and
+    k_cap live on the handle). EVERY field's zero is its default ({0} == NULL),
+    including `retry_with_lookahead`, which is named for the OPT-IN because the flip it
+    performs turns the non-uniform soft polarity on."""
+    _fields_ = [("max_chunks", c_int64), ("keep_cap", c_int64),
+                ("time_limit_s", ctypes.c_double), ("min_measure_chunks", c_int32),
+                ("grace_chunks", c_int32), ("verify", c_int32),
+                ("retry_with_lookahead", c_int32), ("support_only", c_int32)]
+
+
+class ConfigStats(ctypes.Structure):
+    """Mirror of `gpap_config_stats` — one portfolio entry's outcome."""
+    _fields_ = [("models", c_int64), ("attempts", c_int64), ("chunks", c_int64),
+                ("kept_rows", c_int64), ("decs", c_int64), ("props", c_int64),
+                ("wall_s", ctypes.c_double)]
+
+
+class SampleStats(ctypes.Structure):
+    """Mirror of `gpap_sample_stats`. `sampling_s` is THE clock (delivery and the soundness
+    self-test are billed to `deliver_s` / `verify_s`); `sound_rows_checked` is the evidence a
+    soundness verdict is a statement about."""
+    _fields_ = [("n_models", c_int64), ("attempts", c_int64), ("chunks", c_int64),
+                ("n_support_complete", c_int64), ("sound_rows_checked", c_int64),
+                ("unsound_rows", c_int64),
+                ("best_config", c_int32), ("dominant_config", c_int32), ("stop", c_int32),
+                ("timed_out", c_int32), ("retried", c_int32), ("lookahead_used", c_int32),
+                ("rounds_max", c_int32),
+                ("rounds_mean", ctypes.c_double), ("sampling_s", ctypes.c_double),
+                ("deliver_s", ctypes.c_double), ("verify_s", ctypes.c_double)]
+
+
+#: `gpap_sample_stop` — why a run ended. "unsat" is a PROOF (the construction flush
+#: conflicted); "zero_yield" is only an absence of evidence.
+SAMPLE_STOP = {0: "target", 1: "time", 2: "chunks", 3: "zero_yield", 4: "unsat"}
+
+
 _I32P, _I64P, _I8P = POINTER(c_int32), POINTER(c_int64), POINTER(c_int8)
 
 
@@ -198,6 +240,18 @@ def _declare(lib: ctypes.CDLL) -> None:
         ("gpap_probe_conflicts", [c_void_p, _I32P, c_int64], c_int),
         ("gpap_free_literals", [c_void_p, _I32P, _I32P], c_int),
         ("gpap_assume_units", [c_void_p, _I32P, c_int32], c_int),
+        ("gpap_sampler_create", [c_void_p, c_int64, c_int32, POINTER(c_void_p)], c_int),
+        ("gpap_sampler_free", [c_void_p], None),
+        ("gpap_sampler_k", [c_void_p], c_int32),
+        ("gpap_sampler_set_k", [c_void_p, c_int32], c_int),
+        ("gpap_sampler_reseed", [c_void_p, c_int64], c_int),
+        ("gpap_sampler_set_support", [c_void_p, _I32P, c_int32], c_int),
+        ("gpap_sampler_set_columns", [c_void_p, _I32P, c_int32], c_int),
+        ("gpap_sampler_run",
+         [c_void_p, c_int64, POINTER(SampleConfig), c_int32, POINTER(SamplerOptions),
+          POINTER(SampleStats)], c_int),
+        ("gpap_sampler_config_stats", [c_void_p, c_int32, POINTER(ConfigStats)], c_int),
+        ("gpap_sampler_bits", [c_void_p, c_int32, POINTER(ctypes.c_uint8), c_int64], c_int),
         ("gpap_last_error", [], c_char_p),
         ("gpap_version", [], c_char_p),
         ("gpap_build_id", [], c_char_p),
@@ -827,6 +881,104 @@ class Engine:
         try:
             if getattr(self, "_h", None):
                 load().gpap_engine_free(self._h)
+                self._h = None
+        except Exception:       # noqa: BLE001 — interpreter shutdown
+            pass
+
+
+class Sampler:
+    """Owns a `gpap_sampler*` over an Engine: THE sampling chunk loop + adaptive config bandit
+    (cpp/src/sample.cpp). This is marshalling only — the loop, the bandit, the stop valves and
+    the delivery/verify accounting all live in the core, shared with the C++ face.
+
+    The engine must outlive the sampler and nothing else may drive it while the sampler exists;
+    holding a reference here is what makes that true under CPython refcounting."""
+
+    def __init__(self, engine: Engine, *, seed: int = 0, k_cap: int = 0):
+        lib = load()
+        self._e = engine                        # the lifetime guarantee (see class docstring)
+        h = c_void_p()
+        check(lib.gpap_sampler_create(engine._h, int(seed), int(k_cap), byref(h)),
+              "create sampler")
+        self._h = h
+        self._n_cols = engine.num_vars          # kept-row width; set_columns overrides
+        self._last: "SampleStats | None" = None
+
+    # -------------------------------------------------- knobs
+    @property
+    def k(self) -> int:
+        """Rows per chunk (the resolved batch)."""
+        return int(load().gpap_sampler_k(self._h))
+
+    def set_k(self, k: int) -> None:
+        """Pin the batch (the pin_batch primitive); k <= 0 restores the calibrated value."""
+        check(load().gpap_sampler_set_k(self._h, int(k)), "sampler set_k")
+
+    def reseed(self, seed: int) -> None:
+        check(load().gpap_sampler_reseed(self._h, int(seed)), "sampler reseed")
+
+    def set_support(self, vars_0based) -> None:
+        """Phase-1 variables (0-based). None/empty = no support: one phase over every var."""
+        if vars_0based is None or len(vars_0based) == 0:
+            check(load().gpap_sampler_set_support(self._h, None, 0), "sampler set_support")
+            return
+        v = i32(vars_0based)
+        check(load().gpap_sampler_set_support(self._h, _p(v, c_int32), len(v)),
+              "sampler set_support")
+
+    def set_columns(self, cols_0based) -> None:
+        """Kept-row columns (0-based, output order). None/empty = every variable."""
+        if cols_0based is None or len(cols_0based) == 0:
+            check(load().gpap_sampler_set_columns(self._h, None, 0), "sampler set_columns")
+            self._n_cols = self._e.num_vars
+            return
+        c = i32(cols_0based)
+        check(load().gpap_sampler_set_columns(self._h, _p(c, c_int32), len(c)),
+              "sampler set_columns")
+        self._n_cols = len(c)
+
+    # -------------------------------------------------- the run
+    def run(self, n_target: int, configs, *, time_limit_s: float = 0.0, max_chunks: int = 0,
+            min_measure_chunks: int = 0, grace_chunks: int = 0, keep_cap: int = 0,
+            verify: bool = False, retry_with_lookahead: bool = False,
+            support_only: bool = False) -> SampleStats:
+        """Run the loop. `configs` = [(random_order, batch, soft), ...] — the PORTFOLIO; one
+        entry pins the algorithm (no bandit). The keyword knobs are THIS run's options (the
+        core's per-run struct); the RNG continues across runs (reseed restarts it). Returns
+        the core's stats struct verbatim."""
+        arr = (SampleConfig * len(configs))(
+            *[SampleConfig(int(bool(c[0])), int(c[1]),
+                           int(bool(c[2])) if len(c) > 2 else 0) for c in configs])
+        o = SamplerOptions(int(max_chunks), int(keep_cap), float(time_limit_s),
+                           int(min_measure_chunks), int(grace_chunks), int(verify),
+                           int(retry_with_lookahead), int(support_only))
+        st = SampleStats()
+        check(load().gpap_sampler_run(self._h, int(n_target), arr, len(configs), byref(o),
+                                      byref(st)), "sampler run")
+        self._last = st
+        return st
+
+    def config_stats(self, i: int) -> ConfigStats:
+        out = ConfigStats()
+        check(load().gpap_sampler_config_stats(self._h, int(i), byref(out)),
+              "sampler config_stats")
+        return out
+
+    def bits(self, i: int = -1, rows: "int | None" = None) -> np.ndarray:
+        """Kept rows of config `i` (-1 = the winner) as a (rows, n_cols) uint8 matrix."""
+        if rows is None:
+            idx = int(self._last.best_config) if (i < 0 and self._last is not None) else max(i, 0)
+            rows = int(self.config_stats(idx).kept_rows)
+        out = np.zeros((int(rows), self._n_cols), dtype=np.uint8)
+        if rows:
+            check(load().gpap_sampler_bits(self._h, int(i), _p(out, ctypes.c_uint8), int(rows)),
+                  "sampler bits")
+        return out
+
+    def __del__(self):
+        try:
+            if getattr(self, "_h", None):
+                load().gpap_sampler_free(self._h)
                 self._h = None
         except Exception:       # noqa: BLE001 — interpreter shutdown
             pass

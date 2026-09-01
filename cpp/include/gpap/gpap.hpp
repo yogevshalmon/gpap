@@ -424,31 +424,69 @@ inline bool is_supported(const Formula &f) {
 
 /** How the sampler should run. Every field has a working default; `seed` is the only one most
  *  callers set. Sizes and kernel choices are derived from the GPU and the formula. */
+/** Which unassigned variable each decision picks. int-valued to match the ABI's
+ *  gpap_sample_config.random_order (Random = 1, Structured = 0). */
+enum class VarOrder : std::int32_t {
+    Structured = 0,  ///< first free variable in index order — the gate-DAG order on a Tseitin
+                     ///< CNF; wins search-heavy instances where a random order keeps picking
+                     ///< variables propagation would have implied anyway
+    Random = 1       ///< uniform-random free variable (CMSGen's Algorithm 1) — diverse; default
+};
+
+/** How the sampler should run. Every field has a working default; `seed` is the only one most
+ *  callers set. Sizes and kernel choices are derived from the GPU and the formula.
+ *
+ *  A default run is DETERMINISTIC: same seed, same library build, same solutions, on any
+ *  standard library (the RNG and shuffle are libgpap's own — see cpp/src/sample.cpp). A
+ *  `portfolio` run is not machine-reproducible by design: the bandit selects configs on
+ *  measured wall-clock throughput. */
 struct SampleOptions {
-    /** Reproducibility: a run is a deterministic function of this seed. (Same seed, same
-     *  binary, same solutions — `std::shuffle`'s draw is implementation-defined, so identity
-     *  across different standard libraries is not promised.) */
+    /** Reproducibility: a single-config run is a pure function of this seed. */
     std::int64_t seed = 0;
-    /** Stop after this many seconds of sampling even if the target is not met (0 = no limit). */
+    /** Stop after this many seconds of SAMPLING wall even if the target is not met (0 = no
+     *  limit). Delivery and verification are billed outside this clock. */
     double time_limit_s = 0.0;
-    /** How many solutions to materialize on the host. 0 = count only, keep nothing. */
+    /** Stop after this many chunks (0 = unbounded) — the expert knob behind fixed-work runs. */
+    std::int64_t max_chunks = 0;
+    /** How many solutions to materialize on the host. 0 = count only, keep nothing (kept rows
+     *  are gathered per chunk and billed to Solutions::deliver_seconds, never to the rate). */
     std::size_t max_keep = 100000;
     /** Which variables to report, as DIMACS variables. Empty = the formula's `c ind` independent
      *  support if it declares one, else every variable. */
     std::vector<std::int32_t> variables{};
     /** CUDA device ordinal. */
     int device = 0;
-    /** Variables decided per round before propagating. 8 is a good default; 1 lets propagation
-     *  do more of the work and wins on tightly constrained formulas. */
+    /** THE PORTFOLIO: when non-empty, each chunk runs ONE of these configs at full K, raced as
+     *  a throughput bandit in the core (cold-start each once, then decaying-epsilon-greedy on
+     *  measured models/wall; kept rows are bucketed per config and only the winner's are
+     *  returned). Empty (default) = the single config the three fields below describe — the
+     *  deterministic, pinned-measurement mode. `gpap::default_portfolio()` is the same
+     *  portfolio the Python pipeline runs by default; reach for it when a formula yields
+     *  nothing under the default config (it is what samples the search-heavy instances the
+     *  single config cannot). */
+    std::vector<gpap_sample_config> portfolio{};
+    /** Single-config mode: how decisions pick a variable. */
+    VarOrder var_order = VarOrder::Random;
+    /** Single-config mode: variables decided per round before propagating. 8 is a good default;
+     *  1 lets propagation do more of the work and wins on tightly constrained formulas.
+     *  B >= |support| makes the surviving rows exact rejection sampling — exactly uniform. */
     std::int32_t batch = 8;
-    /** In-kernel risk-aware polarity. Helps on some circuit instances, hurts on others. */
+    /** Single-config mode: in-kernel risk-aware polarity (prefer the value less likely to
+     *  conflict). A big success-rate win on tight/deep circuits (b03-c25: 10% -> 88%) and NOT
+     *  UNIFORM — it biases the distribution by construction, and Barbarik rejects it on 64 of
+     *  the 65 circuit instances it can sample. Use it for "many solutions fast, distribution
+     *  does not matter", never for a distribution claim. The Python face spells this opt-in
+     *  `--allow-soft` and prints a warning. docs/findings/UNIFORMITY_FINDINGS.md 4b. */
     bool lookahead = false;
-    /** If the configuration above finds NOTHING in the first few chunks, try once more with
-     *  `lookahead` flipped before giving up. This matters: on b12 unrolled 50 cycles, B=8 and
-     *  B=1 both return 0 while the same engine with the risk polarity delivers ~1100 models/s —
-     *  reporting 0 there would be actively misleading. It is one retry, not a search; the Python
-     *  pipeline (`gpap.sampling`) runs a proper adaptive portfolio. */
-    bool auto_retry = true;
+    /** If the run finds NOTHING in the first few chunks, try once more with `lookahead`
+     *  FLIPPED before giving up. Rescues instances that yield only under the risk polarity
+     *  (b12 unrolled 50 cycles: 0 either way, ~1100 models/s with it) — but that is exactly
+     *  why it is OFF by default and named for what it opts into: the flip turns the
+     *  NON-UNIFORM polarity on, silently, on the hard instances whose rows a caller is most
+     *  likely to publish. Check Solutions::lookahead_used() whenever this is set. (It was
+     *  `auto_retry = true`; renamed rather than reversed so an out-of-tree caller gets a
+     *  compile error, not a silent default change — the library's own ground rule.) */
+    bool retry_with_lookahead = false;
     /** Trajectories per chunk. 0 = size it to the free VRAM (recommended). */
     std::int32_t k = 0;
     /** Upper bound on the auto-sized K. **0 (default) = the library's batch cap**
@@ -459,18 +497,29 @@ struct SampleOptions {
     /** Re-check on the device that every emitted row really satisfies every clause.
      *  OFF by default: it is a self-test, not part of producing samples — a row is only counted
      *  when it is active and fully assigned, which already means no clause was emptied. Turn it
-     *  on in tests, or in a run whose output will be published. When on it checks EVERY emitted
-     *  row (a fraction of a percent of the chunk, growing with the formula), and `Sampler::sample`
-     *  throws if any row fails. Matches gpap.sampling's `verify_sound`, which is also off by
-     *  default — the two faces must not disagree about what a default run does. */
+     *  on in tests, or in a run whose output will be published. When on it covers EVERY
+     *  completed row, its wall is billed to Solutions::verify_seconds (outside the rate), and
+     *  `Sampler::sample` throws if any row fails — after the run, with the evidence in
+     *  Solutions::sound_rows_checked. Matches gpap.sampling's `verify_sound`. */
     bool verify = false;
+    /** Some config must accumulate this many chunks before the target may stop a portfolio run
+     *  (a single chunk's rate is ±1.9x run-to-run noise). 0 = the core default (1). */
+    std::int32_t min_measure_chunks = 0;
 };
+
+/** The portfolio the Python pipeline races by default: (random, B=8) — the classic niche
+ *  config; (random, B=1) — the success-leaning deep-circuit winner; (structured, B=1) — the
+ *  search-heavy "service" family. Uniformity-safe: no soft-polarity member. */
+inline std::vector<gpap_sample_config> default_portfolio() {
+    return {{1, 8, 0}, {1, 1, 0}, {0, 1, 0}};
+}
 
 /** The result of `Sampler::sample`: a bit matrix of solutions plus what it cost to get them.
  *  Row i, column j is the value of variable `variables()[j]` in the i-th solution. */
 class Solutions {
   public:
-    /** Solutions materialized here (<= found(), capped by SampleOptions::max_keep). */
+    /** Solutions materialized here (<= found(), capped by SampleOptions::max_keep). All from
+     *  ONE config — the winner's bucket, never a mixture of the bandit's arms. */
     std::size_t size() const noexcept { return n_kept_; }
     std::size_t columns() const noexcept { return vars_.size(); }
     bool empty() const noexcept { return n_kept_ == 0; }
@@ -491,33 +540,66 @@ class Solutions {
     const std::vector<std::uint8_t> &bits() const noexcept { return bits_; }
 
     /** Total solutions found, including those past the keep cap. */
-    std::int64_t found() const noexcept { return found_; }
+    std::int64_t found() const noexcept { return stats_.n_models; }
     /** Trajectories run to find them. */
-    std::int64_t drawn() const noexcept { return drawn_; }
+    std::int64_t drawn() const noexcept { return stats_.attempts; }
     /** Chunks (kernel launches) used. */
-    std::int64_t chunks() const noexcept { return chunks_; }
-    double seconds() const noexcept { return seconds_; }
-    /** Solutions per second. */
+    std::int64_t chunks() const noexcept { return stats_.chunks; }
+
+    /** SAMPLING wall: the chunk loop only. Copying solutions to the host and the optional
+     *  soundness re-check are billed separately below and EXCLUDED here, so neither asking for
+     *  rows nor asking for verification can move the rate — the same contract gpap.sampling
+     *  keeps as `out_project_s` / `verify_sound_s`. */
+    double seconds() const noexcept { return stats_.sampling_s; }
+    /** Host copy-out of the kept rows — delivery, not sampling. Grows with max_keep and with
+     *  the number of reported variables. */
+    double deliver_seconds() const noexcept { return stats_.deliver_s; }
+    /** The SampleOptions::verify re-check — a self-test, not sampling. 0 when verify is off. */
+    double verify_seconds() const noexcept { return stats_.verify_s; }
+    /** Everything the call took, including delivery and verification. */
+    double wall_seconds() const noexcept {
+        return stats_.sampling_s + stats_.deliver_s + stats_.verify_s;
+    }
+    /** Solutions per second, over seconds(). */
     double rate() const noexcept {
-        return seconds_ > 0 ? static_cast<double>(found_) / seconds_ : 0.0;
+        return stats_.sampling_s > 0 ? double(stats_.n_models) / stats_.sampling_s : 0.0;
     }
     /** Fraction of trajectories that reached a solution. */
-    double success_rate() const noexcept { return drawn_ > 0 ? double(found_) / double(drawn_) : 0.0; }
+    double success_rate() const noexcept {
+        return stats_.attempts > 0 ? double(stats_.n_models) / double(stats_.attempts) : 0.0;
+    }
+
+    /** Why the run ended — which safety valve fired, if one did. GPAP_SAMPLE_STOP_UNSAT is a
+     *  PROOF (the construction flush conflicted); ZERO_YIELD is only an absence of evidence. */
+    gpap_sample_stop stop() const noexcept { return static_cast<gpap_sample_stop>(stats_.stop); }
     /** True when the run stopped on the time limit rather than reaching the target. */
-    bool timed_out() const noexcept { return timed_out_; }
-    /** Whether SampleOptions::lookahead ended up flipped by the auto-retry, and its final value —
-     *  worth carrying over to the next run on the same formula. */
-    bool retried() const noexcept { return retried_; }
-    bool lookahead_used() const noexcept { return lookahead_; }
+    bool timed_out() const noexcept { return stats_.timed_out != 0; }
+    /** Whether the retry_with_lookahead flip fired, and the soft flag the winning config (or
+     *  the final retry window) actually ran with — a distribution claim needs it false. */
+    bool retried() const noexcept { return stats_.retried != 0; }
+    bool lookahead_used() const noexcept { return stats_.lookahead_used != 0; }
+
+    /** Rows the verify re-check covered — the EVIDENCE behind a soundness claim, and what
+     *  distinguishes "verified every one of a million rows" from "verify was on but nothing
+     *  ever completed, so it never ran". 0 with verify on is NOT a passing verdict. */
+    std::int64_t sound_rows_checked() const noexcept { return stats_.sound_rows_checked; }
+
+    /** Portfolio breakdown: one entry per config passed to the run (a single entry for the
+     *  default single-config mode). `best_config()` is the winner whose rows fill bits(). */
+    std::size_t n_configs() const noexcept { return cstats_.size(); }
+    const gpap_config_stats &config_stats(std::size_t i) const { return cstats_.at(i); }
+    std::int32_t best_config() const noexcept { return stats_.best_config; }
+    std::int32_t dominant_config() const noexcept { return stats_.dominant_config; }
+    /** The whole core stats record, verbatim. */
+    const gpap_sample_stats &stats() const noexcept { return stats_; }
 
   private:
     friend class Sampler;
     std::vector<std::uint8_t> bits_;
     std::vector<std::int32_t> vars_;
     std::size_t n_kept_ = 0;
-    std::int64_t found_ = 0, drawn_ = 0, chunks_ = 0;
-    double seconds_ = 0.0;
-    bool timed_out_ = false, retried_ = false, lookahead_ = false;
+    gpap_sample_stats stats_{};
+    std::vector<gpap_config_stats> cstats_;
 };
 
 /** Draws satisfying assignments of a CNF formula on the GPU.
@@ -530,12 +612,18 @@ class Solutions {
  *  no repair step and nothing to round. Rows that conflict are dropped, which is why
  *  `Solutions::success_rate()` is worth looking at: it is the fraction that made it.
  *
- *  Construction picks the batch size K from free VRAM, the propagate kernel from K, and the
- *  decision order from the formula's independent support. Read them back with k(), mode() and
- *  variables() if you care; override them through SampleOptions if you must.
+ *  THE LOOP LIVES IN THE CORE (`gpap_sampler_*`, cpp/src/sample.cpp), shared verbatim with the
+ *  Python face — this class is marshalling: DIMACS ids, RAII, exceptions. Construction picks
+ *  the batch size K from free VRAM, the propagate kernel from the formula, and the decision
+ *  order from the formula's independent support. Read them back with k(), mode() and
+ *  variables(); override them through SampleOptions if you must. If a formula yields nothing
+ *  under the default config, run `SampleOptions::portfolio = gpap::default_portfolio()` — the
+ *  adaptive portfolio the Python pipeline uses, which also samples the search-heavy instances
+ *  a single random-order config cannot.
  *
- *  This is a SAMPLER, not a decision procedure: `found() == 0` means these trajectories did not
- *  reach a solution, never that the formula is unsatisfiable. Use a CDCL solver for that.
+ *  This is a SAMPLER, not a decision procedure: `found() == 0` with stop() != UNSAT means these
+ *  trajectories did not reach a solution, never that the formula is unsatisfiable (UNSAT is
+ *  reported only when construction PROVED it). Use a CDCL solver for the question.
  *
  *  Not thread-safe (it owns an Engine): one Sampler per thread. */
 class Sampler {
@@ -545,22 +633,43 @@ class Sampler {
 
     explicit Sampler(Formula formula, SampleOptions opts = SampleOptions())
         : formula_(std::move(formula)), opts_(std::move(opts)),
-          engine_(formula_, engine_options(opts_)), rng_(mix_seed(opts_.seed)) {
+          engine_(formula_, engine_options(opts_)) {
         const gpap_formula_info info = formula_.info();
         n_vars_ = info.num_vars;
 
-        // --- what to report ------------------------------------------------------------
-        // Default: the declared independent support (projected sampling), else all variables.
-        // `support` is 0-based (tier 2); everything a caller sees below is DIMACS. A `c ind`
-        // line naming a variable the header never declared is dropped rather than trusted —
-        // it would otherwise become an out-of-range gather column.
+        /* --- the core handle --------------------------------------------------------- */
+        run_opts_ = gpap_sampler_options{};          /* {0} is every default, by the ground rule */
+        run_opts_.max_chunks = opts_.max_chunks;
+        run_opts_.keep_cap = static_cast<std::int64_t>(opts_.max_keep);
+        run_opts_.time_limit_s = opts_.time_limit_s;
+        run_opts_.min_measure_chunks = opts_.min_measure_chunks;
+        run_opts_.verify = opts_.verify ? 1 : 0;
+        run_opts_.retry_with_lookahead = opts_.retry_with_lookahead ? 1 : 0;
+        check(gpap_sampler_create(engine_.handle(), opts_.seed, opts_.k_cap, &h_),
+              "gpap_sampler_create");
+        if (opts_.k > 0) check(gpap_sampler_set_k(h_, opts_.k), "gpap_sampler_set_k");
+
+        /* --- decision phase 1: the declared independent support ---------------------- */
+        /* `support` is 0-based (tier 2). A `c ind` line naming a variable the header never
+         * declared is dropped rather than trusted — it would otherwise become an out-of-range
+         * column. The head/tail split itself is the core's. */
         std::vector<std::int32_t> support;
         for (std::int32_t v : formula_.support())
             if (v >= 0 && v < n_vars_) support.push_back(v);
+        if (!support.empty())
+            check(gpap_sampler_set_support(h_, support.data(),
+                                           static_cast<std::int32_t>(support.size())),
+                  "gpap_sampler_set_support");
+        n_support_ = support.empty() ? n_vars_ : static_cast<std::int32_t>(support.size());
+
+        /* --- what to report ---------------------------------------------------------- */
+        /* Default: the support (projected sampling), else all variables — DIMACS out here,
+         * 0-based columns into the core. */
         vars_ = opts_.variables;
         if (vars_.empty()) {
             if (support.empty()) {
-                vars_ = all_vars(n_vars_);
+                vars_.resize(static_cast<std::size_t>(n_vars_));
+                std::iota(vars_.begin(), vars_.end(), 1);
             } else {
                 vars_.reserve(support.size());
                 for (std::int32_t v : support) vars_.push_back(v + 1);
@@ -570,169 +679,93 @@ class Sampler {
                 if (v < 1 || v > n_vars_)
                     throw Error(GPAP_ERR_ARG, "SampleOptions::variables: variable out of range");
         }
-        cols_.reserve(vars_.size());
-        for (std::int32_t v : vars_) cols_.push_back(v - 1);          // -> 0-based for the ABI
-
-        // --- decision order ------------------------------------------------------------
-        // Phase 1 decides the support and propagates to a fixpoint; phase 2 finishes whatever
-        // is still free. The kernel never straddles the boundary. Deciding a variable that
-        // propagation would have implied is a wasted decision AND a chance to conflict, so this
-        // split is what makes success rates on structured formulas survivable.
-        std::vector<char> in_support(static_cast<size_t>(n_vars_), 0);
-        for (std::int32_t v : support) in_support[static_cast<size_t>(v)] = 1;
-        for (std::int32_t v = 0; v < n_vars_; ++v)
-            (in_support[static_cast<size_t>(v)] ? head_ : tail_).push_back(v);
-        if (head_.empty()) { head_.swap(tail_); }                    // no `c ind`: a single phase
-        n_support_ = static_cast<std::int32_t>(head_.size());
-        order_.reserve(static_cast<size_t>(n_vars_));
-
-        // --- batch size ----------------------------------------------------------------
-        K_ = opts_.k > 0 ? opts_.k : auto_k(info, opts_);
-        engine_.reset(K_);             // resolve wave/scalar now, so mode() is true before sample()
-                                       // (reset, not plan_for: the latter is a pure query and
-                                       //  resolves nothing -- run_chunk resets again anyway)
-        // A model must have EVERY variable assigned, so completion is tested over all of them.
-        mask_all_ = engine_.pair_mask();
+        std::vector<std::int32_t> cols;
+        cols.reserve(vars_.size());
+        for (std::int32_t v : vars_) cols.push_back(v - 1);
+        check(gpap_sampler_set_columns(h_, cols.data(),
+                                       static_cast<std::int32_t>(cols.size())),
+              "gpap_sampler_set_columns");
     }
 
-    /** Draw solutions until `want` have been found, the time limit expires, or the formula
-     *  proves hopeless (see below). `want` is a target, not a promise — check `found()`. */
+    Sampler(const Sampler &) = delete;
+    Sampler &operator=(const Sampler &) = delete;
+    ~Sampler() { reset_handle(); }
+
+    /** Draw solutions until `want` have been found, a safety valve fires, or the formula is
+     *  proved hopeless — `Solutions::stop()` says which. `want` is a target, not a promise. */
     Solutions sample(std::int64_t want) {
         Solutions out;
         out.vars_ = vars_;
-        if (want <= 0 || formula_.trivially_unsat()) return out;      // empty clause => no models
-
-        const std::size_t keep_cap = opts_.max_keep;
-        const auto t0 = std::chrono::steady_clock::now();
-        out.lookahead_ = opts_.lookahead;
-        std::int64_t window_start = 0;                 // first chunk of the current config
-
-        while (out.found_ < want) {
-            const std::int32_t n = run_chunk(out.lookahead_);
-            out.drawn_ += K_;
-            out.chunks_ += 1;
-            out.found_ += n;
-
-            if (n > 0 && out.n_kept_ < keep_cap) {
-                const std::int32_t take = static_cast<std::int32_t>(
-                    std::min<std::int64_t>(n, static_cast<std::int64_t>(keep_cap - out.n_kept_)));
-                gather(take, n, out);
-            }
-            out.seconds_ = std::chrono::duration<double>(
-                               std::chrono::steady_clock::now() - t0).count();
-            // Give up only when NOTHING has been found after a grace period. "This chunk was
-            // empty" is not a signal: at a 0.01% success rate most chunks are empty and the run
-            // is still productive — an eager stop would report 0 on instances that do deliver.
-            if (out.found_ == 0 && out.chunks_ - window_start >= kGraceChunks) {
-                if (!opts_.auto_retry || out.retried_) break;
-                out.retried_ = true;                   // one flip of the polarity, then stop
-                out.lookahead_ = !out.lookahead_;
-                window_start = out.chunks_;
-            }
-            if (opts_.time_limit_s > 0 && out.seconds_ >= opts_.time_limit_s) {
-                out.timed_out_ = out.found_ < want;
-                break;
-            }
+        const std::vector<gpap_sample_config> cfgs = run_configs();
+        check(gpap_sampler_run(h_, want, cfgs.data(),
+                               static_cast<std::int32_t>(cfgs.size()), &run_opts_, &out.stats_),
+              "gpap_sampler_run");
+        out.cstats_.resize(cfgs.size());
+        for (std::size_t i = 0; i < cfgs.size(); ++i)
+            check(gpap_sampler_config_stats(h_, static_cast<std::int32_t>(i), &out.cstats_[i]),
+                  "gpap_sampler_config_stats");
+        const std::int64_t kept =
+            out.cstats_[static_cast<std::size_t>(out.stats_.best_config)].kept_rows;
+        if (kept > 0 && !vars_.empty()) {
+            out.bits_.resize(static_cast<std::size_t>(kept) * vars_.size());
+            check(gpap_sampler_bits(h_, -1, out.bits_.data(), kept), "gpap_sampler_bits");
+            out.n_kept_ = static_cast<std::size_t>(kept);
         }
-        out.seconds_ =
-            std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count();
+        if (opts_.verify && out.stats_.unsound_rows > 0)
+            throw Error(GPAP_ERR_KERNEL, "a returned row does not satisfy the formula (" +
+                                             std::to_string(out.stats_.unsound_rows) + " of " +
+                                             std::to_string(out.stats_.sound_rows_checked) +
+                                             " checked)");
         return out;
     }
 
     // ------------------------------------------------------------------ what it chose
     /** Trajectories per chunk. */
-    std::int32_t k() const noexcept { return K_; }
+    std::int32_t k() const noexcept { return gpap_sampler_k(h_); }
     /** The propagate variant in use. */
     Mode mode() const { return engine_.mode(); }
     /** Variables reported in the solution columns (DIMACS). */
     const std::vector<std::int32_t> &variables() const noexcept { return vars_; }
-    /** Size of decision phase 1 — the independent support, or all variables if none is declared. */
+    /** Size of decision phase 1 — the independent support, or all variables if none declared. */
     std::int32_t num_support() const noexcept { return n_support_; }
     /** Work done so far: literals assigned, decisions, occurrence entries, launches. */
     gpap_counters counters() const { return engine_.counters(); }
+    /** Restore the RNG to a known point — a run is then a function of the seed alone again. */
+    void reseed(std::int64_t seed) { check(gpap_sampler_reseed(h_, seed), "gpap_sampler_reseed"); }
+    /** Pin the batch (k <= 0 restores the calibrated value) — the cross-run A/B lever. */
+    void set_k(std::int32_t k) { check(gpap_sampler_set_k(h_, k), "gpap_sampler_set_k"); }
 
     /** Escape hatches to tier 2 — the same objects the sampler is driving. */
     Engine &engine() noexcept { return engine_; }
     const Formula &formula() const noexcept { return formula_; }
 
   private:
-    /** Chunks to run before concluding that a formula yields nothing at all. */
-    static constexpr std::int64_t kGraceChunks = 4;
-    /** Share of free VRAM a batch may occupy. The row model is exact (see calibrate.cpp), so
-     *  this is the ONLY headroom in the sizing path — it covers readout transients and whatever
-     *  else shares the device. It used to be one of three stacked factors (0.75 x 0.60 against a
-     *  1.57x-inflated model = 0.29 of free memory actually used). */
-    static constexpr double kMemFraction = 0.80;
-
     static Options engine_options(const SampleOptions &o) {
         Options e;
         e.device = o.device;
-        return e;                                     // Mode::Auto — resolved on the first reset
+        return e;                                     // Mode::Auto — the core resolves and pins
     }
-    static std::uint64_t mix_seed(std::int64_t s) {
-        return static_cast<std::uint64_t>(s) * 6364136223846793005ull + 1442695040888963407ull;
+    std::vector<gpap_sample_config> run_configs() const {
+        if (!opts_.portfolio.empty()) return opts_.portfolio;
+        return {gpap_sample_config{static_cast<std::int32_t>(opts_.var_order), opts_.batch,
+                                   opts_.lookahead ? 1 : 0}};
     }
-    static std::vector<std::int32_t> all_vars(std::int32_t n) {
-        std::vector<std::int32_t> v(static_cast<size_t>(n));
-        std::iota(v.begin(), v.end(), 1);
-        return v;
-    }
-
-    /** K from the free VRAM, matching the Python sampler's kill-switch-validated model:
-     *  min(the analytic bound over gpap_row_bytes, the batch cap). ONE number — the "fused
-     *  boost" that used to multiply this is gone, along with the 1.57x-over per-row model it
-     *  existed to undo. Hardware that spills to host RAM rather than failing is why the bound is
-     *  the exact allocation list and not an estimate: an optimistic K silently halves throughput
-     *  instead of raising anything. */
-    static std::int32_t auto_k(const gpap_formula_info &info, const SampleOptions &o) {
-        /* SampleOptions::k_cap: 0 = auto (this GPU's VRAM), >0 = verbatim, <0 = uncapped.
-         * gpap_compute_k_safe reads cap<=0 as "no cap", which is what the negative case wants. */
-        const std::int32_t cap = o.k_cap == 0 ? gpap_default_k_cap(o.device) : o.k_cap;
-        const std::int64_t free_bytes = gpap_mem_available(o.device, kMemFraction);
-        /* num_long: only length>=3 clauses carry per-row state — binaries are implication
-         * edges and units live in the flush bitmap, so charging total M would waste ~2.3x
-         * of the batch on circuit CNFs. */
-        return gpap_compute_k_safe(info.num_long, info.num_vars, free_bytes, cap);
-    }
-
-    /** One chunk: reshuffle within each phase, run K trajectories, count the models. */
-    std::int32_t run_chunk(bool soft) {
-        std::shuffle(head_.begin(), head_.end(), rng_);
-        std::shuffle(tail_.begin(), tail_.end(), rng_);
-        order_.clear();
-        order_.insert(order_.end(), head_.begin(), head_.end());
-        order_.insert(order_.end(), tail_.begin(), tail_.end());
-
-        engine_.reset(K_);
-        engine_.trajectory(order_, n_support_, opts_.batch,
-                           static_cast<std::int64_t>(rng_() >> 2), soft);
-        const std::int32_t n = engine_.select_complete(mask_all_, /*slot=*/0);
-        if (opts_.verify && n > 0 && engine_.check_sound(/*slot=*/0) != 0)
-            throw Error(GPAP_ERR_KERNEL, "a returned row does not satisfy the formula");
-        return n;
-    }
-
-    /** Copy `take` of this chunk's `n` models into `out` (device-side gather of the columns). */
-    void gather(std::int32_t take, std::int32_t n, Solutions &out) {
-        std::int32_t slot = 0;
-        if (take < n) {                            // keep-cap partial: narrow a scratch selection
-            std::vector<std::int32_t> rows = engine_.selection_rows(0, n);
-            rows.resize(static_cast<size_t>(take));
-            slot = 2;
-            engine_.selection_set(slot, rows);
+    void reset_handle() {
+        if (h_) {
+            gpap_sampler_free(h_);
+            h_ = nullptr;
         }
-        const std::vector<std::uint8_t> chunk = engine_.var_bits(cols_, take, slot);
-        out.bits_.insert(out.bits_.end(), chunk.begin(), chunk.end());
-        out.n_kept_ += static_cast<std::size_t>(take);
     }
 
+    /* Declaration order is the destruction contract: the handle is declared LAST so it is freed
+     * FIRST — gpap_sampler_free touches the engine it borrowed. */
     Formula formula_;
     SampleOptions opts_;
+    gpap_sampler_options run_opts_{};            // opts_, translated once for the ABI
     Engine engine_;
-    std::mt19937_64 rng_;
-    std::vector<std::int32_t> vars_, cols_;          // DIMACS ids / 0-based columns
-    std::vector<std::int32_t> head_, tail_, order_;  // 0-based decision order, phase 1 then 2
-    std::int32_t n_vars_ = 0, n_support_ = 0, K_ = 0, mask_all_ = 0;
+    std::vector<std::int32_t> vars_;             // DIMACS ids of the reported columns
+    std::int32_t n_vars_ = 0, n_support_ = 0;
+    gpap_sampler *h_ = nullptr;
 };
 
 /** Value of a variable after propagation. */

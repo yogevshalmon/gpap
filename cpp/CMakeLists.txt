@@ -15,7 +15,9 @@ cmake_minimum_required(VERSION 3.18)
 # that recompiles -- but a caller that only RELINKS gets none of that, so the soname has to move:
 # under SOVERSION 0 an old binary would have read GPAP_MODE_WAVE as SCALAR and passed the integer
 # 1 where a gpap_probe_options* is now dereferenced. Bump both again on the next break.
-project(gpap VERSION 0.2.0 LANGUAGES C CXX)
+# 0.3.0 — ADDITIVE: the gpap_sampler_* sampling entry points (cpp/src/sample.cpp). No
+# existing symbol or struct changed, so SOVERSION stays 1.
+project(gpap VERSION 0.3.0 LANGUAGES C CXX)
 
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -76,6 +78,7 @@ add_library(gpap SHARED
   src/calibrate.cpp
   src/probe.cpp
   src/check.cpp
+  src/sample.cpp
   ${GPAP_GENERATED})
 target_include_directories(gpap
   PUBLIC  $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>

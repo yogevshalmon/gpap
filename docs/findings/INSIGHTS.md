@@ -26,6 +26,24 @@ The deep write-ups, by topic:
 
 ## Engine & memory model
 
+**The sampling chunk loop was the last duplicated flow, and it moved into the core
+(2026-09-01).** `check.cpp` and `probe.cpp` had already established the rule — "a rule callers
+can observe must have one home" — but the FLAGSHIP flow was still written twice:
+`gpap::Sampler` in the header and `GPUSampler.sample` in Python, sharing only tier-2
+primitives, compared by no test. Measured drift before the port: the C++ face could not sample
+the service family at all (no structured order, no portfolio — PhaseService.sk_14_27: 0 models
+in 40 s where Python delivered 20,808 in 25 s; with the ported portfolio, 3,768 in 0.35 s, the
+structured B=1 arm winning); its `rate()` charged delivery and the verify self-test to the
+sampling clock (−6.7% for asking for the rows, −8.5% for verify on 27.sk_3_32 — the exact
+`out_project_s` trap the Python face had already fixed twice); and its `auto_retry=true`
+default silently flipped the Barbarik-rejected soft polarity on. Now `cpp/src/sample.cpp`
+(`gpap_sampler_*`) owns chunks, the bandit, the valves, buckets and the accounting; both faces
+are marshalling; the RNG is the core's own (xoshiro256** + in-house Fisher-Yates — never
+std::shuffle, whose draws are stdlib-defined); delivery draws nothing from the sampling stream
+BY CONSTRUCTION. Gates: tests/test_sample_core.py (the loop's contract at the ABI),
+tests/test_face_parity.py (same seed ⇒ identical rows across faces — impossible before).
+⚠️ Seed era boundary: pre-port recorded rows replay under torch streams (BENCHMARKING §3).
+
 **The C ABI's own defaults were the last place the dispatch rule did not reach (2026-08-31).**
 `gpap_engine_options.mode` was `GPAP_MODE_SCALAR`, and scalar was the enum's 0 — so `{0}` and a
 NULL options pointer, the two spellings the header calls "every default", handed the raw C face

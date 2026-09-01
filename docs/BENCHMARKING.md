@@ -40,6 +40,12 @@ noise only. Any change to portfolio membership or chunk count shifts RNG consump
 low-success instances per-instance rates then swing ±20–40% either way; a "consistent 0.81×" can
 be pure draw luck.
 
+> ⚠️ **Seed era boundary, 2026-09-01**: the sampling RNG moved from Python's torch generators
+> into the core sampler (`gpap_sampler_*` — one deterministic stream shared by the C++ and
+> Python faces). Same-seed model counts are comparable WITHIN an era, never across it; the gate
+> below applies unchanged inside the new era, and it gains a cross-FACE variant
+> (tests/test_face_parity.py: same seed + single config ⇒ identical rows on both faces).
+
 **A pure refactor is gated on identical model counts**, not on rates:
 
 - pin the batch **below both arms' analytic bounds** (`--k-cap 20000` on the reference box; the

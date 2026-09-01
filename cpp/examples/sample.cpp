@@ -1,6 +1,11 @@
 // Sampling a CNF's solutions from C++ with libgpap.
 //
-//   ./gpap_sample formula.cnf [n_solutions] [seed] [out.txt]
+//   ./gpap_sample formula.cnf [n_solutions] [seed] [out.txt] [--portfolio]
+//
+// --portfolio races the library's default config portfolio (random B=8 / random B=1 /
+// structured B=1) as a throughput bandit — what the Python pipeline runs by default, and what
+// samples the search-heavy instances the single default config cannot. Without it the run is a
+// single config and DETERMINISTIC: same seed, same solutions.
 //
 // Everything that makes GPAP fast — the batch size, the propagate kernel, the decision order,
 // the chunk loop — is chosen by gpap::Sampler. There is no K to pick and no tuning to do; the
@@ -14,16 +19,26 @@
 #include "gpap/gpap.hpp"
 
 int main(int argc, char **argv) {
-    if (argc < 2) {
-        std::fprintf(stderr, "usage: %s formula.cnf [n_solutions] [seed] [out.txt]\n", argv[0]);
+    // Pull the one flag out first so the positional arguments stay simple.
+    bool portfolio = false;
+    std::vector<const char *> pos;
+    for (int i = 1; i < argc; ++i) {
+        if (std::string(argv[i]) == "--portfolio") portfolio = true;
+        else pos.push_back(argv[i]);
+    }
+    if (pos.empty()) {
+        std::fprintf(stderr, "usage: %s formula.cnf [n_solutions] [seed] [out.txt] "
+                             "[--portfolio]\n", argv[0]);
         return 2;
     }
-    const std::int64_t want = argc > 2 ? std::atoll(argv[2]) : 100000;
-    const char *out_path = argc > 4 ? argv[4] : nullptr;
+    const char *cnf = pos[0];
+    const std::int64_t want = pos.size() > 1 ? std::atoll(pos[1]) : 100000;
+    const char *out_path = pos.size() > 3 ? pos[3] : nullptr;
 
     try {
         gpap::SampleOptions opts;
-        opts.seed = argc > 3 ? std::atoll(argv[3]) : 5;
+        opts.seed = pos.size() > 2 ? std::atoll(pos[2]) : 5;
+        if (portfolio) opts.portfolio = gpap::default_portfolio();
         // Keep only what we are going to look at: 10 to print, or everything if writing a file.
         // Solutions are found on the GPU either way; this caps what is copied back to the host.
         opts.max_keep = out_path ? static_cast<std::size_t>(want) : 10;
@@ -40,16 +55,24 @@ int main(int argc, char **argv) {
         //                                   // real model. OFF by default, like every other face:
         //                                   // it is a self-test, not part of producing samples.
 
-        gpap::Sampler sampler(argv[1], opts);
+        gpap::Sampler sampler(cnf, opts);
         // What it chose for you, for the record — none of this had to be supplied.
         std::printf("%s: %d vars, %d clauses — %d rows/chunk, %s propagate, "
                     "%d variables decided first, %zu reported\n",
-                    argv[1], sampler.formula().num_vars(), sampler.formula().num_clauses(),
+                    cnf, sampler.formula().num_vars(), sampler.formula().num_clauses(),
                     sampler.k(), sampler.mode() == gpap::Mode::Wave ? "wave" : "scalar",
                     sampler.num_support(), sampler.variables().size());
 
         const gpap::Solutions sols = sampler.sample(want);
 
+        if (sols.n_configs() > 1) {                 // the bandit's evidence, one line per arm
+            for (std::size_t i = 0; i < sols.n_configs(); ++i) {
+                const gpap_config_stats &c = sols.config_stats(i);
+                std::printf("  config %zu: %lld models / %lld chunks%s\n", i,
+                            (long long)c.models, (long long)c.chunks,
+                            (int)i == sols.best_config() ? "  <- winner (rows reported)" : "");
+            }
+        }
         if (sols.retried())
             std::printf("note: nothing found with lookahead=%s, retried with lookahead=%s\n",
                         sols.lookahead_used() ? "off" : "on",

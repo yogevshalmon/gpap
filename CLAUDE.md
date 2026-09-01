@@ -49,6 +49,9 @@ cpp/                       # THE ENGINE CORE — libgpap (C ABI + header-only C+
   src/engine.cpp           # state ownership (cuMemAlloc), reset/flush cache, both entry points
   src/readout.cpp          # selections, on-device soundness, bit gathers, assignment rows
   src/calibrate.cpp        # K sizing, VRAM model + THE wave/scalar dispatch rule
+  src/sample.cpp           # THE SAMPLING LOOP (both faces): chunks + config bandit + stop
+                           #   valves + kept-row buckets + delivery/verify accounting, and the
+                           #   core's own deterministic RNG (gpap_sampler_* ABI)
   src/probe.cpp            # combinatorial probing: every k-subset of a literal set, paged +
                            #   budgeted (enumeration/chunking/ceiling all live HERE, not per-face)
   src/check.cpp            # batched checking: THE chunk loop of both AssumptionChecker faces
@@ -82,7 +85,9 @@ gpap/
     probe.py               # LiteralProbe: a thin DIMACS face over the core's probe ABI (the
                            #   sweep itself is cpp/src/probe.cpp) — mining/backbone/lookahead
   sampling/                # THE FLAGSHIP
-    sampler.py             # GPUSampler (trajectories, bandit, soft-stop) — engine consumer only
+    sampler.py             # GPUSampler — MARSHALLING over the core's gpap_sampler_* loop
+                           #   (configs/knobs in, stats/buckets out) + ELS reconstruction and
+                           #   the host projection fill; the loop itself is cpp/src/sample.cpp
     pipeline.py            # sample_file / sample_clauses: the full e2e flow + the portfolios
                            #   (VarOrder/Lookahead enums + SamplingConfig NamedTuple, so a config
                            #   documents itself; `portfolio(name, allow_soft=)` is the accessor)
@@ -198,7 +203,20 @@ in `docs/findings/`. Do not put a dated measurement or a card name back into a s
    costing an int32 per row and a branch in both propagate loops — redundancy is a property of a
    CLAUSE against a FORMULA, so it belongs where the formula is known.
 2. **Fused trajectory sampling**: `reset(K)` + `run_trajectory(order, n_support, B, seed,
-   soft=…)` — the whole randomized decide+propagate loop in one launch.
+   soft=…)` — the whole randomized decide+propagate loop in one launch. **The SAMPLING CHUNK
+   LOOP OVER IT IS ALSO CORE** (`gpap_sampler_*`, `cpp/src/sample.cpp`, 2026-09-01): chunks,
+   the adaptive config bandit, the stop valves, per-config kept-row buckets and the
+   delivery/verify accounting — one home, the same lesson as `check.cpp`/`probe.cpp`. Both
+   faces (`GPUSampler`, `gpap::Sampler`) are marshalling over it; at one seed + single config
+   they draw IDENTICAL models (gated by tests/test_face_parity.py; the loop's own contract by
+   tests/test_sample_core.py). The RNG is the core's (xoshiro/Fisher-Yates, stdlib-independent);
+   ⚠️ recorded rows from before the port replay under torch seeds and are not
+   seed-comparable — re-baseline, docs/BENCHMARKING.md §3. The C++ face gained
+   `portfolio`/`var_order` (it could sample NOTHING on the service family before — PhaseService:
+   0 in 40 s vs 3,768 in 0.35 s with the portfolio) and its `rate()` no longer charges delivery
+   or the soundness self-test; `auto_retry` is now `retry_with_lookahead`, **default OFF** (the
+   flip turns the Barbarik-rejected soft polarity on — the same choice `--allow-soft` gates in
+   Python, applied to the face that never got the memo).
 
 `reset(K)` broadcast-restores the construction-time post-units-flush cache (no per-chunk flush).
 
@@ -216,7 +234,9 @@ kernels are the only path — the oracle is `tests/reference_bcp.py`).
 - `PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True` is set in `gpap/__init__.py` **before** torch
   inits CUDA. It removes the allocator fragmentation that inflated reserved memory ~2.3× and forced
   a small K. Do not remove it.
-- `GPUSampler._calibrate_k`: **K = min(analytic, cap)** (kill-switch
+- K sizing lives on the CORE sampler handle (`gpap_sampler_create`; `GPUSampler.K` is a
+  property over it, assignment = `gpap_sampler_set_k` = the pin): **K = min(analytic, cap)**
+  (kill-switch
   validated: the old 4×0.7·free/(70M+40N) floor modeled the deleted PyTorch path and bound K at
   ~1/3 of the packed fit). A runtime memory PROBE is unreliable here — do not resurrect it.
 - **The `cap` is ONE constant, the same on every GPU**: `kBatchCap = 262,144`
@@ -738,4 +758,7 @@ Cross-GPU K-scaling: `eval/colab/colab_sampling_benchmark.py` + `notebooks/gpap_
   user-local benchmark tree). `tests/conftest.py::circuit_cnfs` builds the matrix once per session.
 - The no-change gate for a pure refactor: fixed K (`--k-cap N` + `pin_batch`), one config, seed 5 ⇒
   bit-identical model counts (+ model-set hashes on small instances). Rates alone are draw-noisy on
-  low-success instances (±40%) — see docs/BENCHMARKING.md §3.
+  low-success instances (±40%) — see docs/BENCHMARKING.md §3. ⚠️ **Seed streams re-baselined
+  2026-09-01** (the sampling RNG moved from torch generators into the core): counts recorded
+  before that date are not same-seed-comparable to counts after; the gate holds WITHIN each era,
+  and cross-FACE (C++ vs Python) within the new one.

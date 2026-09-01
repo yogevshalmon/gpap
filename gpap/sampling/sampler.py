@@ -37,6 +37,7 @@ import time
 import numpy as np
 import torch
 
+from gpap.engine import _core as _gcore
 from gpap.engine.formula import CnfFormula
 from gpap.engine.bcp_engine import BCPEngine
 from gpap.engine.calibrate import (
@@ -83,51 +84,44 @@ class GPUSampler:
         # Shape comes from the engine core (free) — never a reduction over a (M,) tensor.
         self._max_cls = formula.max_clause_len or 1
         self._total_lits = formula.total_lits
-        # RNG + state must exist before K calibration (the probe chunk in _calibrate_k uses _gen).
-        # TWO streams, deliberately. `_gen` drives SAMPLING (the per-chunk var permutation and the
-        # trajectory seed); `_proj_gen` drives DELIVERY (the don't-care bits `_project` fills in).
-        # They must not share: `_project` now runs inside the timed chunk loop when a caller asks
-        # for output rows, and on a shared generator each of its draws would shift every later
-        # chunk's permutation and seed — making `--out` change which models a run finds, at the
-        # same --seed. Split, output collection is stream-neutral by construction.
-        self._gen = torch.Generator(device=device)
+        # TWO streams, deliberately. SAMPLING (the per-chunk shuffle and trajectory seed) is
+        # the CORE sampler's own deterministic RNG, seeded below and shared with the C++ face.
+        # `_proj_gen` drives DELIVERY (the don't-care bits the projection fill draws). They must
+        # not share a stream: delivery draws would otherwise shift every later chunk's
+        # permutation, making `--out` change which models a run finds at the same --seed. The
+        # core enforces its half by construction (its kept-row gathers draw nothing); this
+        # generator keeps the host half honest.
         self._proj_gen = torch.Generator(device=device)
-        if seed is not None:
-            self._gen.manual_seed(seed)
         self._proj_gen.manual_seed((seed if seed is not None else 0) ^ 0x5EED_0117)
         self._seed = seed
         import random as _random
         self._pyrng = _random.Random(seed)
         self.support: list[int] | None = None   # 0-based independent-support vars (from `c ind`)
         self._recon: dict | None = None          # set when built with simplify=True (see _from_simplified)
-        # THE batch size, from the engine's own memory model (gpap.engine.calibrate ->
-        # cpp/src/calibrate.cpp). One number, one model: `row_bytes` is the exact allocation list
-        # of what a chunk reserves, so there is nothing left to "boost".
-        #
-        # There used to be TWO models here — a conservative `K` plus a `K_fused` boost that
-        # recovered the headroom the conservative one wasted. Both are gone because the reason
-        # for them is: the old per-row model charged for a separate sat array, a byte-per-literal
-        # assignment and PyTorch-era scatter temporaries that no longer exist, while omitting the
-        # trail, which made it 1.57x over. The boost was a correction factor for a wrong model.
-        # No B term: the trail is sized by the VARIABLE count alone (every push is bitmap-
-        # deduped), so K is independent of the portfolio's decision batch by construction rather
-        # than by passing a floor here — which is what a measurement wants and what the sizing
-        # model now guarantees instead of merely permitting.
-        self.K = compute_k_safe(self.M_state, self.N, gpu_mem_available(device), cap=k_cap)
-        self._K_init = self.K
-        # PIN the propagate kernel to the batch the chunks will actually run, rather than letting
-        # the engine re-dispatch per reset(). The two agree on every full chunk, but the sampler
-        # also issues small resets — the warmup's pinned 1024, a short final chunk — and those
-        # must not silently switch kernel mid-run: `engine.mode` is recorded as row provenance and
-        # a measurement whose kernel changes underneath it is not a measurement. The RULE lives in
-        # engine.calibrate.dispatch_mode; this only chooses its input. `auto_dispatch` guards it:
-        # a kernel pinned any other way ($GPAP_KERNEL, an explicit mode) must not be overridden.
-        if self.engine.auto_dispatch and device.type == "cuda":
-            self.engine.set_mode(dispatch_mode(self.M, self.K, device))
+        # THE chunk loop lives in the core (cpp/src/sample.cpp, `gpap_sampler_*`), shared
+        # verbatim with the C++ face — this class marshals configs and knobs in, stats and kept
+        # rows out. The handle owns the batch (K = min(analytic bound, cap) over the exact
+        # per-row allocation list, gpap_compute_k_safe), the SAMPLING RNG, and the kernel pin
+        # (the propagate variant is pinned to the chunk batch at create, so a short warmup
+        # reset cannot switch kernels mid-measurement; an explicit $GPAP_KERNEL / mode pin is
+        # never overridden — gpap_engine_auto guards it, in the core).
+        self._smp = _gcore.Sampler(self.engine._core, seed=(seed if seed is not None else 0),
+                                   k_cap=(-1 if k_cap is None else int(k_cap)))
+        self._K_init = self._smp.k
+        self._sup_pushed = "unset"     # last support handed to the core (see _push_support)
 
     # ---------------------------------------------------------------- THE batch size
-    # Read `batch_size`; set it with pin_batch() / pinned_batch(). `K` is the calibrated value
-    # and `batch_size` is what the next chunk runs — they differ only while a pin is in force.
+    # Read `batch_size`; set it with pin_batch() / pinned_batch(). `K` is held by the CORE
+    # sampler — assigning it routes to gpap_sampler_set_k, so a pin binds the actual chunk loop.
+    @property
+    def K(self) -> int:
+        """Rows per chunk — the core sampler's resolved batch."""
+        return self._smp.k
+
+    @K.setter
+    def K(self, n: int) -> None:
+        self._smp.set_k(int(n))
+
     @property
     def batch_size(self) -> int:
         """Trajectories the next chunk will run — the number that sets throughput."""
@@ -237,95 +231,20 @@ class GPUSampler:
         if self.device.type == "cuda":
             torch.cuda.synchronize()
 
-    # ----------------------------------------------------------------- one chunk
+    # ------------------------------------------------------------- the core chunk loop
+    # reset+trajectory+selection, the config bandit, the stop valves and the delivery/verify
+    # accounting ALL live in cpp/src/sample.cpp (`gpap_sampler_*`), shared with the C++ face.
+    # tests/test_sample_core.py pins that loop's own contract at the ABI level; nothing here
+    # re-implements any of it.
 
-    def _pair_masks(self, support_mask: "torch.Tensor | None"):
-        """(all_vars_id, support_id|None) engine pair-mask IDs for the completion checks.
-        Cached; keyed by support-mask IDENTITY with a strong ref held — sample() builds ONE
-        support_mask per call, so this registers once per sample() not per chunk."""
-        if getattr(self, "_pm_ref", "unset") is not support_mask:
-            self._pm_ref = support_mask
-            self._pm_all = self.engine.make_pair_mask(None)
-            self._pm_sup = (self.engine.make_pair_mask(support_mask)
-                            if support_mask is not None else None)
-        return self._pm_all, self._pm_sup
-
-    @torch.inference_mode()
-    def _run_chunk(self, K: int, B: int, random_var: bool,
-                   support_mask: torch.Tensor | None, complete: bool, lookahead=False):
-        """One chunk of K trajectories — the WHOLE decide+propagate loop in ONE fused kernel
-        launch (engine.run_trajectory). Decision order = support vars first (phase 1), then, if
-        `complete`, the remaining vars (phase 2); the kernel never straddles the phase boundary.
-        `lookahead` in ("soft", "fsoft") enables the in-kernel risk-polarity. There is
-        deliberately no round cap: the kernel structurally terminates in <= |order| decision
-        groups, and a cap cripples B=1 on large supports (measured 2x on s832).
-
-        Returns (n_fully, n_support_complete, rounds):
-          n_fully : rows that are active AND have no free var -> guaranteed models.
-                    The row selection stays on the GPU in engine slot 0 (slot 1 holds
-                    the support-complete selection); read it out with the engine's
-                    selection accessors, no (K,) mask ever crosses the bus.
-        """
-        eng = self.engine
-        # reset broadcast-restores the cached post-units-flush state: no (K,M) state writes
-        # beyond one copy, no per-chunk units flush.
-        eng.reset(K)
-        if random_var:
-            priority = torch.randperm(self.N, generator=self._gen, device=self.device)
-        else:
-            priority = torch.arange(self.N, device=self.device)
-        # Picking the next-B-free-vars in priority order happens inside the kernel; polarity is
-        # a per-(chunk,k,v) hash bit seeded below (torch RNG stream consumed ONCE per chunk).
-        rank = torch.argsort(priority)                  # vars in priority order
-        if support_mask is not None:
-            in_sup = support_mask[rank]
-            sup_part = rank[in_sup]
-            order = torch.cat([sup_part, rank[~in_sup]]) if complete else sup_part
-            n_support = int(sup_part.numel())
-        else:
-            order = rank
-            n_support = order.numel()                   # single phase: boundary = end
-        seed = int(torch.randint(0, 2 ** 62, (1,), generator=self._gen,
-                                 device=self.device).item())
-        rounds = eng.run_trajectory(order, n_support, B, seed,
-                                    soft=(lookahead in ("soft", "fsoft")))
-        # Completion checks straight off the assignment BITMAP (one bitwise pass over the words
-        # inside the engine; only the COUNT crosses the bus). The former (K, N) free-mask
-        # materialization cost ~16x its bytes in strided sector RMWs.
-        pm_all, pm_sup = self._pair_masks(support_mask)
-        n_fully = eng.select_complete(pm_all, slot=0)
-        n_sup = (eng.select_complete(pm_sup, slot=1) if support_mask is not None else n_fully)
-        return n_fully, n_sup, rounds
-
-    def _select_config(self, plan, stats, chunk, exploit=False):
-        """Adaptive (bandit) config selection: dynamically switch to the best-THROUGHPUT config as it
-        is measured on real full-K chunks. More robust than a small-K pre-probe (which
-        under-rates large B because kernel-launch overhead dominates its few rounds, and commits
-        permanently): here every measurement is a productive full-K chunk and the choice can change.
-        Policy: try each config once, then decaying-epsilon-greedy (explore shrinks as 1/sqrt(chunk),
-        floored at 5%) on cumulative models/wall — keeps re-checking alternatives but spends most of
-        the budget on the winner (niche → (random,8); service → (structured,1)).
-        Exploration is PLAUSIBILITY-FILTERED: only configs within 20x of the best measured rate get
-        re-checked. Uniform re-checks ignored what a re-check COSTS — measured on b10 T=25 (64-chunk
-        collect run): orac at 102 models/s vs the winner's 29.6k (290x) got 5 uniform picks = 20.4s
-        of the 29s wall (70%). Run-to-run rate noise is ~1.9x (b06 measurements), so a 20x-slower
-        config is dead on this formula, not noisy — it keeps exactly its one cold-start chunk.
-        `exploit=True` skips exploration and returns the current best — used in the post-target
-        top-up phase to accumulate a stable measurement window on the winner (min_measure_chunks)."""
-        rate = lambda c: (stats[c]["models"] / stats[c]["wall"]) if stats[c]["wall"] > 0 else 0.0
-        best = lambda: max(plan, key=rate)
-        for c in plan:                                  # cold start: one real chunk per config
-            if stats[c]["chunks"] == 0:
-                return c
-        if exploit:
-            return best()
-        eps = max(0.05, chunk ** -0.5)
-        if self._pyrng.random() < eps:
-            b = best()
-            cands = [c for c in plan if c is not b and rate(c) >= rate(b) / 20]
-            if cands:
-                return self._pyrng.choice(cands)
-        return best()
+    def _push_support(self, sup) -> None:
+        """Hand the decision phase-1 variable set to the core, once per DISTINCT set: a pair
+        mask lives until the engine dies (see gpap.h), so re-pushing an identical support every
+        sample() call would leak one mask per call."""
+        key = tuple(sup) if sup else None
+        if self._sup_pushed != key:
+            self._smp.set_support(list(sup) if sup else None)
+            self._sup_pushed = key
 
     def _reconstruct_els(self, comp_rows: list[list[int]]):
         """Reconstruct original models when the formula was reduced by ELS (simplify_cnf_els).
@@ -471,43 +390,48 @@ class GPUSampler:
         }
         return self._proj_plan
 
-    @torch.inference_mode()
-    def _project(self, n: int, slot: int = 0):
-        """(n, S) uint8 support projection for the rows selected in `slot`, via the cached plan.
-
-        The only bytes that leave the device are the gathered support bits themselves (the
-        engine does the bit gather); the constant / polarity-flip / don't-care columns are
-        assembled here. No per-row Python reconstruct — that was the measured delivery
-        bottleneck — and no (K, N) mask."""
-        plan = self._build_projection_plan()
+    def _fill_projection(self, raw, plan, n=None):
+        """(n, S) uint8 support projection from `raw` — the (n, |gather|) bit rows the CORE
+        kept (plan["gcol"]'s >= 0 columns, in that order) — via the cached plan: constant
+        columns broadcast, gathered columns XOR their polarity flip, don't-care groups drawn
+        from `_proj_gen` (ELS-equivalent variables share a draw — a hard validity requirement).
+        The gather itself happened in the core, billed to deliver_s; only this fill is host
+        work, and only IT consumes delivery randomness."""
+        n = raw.shape[0] if n is None else n
+        plan_g = plan["gcol"] >= 0
         proj = np.broadcast_to(plan["const"], (n, plan["S"])).copy()   # (n, S) uint8
-        g = plan["gcol"] >= 0
-        if g.any():
-            # gather ONLY the needed var columns' TRUE bits straight from the bitmap
-            pos = self.engine.var_bits(slot, plan["gcol"][g], n)       # (n, |g|) uint8
-            proj[:, g] = pos ^ plan["flip"][g]
+        if plan_g.any() and n:
+            proj[:, plan_g] = raw[:n, :int(plan_g.sum())] ^ plan["flip"][plan_g]
         rm = plan["rgroup"] >= 0
-        if plan["n_groups"] and rm.any():
-            # torch RNG keeps the don't-care draw stream identical to the historical engine
-            # uint8 straight out of randint: the int64 default allocated 8x the bytes on device
-            # for a tensor that is cast to uint8 on the very next call, inside the chunk loop.
+        if plan["n_groups"] and rm.any() and n:
+            # torch RNG keeps the don't-care stream on `_proj_gen`, never the sampling one.
             bits = torch.randint(0, 2, (n, plan["n_groups"]), generator=self._proj_gen,
                                  dtype=torch.uint8, device=self.device).cpu().numpy()
             proj[:, rm] = bits[:, plan["rgroup"][rm]] ^ plan["flip"][rm]
         return proj
 
+    def _gather_cols(self, plan):
+        """The 0-based compacted columns the core must keep for this plan — the gather set, or
+        ONE dummy column when the plan gathers nothing: set_columns(empty) means EVERY variable
+        in the ABI, which is the opposite of "none", and `_fill_projection` reads a raw matrix
+        only through the gather mask, so a dummy column is never looked at."""
+        g = plan["gcol"][plan["gcol"] >= 0]
+        if len(g) or self.N == 0:       # N == 0: "every variable" IS zero columns — no dummy
+            return g
+        return np.zeros(1, dtype=np.int64)
+
     def reseed(self, seed: int) -> None:
         """Restore BOTH RNG streams to a known point (see `_gen` / `_proj_gen`).
 
         The warmup calls this so the timed run is deterministic from `seed` alone. It exists as a
-        method because there are two streams to restore and a caller that reseeds only the one it
-        knows about silently loses that determinism for the other."""
-        self._gen.manual_seed(seed)
+        method because there are several streams to restore (the core's sampling stream, the
+        delivery fill, the host reconstruction fills) and a caller that reseeds only the one it
+        knows about silently loses that determinism for the others."""
+        self._smp.reseed(seed)
         self._proj_gen.manual_seed(seed ^ 0x5EED_0117)
         import random as _random
         self._pyrng = _random.Random(seed)
 
-    @torch.inference_mode()
     def sample_bits(self, n_target: int, *, config=(True, 8, False),
                     max_chunks: "int | None" = None, max_seconds: "float | None" = None):
         """Collect up to `n_target` support-projection bit-rows efficiently. Only the small
@@ -522,33 +446,22 @@ class GPUSampler:
         sampling here long after its budget was spent. Prefer `sample(out_cap=...)`, which takes
         these rows off chunks the timed run executes anyway; this entry point remains for topping
         up a short collection and for callers with no timed run.
+
+        The loop is the core's (`gpap_sampler_run`, keep_cap = n_target): its zero-yield stop is
+        TOTAL-based — it gives up only when NOTHING has been found after the grace window, where
+        the old Python loop abandoned a delivering fill on one late empty chunk.
         """
         rv, B, la = config[0], max(1, config[1]), (config[2] if len(config) > 2 else False)
         plan = self._build_projection_plan()
-        support_mask = None
-        if self.support:
-            support_mask = torch.zeros(self.N, dtype=torch.bool, device=self.device)
-            support_mask[torch.tensor(self.support, dtype=torch.long, device=self.device)] = True
-        K = self.batch_size
-        mats: list = []
-        got = chunk = 0
-        t0 = time.perf_counter()
-        while got < n_target:
-            if max_chunks is not None and chunk >= max_chunks:
-                break
-            if max_seconds is not None and time.perf_counter() - t0 > max_seconds:
-                break
-            chunk += 1
-            n_done, _, _ = self._run_chunk(K, B, rv, support_mask, True, la)
-            if n_done == 0:
-                if chunk >= 3:                    # cold start + grace: instance is producing nothing
-                    break
-                continue
-            take = min(n_done, n_target - got)
-            mats.append(self._project(n_done)[:take])
-            got += take
-        M = (np.concatenate(mats) if mats else np.zeros((0, plan["S"]), dtype=np.uint8))
-        return M, plan["cols_1based"]
+        self._push_support(self.support)
+        self._smp.set_columns(self._gather_cols(plan))
+        self._smp.run(int(n_target), [(rv, B, la in ("soft", "fsoft"))],
+                      max_chunks=(max_chunks or 0), time_limit_s=(max_seconds or 0.0),
+                      keep_cap=int(n_target))
+        take = min(int(self._smp.config_stats(0).kept_rows), int(n_target))
+        raw = (self._smp.bits(0, rows=take) if take
+               else np.zeros((0, 1), dtype=np.uint8))
+        return self._fill_projection(raw, plan, take), plan["cols_1based"]
 
     # ----------------------------------------------------------------- public
 
@@ -605,9 +518,9 @@ class GPUSampler:
         random_var/decisions_per_round when set.
 
         `out_cap` > 0 also KEEPS up to that many support-projection bit-rows as the run goes, in
-        `out_bits` / `out_cols` — the rows a caller writes to a file. One `_project` per chunk, on
-        chunks this run executes anyway, against the second full sampling pass a post-hoc
-        collection costs. Rows are bucketed PER CONFIG and only the winning config's are returned,
+        `out_bits` / `out_cols` — the rows a caller writes to a file. The core keeps the projection's
+        gather columns off chunks this run executes anyway (billed to deliver_s), against the
+        second full sampling pass a post-hoc collection costs; the host fill finishes the rows. Rows are bucketed PER CONFIG and only the winning config's are returned,
         so the emitted set comes from ONE sampler rather than a mixture of the bandit's arms (a
         mixture is a uniformity question, not a delivery one). Its wall is accumulated separately
         as `out_project_s` and excluded from every rate — the per-config stamp alone was not
@@ -631,20 +544,12 @@ class GPUSampler:
                              "its mind, which are exactly what the probe could not do.")
         B = max(1, decisions_per_round)
         sup = self.support if (isinstance(support, str) and support == "auto") else support
-        support_mask = None
-        sup_idx = None
-        if sup:
-            support_mask = torch.zeros(self.N, dtype=torch.bool, device=self.device)
-            sup_t = torch.tensor(sup, dtype=torch.long, device=self.device)
-            support_mask[sup_t] = True
-            sup_idx = sup_t                                 # for projection
-        # Normalise the portfolio to (random_var, B, lookahead) triples. A config may be a 2-tuple
-        # (rv, B) — lookahead defaults off — or a 3-tuple (rv, B, lookahead), lookahead ∈
-        # {False, "soft"} ("fused"/"fsoft" accepted as aliases from the pre-packed-only era).
-        # "soft" = the in-kernel risk-polarity — the big win on the tight/deep CIRCUIT regime
-        # (conflict-avoidance polarity → far higher success at no extra memory). The retired
-        # modes raise: "full" python lookahead and "orac" needed the deleted PyTorch engine
-        # path (both measured out — see docs/findings/INSIGHTS.md).
+        sup_idx = list(sup) if sup else None
+
+        # Normalise the portfolio to (random_var, B, lookahead) triples. A config may be a
+        # 2-tuple (rv, B) — lookahead defaults off — or a 3-tuple, lookahead ∈ {False, "soft"}
+        # ("fused"/"fsoft" accepted as aliases from the pre-packed-only era). The retired modes
+        # raise: "full" python lookahead and "orac" needed the deleted PyTorch engine path.
         def _norm(c):
             la = c[2] if len(c) > 2 else False
             if la in ("full", "orac", True):
@@ -653,189 +558,112 @@ class GPUSampler:
             return (c[0], max(1, c[1]), "soft" if la in ("soft", "fsoft") else False)
         plan = [_norm(c) for c in configs] if configs else [_norm((random_var, B, lookahead))]
         K = self.batch_size
-        # More than one config => the bandit picks per chunk. Exactly one => nothing to pick, and
-        # per-config timing is skipped (that is the pinned-algorithm measurement mode).
         adaptive = configs is not None and len(plan) > 1
-        # Per-config work counters (decs/props) alongside models/wall so the reported dec/s, impl/s,
-        # assigns/s can be attributed to the SAME config as the headline samples/s (best_rate) —
-        # otherwise they blend over the bandit's exploration (incl. the slow orac chunk), understating
-        # the winner ~2x and diverging across GPUs.
-        cfg_stats = {c: {"models": 0, "attempts": 0, "wall": 0.0, "chunks": 0,
-                         "decs": 0, "props": 0} for c in plan}
-        # Output rows kept per config (see `out_cap`): each config stops collecting at out_cap, so
-        # the peak is bounded by |plan| x out_cap x S bytes.
-        cfg_bits: "dict[tuple, list]" = {c: [] for c in plan}
-        cfg_bits_n = {c: 0 for c in plan}
-        proj_s = 0.0                       # delivery wall, excluded from every reported rate
-        verify_s = 0.0                     # soundness re-check wall, likewise excluded
-        models: list[list[int]] = []
-        attempts = 0
-        n_models = 0
-        n_support_complete = 0
-        rounds_hist: list[int] = []
-        chunk = 0
-        all_valid = True
-        gpu_unsound = 0          # rows that were 'fully+active' yet a clause had sat_count==0
-        sound_rows = 0           # rows the re-check actually covered — a verdict's evidence
-                                 # (must be 0); only populated when verify_sound is on
-        distinct: set[tuple[int, ...]] = set()
         keep_rows = collect or verify_clauses is not None
 
+        # What the core keeps per chunk: full compacted models for collect/verify (host
+        # reconstruction needs every variable), the projection plan's gather set for an
+        # out_cap-only run, NOTHING for a pure timed run — keep_cap=0 means the core never
+        # gathers a row, which is the emission-symmetry property the rival comparison rests on.
+        self._push_support(sup)
+        pplan = self._build_projection_plan() if out_cap else None
+        if keep_rows:
+            self._smp.set_columns(None)
+        elif out_cap:
+            self._smp.set_columns(self._gather_cols(pplan))
+        keep_cap = -1 if keep_rows else (int(out_cap) if out_cap else 0)
+
+        # Work counters bracket the run (the engine keeps counting; only deltas are ours).
         self._sync()
         bcp_r0 = self.engine.launches
         bcp_o0 = self.engine.ops_total()
         bcp_p0 = self.engine.props_total()
         bcp_d0 = self.engine.decs_total()
-        t0 = time.perf_counter()
-        while True:
-            # Stop once n_target is met — BUT for the adaptive bandit, always measure every config at
-            # least once first. Otherwise on a big-K GPU a single chunk can already exceed n_target, so
-            # only plan[0] ever runs and a faster config is never discovered (this was a real
-            # regression on shallow circuits with a large-VRAM card). Bounded by max_chunks. Cold-start chunks are productive (real models).
-            cold = adaptive and any(cfg_stats[c]["chunks"] == 0 for c in plan)
-            # Stability: don't stop until SOME config has been measured over >= min_measure_chunks
-            # chunks (the bandit piles those onto the winner). A big-K GPU meets n_target in the
-            # cold-start (1 chunk/config), so a single noisy chunk would set the headline rate —
-            # measured on b06.c25: best_rate_sps swung 131k-249k (1.9x) run-to-run at 1 chunk.
-            enough = (not adaptive) or max((cfg_stats[c]["chunks"] for c in plan),
-                                           default=0) >= min_measure_chunks
-            if not cold and enough and n_models >= n_target:
-                break
-            if max_chunks is not None and chunk >= max_chunks:
-                break
-            if max_seconds is not None and time.perf_counter() - t0 > max_seconds:
-                break                                   # hard time cap (between chunks)
-            if n_models == 0 and not cold and chunk >= len(plan) + 2:
-                break                                   # every config measured + grace: hopeless
-            chunk += 1
-            # Once past n_target but short of the measurement window, EXPLOIT the winner (no eps
-            # exploration) so its stable rate is measured on back-to-back chunks, not diluted.
-            topup = adaptive and not cold and n_models >= n_target
-            chunk_cfgs = [self._select_config(plan, cfg_stats, chunk, exploit=topup)
-                          if adaptive else plan[0]]
-            for cfg in chunk_cfgs:
-                rv_c, B_c, la_c = cfg
-                K_c = self.batch_size
-                if adaptive:
-                    self._sync()
-                    # read BEFORE t_cfg so the (synced) counter reads aren't charged to wall
-                    p_before = self.engine.props_total()
-                    d_before = self.engine.decs_total()
-                    t_cfg = time.perf_counter()
-                n_done, n_sup, rounds = self._run_chunk(
-                    K_c, B_c, rv_c, support_mask, complete, la_c)
-                rounds_hist.append(rounds)
-                attempts += K_c
-                n_models += n_done
-                n_support_complete += n_sup
-                cfg_stats[cfg]["models"] += n_done
-                cfg_stats[cfg]["attempts"] += K_c
-                cfg_stats[cfg]["chunks"] += 1
-                if adaptive:
-                    self._sync(); cfg_stats[cfg]["wall"] += time.perf_counter() - t_cfg
-                    cfg_stats[cfg]["props"] += self.engine.props_total() - p_before
-                    cfg_stats[cfg]["decs"] += self.engine.decs_total() - d_before
-                if n_done and verify_sound:
-                    # OPT-IN self-test: for a FULLY-assigned row, non-falsified ⟺ TRUE, so
-                    # "every clause has sat_count > 0" ⟺ "every clause has a TRUE literal" ⟺
-                    # satisfied. (Holds ONLY at a complete assignment — sat_count>0 on a PARTIAL
-                    # assignment just means "not yet violated". We gate on the completed
-                    # selection, so it is valid.) Redundant with `active`, which is cleared the
-                    # instant a clause empties; that is why it is off by default rather than a
-                    # tax on every run.
-                    # EVERY completed row, never a prefix: the 4096-row cap it used to carry
-                    # was sizing a (rows, M) int32 host transient that this path deleted long
-                    # ago. The check has been one device flag per row since, so the cap bounded
-                    # nothing but the COVERAGE — it left the claim standing on a small fraction
-                    # of what a chunk emitted. Full coverage is a fraction of a percent of the
-                    # chunk, billed to `verify_s`, outside every rate. Numbers: INSIGHTS.md.
-                    _tv = time.perf_counter()
-                    gpu_unsound += self.engine.check_sound(slot=0, max_rows=0)
-                    sound_rows += n_done          # what the verdict below is a statement ABOUT
-                    verify_s += time.perf_counter() - _tv
-                have = cfg_bits_n[cfg]
-                if out_cap and n_done and have < out_cap:
-                    # AFTER the cfg_stats wall stamp, and separately accumulated into `proj_s`,
-                    # which the caller subtracts from every RATE. The stamp alone was not enough:
-                    # it is only taken `if adaptive`, so a single-config portfolio — the pinned
-                    # mode a MEASUREMENT uses — has no per-config wall at all and falls back to a
-                    # blend that would have carried the delivery cost.
-                    _tp = time.perf_counter()
-                    take = min(n_done, out_cap - have)
-                    # _project(take), never _project(n_done)[:take]: the gather, the host buffer
-                    # and the RNG draw are all sized by the argument, and a numpy slice is a VIEW
-                    # that would pin the whole discarded chunk for the rest of the run.
-                    cfg_bits[cfg].append(self._project(take))
-                    cfg_bits_n[cfg] = have + take
-                    proj_s += time.perf_counter() - _tp
-                if n_done and keep_rows:
-                    # Gather just the variables' TRUE bits — (n, N), half of what the full
-                    # (n, 2N) assignment would cost, and no polarity slice on the host.
-                    if getattr(self, "_all_vars", None) is None:
-                        self._all_vars = np.arange(self.N, dtype=np.int32)
-                    pos = self.engine.var_bits(0, self._all_vars, n_done)   # (n_done, N) uint8
-                    vidx = np.arange(1, self.N + 1, dtype=np.int32)
-                    comp_rows = np.where(pos, vidx, -vidx).tolist()
-                    if self._recon is not None and not self._recon.get("unsat"):
-                        # reconstruct full ORIGINAL models (forced pinned, don't-cares randomized)
-                        out_rows, projs = self._reconstruct(comp_rows)
-                    else:
-                        out_rows = comp_rows
-                        si = sup_idx.tolist() if sup_idx is not None else None
-                        projs = [tuple(r[i] for i in si) for r in comp_rows] if si is not None else comp_rows
-                    for p in projs:
-                        distinct.add(tuple(p))
-                    if verify_clauses is not None:
-                        for r in out_rows:
-                            if not _satisfies(r, verify_clauses):
-                                all_valid = False
-                    if collect:
-                        models.extend(out_rows)
+
+        # ONE call: the loop, the bandit, the valves and the accounting are the core's
+        # (cpp/src/sample.cpp) — see the class docstring and tests/test_sample_core.py.
+        st = self._smp.run(
+            int(n_target), [(rv_c, b_c, la_c == "soft") for rv_c, b_c, la_c in plan],
+            max_chunks=(max_chunks or 0), time_limit_s=(max_seconds or 0.0),
+            min_measure_chunks=int(min_measure_chunks), keep_cap=keep_cap,
+            verify=bool(verify_sound), support_only=not complete)
         self._sync()
-        # `elapsed` is SAMPLING wall: the output projection is delivery and the soundness
-        # re-check is a self-test, both billed separately (`out_project_s` / `verify_sound_s`),
-        # so neither asking for rows nor asking for verification can move samples/s, dec/s or
-        # impl/s.
-        elapsed = time.perf_counter() - t0 - proj_s - verify_s
-        bcp_rounds = self.engine.launches - bcp_r0             # kernel launches over this run (delta)
+        cbd = [self._smp.config_stats(i) for i in range(len(plan))]
+
+        n_models, attempts, chunk = int(st.n_models), int(st.attempts), int(st.chunks)
+        proj_s, verify_s = float(st.deliver_s), float(st.verify_s)
+        gpu_unsound, sound_rows = int(st.unsound_rows), int(st.sound_rows_checked)
+
+        # ---- host-side collection: reconstruct / verify / dedup off the kept buckets ----
+        # ALL configs' buckets, pooled — collection is a correctness readout, so every model
+        # found belongs in it (delivery via out_cap below stays winner-only, the ONE-sampler
+        # rule; a mixture is a uniformity question and that is a delivery decision).
+        models: list[list[int]] = []
+        distinct: set = set()
+        all_valid = True
+        if keep_rows and n_models:
+            vidx = np.arange(1, self.N + 1, dtype=np.int32)
+            for i in range(len(plan)):
+                kept = int(cbd[i].kept_rows)
+                if not kept:
+                    continue
+                pos = self._smp.bits(i, rows=kept)          # (kept, N) uint8, compacted vars
+                comp_rows = np.where(pos, vidx, -vidx).tolist()
+                if self._recon is not None and not self._recon.get("unsat"):
+                    # reconstruct full ORIGINAL models (forced pinned, don't-cares randomized)
+                    out_rows, projs = self._reconstruct(comp_rows)
+                else:
+                    out_rows = comp_rows
+                    projs = ([tuple(r[j] for j in sup_idx) for r in comp_rows]
+                             if sup_idx is not None else comp_rows)
+                for pr in projs:
+                    distinct.add(tuple(pr))
+                if verify_clauses is not None:
+                    for r in out_rows:
+                        if not _satisfies(r, verify_clauses):
+                            all_valid = False
+                if collect:
+                    models.extend(out_rows)
+
+        # `elapsed` is the core's SAMPLING wall: kept-row gathers are delivery and the
+        # soundness re-check is a self-test, both billed separately (`out_project_s` /
+        # `verify_sound_s`), so neither asking for rows nor asking for verification can move
+        # samples/s, dec/s or impl/s.
+        elapsed = float(st.sampling_s)
+        bcp_rounds = self.engine.launches - bcp_r0             # kernel launches (delta)
         bcp_ops = self.engine.ops_total() - bcp_o0
         bcp_props = self.engine.props_total() - bcp_p0
         bcp_decs = self.engine.decs_total() - bcp_d0
         bcp_impl = bcp_props - bcp_decs                        # every non-decision assignment
 
         out = {
-            "n_models": n_models, "n_support_complete": n_support_complete, "attempts": attempts,
+            "n_models": n_models, "n_support_complete": int(st.n_support_complete),
+            "attempts": attempts,
             "success_rate": (n_models / attempts) if attempts else 0.0,
-            "support_success_rate": (n_support_complete / attempts) if attempts else 0.0,
+            "support_success_rate": (int(st.n_support_complete) / attempts) if attempts else 0.0,
             "elapsed_s": elapsed,
             "samples_per_s": (n_models / elapsed) if elapsed > 0 else 0.0,
             "attempts_per_s": (attempts / elapsed) if elapsed > 0 else 0.0,
-            # Lightweight BCP-work stats (free counters) — to tell success-bound from BCP-bound: a low
-            # samples/s with high attempts/s = low success; a low attempts/s = each trajectory is slow
-            # (deep propagation). ops/attempt = clause-cells touched per trajectory.
+            # Lightweight BCP-work stats (free counters) — to tell success-bound from BCP-bound.
             "bcp_rounds": bcp_rounds, "bcp_ops": bcp_ops,
             "bcp_rounds_per_chunk": (bcp_rounds / chunk) if chunk else 0.0,
             "bcp_ops_per_attempt": (bcp_ops / attempts) if attempts else 0.0,
-            # CDCL-comparable work rate: literals assigned (decisions + implications) per second —
-            # what CDCL solvers report as props/sec (typically ~1e7/s single-core). Split into the
-            # branch DECISIONS and the unit-propagation IMPLICATIONS they triggered (impl = assigns
-            # - decisions); implications/decision is the propagation fan-out per branch.
+            # CDCL-comparable work rate: literals assigned (decisions + implications) per second.
             "assigns_per_s": (bcp_props / elapsed) if elapsed > 0 else 0.0,
             "decisions_per_s": (bcp_decs / elapsed) if elapsed > 0 else 0.0,
             "implications_per_s": (bcp_impl / elapsed) if elapsed > 0 else 0.0,
             "bcp_decisions": bcp_decs, "bcp_implications": bcp_impl,
             "n_chunks": chunk, "K": K, "B": B, "random_var": bool(random_var),
             "support_size": (len(sup) if sup else None),
-            "mean_decision_rounds": (sum(rounds_hist) / len(rounds_hist)) if rounds_hist else 0,
-            "max_decision_rounds": max(rounds_hist) if rounds_hist else 0,
+            "mean_decision_rounds": float(st.rounds_mean),
+            "max_decision_rounds": int(st.rounds_max),
             "n_distinct": len(distinct) if keep_rows else None,
-            # Tri-state, never a bool: "off" is not "unsound", and a consumer that folds the
-            # two publishes an un-run check as a failure (the `unique_est_status` lesson).
-            # "off" also covers REQUESTED-BUT-NEVER-REACHED: the check runs per chunk over the
-            # rows that chunk completed, so a run that completes none (0% success, or a
-            # --time-limit cut before the first completion) never calls it — and reporting that
-            # as "ok" is the same conflation one state further along, an un-run check published
-            # as a passing one. `sound_rows_checked` is the evidence behind the verdict.
+            # Why the run ended — the core's stop valve, by name (new with the core loop; the
+            # legacy keys above still carry everything recorded rows compare on).
+            "stop": _gcore.SAMPLE_STOP.get(int(st.stop), "?"),
+            # Tri-state, never a bool: "off" is not "unsound", and it also covers
+            # REQUESTED-BUT-NEVER-REACHED (verify on, nothing completed, check never ran —
+            # `sound_rows_checked` is the evidence a verdict is a statement about).
             "sound_check": ("off" if not (verify_sound and sound_rows) else
                             ("ok" if gpu_unsound == 0 else "UNSOUND")),
             "sound_rows_checked": (sound_rows if verify_sound else None),
@@ -848,59 +676,59 @@ class GPUSampler:
             out["all_valid"] = all_valid
         best_cfg = plan[0]
         if configs is not None:
-            def _rate(s):
-                return (s["models"] / s["wall"]) if s["wall"] > 0 else 0.0
-            dom = max(cfg_stats.items(), key=lambda kv: kv[1]["models"])[0]   # most models produced
+            dom = plan[int(st.dominant_config)]                   # most models produced
             out["random_var"], out["B"], out["lookahead"] = bool(dom[0]), dom[1], dom[2]
             out["dominant_config"] = [bool(dom[0]), dom[1], dom[2]]
-            # Best-THROUGHPUT config = max models/wall (the one a real run commits to after exploring).
-            # The benchmark headline uses THIS rate, not the end-to-end blend, so the bandit's slower
-            # exploration chunks (and any first-chunk warmup) never drag the reported steady-state
-            # throughput. Only meaningful when adaptive (per-config wall is timed); else wall==0.
-            # Prefer a WELL-MEASURED config (>= min_measure_chunks) over a lucky 1-chunk rate, then by
-            # rate — so the headline rests on the config the top-up phase actually committed to and
-            # measured, not a config whose single cold-start chunk happened to clock fast.
-            brc, brs = max(cfg_stats.items(),
-                           key=lambda kv: (kv[1]["chunks"] >= min_measure_chunks, _rate(kv[1])))
+            # Best-THROUGHPUT config — the core's pick (well-measured >= min_measure_chunks
+            # first, then models/wall), the same index whose kept rows out_cap returns below.
+            bi = int(st.best_config)
+            brc, brs = plan[bi], cbd[bi]
             best_cfg = brc
             out["best_rate_config"] = [bool(brc[0]), brc[1], brc[2]]
-            out["best_rate_sps"] = _rate(brs) if brs["wall"] > 0 else None
-            out["best_rate_success"] = (brs["models"] / brs["attempts"]) if brs["attempts"] else 0.0
-            # Work rates for the SAME best-rate config as best_rate_sps (consistent + stable: measured
-            # over the winner's chunks, not blended over the exploration). gpap_sample reports these.
-            bw = brs["wall"]
-            out["best_rate_decisions_per_s"] = (brs["decs"] / bw) if bw > 0 else None
-            out["best_rate_implications_per_s"] = ((brs["props"] - brs["decs"]) / bw) if bw > 0 else None
-            out["best_rate_assigns_per_s"] = (brs["props"] / bw) if bw > 0 else None
-            out["best_rate_chunks"] = brs["chunks"]
+            out["best_rate_success"] = (brs.models / brs.attempts) if brs.attempts else 0.0
+            out["best_rate_chunks"] = int(brs.chunks)
+            # Per-config walls now exist for every run (the core stamps them cheaply), but the
+            # best_rate_* RATES keep their documented shape: only an ADAPTIVE run publishes a
+            # per-config steady-state rate — a pinned single config's headline stays the
+            # caller-side blend, exactly what every recorded row was produced under.
+            bw = float(brs.wall_s) if adaptive else 0.0
+            out["best_rate_sps"] = (brs.models / bw) if bw > 0 else None
+            out["best_rate_decisions_per_s"] = (brs.decs / bw) if bw > 0 else None
+            out["best_rate_implications_per_s"] = ((brs.props - brs.decs) / bw) if bw > 0 else None
+            out["best_rate_assigns_per_s"] = (brs.props / bw) if bw > 0 else None
 
             def _lab(c):
                 # bool()/str() rather than the raw values: a config may be authored with the
                 # pipeline's VarOrder/Lookahead enums, whose repr would otherwise leak into the
-                # results-JSON KEYS ("rv=VarOrder.RANDOM,B=8") and break comparison against rows
-                # recorded before those enums existed.
+                # results-JSON KEYS and break comparison against recorded rows.
                 return f"rv={bool(c[0])},B={c[1]}" + (f",la={str(c[2])}" if c[2] else "")
             out["config_breakdown"] = {
                 _lab(c): {
-                    "models": s["models"], "attempts": s["attempts"], "chunks": s["chunks"],
-                    "wall_s": s["wall"],
-                    "success_rate": (s["models"] / s["attempts"]) if s["attempts"] else 0.0,
-                    "samples_per_s": (s["models"] / s["wall"]) if s["wall"] > 0 else None,
-                    "decisions_per_s": (s["decs"] / s["wall"]) if s["wall"] > 0 else None,
-                    "implications_per_s": ((s["props"] - s["decs"]) / s["wall"]) if s["wall"] > 0 else None,
-                } for c, s in cfg_stats.items()
+                    "models": int(sd.models), "attempts": int(sd.attempts),
+                    "chunks": int(sd.chunks),
+                    "wall_s": float(sd.wall_s) if adaptive else 0.0,
+                    "success_rate": (sd.models / sd.attempts) if sd.attempts else 0.0,
+                    "samples_per_s": (sd.models / sd.wall_s)
+                                     if (adaptive and sd.wall_s > 0) else None,
+                    "decisions_per_s": (sd.decs / sd.wall_s)
+                                       if (adaptive and sd.wall_s > 0) else None,
+                    "implications_per_s": ((sd.props - sd.decs) / sd.wall_s)
+                                          if (adaptive and sd.wall_s > 0) else None,
+                } for c, sd in zip(plan, cbd)
             }
         if out_cap:
-            # The WINNING config's rows only (see `out_cap`). Always well-shaped — a run that
-            # completed nothing returns (0, S) over the same columns, so a caller can write it
-            # unconditionally instead of branching on None.
-            mats = cfg_bits.get(best_cfg) or []
-            if mats:
-                out["out_bits"] = np.concatenate(mats)
-                out["out_cols"] = self._build_projection_plan()["cols_1based"]   # already cached
+            # The WINNING config's rows only (see `out_cap` in the docstring). Always
+            # well-shaped — a run that completed nothing returns (0, S) over the same columns.
+            bi = int(st.best_config)
+            kept = min(int(cbd[bi].kept_rows), int(out_cap))
+            if kept:
+                raw = self._smp.bits(bi, rows=kept)
+                if keep_rows:                       # bucket holds ALL vars: slice the gathers
+                    gsel = pplan["gcol"][pplan["gcol"] >= 0]
+                    raw = raw[:, gsel] if len(gsel) else raw[:, :0]
+                out["out_bits"] = self._fill_projection(raw, pplan, kept)
+                out["out_cols"] = pplan["cols_1based"]
             else:
-                # Nothing was collected, so nothing built the plan — and the shape alone does not
-                # need it (`projection_cols` exists precisely so zero rows do not pay for it).
                 cols = [v + 1 for v in self.projection_cols()]
                 out["out_bits"] = np.zeros((0, len(cols)), dtype=np.uint8)
                 out["out_cols"] = cols
