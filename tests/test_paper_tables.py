@@ -273,6 +273,28 @@ def test_summary_md_counts_zeros_the_papers_way(tmp_path):
 
 
 
+def test_a_gpap_only_sweep_is_not_a_string_of_cmsgen_zero_wins(tmp_path):
+    """ABSENT is not ZERO: rows from a GPAP-only sweep (no --cmsgen) carry no cms arm at all,
+    and reading the missing key as "CMSGen scored 0" published `wins 10/10 | CMSGen=0: 10` over
+    a tool that never ran — found live on the 2026-09-02 engine-A/B campaign's summary.md."""
+    from eval.eval_plots import write_summary
+    gpap_only = []
+    for i in range(3):
+        r = row(f"i{i}.bench")
+        for k in ("cms_n_samples", "cms_sps", "ratio", "ratio_e2e"):
+            r.pop(k, None)
+        gpap_only.append(r)
+    stage(tmp_path, "s", gpap_only, tag="s")
+    # Table 1: a stage with no CMSGen arm has no row at all
+    assert cms_family(str(tmp_path), "s", "tseitin") is None
+    stages = {"s": json.loads((tmp_path / "s.json").read_text())}
+    out = Path(write_summary(stages, str(tmp_path), str(tmp_path))).read_text()
+    line = next(ln for ln in out.splitlines() if ln.startswith("| s |"))
+    hdr = next(ln for ln in out.splitlines() if ln.startswith("| stage |"))
+    got = dict(zip([c.strip() for c in hdr.split("|")], [c.strip() for c in line.split("|")]))
+    assert got["wins"] == "—" and got["CMSGen=0"] == "—", got
+
+
 def test_uniformity_screens_subcube_instances(tmp_path):
     """The campaign's own summary excludes full-subcube instances from its medians (the
     don't-care filler, not the config under test, draws the bits there — two configs return
