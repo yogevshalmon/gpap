@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Figures + summary tables for the GPAP full evaluation (eval/run_full_eval.sh).
 
-Reads every schema-3 results JSON in a directory (one per stage, written by gpap/benchmark.py)
+Reads every bench results JSON in a directory (one per stage, written by gpap/benchmark.py)
 plus the rival head-to-head JSONs, and writes PNGs + a markdown summary:
 
   encoder_ab_<stage>.png      GPAP throughput, tseitin vs abc:fast, paired per instance (the
@@ -136,7 +136,11 @@ def _dumbbell(plt, names, a_vals, b_vals, a_label, b_label, a_color, b_color, *,
 # --------------------------------------------------------------------------- loading
 
 def load_stages(d):
-    """{stage: payload} for every schema-3 bench JSON in `d` (rival files are loaded apart)."""
+    """{stage: payload} for every bench JSON in `d` (rival files are loaded apart).
+
+    Any payload with a `results` list is read, whatever its `schema`: the schema records when a
+    COLUMN appeared or went away, and every consumer here already reads its columns with .get().
+    """
     out = {}
     for p in sorted(glob.glob(os.path.join(d, "*.json"))):
         stem = os.path.splitext(os.path.basename(p))[0]

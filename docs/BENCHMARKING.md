@@ -163,7 +163,9 @@ generator imports them ([`paper/README.md`](paper/README.md)). In prose:
 
 ## 9. Result JSON is versioned
 
-`gpap bench` writes `"schema": 4`. Plots and comparisons key off it, so a schema change is a
-version bump, never a silent field rename. Schema 4 dropped the `uniformity` column: the readout
+`gpap bench` writes `"schema": 4`. Nothing branches on it — readers take columns with `.get()`,
+so old and new rows can sit in one file — it is there so a reader comparing two campaigns can
+tell which columns a row could possibly have. A field that changes meaning is a version bump,
+never a silent rename. Schema 4 dropped the `uniformity` column: the readout
 moved out of the library into `eval/uniformity/` (nothing ever read the key, so schema-3 files
 still read correctly — the bump records when the column stopped being produced).
