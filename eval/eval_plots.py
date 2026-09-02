@@ -30,7 +30,7 @@ import sys
 REPO_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
 sys.path.insert(0, REPO_ROOT)
 
-from eval.artifact.paper_tables import (VACUOUS_PINS,  # noqa: E402 — the shared cell rules
+from eval.artifact.paper_tables import (VACUOUS_PINS, cms_arm_ran,  # noqa: E402 — shared rules
                                         unique_unmeasured, zero_search)
 
 # Categorical palette: fixed slot order, never cycled (blue/orange/aqua/violet). Validated
@@ -69,13 +69,16 @@ def _title(ax, title, subtitle=None):
     """Title + subtitle drawn above the axes at a FIXED point offset (not an axes fraction):
     these figures vary in height with the instance count, and a fractional offset collapses the
     two lines onto each other on the short ones."""
+    import textwrap
     from matplotlib.transforms import offset_copy
     off = lambda pts: offset_copy(ax.transAxes, fig=ax.figure, x=0, y=pts, units="points")  # noqa: E731
-    ax.text(0, 1, title, transform=off(26 if subtitle else 8), fontsize=12,
-            fontweight="bold", color=INK, va="bottom")
-    if subtitle:
-        import textwrap
-        ax.text(0, 1, "\n".join(textwrap.wrap(subtitle, 108)), transform=off(8), fontsize=8.5,
+    lines = textwrap.wrap(subtitle, 108) if subtitle else []
+    # the title sits ABOVE the whole wrapped subtitle block (va="bottom" anchors the block's
+    # bottom, so it grows upward — a 3-line subtitle used to grow straight through the title)
+    ax.text(0, 1, title, transform=off(8 + 12.5 * len(lines) + (6 if lines else 0)),
+            fontsize=12, fontweight="bold", color=INK, va="bottom")
+    if lines:
+        ax.text(0, 1, "\n".join(lines), transform=off(8), fontsize=8.5,
                 color=INK2, va="bottom")
 
 
@@ -420,6 +423,93 @@ def fig_prop_summary(plt, stages, out_dir):
     return _save(fig, os.path.join(out_dir, "propagation_summary.png"))
 
 
+FAMILY_COLOR = {"seq": C_TSEITIN, "comb": C_ABC, "hwmcc": C_CMS, "epfl": C_RIVAL,
+                "sk": "#b0b02a"}
+
+
+def fig_sps_scatter(plt, stages, out_dir):
+    """Every measured cell of the campaign on ONE picture: CMSGen samples/s (x) against GPAP
+    samples/s (y), log-log, one dot per cell, colored by FAMILY.
+
+    The per-family tables answer "what is the geomean"; this answers the question a geomean
+    hides — on a family we beat 100x, how are the instances actually DISTRIBUTED around that
+    ratio? The constant-ratio guides (1x/10x/100x/1000x diagonals) make the answer readable:
+    a family's spread ALONG a guide is instance difficulty (both samplers slow down together),
+    spread ACROSS guides is where the ratio itself varies. Marker = target (circle rare,
+    triangle random; square where the stage has no target axis, e.g. sk).
+
+    Same screens as the paper's Table 1, imported: vacuous pins and zero-search cells are out
+    (a cell that measures the instance is not a point about the sampler), armless rows are out
+    (absent is not zero), and a cell where either side emitted nothing has no log-log position
+    — those are the tables' zero columns, counted in the subtitle so the plot states what it
+    cannot show.
+    """
+    pts = []                                       # (family, target, cms_sps, gpap_sps)
+    n_deg = n_zero = 0
+    for stage, payload in sorted(stages.items()):
+        fam = stage.split("-")[0]
+        tgt_default = (payload.get("args") or {}).get("target")
+        for r in rows_of(payload):
+            if not cms_arm_ran(r):
+                continue
+            k = r["name"].split(".")[0]
+            if k in VACUOUS_PINS or zero_search(r):
+                n_deg += 1
+                continue
+            g, c = r.get("gpap_sps") or 0, r.get("cms_sps") or 0
+            if g <= 0 or c <= 0:
+                n_zero += 1
+                continue
+            pts.append((fam, r.get("target") or tgt_default, c, g))
+    if len(pts) < 3:
+        return None
+    fig, ax = _fig(plt, 7.6, 6.4)
+    ax.grid(True, which="both", color=GRID, lw=0.6, alpha=0.7)
+    lo = min(min(p[2] for p in pts), min(p[3] for p in pts)) * 0.4
+    hi = max(max(p[2] for p in pts), max(p[3] for p in pts)) * 2.5
+    # constant-ratio guides: the frame the eye reads the cloud against
+    for k, lab in ((1, "1x"), (10, "10x"), (100, "100x"), (1000, "1,000x"), (10000, "10,000x")):
+        ax.plot([lo, hi], [lo * k, hi * k], "--", color=INK2 if k == 1 else GRID,
+                lw=1.0 if k == 1 else 0.8, zorder=1)
+        y_at = lo * 3 * k
+        if lo < y_at < hi:
+            ax.annotate(lab, (lo * 3, y_at), fontsize=7.5, color=INK2,
+                        xytext=(2, 3), textcoords="offset points", rotation=29)
+    MARKER = {"rare": "o", "random": "^", None: "s"}
+    fams = sorted({p[0] for p in pts})
+    for fam in fams:
+        col = FAMILY_COLOR.get(fam, INK2)
+        mine = [p for p in pts if p[0] == fam]
+        first = True
+        for tgt, mk in MARKER.items():
+            sub = [p for p in mine if p[1] == tgt]
+            if not sub:
+                continue
+            # no per-family geomean in the label: it would POOL rare+random across depths,
+            # which no table does — the distribution on the guides is the figure's number
+            ax.scatter([p[2] for p in sub], [p[3] for p in sub], s=44, color=col,
+                       marker=mk, edgecolor=SURFACE, linewidth=1.1, zorder=3,
+                       label=(f"{fam}  (n={len(mine)})" if first else None))
+            first = False
+    ax.set_xscale("log")
+    ax.set_yscale("log")
+    ax.set_xlim(lo, hi)
+    ax.set_ylim(lo, hi * 0.9)
+    ax.set_xlabel("CMSGen samples/s (1 CPU core, emission-free)", fontsize=9, color=INK2)
+    ax.set_ylabel("GPAP samples/s (GPU, steady state)", fontsize=9, color=INK2)
+    excl = []
+    if n_zero:
+        excl.append(f"{n_zero} cell(s) with a zero side (the tables' zero columns)")
+    if n_deg:
+        excl.append(f"{n_deg} degenerate cell(s) (vacuous pin / zero-search)")
+    _title(ax, "Every cell at once — samples/s, GPAP vs CMSGen",
+           "one dot per (instance, stage); circle = rare target, triangle = random; "
+           "diagonals = constant ratio"
+           + ("; not plottable: " + ", ".join(excl) if excl else ""))
+    ax.legend(frameon=False, fontsize=8.5, labelcolor=INK2, loc="lower right")
+    return _save(fig, os.path.join(out_dir, "sps_scatter_all.png"))
+
+
 def fig_amplification(plt, stage, payload, out_dir):
     """The rejection-sampling rival: where does propagation actually earn its keep?"""
     rows = [r for r in rows_of(payload)
@@ -646,7 +736,7 @@ def main():
                 p = None
             if p:
                 made.append(p)
-    for fn in (fig_cmsgen_emission, fig_prop_summary):
+    for fn in (fig_cmsgen_emission, fig_prop_summary, fig_sps_scatter):
         try:
             p = fn(plt, stages, out_dir)
             if p:

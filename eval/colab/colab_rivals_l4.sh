@@ -49,6 +49,13 @@ T="${T:-25}"
 # --resume retries ERROR rows and a rival timeout fails again identically (~300 s each) --
 # measured: 3 HTS timeouts ate ~15 min of every rebuilt VM before the later stages could start.
 # Set STAGES to skip what is already done, e.g. STAGES="recurrent-rare recurrent-table".
+# Circuit-variant axis (see rival_common.py): which circuit each side is handed. Default keeps
+# the recorded protocol (DEMOTIC raw+abc, Recurrent raw-only for cost). Override to converge a
+# campaign on one encoding — e.g. VARIANTS_DEM=abc VARIANTS_RCS=abc HTS_ENCS=abc for an
+# abc:fast-only sweep (2026-09-02: no tseitin arm anywhere in the tables).
+VARIANTS_DEM="${VARIANTS_DEM:-raw abc}"
+VARIANTS_RCS="${VARIANTS_RCS:-raw}"
+HTS_ENCS="${HTS_ENCS:-tseitin abc}"
 STAGES="${STAGES:-demotic-native demotic-miter hts recurrent-rare recurrent-table steps-calib}"
 want() { case " $STAGES " in *" $1 "*) return 0 ;; *) echo "[skip] $1 (not in STAGES)"; return 1 ;; esac; }
 
@@ -84,7 +91,7 @@ save_cache() { tar czf "$CACHE_TGZ.tmp" -C "$OUT" .gpap_cache 2>/dev/null \
 if want demotic-native && have 25 "demotic-native"; then
     banner "DEMOTIC native (their ISCAS-85 pins, raw + abc)"
     $PY eval/rivals/rivals_demotic.py --mode native $COMB_INSTS --seeds $RSEEDS --steps "$STEPS" \
-        --timeout "$TIMEOUT" --circuit-variants raw abc \
+        --timeout "$TIMEOUT" --circuit-variants $VARIANTS_DEM \
         --resume --output "$OUT/rivals_demotic_native.json" 2>&1 | tee -a "$LOGS/rivals.log"
     save_cache
 fi
@@ -92,7 +99,7 @@ fi
 if want demotic-miter && have 50 "demotic-miter"; then
     banner "DEMOTIC miter (our rare fixed-T instances, raw + abc)"
     $PY eval/rivals/rivals_demotic.py --mode miter $SEQ_INSTS -T "$T" --target rare \
-        --seeds $RSEEDS --steps "$STEPS" --timeout "$TIMEOUT" --circuit-variants raw abc \
+        --seeds $RSEEDS --steps "$STEPS" --timeout "$TIMEOUT" --circuit-variants $VARIANTS_DEM \
         --resume --output "$OUT/rivals_demotic_miter.json" 2>&1 | tee -a "$LOGS/rivals.log"
     save_cache
 fi
@@ -105,7 +112,7 @@ if want hts && have 40 "hts"; then
     for inst in $SEQ_INSTS; do
         src="benchmarks/circuits/bench/seq/$inst.bench"
         [ -f "$src" ] || continue
-        for enc in tseitin abc; do
+        for enc in $HTS_ENCS; do
             cnf="$HTS_DIR/$inst-c$T-$enc.cnf"
             [ -f "$cnf" ] || $PY -m gpap.cli circuit2cnf "$src" "$cnf" \
                 --cycles "$T" --target rare --encoder "$enc" --abc-opt fast --seed 5 \
@@ -127,7 +134,7 @@ fi
 if want recurrent-rare && have 60 "recurrent-rare"; then
     banner "Recurrent-CircuitSAT — OUR rare pins (raw)"
     $PY eval/rivals/rivals_recurrent.py $SEQ_INSTS -T "$T" --rare --seeds $RSEEDS --steps "$STEPS" \
-        --timeout "$TIMEOUT" --circuit-variants raw \
+        --timeout "$TIMEOUT" --circuit-variants $VARIANTS_RCS \
         --resume --output "$OUT/rivals_recurrent_rare.json" 2>&1 | tee -a "$LOGS/rivals.log"
     save_cache
 fi
@@ -135,7 +142,7 @@ fi
 if want recurrent-table && have 30 "recurrent-table"; then
     banner "Recurrent-CircuitSAT — THEIR target table (raw)"
     $PY eval/rivals/rivals_recurrent.py $SEQ_INSTS -T "$T" --seeds $RSEEDS --steps "$STEPS" \
-        --timeout "$TIMEOUT" --circuit-variants raw \
+        --timeout "$TIMEOUT" --circuit-variants $VARIANTS_RCS \
         --resume --output "$OUT/rivals_recurrent_table.json" 2>&1 | tee -a "$LOGS/rivals.log"
     save_cache
 fi

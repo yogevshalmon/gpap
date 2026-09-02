@@ -96,9 +96,13 @@ PYFIX
 
     # Rival python deps: none of the three ships a requirements file, and HTS's baseline_sat
     # imports pycryptosat UNCONDITIONALLY — on a fresh box every HTS run dies on the import.
+    # python-sat (imported as `pysat`) is in all three rivals' import chains: without it EVERY
+    # rival run of EVERY stage dies at import and a whole campaign is error rows — the status
+    # table below always PROBED pysat but this line never installed it (caught live on the
+    # 2026-09-02 L4 rivals sweep: 40/40 rows errored before anything was measured).
     # pandas/tqdm usually come with the Colab image; install whatever is missing.
-    "$PY_BIN" -m pip install -q pycryptosat pandas tqdm \
-        || echo "[warn] rival python deps (pycryptosat/pandas/tqdm) failed to install"
+    "$PY_BIN" -m pip install -q pycryptosat python-sat pandas tqdm \
+        || echo "[warn] rival python deps (pycryptosat/python-sat/pandas/tqdm) failed to install"
 
     # THE ENGINE. Since the engine became a C++ library there is no Python fallback: without
     # libgpap every GPAP row of every stage errors out. Build it FIRST and fail loudly, because
