@@ -247,6 +247,37 @@ def test_rival_retry_row_replaces_rather_than_appends(tmp_path):
     assert v["cells"] == 1 and v["errors"] == 0 and v["gm"] == pytest.approx(5.0)
 
 
+def test_rival_scatter_only_plots_cells_the_table_scores(tmp_path):
+    """The rival unique/s scatter classifies cells through `rival_cells`, imported — so a cell
+    Table 2 screens out (an unmeasured unique/s estimate, a failed rival run) must not become a
+    dot. The probe is the figure's 3-comparable-cell floor: with 2 ok rows plus 2 screened rows,
+    an implementation that plotted everything it loaded would see 4 points and draw; returning
+    None proves the screen ran before the count."""
+    matplotlib = pytest.importorskip("matplotlib")
+    matplotlib.use("Agg")
+    import matplotlib.pyplot as plt
+    from eval.eval_plots import fig_rivals_sps_scatter
+
+    def ok(name):
+        return {"name": name, "variant": "raw", "demotic": {"unique_per_s": 10.0},
+                "gpap": {"unique_per_s_est": 100.0, "n_models": 5}}
+
+    screened = [
+        {"name": "nm", "variant": "raw", "demotic": {"unique_per_s": 10.0},
+         "gpap": {"unique_per_s_est": None, "unique_est_status": "no-coverage-sample",
+                  "n_models": 42}},                             # unmeasured — NOT a GPAP zero
+        {"name": "err", "variant": "raw", "demotic": {"error": "timeout"}, "gpap": {}},
+    ]
+    p = tmp_path / "rivals_demotic_native.json"
+    p.write_text(json.dumps({"rows": [ok("a"), ok("b"), ok("c")] + screened}))
+    out = fig_rivals_sps_scatter(plt, [str(p)], str(tmp_path))
+    assert out is not None and (tmp_path / "sps_scatter_rivals.png").exists()
+
+    p.write_text(json.dumps({"rows": [ok("a"), ok("b")] + screened}))
+    assert fig_rivals_sps_scatter(plt, [str(p)], str(tmp_path)) is None, \
+        "screened cells were counted as plottable points"
+
+
 # --------------------------------------------------------------- summary.md, the same ledger
 
 def test_summary_md_counts_zeros_the_papers_way(tmp_path):
