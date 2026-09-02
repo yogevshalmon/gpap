@@ -21,8 +21,8 @@ import os
 import sys
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
-from eval.artifact.paper_tables import (cms_family, prop_rates,  # noqa: E402
-                               rival_family, stage_encoders, uniformity)
+from eval.artifact.paper_tables import (barbarik, cms_family,  # noqa: E402
+                               prop_rates, rival_family, stage_encoders, uniformity)
 
 # (stem, human label) in the order they should appear
 CMS_STAGES = [
@@ -77,6 +77,8 @@ def main():
     ap.add_argument("--rivals", required=True)
     ap.add_argument("--uniformity", default=None,
                     help="fuzz_uniformity.py campaign JSON -> the uniformity appendix frame")
+    ap.add_argument("--barbarik", nargs="*", default=[],
+                    help="barbarik_gpap.py JSONL result files (the CM_test certificate frame)")
     ap.add_argument("--soft", default=None,
                     help="profile_soft_portfolio.py JSON -> the `soft` throughput-price frame")
     ap.add_argument("--out", required=True)
@@ -301,6 +303,44 @@ def main():
             r"rejection sampling.}",
         ]
         a("".join(cap))
+        a(r"\end{frame}")
+        a("")
+
+    # ---------------------------------------------------------------- frame 5: Barbarik
+    # The aggregation is paper_tables.barbarik — the eligibility rule (bucket on the negative
+    # CONTROL's verdict, never on the screen) is imported, not restated, so the deck cannot
+    # quote a cell Table 4b refuses to.
+    barb = barbarik(args.barbarik) if args.barbarik else None
+    if barb:
+        p = barb["params"]
+        n_el = len(barb["eligible"])
+        n_all = n_el + len(barb["control_rejected"]) + len(barb["control_errored"])
+        a(r"\begin{frame}{Appendix: Barbarik CM\_test --- the standard certificate}")
+        a(r"  \centering \scriptsize")
+        a(r"  \begin{tabular}{@{}lrrrr@{}}")
+        a(r"    \toprule")
+        a(r"    sampler under test & Accept & Reject & no verdict & max bias \\")
+        a(r"    \midrule")
+        for arm, st in barb["summary"].items():
+            bx = "---" if st["bias_max"] is None else f"${st['bias_max']:.3f}$"
+            label = arm.replace("_", r"\_")
+            body = (f"    \\texttt{{{label}}} & {st['accept']}/{st['n']} & {st['reject']} & "
+                    f"{st['error']} & {bx} \\\\")
+            if "control" in arm:
+                body = body.replace(f"\\texttt{{{label}}}", f"\\rem{{\\texttt{{{label}}}}}")
+            a(body)
+        a(r"    \bottomrule")
+        a(r"  \end{tabular}")
+        a(r"  \\[0.7em]")
+        a(r"  \rem{$\varepsilon=" + str(p["epsilon"]) + r"$, $\eta=" + str(p["eta"])
+          + r"$, $\delta=" + str(p["delta"]) + r"$ (the parameters CMSGen's own authors "
+          + r"certify at). " + str(n_el) + " of " + str(n_all)
+          + r" instances eligible --- the rest are dropped because \keyw{the trusted uniform "
+          + r"reference is itself Rejected there} (bucketed on the control's verdict, never on "
+          + r"the screen). An Accept is ``not caught being $\eta$-far'', conditional on "
+          + r"non-adversality; \keyw{a Reject is unconditional} --- and no GPAP arm has one. "
+          + r"`no verdict' = the sampler could not fill an order the adversarial kernel placed; "
+          + r"it bounds coverage, not uniformity.}")
         a(r"\end{frame}")
         a("")
 

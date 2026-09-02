@@ -141,7 +141,7 @@ RIVALS = [
     ("demotic_miter", "demotic", "DEMOTIC", "our rare pins (miter)"),
     ("recurrent_table", "rcs", "Recurrent-CircuitSAT", "their target table"),
     ("recurrent_rare", "rcs", "Recurrent-CircuitSAT", "our rare pins"),
-    ("hts", "hts", "HTS", "our CNFs (both encoders)"),
+    ("hts", "hts", "HTS", "our CNFs, same GPU"),
 ]
 
 
@@ -805,8 +805,9 @@ def build(args):
               f"`eps={p['epsilon']} eta={p['eta']} delta={p['delta']}` — {setting}. "
               f"An Accept means *not caught being eta-far* (L1 >= {p['eta']}, i.e. TV >= "
               f"{p['eta'] / 2:.2f}) and holds only under Barbarik's non-adversality assumption; "
-              f"a Reject is unconditional. It is not a proof of uniformity; Table 4 is the "
-              f"sensitive instrument.", "",
+              f"a Reject is unconditional. It is not a proof of uniformity — the exact-oracle "
+              f"fuzzing campaign (docs/findings/UNIFORMITY_FINDINGS.md) is the sensitive "
+              f"instrument.", "",
               f"{n_el} eligible instances "
               f"({len(barb['control_rejected'])} dropped because the trusted reference is itself "
               f"Rejected on them — a non-independent sampling set, or a delta-level false "
