@@ -745,7 +745,12 @@ Cross-GPU K-scaling: `eval/colab/colab_sampling_benchmark.py` + `notebooks/gpap_
   FIRST, then bucket; the invariant is `inst = n_gm + CMSGen=0 + GPAP=0 + both=0 + no-search +
   vacuous`, pinned by `test_every_instance_is_counted_exactly_once`. A zero-search cell can also
   be a CMSGen-zero cell (EPFL `ctrl` under ABC), so screening after bucketing published it as an
-  outright win.
+  outright win. ⚠️ **And ABSENT is not zero**: a row that never RAN the CMSGen arm (a campaign
+  resumed on a VM whose cmsgen failed to restore) and a row whose cms subprocess ERRORED
+  (`cms_error`, recorded with a count of 0) are neither wins nor zeros. Screened per ROW by
+  `paper_tables.cms_arm_ran` (a stage-level "does anything have an arm?" test waves the mixed
+  file's armless rows straight into the win column); `verify_artifact` FAILS a mixed or errored
+  stage; `gpap bench --resume` refuses to append rows with a different arm than the file holds.
 - **NO best-of-encoders selection — one table row per (family, encoder).** `select_cells` used to
   keep the encoder with the highest `ratio`, which makes the published statistic its own argmax
   key and lets the RIVAL's number pick which of our runs is reported (measured: seq-c25-rare

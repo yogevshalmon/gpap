@@ -42,7 +42,7 @@ eval/artifact/slide_tables.py --cmsgen $R/gpap_vs_cmsgen_l4 --rivals $R/gpap_vs_
     --uniformity $R/uniformity_l4/uniformity_campaign.json --out docs/slides/l4_results.tex
 
 eval/artifact/verify_artifact.py $R/gpap_vs_cmsgen_l4 --rivals $R/gpap_vs_gpu_rivals_l4 \
-    --uniformity $R/uniformity_l4/*.json
+    --recheck $R/reproducibility_recheck_l4 --uniformity $R/uniformity_l4/*.json
 
 eval/artifact/make_artifact.sh          # -> $GPAP_RESULTS/gpap_experiments_l4_<date>.tar.gz
 ```

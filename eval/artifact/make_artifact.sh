@@ -129,11 +129,25 @@ cp -f "$REPO_ROOT/docs/findings/L4_EVAL_FINDINGS.md" "$STAGE/" 2>/dev/null || tr
 # Run against the STAGED copy, so the verdict describes the bytes actually shipped rather than
 # whatever happens to be in a run directory that may have moved since.
 echo "verifying ..."
+VERIFY_OK=1
 $PY eval/artifact/verify_artifact.py "$STAGE/gpap_vs_cmsgen_l4" \
     --rivals "$STAGE/gpap_vs_gpu_rivals_l4" \
+    --recheck "$STAGE/reproducibility_recheck_l4" \
     --uniformity "$STAGE/uniformity_l4"/*.json "$STAGE/uniformity_prior_campaign/round2.json" \
-    > "$STAGE/VERIFICATION.txt" 2>&1
+    > "$STAGE/VERIFICATION.txt" 2>&1 || VERIFY_OK=0
 VERDICT="$(tail -1 "$STAGE/VERIFICATION.txt")"
+# A FAILING verifier is a refusal, not a footnote: the exit code used to be discarded here, so
+# an artifact whose own checker said "NOT publishable" was tarred and stamped anyway, with the
+# verdict buried in a file nobody is forced to read. Same rule as the STALE refusal above.
+if [ "$VERIFY_OK" != 1 ] && [ "${GPAP_ARTIFACT_ALLOW_FAIL:-0}" != "1" ]; then
+    echo
+    grep '^  FAIL' "$STAGE/VERIFICATION.txt" >&2 || tail -25 "$STAGE/VERIFICATION.txt" >&2
+    echo "[FATAL] verify_artifact FAILED — refusing to package an artifact its own verifier" >&2
+    echo "        calls unpublishable. Fix the failures above (full report:" >&2
+    echo "        VERIFICATION.txt), or set GPAP_ARTIFACT_ALLOW_FAIL=1 to package anyway;" >&2
+    echo "        the failing verdict ships inside the archive either way." >&2
+    exit 1
+fi
 
 # --- manifest ----------------------------------------------------------------------------------
 {
@@ -174,7 +188,8 @@ VERDICT="$(tail -1 "$STAGE/VERIFICATION.txt")"
   echo "    --out-md SOFT_PRICE.md --out-tex soft_price.tex"
   echo "eval/artifact/kernel_ab_tables.py kernel_ab_l4/kernel_ab.json \\"
   echo "    --out-md KERNEL_AB.md --out-tex kernel_ab.tex"
-  echo "eval/artifact/verify_artifact.py gpap_vs_cmsgen_l4 --rivals gpap_vs_gpu_rivals_l4"
+  echo "eval/artifact/verify_artifact.py gpap_vs_cmsgen_l4 --rivals gpap_vs_gpu_rivals_l4 \\"
+  echo "    --recheck reproducibility_recheck_l4"
   echo '```'
   echo
   echo "## Files (SHA-256)"
