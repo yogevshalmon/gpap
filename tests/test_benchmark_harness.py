@@ -14,6 +14,7 @@ import textwrap
 import pytest
 
 from gpap.benchmark import (
+    _cms_arm_mismatch,
     _dimacs_header,
     _parse_cms_stats,
     _row_key,
@@ -82,6 +83,24 @@ def test_row_key_separates_encoder_target_and_depth():
     assert _row_key(base) != _row_key({**base, "enc_key": "abc:fast"})
     assert _row_key(base) != _row_key({**base, "cycles": 50})
     assert _row_key(base) != _row_key({**base, "target": "random"})
+
+
+def test_resume_refuses_to_mix_armed_and_armless_rows():
+    """A campaign VM whose cmsgen binary failed to restore would resume the stage GPAP-only and
+    append ARMLESS rows to an armed file — and every consumer reading the missing count as a
+    number scores those rows as CMSGen zeros, i.e. phantom wins. The mixed file is refused
+    existence at the producer, whichever direction the mix runs."""
+    armed = [{"name": "a.cnf", "cms_n_samples": 5, "n_models": 9}]
+    armless = [{"name": "a.cnf", "n_models": 9}]
+    assert _cms_arm_mismatch(armed, None)                      # armed file, armless run
+    assert _cms_arm_mismatch(armless, "/bin/cmsgen")           # armless file, armed run
+    assert _cms_arm_mismatch(armed, "/bin/cmsgen") is None     # same arm: fine
+    assert _cms_arm_mismatch(armless, None) is None
+    # skipped/error rows carry no arm by construction and must not trip the guard
+    assert _cms_arm_mismatch([{"name": "x", "skipped": "too big"}], "/bin/cmsgen") is None
+    # a crashed cms run still wrote the arm's keys — that is armed provenance, not armless
+    assert _cms_arm_mismatch([{"name": "a.cnf", "cms_n_samples": 0, "cms_error": "boom",
+                               "n_models": 1}], "/bin/cmsgen") is None
 
 
 # --------------------------------------------------------------------- CMSGen accounting

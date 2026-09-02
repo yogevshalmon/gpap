@@ -383,6 +383,34 @@ def _row_key(row):
     return (row.get("name"), row.get("enc_key"), row.get("cycles"), row.get("target"))
 
 
+def _cms_arm_mismatch(results, cmsgen):
+    """Resume guard: refuse to append rows with a different CMSGen arm than the file holds.
+
+    A campaign VM whose cmsgen binary failed to restore would otherwise resume the stage
+    GPAP-only and append ARMLESS rows to an armed file — and a consumer reading the missing
+    counts as numbers scores every one of them as a CMSGen zero, i.e. a phantom win (absent is
+    not zero; eval/artifact/paper_tables.py screens it, verify_artifact FAILS it, and this is
+    where the mixed file is refused existence in the first place). The reverse mix is refused
+    too: resume skips finished rows, so old armless rows would never gain the comparison and the
+    stage would stay half-measured forever. Returns the refusal message, or None."""
+    live = [r for r in results if not r.get("skipped") and not r.get("error")]
+    if not live:
+        return None
+    prev_armed = any("cms_n_samples" in r or r.get("cms_sps") is not None for r in live)
+    if prev_armed == bool(cmsgen):
+        return None
+    if prev_armed:
+        return ("[resume] REFUSED: the existing rows carry a CMSGen arm but this run has no "
+                "--cmsgen. Appending would mix armed and armless rows in one stage (every "
+                "missing count then reads as a CMSGen zero — a phantom win). Point --cmsgen at "
+                "the binary (scripts/build_cmsgen.sh), or delete the file to re-measure "
+                "GPAP-only.")
+    return ("[resume] REFUSED: the existing rows are GPAP-only but this run adds a CMSGen arm. "
+            "--resume skips finished rows, so the old rows would never gain the comparison and "
+            "the stage would stay half-measured. Delete the file to re-measure with the arm, "
+            "or drop --cmsgen to keep extending the GPAP-only sweep.")
+
+
 def _dimacs_header(path):
     """(num_vars, num_clauses) from the `p cnf N M` line — a few bytes, no clause parse."""
     try:
@@ -439,6 +467,9 @@ def main(argv=None):
             results = prev.get("results", [])
             done = {_row_key(r) for r in results}
             print(f"[resume] {len(results)} row(s) already in {args.output}")
+            mismatch = _cms_arm_mismatch(results, args.cmsgen)
+            if mismatch:
+                raise SystemExit(mismatch)
             # Resuming a file written by a DIFFERENT engine silently mixes provenance in one
             # result set. Rows carry engine.core since the libgpap port (absent = the retired
             # torch/Triton-JIT engine), so say so rather than let it into a summary unnoticed.

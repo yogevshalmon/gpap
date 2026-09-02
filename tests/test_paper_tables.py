@@ -295,6 +295,98 @@ def test_a_gpap_only_sweep_is_not_a_string_of_cmsgen_zero_wins(tmp_path):
     assert got["wins"] == "—" and got["CMSGen=0"] == "—", got
 
 
+def _armless(name, **kw):
+    """A row from a sweep that never ran the CMSGen arm (no cms_* keys at all)."""
+    r = row(name, **kw)
+    for k in ("cms_n_samples", "cms_sps", "cms_implications_per_s", "cms_decisions_per_s",
+              "ratio", "ratio_e2e"):
+        r.pop(k, None)
+    return r
+
+
+def test_a_mixed_arm_stage_does_not_mint_phantom_cmsgen_zero_wins(tmp_path):
+    """The stage-level absent-vs-zero guard is not enough: a campaign resumed on a VM where the
+    cmsgen binary failed to restore appends ARMLESS rows to an armed file, the stage passes
+    "does anything here have an arm?", and every armless row falls into the CMSGen=0 bucket as
+    a win over a tool that never ran. The screen must be per ROW."""
+    d = stage(tmp_path, "s", [
+        row("win.bench"),                                   # both ran, we win
+        row("realzero.bench", cms=0, cms_sps=0),            # CMSGen RAN and scored 0: a real win
+        _armless("neverran.bench"),                         # the comparison never happened
+    ])
+    v = cms_family(d, "s", "tseitin")
+    assert v["inf"] == 1, "the armless row was minted into a CMSGen=0 win"
+    assert v["noarm"] == 1 and v["noarm_names"] == ["neverran"]
+    assert v["wins"] == 2 and v["n"] == 2
+    # the ledger still balances once the excluded row's own count is added back
+    assert (v["n_gm"] + v["inf"] + v["gpap0"] + v["both0"] + v["free"] + v["vac"]
+            + v["noarm"]) == v["inst"] == 3
+
+
+def test_a_crashed_cmsgen_is_not_a_zero_win(tmp_path):
+    """cmsgen_run records a spawn failure (missing binary, bad glibc on a fresh VM) as
+    cms_n_samples=0 plus cms_error. Scoring that zero as "CMSGen sampled nothing" publishes a
+    broken environment as a stage of outright wins — the floored-count trap's sibling."""
+    d = stage(tmp_path, "s", [
+        row("crashed.bench", cms=0, cms_sps=0.0, cms_error="FileNotFoundError: cmsgen"),
+        row("ok.bench"),
+    ])
+    v = cms_family(d, "s", "tseitin")
+    assert v["inf"] == 0 and v["cms_err"] == 1 and v["cms_err_names"] == ["crashed"]
+    assert v["wins"] == 1 and v["n"] == 1
+
+
+# --------------------------------------------------------------------- the verifier re-derives
+
+def _verify(*argv):
+    import subprocess
+    root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    return subprocess.run(
+        [sys.executable, os.path.join(root, "eval", "artifact", "verify_artifact.py"),
+         *[str(a) for a in argv]], capture_output=True, text=True)
+
+
+def test_verify_artifact_fails_a_mixed_arm_stage(tmp_path):
+    """paper_tables SCREENS a mixed stage; the verifier must FAIL it — the fix is re-running
+    the armless cells, not publishing around them."""
+    stage(tmp_path, "s", [row("win.bench"), _armless("neverran.bench")])
+    r = _verify(tmp_path)
+    assert r.returncode == 1 and "MIXED CMSGen provenance" in r.stdout, r.stdout
+
+
+def test_verify_artifact_fails_a_crashed_cmsgen_row(tmp_path):
+    stage(tmp_path, "s", [row("crashed.bench", cms=0, cms_sps=0.0, cms_error="boom"),
+                          row("ok.bench")])
+    r = _verify(tmp_path)
+    assert r.returncode == 1 and "ERRORED" in r.stdout, r.stdout
+
+
+def test_verify_artifact_rederives_the_recheck_claim(tmp_path):
+    """--recheck used to be accepted and IGNORED — the 'VERIFIED per row, enforced by nobody'
+    shape. The verifier must re-derive the deterministic-match claim from the raw rows and fail
+    on a mismatch."""
+    orig, rec = tmp_path / "orig", tmp_path / "rec"
+    orig.mkdir(), rec.mkdir()
+    stage(orig, "s", [row("a.bench"), row("b.bench")])
+    stage(rec, "s", [row("a.bench"), row("b.bench", M=999)])       # b re-measured a DIFFERENT M
+    r = _verify(orig, "--recheck", rec)
+    assert r.returncode == 1 and "DETERMINISTIC" in r.stdout, r.stdout
+    stage(rec, "s", [row("a.bench"), row("b.bench")])              # now they agree
+    r = _verify(orig, "--recheck", rec)
+    assert r.returncode == 0 and "deterministic fields match on all 2 shared cells" in r.stdout, \
+        r.stdout
+
+
+def test_verify_artifact_names_a_stage_that_never_wrote_its_json(tmp_path):
+    """A stage that crashes before writing its JSON leaves no other trace: the drivers print
+    their completion markers unconditionally and every other check only sees files that exist."""
+    stage(tmp_path, "sk", [row("x.cnf", enc=None)])
+    r = _verify(tmp_path)
+    assert r.returncode == 0
+    assert "standard stage(s) with no JSON at all" in r.stdout, r.stdout
+    assert "seq-c25-rare" in r.stdout
+
+
 def test_uniformity_screens_subcube_instances(tmp_path):
     """The campaign's own summary excludes full-subcube instances from its medians (the
     don't-care filler, not the config under test, draws the bits there — two configs return

@@ -88,6 +88,19 @@ def sound_unchecked(r):
     return sound_verdict(r) == "off" and r.get("cpu_sound") is None
 
 
+def cms_arm_ran(r):
+    """True when the CMSGen arm actually RAN on this row.
+
+    ABSENT is not ZERO (the `sound_check` lesson): a row written by a GPAP-only sweep carries no
+    `cms_*` keys at all, and reading the missing count as "CMSGen scored 0" mints a win over a
+    tool that never ran. The dangerous shape is the MIXED stage — a campaign resumed on a VM
+    where the cmsgen binary failed to restore appends armless rows to an armed file, and a
+    stage-level "does anything here have an arm?" test then waves every one of them into the
+    zero ledger. So the test is per ROW, defined once, and imported by `verify_artifact.py`
+    (which FAILS a mixed stage) and by `eval/eval_plots.py`'s summary ledger."""
+    return "cms_n_samples" in r or r.get("cms_sps") is not None
+
+
 def unique_unmeasured(g):
     """True when GPAP's unique/s figure could not be MEASURED on a rival cell.
 
@@ -213,7 +226,7 @@ def cms_family(d, stem, encoder):
     # GPAP-only sweep, e.g. an engine A/B re-measurement — must not be read as "CMSGen scored 0"
     # and counted as an outright win over a tool that never ran. A stage with no CMSGen arm has
     # no Table 1 row; the zero ledger below is only for rows where the comparison actually ran.
-    if not any("cms_n_samples" in r or r.get("cms_sps") is not None for r in rows):
+    if not any(cms_arm_ran(r) for r in rows):
         return None
 
     def scored(r, key):
@@ -232,13 +245,27 @@ def cms_family(d, stem, encoder):
     free = {k for k, r in cells.items() if k not in vac and zero_search(r)}
     drop = vac | free
     kept = {k: r for k, r in cells.items() if k not in drop}
+    # The stage-level guard above catches a fully GPAP-only file; a MIXED file — a campaign
+    # resumed on a VM where the cmsgen binary failed to restore — passes it, and its armless
+    # rows would fall straight into the CMSGen=0 bucket below as phantom wins. Screen per ROW:
+    # a row whose comparison never ran is in none of the columns (the `weird` precedent), the
+    # caveats name it, and verify_artifact FAILS the stage.
+    noarm = sorted(k for k, r in kept.items() if not cms_arm_ran(r))
+    kept = {k: r for k, r in kept.items() if cms_arm_ran(r)}
 
     # Bucket every REMAINING instance exactly once. An earlier version keyed off `ratio` alone,
     # and a GPAP-zero row has ratio == 0.0 (falsy) while a both-zero row has ratio == None — so
     # both fell through every branch and vanished, at the same time as CMSGen-zero rows were
     # counted as wins. That is an asymmetric ledger. A reader must be able to add the columns up.
-    finite, gpap_zero, cms_zero, both_zero, weird = {}, [], [], [], []
+    finite, gpap_zero, cms_zero, both_zero, weird, cms_err = {}, [], [], [], [], []
     for k, r in kept.items():
+        # A crashed CMSGen subprocess is recorded as `cms_error` with a count of 0 — an
+        # environment failure, not a measurement. Scoring that 0 as "CMSGen sampled nothing"
+        # publishes a broken binary as a stage of outright wins (the floored-count trap's
+        # sibling). Its own bucket, out of every column, named in the caveats.
+        if r.get("cms_error"):
+            cms_err.append(k)
+            continue
         g, c = scored(r, "n_models"), scored(r, "cms_n_samples")
         if g and c:
             if r.get("ratio") and math.isfinite(r["ratio"]):
@@ -289,6 +316,8 @@ def cms_family(d, stem, encoder):
         "n": len(finite) + n_inf + n_g0, "inf": n_inf,
         "gpap0": n_g0, "both0": n_b0,
         "gpap0_names": sorted(gpap_zero), "both0_names": sorted(both_zero),
+        "noarm": len(noarm), "noarm_names": noarm,
+        "cms_err": len(cms_err), "cms_err_names": sorted(cms_err),
         "skipped": sum(1 for r in allr if r.get("skipped")),
         "errors": sum(1 for r in allr if r.get("error")),
         "unsound": sum(1 for r in rows if sound_failed(r)),
@@ -1013,6 +1042,17 @@ def build(args):
                      f"carries no finite `ratio` (a malformed or pre-schema row). They are in "
                      f"none of the printed columns, so the `inst` identity under Table 1 is "
                      f"short by exactly this count — fix the rows before publishing.")
+        if v.get("noarm"):
+            C.append(f"`{stem}`: **{v['noarm']} row(s) never ran the CMSGen arm at all** "
+                     f"({', '.join('`' + n + '`' for n in v['noarm_names'])}) — a resume "
+                     f"without the binary. Absent is not zero, so they are in none of the "
+                     f"printed columns and the `inst` identity under Table 1 is short by "
+                     f"exactly this count; re-run those cells before publishing.")
+        if v.get("cms_err"):
+            C.append(f"`{stem}`: **the CMSGen subprocess ERRORED on {v['cms_err']} row(s)** "
+                     f"({', '.join('`' + n + '`' for n in v['cms_err_names'])}). A crashed "
+                     f"baseline is not a zero; excluded from every column — re-run before "
+                     f"publishing.")
     for stem, _, rival, proto in RIVALS:
         v = riv.get(stem)
         if v and v["errors"]:

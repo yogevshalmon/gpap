@@ -25,6 +25,9 @@ Checks, and why each one exists:
               never be mistaken for a complete one.
   ORACLE      the uniformity campaign must include BOTH controls; without an exact-uniform
               negative and a known-TV positive, "no skew detected" is uncalibrated and unusable.
+  RECHECK     (--recheck DIR) the reproducibility claim is re-derived from the raw rows: the
+              deterministic fields (M, support, packed split, propagate variant) must match the
+              original sweep exactly on every shared cell.
 """
 import argparse
 import glob as globmod
@@ -34,7 +37,8 @@ import os
 import sys
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
-from eval.artifact.paper_tables import sound_failed, sound_unchecked        # noqa: E402
+from eval.artifact.paper_tables import (CMS_FAMILIES, cms_arm_ran,          # noqa: E402
+                                        sound_failed, sound_unchecked)
 
 VACUOUS_PINS = {"b02", "b05", "b07", "s526"}
 
@@ -51,7 +55,10 @@ def main():
     ap.add_argument("cmsgen_dir")
     ap.add_argument("--rivals", default=None)
     ap.add_argument("--uniformity", nargs="*", default=[])
-    ap.add_argument("--recheck", default=None)
+    ap.add_argument("--recheck", default=None,
+                    help="reproducibility re-measurement directory (same stage layout); the "
+                         "deterministic fields must match the original sweep on every shared "
+                         "cell, or the artifact fails")
     args = ap.parse_args()
 
     fail, warn, ok = [], [], []
@@ -71,6 +78,26 @@ def main():
             continue
         rows = [r for r in d.get("results", []) if not r.get("skipped") and not r.get("error")]
         tot_cells += len(rows)
+        # MIXED CMSGen provenance: some rows carry the comparison arm and some never ran it —
+        # the signature of a campaign resumed on a VM where the cmsgen binary failed to restore.
+        # The armless rows carry no `cms_*` keys, and any consumer that read the missing count
+        # as a number would score them as CMSGen zeros (phantom wins). paper_tables screens
+        # them per row; here the stage FAILS, because the fix is to re-run the cells, not to
+        # publish around them. A FULLY armless stage is fine — that is a GPAP-only sweep.
+        armed = [r for r in rows if cms_arm_ran(r)]
+        if armed and len(armed) != len(rows):
+            fail.append(f"{stem}: MIXED CMSGen provenance — {len(rows) - len(armed)} of "
+                        f"{len(rows)} rows never ran the CMSGen arm (a resume without the "
+                        f"binary?). Re-run those cells or delete them; absent is not zero")
+        # A crashed CMSGen subprocess (binary missing/unrunnable on that VM) is recorded as
+        # `cms_error` with a count of 0. That zero is an environment failure, not a measurement,
+        # and scoring it publishes a broken binary as a stage of outright wins.
+        cerr = [r for r in rows if r.get("cms_error")]
+        if cerr:
+            fail.append(f"{stem}: the CMSGen subprocess ERRORED on {len(cerr)} row(s) "
+                        f"({', '.join(sorted(r.get('name', '?') for r in cerr)[:6])}"
+                        f"{', …' if len(cerr) > 6 else ''}) — a crashed baseline is not a "
+                        f"zero; re-run before publishing")
         # A row that says UNSOUND is a hard failure. A row that ran NO check is not: the
         # re-check is opt-in (`gpap bench --verify-sound`), it is a self-test rather than part
         # of producing the numbers this file gates, and demanding it would make the artifact
@@ -129,10 +156,15 @@ def main():
         # dropping the ones WE could not is the single easiest way to publish a flattering table
         # by accident; it is exactly what the first version of paper_tables.py did, because a
         # GPAP-zero row carries ratio == 0.0 and fell through every branch.
+        # Only rows whose comparison RAN enter the ledger: an armless row (GPAP-only sweep)
+        # is not "CMSGen scored 0", and reading it into b0 claimed "defeated both samplers"
+        # about a tool that never ran.
         g0 = [f"{k}/{e or '-'}" for (k, e), r in best.items()
-              if (r.get("cms_n_samples") or 0) > 0 and not (r.get("n_models") or 0)]
+              if cms_arm_ran(r)
+              and (r.get("cms_n_samples") or 0) > 0 and not (r.get("n_models") or 0)]
         b0 = [f"{k}/{e or '-'}" for (k, e), r in best.items()
-              if not (r.get("cms_n_samples") or 0) and not (r.get("n_models") or 0)]
+              if cms_arm_ran(r)
+              and not (r.get("cms_n_samples") or 0) and not (r.get("n_models") or 0)]
         if g0:
             warn.append(f"{stem}: GPAP emitted NOTHING on {len(g0)} instance(s) that CMSGen "
                         f"sampled ({', '.join(sorted(g0))}) — these are losses and must appear "
@@ -206,6 +238,52 @@ def main():
         for stem, n in sorted(d.items()):
             if n < mx:
                 warn.append(f"coverage: {stem} has {n}/{mx} instances (incomplete stage)")
+
+    # coverage: a stage that CRASHED before writing its JSON leaves no other trace — the colab
+    # drivers print their completion markers unconditionally, so a lost stage would otherwise
+    # be invisible (every check above only sees files that exist). Warn, not fail: sub-campaign
+    # directories legitimately hold a subset, but the absence must be a stated choice.
+    present_stems = {os.path.basename(p)[:-5] for p in stages}
+    known = [stem for stem, _, _, _ in CMS_FAMILIES]
+    if present_stems & set(known):
+        missing = [stem for stem in known if stem not in present_stems]
+        if missing:
+            warn.append(f"coverage: standard stage(s) with no JSON at all: "
+                        f"{', '.join(missing)} — Table 1 will silently have no row for them; "
+                        f"confirm those families were deliberately not run")
+
+    # ---------------------------------------------------------------- reproducibility recheck
+    # Table 6 claims the deterministic fields (M, support, packed split, propagate variant)
+    # match exactly between the sweep and its fresh-VM re-measurement. RE-DERIVE that from the
+    # raw rows — through the same cell reader the comparison tool uses (eval/recheck_compare) —
+    # rather than trusting the generator: an accepted-but-ignored flag here was exactly the
+    # "VERIFIED per row, enforced by nobody" shape this file exists to prevent.
+    if args.recheck:
+        from eval.recheck_compare import cells as recheck_cells
+        det_bad, n_shared = [], 0
+        for p in stages:
+            stem = os.path.basename(p)[:-5]
+            ca = recheck_cells(p)
+            cb = recheck_cells(os.path.join(args.recheck, f"{stem}.json"))
+            for k in set(ca) & set(cb):
+                ra, rb = ca[k], cb[k]
+                n_shared += 1
+                ea, eb = ra.get("engine") or {}, rb.get("engine") or {}
+                if (ra.get("M") != rb.get("M") or ra.get("support") != rb.get("support")
+                        or ea.get("split") != eb.get("split")
+                        or ea.get("mode") != eb.get("mode")):
+                    det_bad.append(f"{stem}/{k[0]}/{k[1] or '-'}")
+        if det_bad:
+            fail.append(f"recheck: {len(det_bad)} cell(s) disagree on a DETERMINISTIC field "
+                        f"(M / support / packed split / propagate variant): "
+                        f"{', '.join(sorted(det_bad)[:8])}"
+                        f"{', …' if len(det_bad) > 8 else ''} — the re-measurement did not "
+                        f"measure the same thing; no rate comparison over it is meaningful")
+        elif n_shared:
+            ok.append(f"recheck: deterministic fields match on all {n_shared} shared cells")
+        else:
+            warn.append("recheck: no shared cells with the original sweep — the "
+                        "reproducibility table would stand on nothing")
 
     # ---------------------------------------------------------------- rivals
     if args.rivals:
