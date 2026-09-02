@@ -391,19 +391,22 @@ def prop_rates(d, stem, encoder):
 
 # ------------------------------------------------------------------ GPAP vs GPU rivals
 
-def rival_family(d, stem, key):
-    payload = load(os.path.join(d, f"rivals_{stem}.json")) if d else None
-    if payload is None:
-        return None
-    rows = (payload.get("rows") if isinstance(payload, dict) else payload) or []
+def rival_cells(rows, key):
+    """Classify every rival cell exactly once — THE per-cell rule Table 2 sums over.
+
+    Yields `(name, variant, bucket, gpap_unique_per_s, rival_unique_per_s)` with bucket one of
+    `ok` / `error` / `misaligned` / `free` / `nomeas` / `both0` / `rival0` / `gpap0`; only `ok`
+    carries two positive rates. `eval/eval_plots.py`'s rival scatter IMPORTS this instead of
+    restating the screens, so the figure and the table cannot disagree about which cells are
+    comparable (the `cms_arm_ran` precedent).
+    """
     seen = {}
     for r in rows:
         seen[(r["name"], r.get("variant", "-"))] = r        # a retry supersedes its error row
-    ratios, errs, zero, gzero, both, free, nomeas, misaligned = [], 0, 0, 0, 0, 0, 0, 0
-    for r in seen.values():
+    for (name, variant), r in seen.items():
         rv, g = r.get(key) or {}, r.get("gpap") or {}
         if rv.get("error"):
-            errs += 1
+            yield name, variant, "error", 0.0, 0.0
             continue
         # Table 2's text says constraint alignment is VERIFIED per row (`pin_check_ok`), so a
         # row that FAILED that check cannot sit inside the geomean the claim covers: the two
@@ -411,36 +414,51 @@ def rival_family(d, stem, key):
         # the samplers. The harness prints the failure and records it; this is where it is
         # enforced, and the caveats name the count whenever it is non-zero.
         if r.get("pin_check_ok") is False:
-            misaligned += 1
+            yield name, variant, "misaligned", 0.0, 0.0
             continue
         # Same zero-search screen as Table 1, where the row carries the counters (recorded
         # since 2026-08-23): a support that is FREE after propagation measures the instance,
         # not either sampler — a seed-mismatched b13 cell once carried a 4.7e9x ratio this way.
         if "decisions_per_s" in g and zero_search(g):
-            free += 1
+            yield name, variant, "free", 0.0, 0.0
             continue
         rate = rv.get("unique_per_s") or 0.0
         # NOT MEASURED is not a zero (see `unique_unmeasured`): it gets its own column, because
         # it is not evidence in either direction.
         if unique_unmeasured(g):
-            nomeas += 1
+            yield name, variant, "nomeas", 0.0, rate
             continue
         ours = g.get("unique_per_s_est") or 0.0
         # Symmetric with the CMSGen table: name OUR zeros as loudly as theirs. A rival that
         # scored zero is an outright win, ours is an outright loss, and neither has a finite
         # ratio — so both stay out of the geomean and both get a column.
         if not rate and not ours:
-            both += 1
+            bucket = "both0"
         elif not rate:
-            zero += 1
+            bucket = "rival0"
         elif not ours:
-            gzero += 1
+            bucket = "gpap0"
         else:
-            ratios.append(ours / rate)
-    return {"cells": len(seen), "gm": gm(ratios), "n": len(ratios) + zero + gzero,
-            "wins": sum(1 for x in ratios if x >= 1) + zero, "errors": errs, "zero": zero,
-            "gpap0": gzero, "both0": both, "free": free, "nomeas": nomeas,
-            "misaligned": misaligned}
+            bucket = "ok"
+        yield name, variant, bucket, ours, rate
+
+
+def rival_family(d, stem, key):
+    payload = load(os.path.join(d, f"rivals_{stem}.json")) if d else None
+    if payload is None:
+        return None
+    rows = (payload.get("rows") if isinstance(payload, dict) else payload) or []
+    cells = list(rival_cells(rows, key))
+    n = {}
+    for _, _, bucket, _, _ in cells:
+        n[bucket] = n.get(bucket, 0) + 1
+    ratios = [ours / rate for _, _, bucket, ours, rate in cells if bucket == "ok"]
+    zero, gzero = n.get("rival0", 0), n.get("gpap0", 0)
+    return {"cells": len(cells), "gm": gm(ratios), "n": len(ratios) + zero + gzero,
+            "wins": sum(1 for x in ratios if x >= 1) + zero, "errors": n.get("error", 0),
+            "zero": zero, "gpap0": gzero, "both0": n.get("both0", 0),
+            "free": n.get("free", 0), "nomeas": n.get("nomeas", 0),
+            "misaligned": n.get("misaligned", 0)}
 
 
 # ------------------------------------------------------------------ uniformity

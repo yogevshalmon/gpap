@@ -14,7 +14,9 @@ plus the rival head-to-head JSONs, and writes PNGs + a markdown summary:
                               flat (~1e9/s, 1.41x spread) while the sample-rate ratio moves three
                               orders of magnitude, and the exact factorisation of why
   amplification_<stage>.png   p_accept vs GPAP's constraint amplification (the rejection rival)
+  sps_scatter_all.png         every CMSGen cell at once: samples/s log-log, colored by family
   rivals_<name>.png           unique solutions/s vs DEMOTIC / Recurrent-CircuitSAT / HTS
+  sps_scatter_rivals.png      every rival cell at once: unique/s log-log, colored by rival
   summary.md                  every stage's geomeans, win counts and skips, as a table
 
 Usage:
@@ -30,8 +32,9 @@ import sys
 REPO_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
 sys.path.insert(0, REPO_ROOT)
 
-from eval.artifact.paper_tables import (VACUOUS_PINS, cms_arm_ran,  # noqa: E402 — shared rules
-                                        unique_unmeasured, zero_search)
+from eval.artifact.paper_tables import (RIVALS, VACUOUS_PINS,  # noqa: E402 — shared rules
+                                        cms_arm_ran, rival_cells, unique_unmeasured,
+                                        zero_search)
 
 # Categorical palette: fixed slot order, never cycled (blue/orange/aqua/violet). Validated
 # colorblind-safe against the light chart surface (all pairs, OKLab dE>=8) — see the dataviz
@@ -592,6 +595,90 @@ def fig_rivals(plt, path, out_dir):
         path=os.path.join(out_dir, f"{stem}.png"))
 
 
+# Same palette, re-slotted for a categorical axis (the FAMILY_COLOR precedent): within THIS
+# figure a colour means one rival, everywhere on it.
+RIVAL_COLOR = {"DEMOTIC": C_TSEITIN, "Recurrent-CircuitSAT": C_ABC, "HTS": C_CMS}
+
+
+def fig_rivals_sps_scatter(plt, rival_paths, out_dir):
+    """Every rival cell of the campaign on ONE picture: the rival's unique solutions/s (x)
+    against GPAP's (y), log-log, one dot per cell — the rivals' own metric, and the same
+    companion to Table 2 that `sps_scatter_all.png` is to Table 1.
+
+    Color = rival; marker = task (circle: the rival's OWN benchmark protocol, triangle: our
+    fixed-depth rare-target task). The two protocols are different tasks and are never pooled,
+    so there is no geomean anywhere on the figure — the constant-ratio diagonals are the frame
+    the cloud is read against.
+
+    Cell classification is `paper_tables.rival_cells`, IMPORTED — errors, misaligned pins,
+    zero-search cells and unmeasured unique/s estimates leave through the subtitle's ledger,
+    and a cell where either side scored zero has no log-log position (Table 2's zero columns),
+    so the figure states what it cannot show.
+    """
+    spec = {stem: (key, rival, proto) for stem, key, rival, proto in RIVALS}
+    pts = []                                       # (rival, proto, rival_rate, gpap_rate)
+    drop = {}
+    for path in rival_paths:
+        stem = os.path.splitext(os.path.basename(path))[0]
+        stem = stem[len("rivals_"):] if stem.startswith("rivals_") else stem
+        if stem not in spec:                       # e.g. rivals_steps_calibration.json
+            continue
+        key, rival, proto = spec[stem]
+        try:
+            payload = json.load(open(path))
+        except Exception:  # noqa: BLE001
+            continue
+        rows = (payload.get("rows") if isinstance(payload, dict) else payload) or []
+        for _name, _var, bucket, ours, rate in rival_cells(rows, key):
+            if bucket == "ok":
+                pts.append((rival, proto, rate, ours))
+            else:
+                drop[bucket] = drop.get(bucket, 0) + 1
+    if len(pts) < 3:
+        return None
+    fig, ax = _fig(plt, 7.6, 6.4)
+    ax.grid(True, which="both", color=GRID, lw=0.6, alpha=0.7)
+    lo = min(min(p[2] for p in pts), min(p[3] for p in pts)) * 0.4
+    hi = max(max(p[2] for p in pts), max(p[3] for p in pts)) * 2.5
+    # constant-ratio guides, extended as far as the data spreads (rival ratios reach 1e5+,
+    # where the CMSGen figure's fixed five guides would stop far short of the cloud)
+    k = 1
+    while lo * k < hi:
+        ax.plot([lo, hi], [lo * k, hi * k], "--", color=INK2 if k == 1 else GRID,
+                lw=1.0 if k == 1 else 0.8, zorder=1)
+        y_at = lo * 3 * k
+        if lo < y_at < hi:
+            ax.annotate("1x" if k == 1 else f"{k:,d}x", (lo * 3, y_at), fontsize=7.5,
+                        color=INK2, xytext=(2, 3), textcoords="offset points", rotation=29)
+        k *= 10
+    for stem, _key, rival, proto in RIVALS:        # RIVALS order = Table 2 row order
+        sub = [p for p in pts if p[0] == rival and p[1] == proto]
+        if not sub:
+            continue
+        ax.scatter([p[2] for p in sub], [p[3] for p in sub], s=46, color=RIVAL_COLOR[rival],
+                   marker="o" if proto.startswith("their") else "^",
+                   edgecolor=SURFACE, linewidth=1.1, zorder=3,
+                   label=f"{rival} — {proto} (n={len(sub)})")
+    ax.set_xscale("log")
+    ax.set_yscale("log")
+    ax.set_xlim(lo, hi)
+    ax.set_ylim(lo, hi * 0.9)
+    ax.set_xlabel("rival unique solutions/s (its own timer, delivery excluded)",
+                  fontsize=9, color=INK2)
+    ax.set_ylabel("GPAP unique solutions/s (timed rate x distinct fraction)",
+                  fontsize=9, color=INK2)
+    NOTE = {"rival0": "rival=0 (our outright wins)", "gpap0": "GPAP=0 (our outright losses)",
+            "both0": "both=0", "nomeas": "no unique/s estimate", "free": "zero-search",
+            "misaligned": "misaligned pins", "error": "rival failed"}
+    excl = [f"{drop[b]} {NOTE[b]}" for b in NOTE if drop.get(b)]
+    _title(ax, "Every rival cell at once — unique solutions/s",
+           "one dot per (instance, protocol); circle = the rival's own benchmark task, "
+           "triangle = our rare-target task; diagonals = constant ratio"
+           + ("; not plottable: " + ", ".join(excl) if excl else ""))
+    ax.legend(frameon=False, fontsize=8.5, labelcolor=INK2, loc="lower right")
+    return _save(fig, os.path.join(out_dir, "sps_scatter_rivals.png"))
+
+
 # --------------------------------------------------------------------------- summary
 
 def write_summary(stages, out_dir, src_dir):
@@ -723,7 +810,10 @@ def main():
     except Exception as e:  # noqa: BLE001
         sys.exit(f"matplotlib unavailable ({e}) — cannot plot")
     stages = load_stages(args.results_dir)
-    if not stages:
+    rival_paths = sorted(glob.glob(os.path.join(args.results_dir, "rivals*.json")))
+    # A campaign keeps its rival JSONs in their OWN directory (gpap_vs_gpu_rivals_*), so a
+    # rivals-only dir is a legitimate input: it gets the rival figures and nothing else.
+    if not stages and not rival_paths:
         sys.exit(f"no results JSONs in {args.results_dir}")
     made = []
     for stage, payload in sorted(stages.items()):
@@ -736,14 +826,15 @@ def main():
                 p = None
             if p:
                 made.append(p)
-    for fn in (fig_cmsgen_emission, fig_prop_summary, fig_sps_scatter):
-        try:
-            p = fn(plt, stages, out_dir)
-            if p:
-                made.append(p)
-        except Exception as e:  # noqa: BLE001
-            print(f"  [warn] {fn.__name__}: {e}")
-    for rp in sorted(glob.glob(os.path.join(args.results_dir, "rivals*.json"))):
+    if stages:
+        for fn in (fig_cmsgen_emission, fig_prop_summary, fig_sps_scatter):
+            try:
+                p = fn(plt, stages, out_dir)
+                if p:
+                    made.append(p)
+            except Exception as e:  # noqa: BLE001
+                print(f"  [warn] {fn.__name__}: {e}")
+    for rp in rival_paths:
         try:
             p = fig_rivals(plt, rp, out_dir)
         except Exception as e:  # noqa: BLE001
@@ -751,7 +842,15 @@ def main():
             p = None
         if p:
             made.append(p)
-    made.append(write_summary(stages, out_dir, args.results_dir))
+    if rival_paths:
+        try:
+            p = fig_rivals_sps_scatter(plt, rival_paths, out_dir)
+            if p:
+                made.append(p)
+        except Exception as e:  # noqa: BLE001
+            print(f"  [warn] fig_rivals_sps_scatter: {e}")
+    if stages:
+        made.append(write_summary(stages, out_dir, args.results_dir))
     print(f"{len(made)} file(s) in {out_dir}:")
     for p in made:
         print(f"  {os.path.basename(p)}")

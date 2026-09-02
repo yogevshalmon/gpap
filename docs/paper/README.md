@@ -27,7 +27,7 @@ purpose:
 | campaign path | content |
 |---|---|
 | `gpap_vs_cmsgen_l4_abc/` | 12 stage JSONs + `plots/` (figures, `sps_scatter_all.png`, `summary.md`) |
-| `gpap_vs_gpu_rivals_l4_abc/` | 5 rival JSONs + `rivals_steps_calibration.json` |
+| `gpap_vs_gpu_rivals_l4_abc/` | 5 rival JSONs + `rivals_steps_calibration.json` + `plots/` (per-rival dumbbells, `sps_scatter_rivals.png`) |
 | `barbarik_abc/` | per-arm JSONL (`circ_abc_{spur,cmsgen,pipe,b8}.jsonl`) + `eligible.txt` + logs |
 | `VERIFICATION.txt` | `verify_artifact.py` over the shipped copy (exit 0) |
 | `README.md` | the campaign's own protocol record (VM history, incidents, deviations) |
@@ -62,7 +62,13 @@ eval/artifact/verify_artifact.py $R/gpap_vs_cmsgen_l4_abc \
     --rivals $R/gpap_vs_gpu_rivals_l4_abc          # the publishability gate
 
 eval/eval_plots.py $R/gpap_vs_cmsgen_l4_abc        # figures -> <dir>/plots/
+eval/eval_plots.py $R/gpap_vs_gpu_rivals_l4_abc    # rival figures, incl. the unique/s scatter
 ```
+
+The two all-cells-at-once scatters (`sps_scatter_all.png` for CMSGen, `sps_scatter_rivals.png`
+for the GPU rivals) answer the question the geomeans hide — how the instances are distributed
+around a ratio — and both import their cell classification from `paper_tables`
+(`cms_arm_ran`/`zero_search`, `rival_cells`), so a figure cannot show a cell its table screens.
 
 The header of `RESULTS.md` carries two commits and they mean different things: the **measured
 engine** is the per-row build id (unioned over every stage — more than one value means mixed
