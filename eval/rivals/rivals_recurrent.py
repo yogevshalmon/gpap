@@ -64,9 +64,12 @@ REPO_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))
 sys.path.insert(0, REPO_ROOT)
 
 from eval.rivals.rival_common import (CACHE_MISS, VARIANTS, cache_peek,  # noqa: E402
-                                      cache_store, cached_gpap, fit_batch, prepare_variant,
+                                      cache_store, cached_gpap, cmsgen_arm, fit_batch,
+                                      _available_bytes, expand_names, host_provenance,
+                                      oversize_reason, prepare_variant,
                                       resolve_steps, rival_commit, rival_vram_budget,
                                       run_at_batch, variant_note)
+from eval.rivals.unroll_to_bench import and_tree                      # noqa: E402
 
 from gpap import paths
 from gpap.sampling.pipeline import merge_sound_check, sound_verdict
@@ -81,21 +84,53 @@ RIVAL_DEFAULT = str(paths.src_dir() / "Recurrent-CircuitSAT-Sampler")
 # A timed-out run is reported as an error row with the reason, never as a zero that would enter
 # a geomean as if the rival had genuinely produced nothing.
 DEFAULT_TIMEOUT = 300.0
-PROBE_TIMEOUT = 60.0          # per start_point probe (a 1-step run; same budget)
-PROBE_BUDGET = 120.0          # total probing per instance before we give up on it
+# INITIALIZATION budget: the whole start_point search — every probe's model build included —
+# must settle inside ONE run timeout (300 s by default), else the instance is an error row for
+# the rival ("did not initialize"). The probe is a 1-step run whose wall is the model build, the
+# same work the measured run does, so a per-probe cap smaller than the run's is not a faster
+# probe, only a failing one: it read 60 s against the run's 300 s for one release, and on b14/b17
+# at T=25 every start_point >= 1 hit it — reported as "no gradient path", a claim about the
+# rival made from our stopwatch. Now each probe gets what is LEFT of the budget, and a probe
+# that runs out of it ends the search with the budget named in the reason.
+PROBE_BUDGET_FRACTION = 1.0
+
+
+def probe_budget(run_timeout=DEFAULT_TIMEOUT):
+    """Total initialization wall per instance, over all start_point probes."""
+    return float(run_timeout) * PROBE_BUDGET_FRACTION
+
+
 BENCH_DIR = os.path.join(REPO_ROOT, "benchmarks", "circuits", "bench", "seq")
 
-# their run.py target table (the branches for instances we share; idx into the OUTPUT list)
+# Their run.py target table (the branches for instances we share; idx into the OUTPUT list).
+# ⚠️ THE KEY IS OUR FILENAME STEM, THEIRS IS THAT WITH DOTS REMOVED: their run.py does
+# `basename.replace('.bench','').replace('.','')`, so `s208.1.bench` selects their `s2081`
+# branch and `s9234.1` their `s92341`. Transcribe against the STRIPPED name or a dotted
+# instance silently lands in the else-branch below.
+# ⚠️ The final `else` is a REAL target, not an error path — idx [0,15,31,63,-1] with
+# values [1,0,1,1,1] — and it is what their own `s15850.1` row runs at, since only the
+# undotted `s15850` has a curated branch. It needs >= 64 outputs, so it raises IndexError on
+# a small circuit; that is why an unlisted instance is skipped rather than guessed at.
+# Gated against their source by tests/test_rival_targets.py, which re-derives this dict.
 TARGETS = {
     "s386": ([-1], [1]), "s400": ([-1], [1]), "s526": ([-1], [1]), "s1423": ([-1], [1]),
+    "s208.1": ([-1], [1]),                                     # their `s2081`
     "b01": ([-1], [1]), "b03": ([-1], [1]), "b04": ([-1], [1]), "b06": ([-1], [1]),
     "b08": ([-1], [1]), "b11": ([-1], [1]), "b13": ([-1], [1]),
     "b02": ([-1], [0]), "b05": ([-1], [0]), "b07": ([-1], [0]), "b09": ([-1], [0]),
     "b10": ([-2], [0]), "b12": ([-2], [0]),
+    # b14/b15/b17 share one branch (target ZEROS). Their absence here silently skipped b15 —
+    # an instance their OWN paper's Table II evaluates.
+    "b14": ([0, -1], [0, 0]), "b15": ([0, -1], [0, 0]), "b17": ([0, -1], [0, 0]),
+    "b18": ([0, -1], [1, 0]), "b19": ([0, -1], [1, 0]),
+    "b20": ([0, 7, -1], [1, 1, 1]), "b21": ([0, 7, -1], [1, 1, 1]),
+    "b22": ([0, 7, -1], [1, 1, 1]),
     "s820": ([0, -1], [0, 1]), "s832": ([0, -1], [0, 1]), "s1238": ([0, -1], [0, 1]),
-    "s1488": ([0, -1], [0, 1]),
+    "s1488": ([0, -1], [0, 1]), "s4863": ([0, -1], [0, 1]),
     "s641": ([0, 1], [1, 0]), "s713": ([0, 1], [1, 0]), "s1196": ([0, 1], [1, 0]),
     "s5378": ([0, 1], [1, 0]),
+    "s35932": ([0, 15, 31, -1], [1, 1, 1, 0]),
+    "s15850.1": ([0, 15, 31, 63, -1], [1, 0, 1, 1, 1]),        # their default branch
 }
 RARE_ALIAS = "b13"      # any of their [-1]=1 names; the rare-mode MITER copy is keyed to it
 
@@ -155,6 +190,9 @@ def miter_bench(src, dst, T, seed):
             n = f"GPAPN{i}"
             extra.append(f"{n} = NOT({o})")
             terms.append(n)
+    # Wide AND -> bounded fan-in tree, or a 320-output circuit like s35932 emits a 321-literal
+    # clause that the packed envelope refuses (see unroll_to_bench.and_tree).
+    terms = and_tree(extra, terms, "GPAPAND")
     if len(terms) == 1:
         extra.append(f"GPAPM0 = NOT({terms[0]})")
         extra.append("GPAPMITER = NOT(GPAPM0)")
@@ -224,33 +262,46 @@ def _sp_task(T, max_sp):
     return {"probe": "start_point", "cycles": T, "max_sp": max_sp}
 
 
-def probe_start_point(rival, bench_file, key, T, max_sp=10, budget=PROBE_BUDGET,
-                      cache_dir=None):
+def probe_start_point(rival, bench_file, key, T, max_sp=10, budget=None,
+                      cache_dir=None, run_timeout=DEFAULT_TIMEOUT):
     """Their backward() crashes while the pinned output has no gradient path to any input
-    (Moore register latency); walk start_point up until a tiny run survives. Bounded twice: each
-    probe gets PROBE_TIMEOUT, and the whole search gets `budget` — an instance whose probe never
-    settles must cost minutes, not the afternoon.
+    (Moore register latency); walk start_point up until a tiny run survives, inside ONE
+    initialization budget (`probe_budget`, = the run timeout).
+
+    Returns `(start_point, reason)`. `start_point` is None when the search did not settle, and
+    then `reason` says which of two things happened — both are outcomes of the RIVAL under a
+    stated rule, and they are kept apart because they mean different things:
+
+      "no gradient path at any start_point<=N"   their backward() refused every depth the search
+                                                 reached. A finding about the rival.
+      "did not initialize ... within the Ns      a 1-step probe ran out of the initialization
+       initialization budget"                    budget. The search stops there: a larger
+                                                 start_point pays the same model build, so it
+                                                 cannot be faster.
 
     CACHED, because it is pure: the answer depends only on the circuit and the unroll depth, yet
     every probe pays a full process launch and model build (~30 s of a Recurrent run's wall is
-    build, even at --num_steps 1). Uncached, re-running this stage costs up to PROBE_BUDGET per
-    instance before any measurement happens."""
+    build, even at --num_steps 1). A timeout is NOT cached — it may pass on a faster box."""
+    budget = probe_budget(run_timeout) if budget is None else float(budget)
     hit = cache_peek(cache_dir, bench_file, _sp_task(T, max_sp))
     if hit is not CACHE_MISS:
-        return hit
+        return hit, None
     t0 = time.perf_counter()
     for sp in range(max_sp + 1):
-        if time.perf_counter() - t0 > budget:
-            return None
+        left = budget - (time.perf_counter() - t0)
+        if left <= 0:
+            return None, (f"did not initialize: start_point probes 0..{sp - 1} used up the "
+                          f"{budget:.0f}s initialization budget")
         r = run_recurrent(rival, bench_file, key, T, steps=1, batch=256, start_point=sp,
-                          timeout=PROBE_TIMEOUT)
+                          timeout=left)
         if "error" not in r:
-            return _remember_sp(cache_dir, bench_file, T, max_sp, sp)
+            return _remember_sp(cache_dir, bench_file, T, max_sp, sp), None
         if "does not require grad" not in r["error"]:
             if "timeout" in r["error"]:
-                return None                     # environmental: do NOT cache, it may pass later
-            return _remember_sp(cache_dir, bench_file, T, max_sp, sp)
-    return None
+                return None, (f"did not initialize: a 1-step start_point probe (sp={sp}) did not "
+                              f"complete within the {budget:.0f}s initialization budget")
+            return _remember_sp(cache_dir, bench_file, T, max_sp, sp), None
+    return None, f"no gradient path at any start_point<={max_sp}"
 
 
 def _remember_sp(cache_dir, bench_file, T, max_sp, sp):
@@ -262,12 +313,13 @@ def _remember_sp(cache_dir, bench_file, T, max_sp, sp):
 
 
 
-def run_recurrent_ladder(rival, bench_file, key, T, steps, batch, start_point,
-                         timeout=DEFAULT_TIMEOUT):
-    """run_recurrent at its granted batch, stepping DOWN if the driver refuses the size. The
-    rungs tried are attached as `batch_sweep`: their unique/s is near-proportional to the batch
-    (s386 T=25: 10k -> 300k is 18.6x, with model_runtime almost flat), so what the rival was
-    granted belongs in the row next to its score."""
+def run_recurrent_once(rival, bench_file, key, T, steps, batch, start_point,
+                       timeout=DEFAULT_TIMEOUT):
+    """ONE measured run at the granted batch (rival_common.run_at_batch: the only fallback is a
+    driver refusal, which is not a measurement). The rungs tried are attached as `batch_sweep`:
+    their unique/s is near-proportional to the batch (s386 T=25: 10k -> 300k is 18.6x, with
+    model_runtime almost flat), so what the rival was granted belongs in the row next to its
+    score."""
     r, sweep = run_at_batch(
         lambda b: run_recurrent(rival, bench_file, key, T, steps, b, start_point,
                                 timeout=timeout),
@@ -283,55 +335,141 @@ def pick_batch(bench_file, T, budget_bytes=None):
     return fit_batch(max(n_gates, 1) * T, "recurrent", budget_bytes)
 
 
-def run_gpap(bench_file, T, pin_outputs, target, seeds, n_time, device, time_limit=60.0,
-             n_cov=1000):
-    """Convert once (explicit pins), then sample at each seed; report per-seed + medians."""
-    from gpap.circuits.bench import parse_bench, build_cnf, write_dimacs
-    from gpap.sampling.pipeline import CIRCUIT_PORTFOLIO, sample_file
+# GPAP's sampling portfolio for our arm. `circuit` is the ADAPTIVE bandit — the shipped default
+# for circuit inputs and what every recorded campaign has used — so it stays the default here;
+# changing it would move every published rival ratio.
+#
+# ⚠️ It is an open ASYMMETRY, not a settled choice: every rival runs one fixed configuration and
+# so does CMSGen, while the bandit measures configs against each other inside the timed wall and
+# reports the winner's rate (RIVAL_FAIRNESS_FINDINGS.md §10, §12). `--portfolio b8` pins a single
+# config if a campaign wants to close that. MEASURED on the rival path (T=25, their pins,
+# Tseitin, seed 5, 20 s): the bandit picks B=8 on b13/b04/b14 and B=1 on b12, and pinning `b8`
+# costs 4.5-8.7% of samples/s (b13 -4.6%, b12 -4.5%, b04 -8.7%, b14 -5.3%) where pinning `b1`
+# costs 13.6-31.2% on three of the four.
+GPAP_PORTFOLIO = "circuit"
+
+
+# The GPAP arm's encoder. The rival unrolls the RAW circuit itself, so the encoder is ours to
+# choose, and it is the one every other table in the paper runs: abc:fast (`--encoders abc:fast`
+# in eval/run_full_eval.sh). It used to be the native Tseitin — the rival path was written
+# before the ABC route existed and never moved — which made this table the only one whose
+# GPAP number came from a formula 2-10x larger than the paper's, and made b14's GPAP arm a
+# 413,451-variable CNF where abc:fast gives 41,938 (docs/findings/RIVAL_FAIRNESS_FINDINGS.md
+# §13). There is NO Tseitin fallback: without an `abc` binary the arm is an error row, never a
+# silently different encoding under the same label. Recorded in every row as `encoder`.
+GPAP_ENCODER = "abc:fast"
+
+# Rows of the timed run's own output kept for the distinct-fraction estimate. This is what
+# `--out`/`--max-samples` keep: GPU-projected support bits of the WINNING config, `out_project_s`
+# excluded from every rate — so the estimate costs rows x |support| bits of host memory, not the
+# coverage run's rows x nv x 72 B (which is what OOM-killed b14 and took 7 instances out of a
+# sweep with it). The coverage pass (`n_cov`) is not run on this path at all.
+UNIQUE_ROWS = 1000
+
+
+def build_arm_cnf(bench_file, T, pin_outputs, target, cnf_path, encoder=GPAP_ENCODER):
+    """Encode ONE instance of a rival row to `cnf_path` — the formula BOTH of our arms run.
+
+    The GPAP arm samples it and the CMSGen arm (`rival_common.cmsgen_arm`) reads the same
+    file, so the two comparisons a row carries are over one CNF by construction rather than by
+    deriving it twice and hoping. `abc:fast` is the campaign's encoder; `tseitin` stays
+    reachable for an A/B and nothing else, and there is NO fallback between them (no abc
+    binary = an error row, never a silently different encoding under the same label).
+    Returns the row's `cnf` provenance: encoder, encode wall, sizes, support width."""
+    from gpap.circuits.bench import parse_bench, write_dimacs
     circ = parse_bench(bench_file)
-    b, support, tgt, labels = build_cnf(circ, T, seed=5, pin_outputs=pin_outputs, target=target)
-    with tempfile.NamedTemporaryFile("w", suffix=".cnf", delete=False) as f:
-        cnf_path = f.name
+    t_enc = time.perf_counter()
+    if encoder == "abc:fast":
+        from gpap.circuits.abc_backend import build_cnf_abc     # raises without an abc binary
+        b, support, _tgt, labels = build_cnf_abc(circ, bench_file, T, seed=5,
+                                                 pin_outputs=pin_outputs, opt="fast",
+                                                 target=target)
+    elif encoder == "tseitin":
+        from gpap.circuits.bench import build_cnf
+        b, support, _tgt, labels = build_cnf(circ, T, seed=5, pin_outputs=pin_outputs,
+                                             target=target)
+    else:
+        raise ValueError(f"encoder must be abc:fast or tseitin, got {encoder!r}")
+    encode_s = time.perf_counter() - t_enc
     write_dimacs(cnf_path, b, support, labels)
+    return {"encoder": encoder, "encode_s": encode_s, "n_vars": b.nv,
+            "n_clauses": len(b.clauses), "support": len(support)}
+
+
+def run_gpap(bench_file, T, pin_outputs, target, seeds, n_time, device, time_limit=60.0,
+             portfolio_name=GPAP_PORTFOLIO, encoder=GPAP_ENCODER, unique_rows=UNIQUE_ROWS,
+             cnf=None):
+    """Convert once (explicit pins, `encoder`), then sample at each seed; report per-seed +
+    medians. `unique_per_s_est` = samples/s x the distinct fraction of the timed run's own
+    kept output rows (`unique_rows` of them) — no separate coverage run.
+
+    `cnf=(path, info)` is a CNF `build_arm_cnf` already wrote for this row — the harnesses pass
+    it so the CMSGen arm can read the very same file afterwards; it is left in place. Without
+    it the arm encodes into a temporary file of its own and removes it."""
+    import numpy as np
+    from gpap.sampling.pipeline import portfolio, sample_file
+    if cnf is None:
+        with tempfile.NamedTemporaryFile("w", suffix=".cnf", delete=False) as f:
+            cnf_path = f.name
+        info, own = build_arm_cnf(bench_file, T, pin_outputs, target, cnf_path, encoder), True
+    else:
+        (cnf_path, info), own = cnf, False
     runs = []
     try:
         for s in seeds:
-            # n_cov feeds distinct_frac only, but it COLLECTS models and rebuilds them in
-            # Python — real wall on a deep unroll. Keep it small; it is not the measurement.
             # verify_sound: this row RECORDS `sound_check`, so it has to run the check —
             # otherwise the column is a permanent "off" beside a comment claiming it is the
             # on-device model check. Free to the comparison: the check's wall is excluded from
             # every rate (`verify_sound_s`), so the rival is not credited a millisecond for it.
-            g = sample_file(cnf_path, device, n_time=n_time, n_cov=n_cov,
-                            configs=CIRCUIT_PORTFOLIO, time_limit=time_limit, seed=s,
+            g = sample_file(cnf_path, device, n_time=n_time, n_cov=0, out_cap=unique_rows,
+                            configs=portfolio(portfolio_name), time_limit=time_limit, seed=s,
                             verify_sound=True)
+            # Distinct fraction over the rows the timed run DELIVERED (the (n, S) support-bit
+            # matrix `--out` would have written). Exact on large spaces (every row distinct),
+            # honest on tiny ones where re-sampling dominates.
+            bits = g.get("samples")
+            n_coll = 0 if bits is None else len(bits)
+            n_distinct = len(np.unique(np.asarray(bits), axis=0)) if n_coll else 0
+            # KEEP None. `or 0.0` turned "nothing to measure on" into "GPAP produced nothing",
+            # and every consumer buckets a zero as an outright loss — b11-c25 at a rare pin
+            # delivered models at ~15x the rival's rate and was published as a loss to it.
+            uniq = (g["samples_per_s"] * n_distinct / n_coll) if n_coll else None
             runs.append({"seed": s, "sps": g["samples_per_s"], "sps_e2e": g.get("sps_e2e_total"),
-                         # KEEP None. `or 0.0` turned "the coverage run collected nothing" into
-                         # "GPAP produced nothing", and every consumer buckets a zero as an
-                         # outright loss — b11-c25 at a rare pin delivered models at ~15x the
-                         # rival's rate and was published as a loss to it.
-                         "unique_per_s_est": g.get("unique_sps_est"),
-                         "unique_est_status": g.get("unique_est_status"),
+                         "unique_per_s_est": uniq,
+                         "unique_est_status": "ok" if uniq is not None else "no-sample-rows",
+                         "unique_rows": n_coll, "unique_distinct": n_distinct,
                          "success": g["success_rate"], "n_models": g["n_models"],
                          # engine provenance per row, same as the CMSGen sweeps: sound_check is
                          # the on-device model check (opt-in), dec/s + impl/s let the zero-search screen
                          # (paper_tables.zero_search) run on rival rows too
                          "sound_check": g.get("sound_check"),
                          "decisions_per_s": g.get("decisions_per_s"),
-                         "implications_per_s": g.get("implications_per_s")})
+                         "implications_per_s": g.get("implications_per_s"),
+                         # the engine that measured it (packed split / kernel / K / build id),
+                         # exactly what a `gpap bench` row records — verify_artifact's
+                         # one-engine-per-stage check reads it here too
+                         "engine": g.get("engine")})
     finally:
-        os.unlink(cnf_path)
+        if own:
+            os.unlink(cnf_path)
     med = lambda k: statistics.median(r[k] for r in runs)
     med0 = lambda k: statistics.median((r.get(k) or 0.0) for r in runs)
     # The unique estimate is median over the seeds that HAVE one; None (not 0.0) when no seed
-    # produced a coverage sample, so a consumer can tell "not measured" from "produced nothing".
+    # kept a row, so a consumer can tell "not measured" from "produced nothing".
     uq = [r["unique_per_s_est"] for r in runs if r["unique_per_s_est"] is not None]
     return {"seeds": runs,
+            # WHICH sampler produced this row. A fixed config is only a fixed config if the row
+            # says which one; `config_breakdown` is per-seed and this is the claim itself.
+            "portfolio": portfolio_name,
+            "adaptive": len(portfolio(portfolio_name)) > 1,
+            # WHICH formula: the encoder is a claim about the row as much as the portfolio is.
+            "encoder": encoder, "encode_s": info["encode_s"],
+            "engine": runs[0].get("engine") if runs else None,
             "unique_per_s_est": (statistics.median(uq) if uq else None),
             "unique_est_status": ("ok" if uq else
-                                  (runs[0].get("unique_est_status") or "no-coverage-sample")),
+                                  (runs[0].get("unique_est_status") or "no-sample-rows")),
             "sps": med("sps"),
-            "success": med("success"), "n_vars": b.nv, "n_clauses": len(b.clauses),
+            "success": med("success"), "n_vars": info["n_vars"], "n_clauses": info["n_clauses"],
             # merge_sound_check, not seed 0's verdict: UNSOUND dominates and "ok" beats "off",
             # so a mixed set of seeds cannot publish the first seed's silence as the answer.
             "sound_check": merge_sound_check(*(sound_verdict(r) for r in runs)),
@@ -340,11 +478,25 @@ def run_gpap(bench_file, T, pin_outputs, target, seeds, n_time, device, time_lim
             "n_models": int(med("n_models"))}
 
 
+def _cms_cols(g, cms):
+    """The live table's CMSGen columns: its samples/s on the row's CNF, and GPAP/CMSGen."""
+    if not cms or "cms_sps" not in cms:
+        return f"{'—':>10}{'—':>9}"
+    if cms.get("cms_error"):
+        return f"{'ERR':>10}{'—':>9}"
+    c = cms["cms_sps"] or 0.0
+    gs = (g or {}).get("sps")
+    gc = "GPAP" if (gs and not c) else (f"{gs / c:,.1f}x" if (gs and c) else "—")
+    return f"{c:>10,.0f}{gc:>9}"
+
+
 # ---------------------------------------------------------------- driver
 
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument("names", nargs="+", help="instance stems, e.g. b03 s1196 (see TARGETS)")
+    ap.add_argument("names", nargs="+",
+                    help="instance stems, e.g. b03 s1196 (see TARGETS); `paper` = the 16 their "
+                         "own Table II evaluates (rival_common.PAPER_INSTANCES)")
     ap.add_argument("--rival", default=RIVAL_DEFAULT)
     ap.add_argument("--bench-dir", default=BENCH_DIR)
     ap.add_argument("--rare", action="store_true",
@@ -364,12 +516,22 @@ def main():
                          "GPAP_RIVAL_CACHE=0 disables reuse entirely.")
     ap.add_argument("--seeds", type=int, nargs="+", default=[5, 6, 7])
     ap.add_argument("--gpap-n", type=int, default=50_000)
+    ap.add_argument("--portfolio", default=GPAP_PORTFOLIO,
+                    help=f"GPAP sampling portfolio for our arm (default {GPAP_PORTFOLIO!r}). "
+                         f"A SINGLE-config name (b8/b1/s1) pins the algorithm, which is what "
+                         f"every rival and CMSGen run; 'circuit'/'default' turn the adaptive "
+                         f"bandit back on and the row then reports an adaptive sampler.")
     ap.add_argument("--target-seed", type=int, default=5, help="rare-pattern selection seed")
     ap.add_argument("--timeout", type=float, default=DEFAULT_TIMEOUT,
                     help="per-run wall cap for the RIVAL subprocess (s); a run that exceeds it "
                          "is an error row, not a zero")
     ap.add_argument("--gpap-time-limit", type=float, default=60.0,
                     help="per-seed sampling wall cap for the GPAP side (s)")
+    ap.add_argument("--cmsgen", default=None,
+                    help="patched cmsgen binary: run the CMSGen arm on the VERY CNF the GPAP arm "
+                         "samples, same n / budget (the converged protocol's third tool; "
+                         "rival_common.cmsgen_arm). Absent = no CMSGen columns on these rows")
+    ap.add_argument("--cmsgen-seed", type=int, default=None, help="cmsgen -s seed")
     ap.add_argument("--output", default=None)
     ap.add_argument("--resume", action="store_true",
                     help="keep the rows already in --output and re-run only what is missing "
@@ -380,6 +542,7 @@ def main():
                          "timeout to rediscover on every restart. Turn it on when the failure "
                          "was ENVIRONMENTAL (e.g. a missing dependency), not the rival's.")
     args = ap.parse_args()
+    args.names = expand_names(args.names, "rcs")
     if not os.path.isdir(os.path.join(args.rival, "src")):
         sys.exit(f"no rival checkout at {args.rival} (see module docstring)")
     import torch
@@ -388,10 +551,14 @@ def main():
     steps, steps_src = resolve_steps("recurrent", args.steps)
     tmp = tempfile.mkdtemp(prefix="rivals_recurrent_")
     mode = "rare(fixed-T pattern, MITER)" if args.rare else "their target table"
+    if args.cmsgen and not os.access(args.cmsgen, os.X_OK):
+        sys.exit(f"--cmsgen {args.cmsgen}: not an executable (scripts/build_cmsgen.sh)")
     print(f"{len(args.names)} instances | T={args.cycles} steps={steps} ({steps_src}) | mode: {mode} | "
-          f"GPAP median of seeds {args.seeds}")
+          f"GPAP median of seeds {args.seeds} | CMSGen arm: "
+          f"{'on (same CNF, --nowrite --maxtime)' if args.cmsgen else 'OFF'}")
     hdr = (f"{'instance':<10}{'circ':>6}{'pin':>12}{'p_acc':>10}{'RCS uniq':>11}{'@T':>9}"
-           f"{'t':>7}{'RCS u/s':>10}{'GPAP u/s~':>11}{'succ%':>7}{'ratio':>10}")
+           f"{'t':>7}{'RCS u/s':>10}{'GPAP u/s~':>11}{'succ%':>7}{'ratio':>10}"
+           f"{'CMS/s':>10}{'G/C':>9}")
     print(hdr)
     print("-" * len(hdr))
     out = []
@@ -412,21 +579,45 @@ def main():
         except Exception as e:      # noqa: BLE001 — a truncated checkpoint must not kill the run
             print(f"[resume] ignoring unreadable {args.output}: {e}")
             out, done = [], set()
+    # EVERY instance that produces no row is tracked, so a stage cannot quietly measure less
+    # than it was asked to. Without this, `b19`-`b22` and `s35932` vanished from a 29-instance
+    # sweep and the only evidence was one line each in a log nobody reads (the same failure the
+    # DEMOTIC harness had). Reasons are reported at the end; a stage that measured NOTHING exits
+    # non-zero so the driver sees it.
+    skipped = []
     for name, variant in ((n, v) for n in args.names for v in args.circuit_variants):
         if (name, variant) in done:
             continue
         src0 = os.path.join(args.bench_dir, f"{name}.bench")
         if not os.path.isfile(src0):
-            print(f"{name:<10}  no such bench file, skipped")
+            print(f"{name:<10}  no such bench file ({src0}), skipped")
+            skipped.append((name, "no bench file"))
             continue
+        # Checked BEFORE anything is built: an oversized Tseitin unroll is OOM-killed mid-build,
+        # which writes no row and silently truncates every instance after it (see
+        # oversize_reason). It gates OUR arm only, and only under the Tseitin encoder — with
+        # abc:fast (the default) the guard passes everything: every seq instance built on the
+        # 13 GB L4 VM. The rival unrolls the .bench its own way and always gets its run.
+        too_big = oversize_reason(src0, args.cycles, encoder=GPAP_ENCODER)
+        if too_big:
+            print(f"{name:<10}  GPAP arm not attempted (oversize): {too_big[:70]}", flush=True)
         # BOTH sides get the same circuit (eval/rivals/rival_common.py): with 'abc' the rival is handed
         # the ABC-optimized .bench too, gated by a bit-exact simulation equivalence check.
         src, vinfo = prepare_variant(src0, variant, tmp, cycles=args.cycles,
                                      seed=args.target_seed,
                                      target_mode="rare" if args.rare else "random")
         if vinfo.get("error"):
+            # A ROW, not a silent skip. `prepare_variant` fails closed (ABC missing, ABC crashed,
+            # or the equivalence check refused the copy) and this used to `continue`, so the
+            # instance vanished from the sweep with one line in a log. Every other failure mode
+            # here records what happened; so does this one.
             print(f"{name:<10}{variant:>6}  circuit variant unusable: {vinfo['error'][:60]}",
                   flush=True)
+            out.append({"name": name, "variant": variant,
+                        "mode": "rare" if args.rare else "table", "circuit": vinfo,
+                        "rcs": {"error": f"circuit variant unusable: {vinfo['error'][:160]}"},
+                        "gpap": {"error": "not attempted: no usable circuit for this variant"}})
+            skipped.append((name, f"variant unusable: {vinfo['error'][:40]}"))
             continue
         if args.rare:
             rival_file = os.path.join(tmp, f"{name}_{variant}_rare.bench")
@@ -438,6 +629,7 @@ def main():
         else:
             if name not in TARGETS:
                 print(f"{name:<10}  not in their target table, skipped")
+                skipped.append((name, "not in their target table"))
                 continue
             idx, vals = TARGETS[name]
             key = name                             # untouched copy hits their table branch
@@ -449,45 +641,117 @@ def main():
             pin_desc = ",".join(f"[{i}]={v}" for i, v in zip(idx, vals))
         sim = sim_baseline(gpap_file, args.cycles, args.target_seed, pin_outputs=pin_n,
                            target=gpap_target)
-        sp = probe_start_point(args.rival, rival_file, key, args.cycles,
-                               cache_dir=cache_dir)                        # bounded, see above
+        sp, why = probe_start_point(args.rival, rival_file, key, args.cycles,
+                                    cache_dir=cache_dir,                   # bounded, see above
+                                    run_timeout=args.timeout)
         if sp is None:
-            rcs = {"error": "no gradient path at any start_point<=10"}
+            # `why` is one of two rival outcomes under a stated rule (no gradient path, or did
+            # not initialize within the budget); it is recorded verbatim, never as a zero.
+            rcs = {"error": why}
         else:
             batch = pick_batch(rival_file, args.cycles)
-            rcs = run_recurrent_ladder(args.rival, rival_file, key, args.cycles, steps,
-                                       batch, sp, timeout=args.timeout)
+            rcs = run_recurrent_once(args.rival, rival_file, key, args.cycles, steps,
+                                     batch, sp, timeout=args.timeout)
             rcs["steps_source"] = steps_src
         task = {"harness": "recurrent", "mode": "rare" if args.rare else "table",
                 "cycles": args.cycles, "pin_outputs": pin_n, "target": gpap_target,
                 "seeds": args.seeds, "n_time": args.gpap_n,
-                "time_limit": args.gpap_time_limit, "portfolio": "circuit"}
-        g, hit = cached_gpap(cache_dir, gpap_file, task,
-                             lambda: run_gpap(gpap_file, args.cycles, pin_n, gpap_target,
-                                              args.seeds, args.gpap_n, device,
-                                              time_limit=args.gpap_time_limit))
+                "time_limit": args.gpap_time_limit, "portfolio": args.portfolio,
+                "encoder": GPAP_ENCODER, "unique_rows": UNIQUE_ROWS}
+        # ONE BAD INSTANCE MUST NOT TRUNCATE THE SWEEP. `b19` Tseitin-unrolls to 2N=19,182,702,
+        # past the 8|24 envelope's 16,777,215, and the raised EnvelopeError killed the harness —
+        # so b20/b21/b22/s35932, all alphabetically after it, were never attempted and the stage
+        # simply ended 4 instances short with nothing marking the gap. Recorded as a GPAP-side
+        # error row (its own bucket in paper_tables: an envelope refusal is NOT "GPAP produced
+        # nothing"), exactly as a rival crash is recorded on their side.
+        # OUR ARM RUNS EVEN WHEN THE RIVAL FAILED. There is no ratio in such a row — `rival_cells`
+        # buckets it as `error` before it reads our side — but "the rival has no gradient path
+        # here and GPAP delivers N models/s on the same circuit" is a capability contrast worth
+        # recording, and it is what the sweep is asked to cover: every b*/s* on all three tools.
+        #
+        # It was skipped for one release because it was the half that BLEW UP: b14's table-mode
+        # arm peaked at 43.5 GB and was OOM-killed on a 13 GB Colab VM *and* on a 47 GB box,
+        # taking the 8 instances after it out of the sweep. That was never about the rival — it
+        # was the COVERAGE RUN (`n_cov`), which reconstructs rows x nv x 72 B on the host (b14
+        # through the Tseitin encoding this path used then is 413,451 vars: 2048 rows = 61 GB).
+        # The arm no longer runs a coverage pass at all (the distinct fraction comes from the
+        # timed run's own kept output rows, see `run_gpap`) and encodes with abc:fast, so there
+        # is nothing left to dodge. Set GPAP_RIVAL_SKIP_ON_ERROR=1 to restore the skip.
+        skip_on_err = os.environ.get("GPAP_RIVAL_SKIP_ON_ERROR", "0") == "1"
+        # ONE CNF PER ROW, both of our arms on it. Built here rather than inside run_gpap so the
+        # CMSGen arm reads the very file the GPAP arm sampled — the converged protocol's third
+        # tool (RIVAL_FAIRNESS_FINDINGS.md §14) — and built even on a GPAP-cache hit, since it is
+        # what CMSGen runs on. An encode failure (no abc binary) is a GPAP-side error row.
+        cnf_path, cnf_info, cnf_err = None, None, None
+        if not too_big:
+            cnf_path = os.path.join(tmp, f"{name}_{variant}_{'rare' if args.rare else 'table'}.cnf")
+            try:
+                cnf_info = build_arm_cnf(gpap_file, args.cycles, pin_n, gpap_target, cnf_path)
+            except Exception as e:                          # noqa: BLE001 — one cell, not the run
+                cnf_err = f"{type(e).__name__}: {str(e)[:200]}"
+                print(f"{name:<10}{variant:>6}  encode failed: {cnf_err[:80]}", flush=True)
+        if too_big:
+            g, hit = {"error": f"oversize: {too_big}"}, False
+        elif cnf_err:
+            g, hit = {"error": f"encode failed: {cnf_err}"}, False
+        elif rcs.get("error") and skip_on_err:
+            g, hit = {"skipped": "rival failed; GPAP arm not run (unused in an error row) — "
+                                 "see the CMSGen table for GPAP on this instance"}, False
+        else:
+            try:
+                g, hit = cached_gpap(cache_dir, gpap_file, task,
+                                     lambda: run_gpap(gpap_file, args.cycles, pin_n, gpap_target,
+                                                      args.seeds, args.gpap_n, device,
+                                                      time_limit=args.gpap_time_limit,
+                                                      portfolio_name=args.portfolio,
+                                                      cnf=(cnf_path, cnf_info)))
+            except Exception as e:                          # noqa: BLE001 — one cell, not the run
+                print(f"{name:<10}{variant:>6}  GPAP arm failed: {type(e).__name__}: "
+                      f"{str(e)[:80]}", flush=True)
+                g, hit = {"error": f"{type(e).__name__}: {str(e)[:200]}"}, False
         if hit:
             print(f"{name:<10}{variant:>6}  [gpap-cache hit — arm not re-run]", flush=True)
+        # The CMSGen arm: the same CNF file, the same n and sampling budget as the GPAP arm.
+        # Not cached (a `--resume` skips finished rows; only `--retry-errors` re-pays it).
+        cms = (cmsgen_arm(cnf_path, args.cmsgen, args.gpap_n, args.gpap_time_limit, tmp,
+                          seed=args.cmsgen_seed) if (args.cmsgen and cnf_info) else {})
+        if cnf_path and os.path.exists(cnf_path):
+            os.remove(cnf_path)                 # a b19-class CNF is hundreds of MB; not kept
         row = {"name": name, "mode": "rare" if args.rare else "table", "pin": pin_desc,
-               "variant": variant, "circuit": vinfo,
+               "variant": variant, "circuit": vinfo, "cycles": args.cycles,
                "p_accept": sim["p_accept"], "p_accept_lt": sim.get("p_accept_lt"),
                "rival_commit": rival_commit(args.rival), "rcs": rcs, "gpap": g,
-               "vram_budget_bytes": rival_vram_budget()}
+               # the ONE formula both of our arms ran (encoder, sizes, support width); `support`
+               # at the top level is what `paper_tables.tiny_space` reads, as on a bench row
+               "cnf": cnf_info, "support": (cnf_info or {}).get("support"),
+               **cms, **host_provenance(device),
+               "vram_budget_bytes": rival_vram_budget(),
+               # HOST ram, recorded because it decides what this machine could attempt at all:
+               # `oversize_reason`'s second term refuses an instance whose measured-fit peak
+               # exceeds a share of it, so a refusal row is only interpretable next to this.
+               "host_mem_avail_bytes": _available_bytes()}
         out.append(row)
         if args.output:      # checkpoint after every instance: this stage runs for HOURS, and a
             os.makedirs(os.path.dirname(args.output) or ".", exist_ok=True)   # death at 90% used
             json.dump(out, open(args.output, "w"), indent=1)                  # to leave nothing
         pa = sim["p_accept"] if sim["p_accept"] else sim.get("p_accept_lt", 0.0)
         pa_s = f"{pa:.2e}" if sim["p_accept"] else f"<{pa:.0e}"
-        # None = the off-timing coverage run collected nothing, i.e. NOT MEASURED. It is not a
-        # zero: `n_models` says whether GPAP produced anything, and on a rare pin it routinely
-        # did while this estimate did not exist.
+        # None = the timed run kept no output row to measure on, i.e. NOT MEASURED. It is not
+        # a zero: `n_models` says whether GPAP produced anything.
         uq = g.get("unique_per_s_est")
         uq_s = f"{uq:,.0f}" if uq is not None else "n/a"
         if "error" in rcs:
+            # `g` may hold no measurement at all now (the arm is skipped when the rival has
+            # already failed), so every field read here has to tolerate that.
+            succ_s = (f"{100 * g['success']:.0f}%" if g.get("success") is not None
+                      else "arm not run")
             print(f"{name:<10}{variant:>6}{pin_desc:>12}{pa_s:>10}  RCS FAILED: "
-                  f"{rcs['error'][:44]} | GPAP u/s~={uq_s} "
-                  f"succ={100 * g['success']:.0f}%", flush=True)
+                  f"{rcs['error'][:44]} | GPAP u/s~={uq_s} succ={succ_s} |{_cms_cols(g, cms)}",
+                  flush=True)
+            continue
+        if "error" in g:
+            print(f"{name:<10}{variant:>6}{pin_desc:>12}{pa_s:>10}{rcs['unique']:>11,}"
+                  f"  GPAP FAILED: {g['error'][:50]} |{_cms_cols(g, cms)}", flush=True)
             continue
         ratio = (None if uq is None else
                  (uq / rcs["unique_per_s"] if rcs["unique_per_s"] else float("inf")))
@@ -497,7 +761,7 @@ def main():
         at_t = f"{rcs['unique_at_T']:,}" if rcs.get("unique_at_T") is not None else "—"
         print(f"{name:<10}{variant:>6}{pin_desc:>12}{pa_s:>10}{rcs['unique']:>11,}{at_t:>9}"
               f"{rcs['runtime_s']:>6.1f}s{rcs['unique_per_s']:>10,.0f}"
-              f"{uq_s:>11}{100 * g['success']:>6.0f}%{rt}",
+              f"{uq_s:>11}{100 * g['success']:>6.0f}%{rt}{_cms_cols(g, cms)}",
               flush=True)
     if len(args.circuit_variants) > 1:
         print("\ncircuit variants (BOTH sides get the same circuit; abc = sequential-AIG "
@@ -509,6 +773,13 @@ def main():
         json.dump(out, open(args.output, "w"), indent=1)
         print(f"wrote {args.output}")
     shutil.rmtree(tmp, ignore_errors=True)
+    if skipped:
+        print(f"\n[warn] {len(skipped)} instance(s) produced NO row:")
+        for n, why in skipped:
+            print(f"    {n:<12} {why}")
+    if skipped and not out:
+        sys.exit(f"[FATAL] every instance was skipped ({len(skipped)}) — the arm measured "
+                 f"nothing. See the reasons above.")
 
 
 if __name__ == "__main__":

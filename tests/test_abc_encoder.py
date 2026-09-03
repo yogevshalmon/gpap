@@ -58,6 +58,29 @@ def test_abc_preserves_projected_solution_set(name, cycles, opt):
                               f"(native {len(proj_t)} vs abc {len(proj_a)} projections)")
 
 
+@pytest.mark.parametrize("name,cycles", [("b06", 3), ("b09", 4)])
+def test_abc_pins_a_prefix_from_a_partial_target_like_the_native_encoder(name, cycles):
+    """`pin_outputs=k` reads `target` only for the first k outputs, on BOTH encoders: the rival
+    harnesses hand a partial dict holding just the pinned outputs (their target tables), and the
+    ABC route used to index every output and KeyError on it — so the abc:fast rival arm could
+    not run at all in table mode. Same target, same pins => the same projected solution set."""
+    path = os.path.join(BENCH, f"{name}.bench")
+    circ = parse_bench(path)
+    outputs = list(circ[1])
+    k = max(1, len(outputs) // 2)
+    full = build_cnf(circ, cycles, 3, pin_outputs=None)[2]
+    partial = {o: full[o] for o in outputs[:k]}          # nothing for the unpinned outputs
+    bt, sup_t, _t, _l = build_cnf(circ, cycles, 3, pin_outputs=k, target=partial)
+    ba, sup_a, _t2, _l2 = build_cnf_abc(circ, path, cycles, 3, pin_outputs=k, opt="fast",
+                                        target=partial)
+    proj_t = _enum_projections(bt.nv, bt.clauses, sup_t)
+    proj_a = _enum_projections(ba.nv, ba.clauses, sup_a)
+    assert proj_t and proj_a == proj_t
+    # And it genuinely pins fewer outputs than pinning all of them would.
+    ball = build_cnf_abc(circ, path, cycles, 3, pin_outputs=None, opt="fast", target=full)[0]
+    assert len(_enum_projections(ball.nv, ball.clauses, sup_a)) <= len(proj_a)
+
+
 @pytest.mark.parametrize("name,cycles", [("b01", 4), ("b10", 3), ("b03", 3)])
 def test_abc_encoder_is_smaller_and_short_clauses(name, cycles):
     """ABC's AIG encoding should not be larger, and must emit only 2- and 3-literal clauses

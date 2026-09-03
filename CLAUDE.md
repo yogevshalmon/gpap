@@ -646,12 +646,18 @@ gpap bench 'benchmarks/circuits/bench/seq/*.bench' --encoders tseitin abc:fast -
 (Colab reaps idle notebook cells), staged and resumable:
 ```bash
 eval/rivals/rivals_setup.sh                  # abc + patched cmsgen + DEMOTIC/Recurrent/HTS checkouts
-eval/run_full_eval.sh seq             # or comb | sk | epfl | hwmcc | rivals | plots | all
+eval/run_full_eval.sh campaign        # THE PAPER RUN; or rivals | plots | seq | comb | sk | epfl | hwmcc | all
 ```
-Each circuit stage sweeps encoders × targets(rare,random) × depths(25,50) into
-`.experiments/full_eval/<gpu>/`; `eval/eval_plots.py` turns those into the encoder-A/B,
-vs-CMSGen, work-rate, amplification and rival figures + `summary.md` (which lists every
-skipped/errored instance — read it before quoting a geomean).
+**THE PROTOCOL (converged 2026-09-03, EVAL_RUNBOOK §0)**: the rivals' own published benchmark
+sets (DEMOTIC's 11 ISCAS-85; every ITC'99 `b*` / ISCAS-89 `s*` Recurrent-CircuitSAT evaluates),
+each under the rival's own pins AND our rare pin, one config per rival — and on every one of
+those cells GPAP (abc:fast CNF of the same circuit + pins) and CMSGen on that very CNF file
+(`rivals_*.py --cmsgen`, `rival_common.cmsgen_arm`). Three tools, one constraint, one row;
+`paper_tables --rivals` reads Tables 1/2/3 off those rows. The family stages (seq/comb/sk/epfl/
+hwmcc × targets × depths, `gpap bench` on instances pinned OUR way) are SUPPLEMENTARY now.
+`eval/eval_plots.py` turns a directory into the vs-CMSGen, work-rate, amplification and rival
+figures + `summary.md` (which lists every skipped/errored instance — read it before quoting a
+geomean).
 Rival harnesses: `eval/rivals/rivals_demotic.py` (`--mode native` = their ISCAS-85 pins, `--mode miter`
 = our rare-target instance as a single-output miter; sanitizes wire names + BUFF→BUF because
 DEMOTIC exec's generated Python), `eval/rivals/rivals_recurrent.py`, `eval/rivals/rivals_hts.py`.

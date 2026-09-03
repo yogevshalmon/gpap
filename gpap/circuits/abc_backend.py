@@ -361,8 +361,13 @@ def build_cnf_abc(circ, bench_path: str, cycles: int, seed: int, pin_outputs: in
 
     opt = resolve_opt(opt, len(gates) * cycles)
     faig = _read_framed(bench_path, cycles, abc, opt)
+    # Like the native encoder, only the PINNED prefix of the outputs is read from `target`: a
+    # caller pinning `pin_outputs` may hand a partial dict holding just those (the rival
+    # harnesses' target tables do), and indexing every output here raised a KeyError on it.
+    pinned = list(outputs) if pin_outputs is None else list(outputs)[:pin_outputs]
+    values = [target[o] for o in pinned] + [False] * (len(outputs) - len(pinned))
     b, support, labels = _framed_to_cnf(faig, cycles, list(inputs), list(outputs),
-                                        [target[o] for o in outputs], pin_outputs)
+                                        values, pin_outputs)
     return b, support, target, labels
 
 

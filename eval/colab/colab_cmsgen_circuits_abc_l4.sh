@@ -45,7 +45,17 @@ fi
 
 # seq first: the flagship family, and the run may be cut short (rare targets already lead
 # inside each stage because TARGETS lists them first).
-for stage in seq comb epfl hwmcc; do
+# STAGES narrows the sweep for an INCREMENTAL run: seeded with a previous campaign's JSONs,
+# `gpap bench --resume` skips every finished cell, so re-running only the families that gained
+# instances costs just the new cells (2026-09-02: seq +4, comb +1 -> 18 cells, not 164).
+# The seq stage globs benchmarks/circuits/bench/seq/*.bench, and b17-b22 are fetched rather than
+# committed — pull them first so a fresh VM sweeps the same 29 circuits as every other one.
+bash "$REPO_ROOT/scripts/fetch_benchmarks.sh" itc99 2>&1 | sed 's/^/[bench] /' || \
+    echo "[warn] could not fetch ITC'99 b17-b22 — the seq stage will run without them"
+echo "[bench] sequential family: $(ls "$REPO_ROOT"/benchmarks/circuits/bench/seq/*.bench 2>/dev/null | wc -l) circuits"
+
+STAGES="${STAGES:-seq comb epfl hwmcc}"
+for stage in $STAGES; do
     echo; echo "########## STAGE $stage  $(date -Is)"
     bash eval/run_full_eval.sh "$stage" || echo "[warn] stage $stage returned non-zero"
     echo "STAGE_${stage}_DONE"

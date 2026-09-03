@@ -30,6 +30,40 @@ from gpap.circuits.simulate import (_pin_and_target, _run_bench, _topo_gates,  #
                                     _popcount, sim_baseline)
 
 
+# Max fan-in of any AND in a miter tree. 64 keeps the Tseitin clause at 65 literals, well
+# inside the packed 8|24 envelope's 255-literal cap, with room for the pin/unit clauses.
+_MITER_FANIN = 64
+
+
+def and_tree(lines, terms, prefix, fanin=_MITER_FANIN):
+    """Reduce a wide AND to a tree of bounded fan-in, appending the intermediate gates to `lines`.
+
+    THE BUG THIS EXISTS FOR: one AND over k inputs Tseitin-encodes to a (k+1)-literal clause, and
+    the packed 8|24 envelope caps clause length at 255. `s35932` has 320 outputs, so its miter
+    emitted a 321-literal clause, `gpap_engine_create` refused the formula ("outside packed
+    envelopes", 2N=507460 len=321), and the instance was skipped with NO row in either Recurrent
+    arm — despite sitting in that rival's own Table II.
+
+    Shared by both miter builders on purpose: this file and `rivals_recurrent.miter_bench` had
+    the same wide-AND line, and fixing only one of them left the failure exactly where it was.
+    Function-preserving; both call sites re-verify with their own p_miter == p_accept check.
+    """
+    idx = 0
+    while len(terms) > fanin:
+        nxt = []
+        for i in range(0, len(terms), fanin):
+            chunk = terms[i:i + fanin]
+            if len(chunk) == 1:
+                nxt.append(chunk[0])
+                continue
+            nm = f"{prefix}{idx}"
+            idx += 1
+            lines.append(f"{nm} = AND({', '.join(chunk)})")
+            nxt.append(nm)
+        terms = nxt
+    return terms
+
+
 def write_unrolled_miter(bench_path, out_path, T, seed, pin_outputs=None,
                          target_mode="random"):
     """Unroll + miter-ify to a combinational single-output .bench. Returns (n_inputs, p_accept
@@ -72,6 +106,13 @@ def write_unrolled_miter(bench_path, out_path, T, seed, pin_outputs=None,
         else:
             lines.append(f"MITN_{o} = NOT({nm})")
             terms.append(f"MITN_{o}")
+    # WIDE AND -> a tree of bounded fan-in. One AND over k inputs Tseitin-encodes to a
+    # (k+1)-literal clause, and the packed 8|24 envelope caps clause length at 255: s35932 has
+    # 320 outputs, so its miter produced a 321-literal clause and the engine REFUSED the formula
+    # ("outside packed envelopes", 2N=507460 len=321). The instance was then skipped with no row
+    # in either Recurrent arm, despite being in that rival's own Table II. Function-preserving —
+    # and the p_miter == p_accept self-check below re-verifies it either way.
+    terms = and_tree(lines, terms, "MITAND")
     lines.append(f"MITER = {'AND(' + ', '.join(terms) + ')' if len(terms) > 1 else f'BUFF({terms[0]})'}")
     # A second (unconstrained) output so DEMOTIC's generated forward returns a TUPLE: with a
     # single output it returns the bare tensor and their `outputs_list[-1]` slices the BATCH

@@ -1008,6 +1008,82 @@ Sketch/service family), n=10k, SAME per-instance wall cap both sides (cmsgen_sam
 
 ## Measurement methodology (the traps that actually bit)
 
+**The CMSGen table and the rival table described two different instance sets; the protocol is
+now three tools on one constraint, and Table 1 is read off Table 2's rows (2026-09-03,
+`docs/findings/RIVAL_FAIRNESS_FINDINGS.md` §14).** Table 1 was a separate `gpap bench` sweep
+that pinned the circuits our way (one output on ISCAS-85 where the DEMOTIC-rare arm pins all,
+outputs-direct where the rival rows use a miter, plus `random`/T=50 and three families no rival
+ever ran) and never saw a rival's pins. The converged campaign is ONE stage: each rival on its
+own published set, under its own pins and our rare pin, one configuration each — and on every
+one of those cells GPAP on the `abc:fast` CNF of the same circuit + pins, and CMSGen (patched,
+`--nowrite --maxtime`) on that very CNF file, through the same runner `gpap bench` uses. The
+harness encodes once and both arms read the file; the row carries the bench driver's `cms_*`
+keys and the host CPU. `paper_tables --rivals` reads Tables 1/2/3 off those rows with the same
+screens applied once; `verify_artifact --rivals` applies the bench-stage gates to them. The
+family matrix is supplementary now. Every earlier Table 1 is superseded (different instances).
+
+**A rival was scored "incapable" on OUR stopwatch (2026-09-03,
+`docs/findings/RIVAL_FAIRNESS_FINDINGS.md` §11).** The Recurrent harness probes upward for a
+usable `--start_point` (their `backward()` raises while the pinned output has no gradient path to
+any input) and capped each probe at **60 s against the measured run's 300 s**, with a comment on
+the line claiming "same budget". All three ways the search can fail then collapsed into one
+string — `"no gradient path at any start_point<=10"`, a claim about the RIVAL — including the
+case where our own cap produced it. Measured on b14 at T=25: at a 60 s cap `start_point=1` is a
+timeout; given a real budget it **RUNS**. b14 is in Recurrent's own Table II. ⚠️ **The ratio has
+to come from the GRANTED batch, never from the probe** — the probe runs at `batch=256` by
+construction and this document's own §2 rule is that a rival's batch IS its score: at 256 it is
+7.3 u/s (743 s), at the granted 3,000 it is **84.7 u/s** (1,025 s wall, 55,458 unique), an 11.6x
+difference. So b14 is a **~40x** cell against GPAP's 3,420 u/s, not the ~470x a probe-derived
+ratio claims — understating a rival by an order of magnitude is the same error §2 catalogues. The contrast that makes it worth measuring rather
+than assuming: `b17` produces the IDENTICAL error string and is genuine — walked to
+start_point 12 at a 1200 s cap, 0 and 1 refuse in 2 s / 6 s and 2-12 all time out at 1200 s, so
+it is out of reach at any depth and at 4x the granted budget. That walk also proves a timeout
+should STOP the search (no higher start_point was reachable; continuing cost 3.5 h and changed
+nothing). **Settled 2026-09-03 (user's rule):** the start_point search is the rival's INITIALIZATION and
+gets ONE budget equal to the run's timeout, 300 s — each probe runs on what is left — followed by
+ONE measured run at the granted batch (`num_steps=1`, their script's value; no up-probe, no
+retry of a timeout at a smaller batch — `run_at_batch` is one configuration). The three failures
+are reported separately (`no gradient path` / `did not initialize: ... 300s initialization
+budget`), excluded from the geomean, never zeros. ⚠️ The price is stated, not hidden: **300 s does
+not buy b14 a cell** (its granted-batch run needs 1,025 s of wall; the probe alone 743 s), and
+b17 is unreachable at any cap (1,134 s of model build per probe). The campaign prints the
+did-not-initialize count beside the geomean; a cap chosen after seeing which value gives the
+better ratio would not be defensible, so the same 300 s applies to every instance.
+
+**A missing instance is a bug, not a gap — the three ways a sweep lost instances silently
+(2026-09-03).** Chasing "why did b14 and b17 fail?" turned up three independent mechanisms, all
+of which end the same way: no exception, no row, and every instance after it in the sweep
+unmeasured. (1) **The coverage run's host budget bounded the wrong quantity.**
+`pipeline.cov_k_cap = 2048` capped collected ROWS while the cost is rows × nv × **72 B**
+(measured: a `(rows, N)` bit matrix becomes one python list of `nv` ints per row, and
+`_reconstruct` builds a second) — the same cap that is 1.9 GB on a 13k-var formula is **61 GB on
+b14 through the Tseitin encoding the rival path requires** (413,451 vars). Peak was 43.5 GB and
+the process was OOM-killed on a 47 GB box. `pipeline.cov_batch` bounds the product and divides by
+`cov_chunks` (kept rows accumulate across the run — budgeting one chunk still left b14 at 5.2 GiB
+against a 2 GiB budget). It costs nothing: `distinct_frac` is 1.0 on every instance large enough
+for the cap to bind, capped and uncapped alike, so the diagnostic the budget protects does not
+move. ⚠️ Only the RIVAL harnesses were exposed — `run_full_eval.sh` runs the CMSGen sweep at
+`N_COV=0`, so no coverage run happens there at all. **Superseded the same day (user's rule: "we
+don't need it for the eval at all"): the rival arm runs NO coverage pass** — `run_gpap`
+measures the distinct fraction on the timed run's own 1,000 kept output rows (`out_cap`,
+GPU-projected support bits, projection wall subtracted), so its host cost is rows × |support|
+bits whatever `nv` is; `cov_batch` remains for the opt-in `--n-cov`. (2) **`scripts/fetch_benchmarks.sh` installed
+b17-b22 somewhere no driver looks** (`.gpap/benchmarks/`, while both drivers list
+`benchmarks/circuits/bench/seq/`), so the big ITC'99 instances were in the 2026-09-02 campaign
+only because they had been copied over by hand — and the driver comment asserted otherwise.
+(3) **A `prepare_variant` failure `continue`d** instead of writing a row, so an ABC crash or a
+failed equivalence check deleted the instance with one log line. The rule these share: a refusal
+must be **recorded as a row with its reason**, and the guard must bound the quantity that
+actually costs — for a fixed instance set the second-best outcome is a documented refusal, and
+the worst is silence. `oversize_reason` now also refuses what will not fit on THIS box (measured
+fit: 1.4 GiB + 3.3 GiB per million unrolled gates, ±15% over five instances from b14 to b18),
+because the same instance that runs on a 47 GB workstation is an OOM kill on a 13 GB VM — a
+TSEITIN fit, so it applies only under `encoder="tseitin"`; the rival arm encodes with
+`abc:fast` since 2026-09-03 (RIVAL_FAIRNESS_FINDINGS.md §13: the "must be Tseitin because the
+rival unrolls itself" argument confused same-circuit with same-encoder; abc:fast is
+function-preserving on the same pins, and every seq instance built on the 13 GB L4 that way).
+Pre-2026-09-03 rival rows are 1.04-4.8x slower for us and superseded.
+
 **Seven fairness audits of the GPU head-to-heads, and all seven had been flattering US
 (2026-08-24/26, `docs/findings/RIVAL_FAIRNESS_FINDINGS.md`).** Every unexamined default in a
 harness we wrote is a default we chose, so the expected direction of an unaudited error is toward
@@ -1022,8 +1098,8 @@ c1355 564× from 1k to 1M), so a fixed batch is a silent multiplier. We had give
 rivals a fixed 5 GiB whatever the card and run HTS at its scripts' 100/1000. **Their own defaults
 cannot be the rule** (all three argparse defaults are `--batch_size 10`; the demo scripts span
 1,000 to 1,000,000 on comparably tiny circuits). The rule is the one `K` uses: 0.80 of free VRAM,
-step down if the driver refuses, probe one rung up and keep it only if it is FASTER — **a static
-model cannot do this alone**, peak VRAM per gate-row falls 23.0 → 11.6 B from c432 to c3540. On
+step down if the driver refuses (the one-rung up-probe kept-if-faster was a best-of-two and was
+removed 2026-09-03) — **a static model under-grants on its own**, peak VRAM per gate-row falls 23.0 → 11.6 B from c432 to c3540. On
 the L4 all three branches were load-bearing: 92 under-grants recovered, 82 refusals, 18 spills
 caught. Cost: HTS 6,369× → 603×.
 (3) **PREPROCESSING was outside our headline rate and inside CMSGen's own** (its rate is

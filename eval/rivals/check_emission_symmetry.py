@@ -4,7 +4,13 @@ solutions while another is not.
 
 GPAP's timed run emits NOTHING — `sample(collect=False)` never gathers a model row to the host
 (`keep_rows` is False, so `var_bits` is not called), and the sample writer runs in a separate
-pass after the clock stops. CMSGen is timed with the patch's `--nowrite` for exactly this
+pass after the clock stops. The ONE bounded exception is the rival GPAP arm
+(eval/rivals/rivals_recurrent.py::run_gpap, since 2026-09-03): it keeps `UNIQUE_ROWS` (1,000)
+GPU-projected support-bit rows of the winning config for the distinct-fraction estimate — a
+fixed number of rows, not one per sample, whose projection wall the pipeline measures and
+subtracts from the timed wall (`out_project_s`; checked below, [2]). It replaced a separate
+coverage run that reconstructed thousands of full models on the host and OOM-killed b14.
+CMSGen is timed with the patch's `--nowrite` for exactly this
 reason (a stock binary writing every sample cost 8.2x of its wall on 27.sk_3_32). The GPU
 gradient rivals must therefore also be timed on generation alone — otherwise our ratio is
 partly a measurement of THEIR disk/PCIe traffic, which is not what the paper claims.
@@ -156,9 +162,11 @@ def scan_gpap():
 
     `out_cap` is the second way the timed run can deliver rows to the host: it projects each
     chunk's support bits as the run goes (that is what makes `gpap sample --out` cheap). The
-    benchmark driver never sets it, and this check is here so it cannot start doing so quietly —
-    re-deriving the property instead of asserting a claim that used to follow from `collect=False`
-    alone and no longer does."""
+    benchmark driver never sets it; the rival GPAP arm sets it to a FIXED 1,000 rows (module
+    docstring), which is only symmetric because the pipeline subtracts the projection wall from
+    the timed wall — so this check also re-derives THAT: the `wall = ...` assignment that closes
+    the window must subtract `proj_s`. Re-deriving the property instead of asserting a claim
+    that used to follow from `collect=False` alone and no longer does."""
     path = os.path.join(REPO_ROOT, "gpap", "sampling", "pipeline.py")
     tree = ast.parse(open(path).read())
     ends = [n.lineno for n in ast.walk(tree)
@@ -172,6 +180,17 @@ def scan_gpap():
         return False
     end = min(ends)
     start = max(s for s in starts if s < end)
+    wall_node = next(n for n in ast.walk(tree)
+                     if isinstance(n, ast.Assign) and n.lineno == end)
+    subtracted = {n.id for n in ast.walk(wall_node.value) if isinstance(n, ast.Name)}
+    # ...and `proj_s` must be the sampler's own `out_project_s` stamp, not some other clock.
+    proj_src = [n for n in ast.walk(tree) if isinstance(n, ast.Assign)
+                and any(getattr(t, "id", "") == "proj_s" for t in n.targets)
+                and any(isinstance(c, ast.Constant) and c.value == "out_project_s"
+                        for c in ast.walk(n.value))]
+    proj_ok = "proj_s" in subtracted and bool(proj_src)
+    print(f"    line {end}: wall subtracts {sorted(subtracted)}  "
+          f"{'OK' if proj_ok else 'FAIL — projection wall not excluded from the timed wall'}")
     calls = [n for n in ast.walk(tree) if isinstance(n, ast.Call)
              and isinstance(n.func, ast.Attribute) and n.func.attr == "sample"
              and start < n.lineno < end]
@@ -193,8 +212,10 @@ def scan_gpap():
               f"  out_cap={'0/param' if oc_ok else ast.dump(oc)}"
               f"  {'OK' if (good and oc_ok) else 'FAIL'}")
         ok &= good and oc_ok
+    ok &= proj_ok
     print("    => the timed run never gathers a model row to the host (collect=False, out_cap 0 "
-          "on every benchmarked call)" if ok else "    => TIMED RUN MAY EMIT")
+          "on every benchmarked call), and the rival arm's fixed 1,000 projected rows are "
+          "excluded from its wall" if ok else "    => TIMED RUN MAY EMIT")
     return ok
 
 
@@ -207,7 +228,14 @@ def scan_cmsgen(results):
             d = json.load(open(f))
         except (ValueError, OSError):
             continue
-        for r in (d.get("results") or []) if isinstance(d, dict) else []:
+        # `gpap bench` stages keep their rows under `results`; the rival harnesses (which carry
+        # the CMSGen arm on their own rows since the converged protocol) under `rows`, or as a
+        # bare list (rivals_recurrent_*.json). Every one of them is audited.
+        if isinstance(d, dict):
+            rows = list(d.get("results") or []) + list(d.get("rows") or [])
+        else:
+            rows = d if isinstance(d, list) else []
+        for r in rows:
             if not isinstance(r, dict) or "cms_mode" not in r:
                 continue
             n += 1

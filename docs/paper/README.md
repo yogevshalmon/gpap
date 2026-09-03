@@ -24,6 +24,13 @@ purpose:
 * **Uniformity = Barbarik CM_test only** (Table 4b), run locally (RTX 4080) on the same
   `abc:fast`-encoded circuits.
 
+⚠️ **This campaign predates the converged protocol** ([../EVAL_RUNBOOK.md](../EVAL_RUNBOOK.md)
+§0, 2026-09-03) and its tables are superseded by the next one. Under the protocol there is ONE
+campaign directory, the rival stages (`rivals_*.json`): each row is the rival, the GPAP arm and
+the CMSGen arm on the same CNF, and `paper_tables.py --rivals <dir>` reads Tables 1, 2 and 3
+off it (`--cmsgen` is then optional and supplementary; `verify_artifact.py --rivals <dir>` is
+the gate). The commands below regenerate the tables of the campaign named above.
+
 | campaign path | content |
 |---|---|
 | `gpap_vs_cmsgen_l4_abc/` | 12 stage JSONs + `plots/` (figures, `sps_scatter_all.png`, `summary.md`) |
@@ -88,11 +95,11 @@ block above at a later commit moves the second, never the first.
 run against this campaign's engine yet, so `RESULTS.md` carries no Table 6 — an un-run check is
 neither a pass nor a failure, and the generator only prints the table when the arm exists.
 
-## The rules the generator enforces
+## The nine rules the generator enforces
 
 These exist because each one, left implicit, produces a number that a referee would reject.
-Rules 1 and 5 are two faces of the same principle: **a cell that measures the instance rather
-than the sampler does not belong in a geomean.** The incident record behind each rule is in
+Rules 1, 5 and 6 are three faces of the same principle: **a cell that measures the instance
+rather than the sampler does not belong in a geomean.** The incident record behind each rule is in
 `docs/findings/` (RIVAL_FAIRNESS, L4_EVAL, UNIFORMITY).
 
 1. **Vacuous pins are excluded from sequential geomeans.** `b02`, `b05`, `b07`, `s526` have
@@ -114,10 +121,23 @@ than the sampler does not belong in a geomean.** The incident record behind each
    M samples/s with *no decisions and no implications*: after propagation the support is a free
    hypercube, so no search happens. Detected per row (`paper_tables.zero_search`), not by a name
    list. Leaving them in would read EPFL-rare `257.0×` instead of `108.9×` on this campaign.
-6. **A geomean over fewer than three instances is flagged, not quoted.** On HWMCC, CMSGen scores
+6. **A solution space smaller than the sample request is enumerated, not sampled.** ISCAS-85
+   `c17` has 5 inputs = 32 points; both tools saturate it and the ratio becomes a race between
+   startup costs. DEMOTIC's own Table II says the same thing by carving it out — "a minimum of
+   1000 distinct solutions (**except c17**)" — and that 1000 is the threshold
+   `paper_tables.tiny_space` uses (`2**support < 1000`, read off the rival's own `num_inputs` on
+   a Table 2 row). It is applied to BOTH tables, and it does not flatter us: it removes a
+   45,520× cell from Table 2 (DEMOTIC-native would otherwise read ~6.5× instead of 2.7×) while
+   *returning* 1,348× → 1,620× to Table 1's combinational row, where the tiny space made us look
+   worse. A screen that only ever helped would be the one to distrust.
+7. **Every screen applies to every table.** Vacuous pins were screened in Table 1 from the start
+   but not in Table 2 — invisible while no vacuous instance was in the rival set, and live the
+   moment that set became each rival's own published one (Recurrent's Table II includes `s526`).
+   Both tables now share `zero_search`, `tiny_space` and `VACUOUS_PINS`, and both ledgers sum.
+8. **A geomean over fewer than three instances is flagged, not quoted.** On HWMCC, CMSGen scores
    zero on 2–3 of 7 instances depending on depth and target; the ledger columns carry what the
    thinned geomean cannot.
-7. **A GPAP/CMSGen ratio without its CPU is meaningless.** CMSGen is single-core, so the ratio
+9. **A GPAP/CMSGen ratio without its CPU is meaningless.** CMSGen is single-core, so the ratio
    is as much a property of the host as of the sampler: this campaign's Xeon is 0.41× the
    reference laptop's CPU while GPAP itself moves 0.96× between the cards. `gpap bench` records
    `cpu` in every JSON for this reason — quote it with every ratio.

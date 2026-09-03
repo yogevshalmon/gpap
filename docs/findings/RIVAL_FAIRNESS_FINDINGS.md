@@ -102,20 +102,24 @@ s386@300k: 4.44 GiB estimated, 8.36 measured; HTS: 8.4 B per clause-row).
 
 ### The rule
 
-Largest batch that fits **0.80 of free VRAM**, then two bounded checks: step DOWN if the driver
-refuses the size, and probe ONE rung up, kept only if it is also FASTER. The speed condition is
-the spill guard — too big does not always error (Recurrent on s386 runs at 1M and is *slower*
-than at 300k). On the L4 campaign all three branches were load-bearing:
+Largest batch that fits **0.80 of free VRAM** — **ONE measured run** (2026-09-03; the user's
+rule: "1 config" for the rival). The only fallback is a DRIVER REFUSAL, which is not a run at all:
+"device not ready" reproduces at a fixed size on some models and passes one rung lower, so the
+machine gets the last word over our estimate and the next rung down is tried; the row still
+holds exactly one measurement. A TIMEOUT is a result and is recorded as one — never retried at
+a smaller batch (a smaller rung might come in under the cap, but that is a second configuration).
 
-| outcome | count |
-|---|---|
-| up-probe recovered an under-grant | 92 |
-| driver refused a rung | 82 |
-| bigger rung ran but was SLOWER (spilling) | 18 |
+⚠️ **Superseded:** until 2026-09-03 the ladder also probed ONE rung up after a successful run and
+kept it only if it was also faster (the spill guard: Recurrent on s386 runs at 1M and is *slower*
+than at 300k), and it stepped a timeout down the ladder. On the L4 campaign the branches were
+load-bearing — 92 up-probes recovered an under-grant, 82 refusals, 18 spills caught — but the
+up-probe is a best-of-two, and best-of-N over a knob is the same trap §8 forbids for our own
+encoder choice. The static grant now stands on its own; where `fit_batch`'s model under-grants,
+the rival is under-granted and the row says what it got (`batch_sweep`).
 
-A timeout is NOT a memory refusal and must not walk the ladder: HTS's three tseitin cells stepped
+A timeout must not walk the ladder either way: HTS's three tseitin cells once stepped
 1M -> 1,000 at the full 300 s cap on every rung, ~40 min per cell to record an error they had
-after the first run. Two rungs, then record it.
+after the first run.
 
 ### What it cost us
 
@@ -273,8 +277,8 @@ turns over — we run it at 10, which is its own default and NOT its best.
 ### What it costs us
 
 The `demotic_native` row moves from **4.6x to ~1.1x on c432** in local re-measurement — at
-steps=1 DEMOTIC finishes fast enough that the batch up-probe also takes it from 1M to 3M rows,
-and the two effects compound. The audit's projection for `recurrent_table` is 6.1x → **~0.75x, an
+steps=1 DEMOTIC finishes fast enough that the (since-removed, §2) batch up-probe also took it
+from 1M to 3M rows, and the two effects compounded. The audit's projection for `recurrent_table` is 6.1x → **~0.75x, an
 outright loss**. Those are projections until the L4 stage is re-run; the rival rows recorded
 2026-08-26 and earlier are superseded by construction.
 
@@ -379,6 +383,202 @@ succ 1.0 at 240M samples/s) was published as an outright win rather than screene
 
 ---
 
+## 11. The rival was declared incapable on OUR stopwatch (2026-09-03)
+
+`rivals_recurrent.py` finds the rival's usable `--start_point` by probing upward: their
+`backward()` raises while the pinned output has no gradient path to any input (Moore register
+latency), so the harness walks the depth until a 1-step run survives. Each probe was capped at
+`PROBE_TIMEOUT = 60.0` — against the measured run's `DEFAULT_TIMEOUT = 300.0`, with a comment on
+the same line reading "(a 1-step run; same budget)". It was not the same budget.
+
+Worse, all three ways the search can fail were reported as one string, `"no gradient path at any
+start_point<=10"` — a statement about THE RIVAL — including the case where the string was
+produced by our own cap firing.
+
+**Measured on b14, T=25 (RTX 4080):**
+
+| start_point | 60 s cap (what the campaign ran) | 900 s cap |
+|---|---|---|
+| 0 | no gradient path (3 s) | no gradient path (3 s) |
+| 1 | **TIMEOUT at 60 s** → reported "no gradient path at any start_point<=10" | **RUNS: 743 s wall, 636 s by their own clock, 4,657 unique solutions** |
+
+So the rival is not incapable on b14 — it is *slow*. b14 sits in Recurrent's own Table II.
+
+⚠️ **The ratio must come from the GRANTED batch, never from the probe.** The probe runs at
+`batch=256` by construction (it asks "does backward() work here?", not "how fast is it"), and
+§2 of this document is the rule that a rival's batch IS its score. Re-measured through
+`run_recurrent_ladder` at the batch `fit_batch` grants it:
+
+| | batch | wall | their `runtime_s` | unique | **unique/s** |
+|---|---|---|---|---|---|
+| probe (NOT a measurement) | 256 | 743 s | 636 s | 4,657 | 7.3 |
+| **granted** (10,000 refused → 3,000) | 3,000 | 1,025 s | 655 s | 55,458 | **84.7** |
+
+The grant is worth **11.6x** to them. Against GPAP's 3,420 u/s on the same circuit and pin that
+makes b14 a **~40x** cell — a real comparison the campaign recorded as a rival failure, not the
+~470x a probe-derived ratio would have claimed. Quoting the probe would have understated the
+rival by an order of magnitude, which is the same error §2 catalogues, committed while fixing a
+different one.
+
+`b17` is the opposite case and the reason this needs measuring rather than assuming. Walked all
+the way to `start_point=12` at a 1200 s cap: **0 and 1 fail in 2 s and 6 s** with the genuine
+`element 0 of tensors does not require grad`, and **2 through 12 every one time out at 1200 s**
+(1132-1134 s each — the model build alone). So b17 is out of the rival's reach at T=25 at any
+depth and at four times its granted budget: a real limit, not our cap. The distinction is the
+whole point — b14 and b17 produced the identical error string and only one of them was true.
+
+That walk also validates the rule that a **timeout stops the search**: no start_point above the
+first timing-out one was reachable, so continuing cost 3.5 h of GPU and changed nothing. Under
+the shipped rule b17 costs `2 s + 6 s + one 300 s timeout` and reports the accurate reason.
+
+### The rule (settled 2026-09-03)
+
+- **The start_point search is the rival's INITIALIZATION and gets ONE budget: the run's timeout
+  (`--timeout`, default 300 s).** Each probe runs with whatever is LEFT of it, so neither a single
+  probe nor the sum of them can exceed 300 s. The user's call: "1 config with max of 300s if it
+  takes to initialize the sampling" — generous beside the 60 s the rival is measured under. (An
+  intermediate version gave the whole search 4x the run timeout = 1,200 s; that spent 4 x 1,134 s
+  on b17 to learn it cannot start.)
+- **Then ONE measured run** at the granted batch, `num_steps=1` (their script), the probed
+  `start_point` — `run_at_batch`, §2.
+- `probe_start_point` returns `(start_point, reason)` and the three failures are **named
+  separately**: a gradient-path refusal at every depth reached (a finding about the rival); a
+  probe that did not complete within the initialization budget; and a budget used up by the
+  probes before one completed. The last two read `did not initialize: ... {budget}s
+  initialization budget` — the rival's own outcome under a stated, uniform budget. `paper_tables`
+  prints the failed count in the caveat; they are excluded from the geomean, never zeros.
+- A timing-out probe stops the walk: a larger `start_point` pays the same model build, so it
+  cannot be faster (b17 above: 2-12 all 1,132-1,134 s).
+
+### What the 300 s rule costs — stated, not hidden
+
+**300 s does not buy b14 a cell.** Its granted-batch run needs 1,025 s of subprocess wall (655 s
+of it their own clock, the rest model build, which their metric excludes and ours does not charge
+them for); its probe alone is 743 s. Under the rule b14 is a "did not initialize" error row, and so
+are b17 (every start_point 2-12 exceeds 1,134 s of model build) and, by size, b15/b19/b22/s35932
+most likely. The campaign reports "N of 16 Recurrent runs did not initialize within 300 s; b14
+completes in 1,025 s when given it" beside the geomean over the rest. The cap is OURS and is the
+same for every instance; what is NOT defensible is a cap chosen after seeing which one gives the
+better ratio.
+
+## 12. What pinning GPAP's config would cost — MEASURED, not adopted (2026-09-03)
+
+§10 lists an asymmetry: every rival runs one fixed configuration, and so does CMSGen, while
+GPAP's `CIRCUIT_PORTFOLIO` is a per-instance **bandit** that measures configs against each other
+inside the timed wall and reports the winner's rate. No table says so.
+
+This is the price of closing it, so the decision can be made on a number rather than a guess.
+**Not adopted** — the default stays the shipped bandit, because changing it moves every recorded
+rival ratio; `--portfolio b8` (`rivals_recurrent.GPAP_PORTFOLIO`, shared by the DEMOTIC harness)
+is the knob. MEASURED on the rival path — T=25, their pins, Tseitin, seed 5, 20 s budget, same
+circuit and same CNF:
+
+| instance | bandit samples/s | pinned `b8` | pinned `b1` | bandit picked |
+|---|---:|---:|---:|---|
+| b13 | 560,478 | 534,674 (−4.6%) | 422,483 (−24.6%) | B=8 |
+| b12 | 124,570 | 119,017 (−4.5%) | 107,594 (−13.6%) | B=1 |
+| b04 | 100,227 | 91,479 (−8.7%) | 68,910 (−31.2%) | B=8 |
+| b14 | 3,603 | 3,411 (−5.3%) | 3,469 (−3.7%) | B=8 |
+
+So the pin would cost **4.5-8.7%** and buy a claim the table can actually make. `b8` rather than
+`b1` because the bandit selects it on 3 of 4, it is the library default everywhere
+(`decisions_per_round=8`), and it is the uniformity-best of the three (Barbarik TV 0.040, the
+instrument floor — UNIFORMITY_FINDINGS.md).
+
+⚠️ Note the bandit beats BOTH pinned configs on every instance above, which is the point: its
+advantage is real, it is not available to the tools it is being compared against, and it was
+being reported without a label. The row now carries `portfolio` and `adaptive` so the claim is
+in the data, not in a caption.
+
+## 13. Table 2's GPAP arm encodes with `abc:fast`, like Table 1 (settled 2026-09-03)
+
+**Status: SETTLED.** `rivals_recurrent.run_gpap` (shared by the DEMOTIC harness) builds the GPAP
+arm's CNF with `abc_backend.build_cnf_abc(..., opt="fast")` — the encoding every other table in
+the paper runs — and records it per row as `gpap.encoder`. There is no Tseitin fallback: without
+an `abc` binary the arm is an error row. Rows recorded before this date encoded with the native
+Tseitin and are superseded.
+
+### What the Tseitin arm was costing — MEASURED (T=25, their target pins, seed 5, 20 s, bandit)
+
+| instance | Tseitin nv | abc:fast nv | Tseitin samples/s | abc:fast samples/s | ratio |
+|---|---:|---:|---:|---:|---:|
+| b13 | 12,926 | 913 | 556,438 | 1,220,983 | **2.19x** |
+| b04 | 28,626 | 7,809 | 94,418 | 118,194 | **1.25x** |
+| b12 | 42,051 | 12,287 | 115,915 | 120,846 | **1.04x** |
+| b14 | 413,451 | 41,937 | 3,564 | 17,121 | **4.80x** |
+
+Table 2 was running GPAP **1.04-4.8x slower than Table 1 did**, on the same circuits and the
+same pins, and it was unlabelled: the harness called `bench.build_cnf` with no encoder parameter.
+
+### Why it was believed to "have to" be Tseitin, and why that was wrong
+
+The argument was: the rivals consume `.bench` and unroll it themselves, so both sides must be
+handed the same circuit, and `abc:fast`'s win lives in a pass that runs *after* unrolling. The
+premise is right and the conclusion does not follow. Fairness is **same circuit, same task**:
+both sides receive the identical `.bench` and the identical pins, and each compiles it into its
+own representation — the rival into its differentiable model (with whatever its own compiler
+does), we into CNF. `abc:fast` is a function-preserving encoding of the same unrolled circuit
+with the same projected solution space (gated by `tests/test_abc_encoder.py`, which enumerates
+projections under both encoders), and its encode wall is `encode_s`, outside every rate exactly
+as it is in Table 1. The `--circuit-variants abc` axis remains a different thing — it hands
+BOTH sides an ABC-simplified *sequential* circuit — and the campaign runs `raw` only.
+
+### The oversize guard is a Tseitin guard
+
+`rival_common.oversize_reason` models the native Tseitin build (its host-RAM fit is Tseitin's
+peak RSS), so it now takes `encoder=` and passes everything under `abc:fast`: every seq
+instance in the suite — b19 and s35932 at T=50 included — built and sampled on the 13 GB L4 VM
+in the CMSGen stage of the 2026-09-02 campaign (b18: 19,859 vars at T=25 against 2.86M
+unrolled gates). A Tseitin-calibrated refusal would have omitted instances the campaign had
+already run.
+
+### The coverage run is gone from the rival arm
+
+The 61 GB OOM (§2 of this note's first draft, `pipeline.cov_batch`) was the coverage run:
+`n_cov` collects models and reconstructs them on the host at `rows x nv x 72 B`, and `abc:fast`
+alone would only have moved the failure (b17 21.9 GB at abc:fast nv, 194.5 GB at Tseitin nv).
+`run_gpap` no longer runs it. The distinct fraction behind `unique_per_s_est` is measured on the
+timed run's OWN kept output rows — `out_cap=UNIQUE_ROWS` (1,000) GPU-projected support-bit rows
+of the winning config, exactly what `gpap sample --out` keeps, at rows x |support| bits of host
+memory — with the projection wall subtracted from the timed wall (`out_project_s`;
+`check_emission_symmetry.py` re-derives the subtraction). `unique_est_status` is `ok` |
+`no-sample-rows`; the pre-2026-09-03 `no-coverage-sample` is still read by
+`paper_tables.unique_unmeasured`. `cov_batch` stays for the opt-in `--n-cov` path.
+
+## 14. The converged protocol: three tools on one constraint, and Table 1 read off Table 2's rows (2026-09-03)
+
+**What was wrong.** The CMSGen comparison (Table 1) and the rival comparison (Table 2) came from
+two different instance sets. Table 1 was a separate `gpap bench` sweep that pinned the circuits
+OUR way — one output on ISCAS-85 (where the DEMOTIC-rare arm pins all of them), the outputs
+directly rather than through a miter on the unrolls, plus `random` targets, T=50 and three
+families (EPFL, HWMCC, `sk_`) no rival ever ran — and it never saw a rival's own pins at all. A
+reader could not line a Table 1 row up against a Table 2 row, and the headline families were
+ones we chose.
+
+**The rule now.** The instance set is the rivals' own published sets, under their pins and our
+rare pin (§11, §13 unchanged), and EVERY cell is run by three tools on one constraint: the rival
+on its circuit, GPAP on the `abc:fast` CNF of that circuit and those pins, CMSGen on that very
+CNF file. Mechanically: the harness encodes once (`rivals_recurrent.build_arm_cnf`), the GPAP
+arm samples that path (`run_gpap(cnf=...)`), then `rival_common.cmsgen_arm` runs the patched
+binary on it (`--nowrite`, `--maxtime` = the GPAP budget, same `n`) through the SAME runner
+`gpap bench` uses (`gpap.benchmark.cmsgen_run`), and the row records the bench driver's own
+`cms_*` keys plus the host `cpu`/`gpu` (a CMSGen ratio is host-dependent, docs/BENCHMARKING.md).
+`paper_tables.rival_cms_family` then reads Table 1 off the rival stages — Table 2's screens
+first (vacuous / no-search / tiny), Table 1's ledger after (finite / CMSGen=0 / GPAP=0 / both=0,
+absent-is-not-zero, crashed-is-not-zero), the rival paper's own subset beside the whole set —
+and `rival_prop_rates` reads Table 3 off the same cells. `verify_artifact.py --rivals` applies
+the bench-stage gates to those rows (mixed provenance, crashed subprocess, floored zero,
+unpatched binary, unsound GPAP arm, two engine builds in one stage), and
+`check_emission_symmetry` audits their `cms_mode` like any other.
+
+**What it costs and what it removes.** +60 s of CMSGen per row (~80 rows). It removes the
+whole family matrix from the campaign: `CMS_FAMILIES` stages are supplementary now, printed by
+`paper_tables` only when their JSONs exist, never the headline. The rows of every earlier
+campaign are superseded for Table 1 (different instances) and unchanged in meaning for Table 2.
+Gated by `tests/test_rival_targets.py` (the arm is the bench runner, emission-free, on the very
+CNF the GPAP arm sampled, in both harnesses) and `tests/test_paper_tables.py` (the ledger
+identity on rival rows; the verifier's gates with no bench directory at all).
+
 ## 10. Still open after §6-§9 — things a referee can still ask
 
 Carried over from the 2026-08-26 audit; none is a correctness bug, all are statements the text
@@ -401,7 +601,9 @@ owes the reader. Kept here because a scratch note does not survive the session t
   `p_accept = 1.0` — a tautological pin — and its 12.9x sits above the row geomean (5.27x without
   it). The caption says "p_accept is 0.03-0.5 there"; the real span is 0.0218 to 1.0.
 - **GPAP runs an adaptive per-instance config bandit; CMSGen and all three rivals run one fixed
-  configuration.** The headline is the bandit winner's rate. No table says so.
+  configuration.** The headline is the bandit winner's rate. No table says so. STILL OPEN — §12
+  prices it (4.5-8.7% to pin `b8`) and `--portfolio` is the knob, but the default is unchanged;
+  every row now records `portfolio`/`adaptive` so at least the table can state which it was.
 - **`paper_tables.py` says "Nothing here is typed by hand" and then hardcodes numbers** in three
   places ("up to 1.9x" is 1.42x/1.58x on this campaign).
 - **Table 1's `n` is instances; Table 2's `cells` is instance x variant** (DEMOTIC native's
