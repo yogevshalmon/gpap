@@ -52,19 +52,26 @@ def load(p):
 
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument("cmsgen_dir")
-    ap.add_argument("--rivals", default=None)
+    ap.add_argument("cmsgen_dir", nargs="?", default=None,
+                    help="`gpap bench` stage directory — the supplementary family matrix. "
+                         "Optional: the converged protocol reads Table 1 off --rivals")
+    ap.add_argument("--rivals", default=None,
+                    help="the campaign directory (rivals_*.json) — every row carries the "
+                         "rival, the GPAP arm and the CMSGen arm on one CNF")
     ap.add_argument("--uniformity", nargs="*", default=[])
     ap.add_argument("--recheck", default=None,
                     help="reproducibility re-measurement directory (same stage layout); the "
                          "deterministic fields must match the original sweep on every shared "
                          "cell, or the artifact fails")
     args = ap.parse_args()
+    if not (args.cmsgen_dir or args.rivals):
+        ap.error("nothing to verify: pass --rivals (the campaign) and/or a `gpap bench` directory")
 
     fail, warn, ok = [], [], []
 
     # ---------------------------------------------------------------- CMSGen sweep
-    stages = sorted(globmod.glob(os.path.join(args.cmsgen_dir, "*.json")))
+    stages = (sorted(globmod.glob(os.path.join(args.cmsgen_dir, "*.json")))
+              if args.cmsgen_dir else [])
     tot_cells = tot_unsound = tot_unchecked = 0
     fam_inst = {}
     for p in stages:
@@ -117,6 +124,24 @@ def main():
         if not (d.get("cpu") or {}).get("model"):
             warn.append(f"{stem}: no CPU recorded — a GPAP/CMSGen ratio is not interpretable "
                         f"without it (this stage predates the cpu provenance fix)")
+        # ---- ONE ENGINE PER STAGE -----------------------------------------------------------
+        # `gpap_build_id` fingerprints the loaded library's own bytes, and compilation is
+        # deterministic, so two ids in one stage means two different engines produced rows that
+        # a table then geomeans together. It is what `--resume` does when a stage is topped up
+        # after a rebuild (or on a VM that built from a different tree): the 2026-09-02 seq
+        # stages carry 19 rows on one build and 10 on another — exactly the instances that were
+        # added incrementally. Not fatal, because the added rows may be perfectly good; but the
+        # campaign cannot claim one engine, and this is the only place that would notice.
+        cores = {}
+        for r in rows:
+            c = (r.get("engine") or {}).get("core")
+            if c:
+                cores[c] = cores.get(c, 0) + 1
+        if len(cores) > 1:
+            warn.append(f"{stem}: rows span {len(cores)} ENGINE BUILDS "
+                        + ", ".join(f"{c} ({n} rows)" for c, n in sorted(cores.items()))
+                        + " — a resumed stage was topped up under a different libgpap; the "
+                          "table geomeans them together. Re-run the stage, or say so.")
         inst = {r["name"].split(".")[0] for r in rows}
         fam_inst.setdefault(stem.split("-")[0], {})[stem] = len(inst)
         # ---- CMSGen's sample count must be EXACT where it is published -----------------------
@@ -291,6 +316,21 @@ def main():
             d = load(p)
             rows = (d.get("rows") if isinstance(d, dict) else d) or []
             stem = os.path.basename(p)[:-5]
+            # AN ARM THAT MEASURED NOTHING IS NOT A PASSING ARM. A well-formed JSON holding
+            # `"rows": []` is what a stage writes when every instance was skipped — e.g. the
+            # miter arm pointed at ISCAS-85 names without --bench-dir, which resolves to
+            # bench/seq/ and finds none of them (2026-09-02). The campaign ran on, and the empty
+            # file was indistinguishable from a stage that had not started.
+            # `rivals_steps_calibration.json` is EVIDENCE, not an arm: it has no `rows` key at
+            # all (its schema is {generated, tools}). Distinguish by the KEY, not by emptiness —
+            # an arm that measured nothing writes `"rows": []`, which is the case below.
+            if isinstance(d, dict) and "rows" not in d:
+                continue
+            if not rows:
+                fail.append(f"{stem}: 0 rows — the arm measured NOTHING. An empty result file "
+                            f"is a failed stage, not an absent one; check the harness's own "
+                            f"exit status and its 'no such bench file' lines.")
+                continue
             seen = {}
             for r in rows:
                 seen[(r["name"], r.get("variant", "-"))] = r
@@ -303,6 +343,14 @@ def main():
             if errs:
                 warn.append(f"{stem}: {errs}/{len(seen)} rival runs failed "
                             f"(reported, not folded in as zeros)")
+            # ONE CIRCUIT VARIANT PER STAGE: `paper_tables.rival_cells` keys on (name, variant)
+            # and pools every cell of a stage into ONE geomean, so a stage holding `raw` and
+            # `abc` rows counts each instance twice (the campaign runs `raw` only).
+            variants = {v for _n, v in seen}
+            if len(variants) > 1:
+                warn.append(f"{stem}: rows span circuit variants {sorted(variants)} — the table "
+                            f"pools them into one geomean, so every instance counts once per "
+                            f"variant. Publish ONE variant per stage.")
             # A row whose constraint-alignment check FAILED compared two different tasks; the
             # tables exclude it (paper_tables.rival_family), and it must not go unnoticed here.
             mis = [r["name"] for r in seen.values() if r.get("pin_check_ok") is False]
@@ -310,6 +358,60 @@ def main():
                 fail.append(f"{stem}: {len(mis)} row(s) FAILED the constraint-alignment check "
                             f"({', '.join(sorted(mis))}) — the two sides were not given the "
                             f"same task; re-run before publishing")
+            # ---- the CMSGen arm on these rows (the converged protocol: Table 1 is read off
+            # them). The SAME gates the `gpap bench` stages get above, because the same numbers
+            # are now published from here: mixed provenance FAILS (absent is not zero), a crashed
+            # subprocess FAILS, anything but --nowrite FAILS, an unpatched binary FAILS, and a
+            # floored count FAILS where it is a zero. `paper_tables.rival_cms_family` screens per
+            # row; this refuses the file.
+            meas = [r for r in seen.values() if not (r.get("gpap") or {}).get("error")]
+            armed = [r for r in meas if cms_arm_ran(r)]
+            if armed and len(armed) != len(meas):
+                fail.append(f"{stem}: MIXED CMSGen provenance — {len(meas) - len(armed)} of "
+                            f"{len(meas)} measured rows never ran the CMSGen arm (a resume "
+                            f"without the binary?). Re-run those cells; absent is not zero")
+            if armed:
+                cerr = [r.get("name", "?") for r in armed if r.get("cms_error")]
+                if cerr:
+                    fail.append(f"{stem}: the CMSGen subprocess ERRORED on {len(cerr)} row(s) "
+                                f"({', '.join(sorted(cerr)[:6])}{', …' if len(cerr) > 6 else ''})"
+                                f" — a crashed baseline is not a zero; re-run before publishing")
+                modes = {r.get("cms_mode") for r in armed if r.get("cms_mode")}
+                if modes - {"nowrite"}:
+                    fail.append(f"{stem}: CMSGen timed in mode(s) {modes}, expected only "
+                                f"'nowrite'")
+                if any(r.get("cms_patched") is False for r in armed):
+                    fail.append(f"{stem}: CMSGen present but NOT patched — ratios inflated by "
+                                f"emission")
+                floored = [r for r in armed
+                           if r.get("cms_count_exact") is False or
+                           (r.get("cms_count_exact") is None and r.get("cms_timed_out"))]
+                if floored:
+                    zeros = [r for r in floored if not (r.get("cms_n_samples") or 0)]
+                    msg = (f"{stem}: {len(floored)} row(s) carry a FLOORED CMSGen count "
+                           f"(killed between --statsevery lines), {len(zeros)} of them recorded "
+                           f"as an exact 0")
+                    (fail if zeros else warn).append(
+                        msg + " — re-run with a --maxtime-capable cmsgen (scripts/build_cmsgen.sh)")
+                if not all((r.get("cpu") or {}).get("model") for r in armed):
+                    warn.append(f"{stem}: CMSGen arm without CPU provenance on some rows — a "
+                                f"GPAP/CMSGen ratio is not interpretable without it")
+                ok.append(f"{stem}: CMSGen arm on {len(armed)}/{len(meas)} measured rows, "
+                          f"--nowrite, counts exact")
+            # ---- the GPAP arm: a soundness verdict and one engine per stage, as for a bench row
+            uns = [r.get("name", "?") for r in meas if sound_failed(r.get("gpap") or {})]
+            for n in uns:
+                fail.append(f"UNSOUND cell {stem}/{n}")
+            cores = {}
+            for r in meas:
+                c = ((r.get("gpap") or {}).get("engine") or {}).get("core")
+                if c:
+                    cores[c] = cores.get(c, 0) + 1
+            if len(cores) > 1:
+                warn.append(f"{stem}: rows span {len(cores)} ENGINE BUILDS "
+                            + ", ".join(f"{c} ({n} rows)" for c, n in sorted(cores.items()))
+                            + " — a resumed stage was topped up under a different libgpap; the "
+                              "table geomeans them together. Re-run the stage, or say so.")
         ok.append("rivals: error rows counted, never treated as zero")
 
     # ---------------------------------------------------------------- uniformity oracle

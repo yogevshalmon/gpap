@@ -131,3 +131,13 @@ docs/slides/*.blg
 # Built/fetched third-party tools, sources and benchmark sets (gpap.paths.gpap_home()).
 # Repo-local on purpose: see gpap/paths.py. Override with $GPAP_HOME.
 /.gpap/
+
+# Big ITC'99 sequential circuits (b17-b22, 1.3-14.5 MB each): FETCHED, never committed.
+# scripts/fetch_benchmarks.sh installs them here because that is the directory every eval driver
+# lists to build its instance set; benchmarks/circuits/README.md carries their provenance.
+benchmarks/circuits/bench/seq/b17.bench
+benchmarks/circuits/bench/seq/b18.bench
+benchmarks/circuits/bench/seq/b19.bench
+benchmarks/circuits/bench/seq/b20.bench
+benchmarks/circuits/bench/seq/b21.bench
+benchmarks/circuits/bench/seq/b22.bench

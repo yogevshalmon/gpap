@@ -17,7 +17,8 @@ import pytest
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from eval.artifact.paper_tables import (cms_family, encoders_in, prop_rates,  # noqa: E402
-                                        rival_family, zero_search)
+                                        rival_family, tiny_space, vacuous_pin,
+                                        zero_search)
 
 
 def row(name, enc="tseitin", *, models=1000, cms=1000, sps=1e6, cms_sps=1e4,
@@ -108,7 +109,7 @@ def test_encoders_are_separate_rows_and_neither_selects_the_other(tmp_path):
 
 
 def test_every_instance_is_counted_exactly_once(tmp_path):
-    """`inst` = n_gm + CMSGen=0 + GPAP=0 + both=0 + no-search + vacuous, printed under Table 1.
+    """`inst` = n_gm + CMSGen=0 + GPAP=0 + both=0 + no-search + tiny-space + vacuous, under Table 1.
     It was FALSE on 6 of 7 families: the degenerate cells were dropped from the geomean but left
     inside `inst` and inside `wins`, so a reader adding the columns up came out short."""
     d = stage(tmp_path, "seq-c25-rare", [
@@ -118,13 +119,104 @@ def test_every_instance_is_counted_exactly_once(tmp_path):
         row("e.bench", models=0, sps=0, cms=0, cms_sps=0),    # both=0
         row("f.bench", dec=0, impl=0),                        # no-search
         row("b02.bench", sps=1e8),                            # vacuous pin
+        row("g.bench", support=5),                            # tiny space: 2**5 < 1000
     ])
     v = cms_family(d, "seq-c25-rare", "tseitin")
-    assert v["inst"] == 7
-    assert v["n_gm"] + v["inf"] + v["gpap0"] + v["both0"] + v["free"] + v["vac"] == v["inst"]
+    assert v["inst"] == 8
+    assert (v["n_gm"] + v["inf"] + v["gpap0"] + v["both0"] + v["free"] + v["vac"]
+            + v["tiny"]) == v["inst"]
     # and the win count is over the same rows, not over the pre-screen set
     assert v["n"] == v["n_gm"] + v["inf"] + v["gpap0"] == 4
     assert v["wins"] == 3                                     # a, b, and the CMSGen-zero
+
+
+def test_tiny_solution_space_is_screened_in_BOTH_tables(tmp_path):
+    """A space smaller than the sample request is enumerated, not sampled — both tools saturate
+    it and the ratio is a race between startup costs. ISCAS-85 `c17` has 5 inputs = 32 points:
+    DEMOTIC finds 19 of them at 14 unique/s against GPAP's 640k/s, a 45,520x cell that alone
+    lifts the DEMOTIC-native geomean from 2.7x to ~6.5x. DEMOTIC's own Table II carves it out
+    ("a minimum of 1000 distinct solutions (except c17)").
+
+    Screened SYMMETRICALLY, and it does not flatter us: in Table 2 it removes a huge win, while
+    in Table 1 the same instance was DRAGGING the combinational geomean down (1,620x -> 1,348x),
+    so the screen gives that number back. A screen that only ever helped would be suspect."""
+    assert tiny_space({"support": 5}) and not tiny_space({"support": 36})
+    assert tiny_space({"demotic": {"num_inputs": 5}}, "demotic")
+    assert not tiny_space({"demotic": {"num_inputs": 36}}, "demotic")
+    assert not tiny_space({}, "demotic"), "absent size info must not be guessed at"
+
+    # Table 2: the enormous ratio must not reach the geomean
+    rows = [
+        {"name": "c432", "variant": "abc", "demotic": {"unique_per_s": 10.0, "num_inputs": 36},
+         "gpap": {"unique_per_s_est": 100.0, "n_models": 5}},
+        {"name": "c17", "variant": "abc", "demotic": {"unique_per_s": 14.0, "num_inputs": 5},
+         "gpap": {"unique_per_s_est": 640622.0, "n_models": 900944}},
+    ]
+    (tmp_path / "rivals_d.json").write_text(json.dumps({"rows": rows}))
+    v = rival_family(str(tmp_path), "d", "demotic")
+    assert v["tiny"] == 1 and v["n"] == 1
+    assert v["gm"] == pytest.approx(10.0), "the 45,520x enumeration cell entered the geomean"
+    assert (v["n"] + v["both0"] + v["nomeas"] + v["errors"] + v["free"] + v["misaligned"]
+            + v["vacuous"] + v["tiny"]) == v["cells"]
+
+
+def test_rival_table_scores_every_measured_instance_and_shows_the_paper_subset_beside_it(tmp_path):
+    """Table 2 runs every b*/s* circuit the campaign can process (user's rule, 2026-09-03) and
+    scores every cell that ran. The subset the rival's OWN paper evaluates is not neutral —
+    b03/b04/b11/b13 are in Recurrent's run.py target table but NOT in its Table II, and with
+    them 'their target table' reads 4.1x where the paper's own set reads 3.0x — so that geomean
+    is printed BESIDE the whole one (`gm_paper`, `n_paper`), never instead of it, and never
+    used to drop a measured cell."""
+    rows = [
+        {"name": "s386", "variant": "raw", "rcs": {"unique_per_s": 10.0},
+         "gpap": {"unique_per_s_est": 100.0, "n_models": 5}},          # in their Table II
+        {"name": "b03", "variant": "raw", "rcs": {"unique_per_s": 1.0},
+         "gpap": {"unique_per_s_est": 1000.0, "n_models": 5}},         # NOT in it: a 1,000x cell
+    ]
+    (tmp_path / "rivals_r.json").write_text(json.dumps({"rows": rows}))
+    v = rival_family(str(tmp_path), "r", "rcs")
+    assert v["n"] == 2 and v["gm"] == pytest.approx(100.0), "a measured cell was dropped"
+    assert v["n_paper"] == 1 and v["gm_paper"] == pytest.approx(10.0)
+    assert v["offpaper"] == 1
+    assert (v["n"] + v["both0"] + v["nomeas"] + v["errors"] + v["free"] + v["misaligned"]
+            + v["vacuous"] + v["tiny"]) == v["cells"]
+
+
+def test_vacuous_pin_is_detected_per_row_not_by_a_name_list(tmp_path):
+    """`VACUOUS_PINS` was a hardcoded {b02,b05,b07,s526} — correct only while the instance list
+    stood still. Running the FULL sequential family brought in `b19`, whose pin is a tautology
+    (sim_baseline p_accept == 1.0 at both depths and both targets), and it entered the geomean as
+    a 491x cell measuring nothing: seq-c25-rare read 72.1x instead of 64.7x.
+
+    The signal is in the row already, so use it."""
+    assert vacuous_pin({"sim_baseline": {"p_accept": 1.0}})
+    assert not vacuous_pin({"sim_baseline": {"p_accept": 0.5}})
+    assert vacuous_pin({"p_accept": 1.0})                    # rival rows carry it top-level
+    assert vacuous_pin({}, "b02"), "the name list must still work for pre-sim_baseline rows"
+    assert not vacuous_pin({}, "b03")
+
+    d = stage(tmp_path, "seq-c25-rare", [
+        row("a.bench"), row("b.bench"), row("c.bench"),
+        row("b19.bench", sps=1e8, sim_baseline={"p_accept": 1.0}),   # tautological pin
+    ])
+    v = cms_family(d, "seq-c25-rare", "tseitin")
+    assert v["vac"] == 1 and v["n_gm"] == 3, "the tautological pin entered the geomean"
+    assert v["gm"] == pytest.approx(100.0)
+
+
+def test_table_3_screens_the_same_rows_as_table_1(tmp_path):
+    """'Every column must use the SAME rows' — the propagation table filtered on the old name
+    list while Table 1 moved to the measured screens, so a vacuous or tiny-space instance could
+    sit in the engine row and not the sampler row (or the reverse). The identity in Table 3 is
+    only meaningful over the same set the ratio is computed on."""
+    rows = [row(f"i{i}.bench") for i in range(3)]
+    rows.append(row("b19.bench", sps=1e8, sim_baseline={"p_accept": 1.0}))
+    rows.append(row("tiny.bench", support=5))
+    d = stage(tmp_path, "seq-c25-rare", rows)
+    v = cms_family(d, "seq-c25-rare", "tseitin")
+    pr = prop_rates(d, "seq-c25-rare", "tseitin")
+    assert pr["n"] == v["n_gm"] == 3, \
+        f"Table 3 scored {pr['n']} rows where Table 1 scored {v['n_gm']}"
 
 
 # --------------------------------------------------------------------- the propagation identity
@@ -155,15 +247,15 @@ def test_rival_zero_buckets_are_symmetric(tmp_path):
     """A cell where NEITHER side scored was being credited to us as a win (DEMOTIC-miter 18/18,
     HTS 14/15)."""
     rows = [
-        {"name": "a", "variant": "raw", "demotic": {"unique_per_s": 10.0},
+        {"name": "c432", "variant": "raw", "demotic": {"unique_per_s": 10.0},
          "gpap": {"unique_per_s_est": 100.0}},                       # our win
-        {"name": "b", "variant": "raw", "demotic": {"unique_per_s": 0.0},
+        {"name": "c499", "variant": "raw", "demotic": {"unique_per_s": 0.0},
          "gpap": {"unique_per_s_est": 100.0}},                       # rival silent -> our win
-        {"name": "c", "variant": "raw", "demotic": {"unique_per_s": 10.0},
+        {"name": "c880", "variant": "raw", "demotic": {"unique_per_s": 10.0},
          "gpap": {"unique_per_s_est": 0.0}},                         # WE are silent -> our loss
-        {"name": "d", "variant": "raw", "demotic": {"unique_per_s": 0.0},
+        {"name": "c1355", "variant": "raw", "demotic": {"unique_per_s": 0.0},
          "gpap": {"unique_per_s_est": 0.0}},                         # neither -> nobody's win
-        {"name": "e", "variant": "raw", "demotic": {"error": "timeout"}, "gpap": {}},
+        {"name": "c1908", "variant": "raw", "demotic": {"error": "timeout"}, "gpap": {}},
     ]
     (tmp_path / "rivals_x.json").write_text(json.dumps({"rows": rows}))
     v = rival_family(str(tmp_path), "x", "demotic")
@@ -201,10 +293,10 @@ def test_rival_zero_search_cell_is_screened_not_scored(tmp_path):
     emitted) measures the instance, not either sampler — a seed-mismatched b13 cell once carried
     a 4.7e9x ratio this way. It leaves through its own `free` column, exactly as in Table 1."""
     rows = [
-        {"name": "ok", "variant": "raw", "demotic": {"unique_per_s": 10.0},
+        {"name": "c432", "variant": "raw", "demotic": {"unique_per_s": 10.0},
          "gpap": {"unique_per_s_est": 100.0, "n_models": 5,
                   "decisions_per_s": 1e7, "implications_per_s": 1e9}},
-        {"name": "b13", "variant": "raw", "demotic": {"unique_per_s": 1e-3},
+        {"name": "c3540", "variant": "raw", "demotic": {"unique_per_s": 1e-3},
          "gpap": {"unique_per_s_est": 4.7e6, "n_models": 1000,
                   "decisions_per_s": 0, "implications_per_s": 0}},
     ]
@@ -223,9 +315,9 @@ def test_rival_misaligned_row_is_excluded_and_counted(tmp_path):
     FAILED that check compared two different tasks; whatever its ratio measures, it is not the
     samplers — so it must leave through its own bucket, not sit silently inside the geomean."""
     rows = [
-        {"name": "ok", "variant": "raw", "pin_check_ok": True,
+        {"name": "c432", "variant": "raw", "pin_check_ok": True,
          "demotic": {"unique_per_s": 10.0}, "gpap": {"unique_per_s_est": 100.0}},
-        {"name": "bad", "variant": "raw", "pin_check_ok": False,
+        {"name": "c880", "variant": "raw", "pin_check_ok": False,
          "demotic": {"unique_per_s": 1e-6}, "gpap": {"unique_per_s_est": 1e6}},  # a 1e12x "win"
     ]
     (tmp_path / "rivals_x.json").write_text(json.dumps({"rows": rows}))
@@ -247,6 +339,27 @@ def test_rival_retry_row_replaces_rather_than_appends(tmp_path):
     assert v["cells"] == 1 and v["errors"] == 0 and v["gm"] == pytest.approx(5.0)
 
 
+def test_rival_vacuous_pin_is_screened_like_table_1(tmp_path):
+    """s526/b02/b05/b07 have constant last-cycle outputs at T=25, so pinning them is a tautology
+    and every sampler scores ~100%. Table 1 has always screened them; the rival table did not,
+    which was invisible while no vacuous instance was in the rival set — and became live when the
+    set became each rival's OWN published one (Recurrent's Table II includes s526)."""
+    rows = [
+        {"name": "s386", "variant": "raw", "rcs": {"unique_per_s": 10.0},
+         "gpap": {"unique_per_s_est": 100.0, "n_models": 5}},
+        {"name": "s526", "variant": "raw", "rcs": {"unique_per_s": 1.0},   # tautological pin
+         "gpap": {"unique_per_s_est": 1e6, "n_models": 1000}},
+    ]
+    (tmp_path / "rivals_r.json").write_text(json.dumps({"rows": rows}))
+    v = rival_family(str(tmp_path), "r", "rcs")
+    assert v["vacuous"] == 1, "the vacuous pin entered the rival ledger"
+    assert v["n"] == 1 and v["gm"] == pytest.approx(10.0), \
+        "the tautological cell moved the geomean"
+    # and the ledger still accounts for every cell exactly once
+    assert (v["n"] + v["both0"] + v["nomeas"] + v["errors"] + v["free"] + v["misaligned"]
+            + v["vacuous"]) == v["cells"]
+
+
 def test_rival_scatter_only_plots_cells_the_table_scores(tmp_path):
     """The rival unique/s scatter classifies cells through `rival_cells`, imported — so a cell
     Table 2 screens out (an unmeasured unique/s estimate, a failed rival run) must not become a
@@ -259,21 +372,21 @@ def test_rival_scatter_only_plots_cells_the_table_scores(tmp_path):
     from eval.eval_plots import fig_rivals_sps_scatter
 
     def ok(name):
-        return {"name": name, "variant": "raw", "demotic": {"unique_per_s": 10.0},
+        return {"name": name, "variant": "raw", "demotic": {"unique_per_s": 10.0, "num_inputs": 36},
                 "gpap": {"unique_per_s_est": 100.0, "n_models": 5}}
 
     screened = [
-        {"name": "nm", "variant": "raw", "demotic": {"unique_per_s": 10.0},
+        {"name": "c1355", "variant": "raw", "demotic": {"unique_per_s": 10.0, "num_inputs": 41},
          "gpap": {"unique_per_s_est": None, "unique_est_status": "no-coverage-sample",
                   "n_models": 42}},                             # unmeasured — NOT a GPAP zero
-        {"name": "err", "variant": "raw", "demotic": {"error": "timeout"}, "gpap": {}},
+        {"name": "c1908", "variant": "raw", "demotic": {"error": "timeout"}, "gpap": {}},
     ]
     p = tmp_path / "rivals_demotic_native.json"
-    p.write_text(json.dumps({"rows": [ok("a"), ok("b"), ok("c")] + screened}))
+    p.write_text(json.dumps({"rows": [ok("c432"), ok("c499"), ok("c880")] + screened}))
     out = fig_rivals_sps_scatter(plt, [str(p)], str(tmp_path))
     assert out is not None and (tmp_path / "sps_scatter_rivals.png").exists()
 
-    p.write_text(json.dumps({"rows": [ok("a"), ok("b")] + screened}))
+    p.write_text(json.dumps({"rows": [ok("c432"), ok("c499")] + screened}))
     assert fig_rivals_sps_scatter(plt, [str(p)], str(tmp_path)) is None, \
         "screened cells were counted as plottable points"
 
@@ -529,37 +642,28 @@ def test_run_at_batch_steps_down_when_the_card_refuses_and_records_the_rungs():
     best, sweep = run_at_batch(run, 300_000, log=lambda *_: None)
     assert "error" not in best and best["unique_per_s"] == 10_000
     assert any(s.get("error") for s in sweep), "the refusals belong in the recorded sweep"
-    # down to the rung that runs; the upward probe is skipped because 30k already refused
+    # down to the rung that runs, one refusal at a time
     assert [s["batch"] for s in sweep] == [300_000, 100_000, 30_000, 10_000]
 
 
-def test_run_at_batch_probes_one_rung_up_because_one_factor_cannot_fit_all_sizes():
-    """Measured, DEMOTIC at batch 300k: peak VRAM per gate-row falls 23.0 B (c432) -> 11.6 B
-    (c3540), so any single factor over-charges one end — at 20 B the model rejects c2670 at 1M,
-    which really fits an L4. One probe upward recovers that; it is bounded to one extra run."""
+def test_run_at_batch_is_one_measurement_per_instance():
+    """Until 2026-09-03 a successful run was followed by ONE probe a rung up, kept if faster
+    (measured: DEMOTIC's peak VRAM per gate-row falls 23.0 -> 11.6 B from c432 to c3540, so a
+    static grant under-charges one end). That is a best-of-two over the rival's batch — the
+    same trap the paper forbids for our own encoder (RIVAL_FAIRNESS §8) — and it is gone: the
+    granted rung is the measurement, and a timeout there is the recorded result. The full
+    contract (timeouts, refusals) is pinned in tests/test_rival_targets.py."""
     from eval.rivals.rival_common import run_at_batch
     calls = []
 
     def run(b):
         calls.append(b)
-        return {"unique_per_s": float(b)}                # bigger is genuinely better here
+        return {"unique_per_s": float(b)}                # bigger WOULD be better here
 
     best, sweep = run_at_batch(run, 100_000, log=lambda *_: None)
-    assert best["unique_per_s"] == 300_000, "the under-grant was not recovered"
-    assert calls == [100_000, 300_000], f"probe must be bounded to ONE rung: {calls}"
-
-
-def test_run_at_batch_keeps_the_granted_rung_when_the_bigger_one_spills():
-    """Too big does not always ERROR — Recurrent on s386 runs at 1M and is slower than at 300k.
-    The upward probe must be kept only when it is actually faster."""
-    from eval.rivals.rival_common import run_at_batch
-
-    def run(b):
-        return {"unique_per_s": 900.0 if b == 100_000 else 200.0}   # 300k spills
-
-    best, sweep = run_at_batch(run, 100_000, log=lambda *_: None)
-    assert best["unique_per_s"] == 900.0, "scored the rival on a spilled run"
-    assert [x["batch"] for x in sweep] == [100_000, 300_000]
+    assert best["unique_per_s"] == 100_000 and calls == [100_000], \
+        f"the rival was measured more than once: {calls}"
+    assert [x["batch"] for x in sweep] == [100_000]
 
 
 # ------------------------------------------------- mirroring: results only exist once local
@@ -663,3 +767,138 @@ def test_the_other_generators_import_the_paper_rules_rather_than_restating_them(
                 for alias in node.names}
     assert "cms_family" in imported, \
         f"{mod} does not import the paper's family aggregation — is it re-deriving it?"
+
+
+# ---------------------------------------------------------------- Table 1 on the rival rows (the converged protocol)
+
+def rrow(name, *, models=1000, sps=1e6, cms=1000, cms_sps=1e4, p_acc=0.01, dec=1e6, impl=1e8,
+         cms_impl=1e6, cms_dec=1e5, arm=True, **extra):
+    """A rival-stage row of the converged protocol: the rival, the GPAP arm and the CMSGen arm
+    on ONE CNF. A tool that emitted nothing has a zero rate (as it does in a real row)."""
+    sps = sps if models else 0.0
+    cms_sps = cms_sps if cms else 0.0
+    r = {"name": name, "variant": "raw", "cycles": 25, "p_accept": p_acc, "support": 40,
+         "rcs": {"unique_per_s": 10.0, "num_inputs": 40},
+         "gpap": {"sps": sps, "n_models": models, "success": 0.5, "encoder": "abc:fast",
+                  "decisions_per_s": dec, "implications_per_s": impl, "sound_check": "ok",
+                  "unique_per_s_est": sps or None, "unique_est_status": "ok",
+                  "seeds": [{"sps": sps, "sps_e2e": sps / 2}],
+                  "engine": {"core": "libgpap 0.3.0+abc"}},
+         "cpu": {"model": "x"}, "gpu": {"name": "L4"}}
+    if arm:
+        r.update({"cms_mode": "nowrite", "cms_patched": True, "cms_sps": cms_sps,
+                  "cms_sps_e2e": cms_sps * 0.9, "cms_n_samples": cms, "cms_count_exact": True,
+                  "cms_implications_per_s": cms_impl, "cms_decisions_per_s": cms_dec})
+    r.update(extra)
+    return r
+
+
+def test_table_1_is_read_off_the_rival_rows_with_table_2s_screens_and_table_1s_ledger(tmp_path):
+    """The converged protocol: Table 1 (GPAP vs CMSGen) comes from the SAME files and cells as
+    Table 2, screened first (vacuous / no-search / tiny), then the symmetric zero ledger with
+    absent-is-not-zero and crashed-is-not-zero, and the rival paper's own subset beside the
+    whole set. Every instance is counted exactly once and a reader can add the columns up."""
+    from eval.artifact.paper_tables import (RIVAL_CMS_SETS, RIVALS, rival_cms_family,
+                                            rival_prop_rates)
+
+    assert [s for s, _, _ in RIVAL_CMS_SETS] == [s for s, _, _, _ in RIVALS], \
+        "Tables 1 and 2 must name the same stages"
+    rows = [rrow("s386", sps=1e6, cms_sps=1e4),               # finite 100x, in their paper
+            rrow("b12", sps=2e5, cms_sps=1e4),                #  finite 20x, in their paper
+            rrow("b04", sps=5e4, cms_sps=1e4),                #  finite  5x, NOT in their paper
+            rrow("b11", cms=0),                               # CMSGen=0: a win, no ratio
+            rrow("b03", models=0),                            # GPAP=0: a loss, no ratio
+            rrow("b13", models=0, cms=0),                     # both=0
+            rrow("b19", p_acc=1.0),                           # vacuous pin: screened FIRST
+            rrow("b10", dec=0, impl=0),                       # no-search: screened
+            rrow("b01", arm=False),                           # absent is not zero
+            rrow("b09", cms=0, cms_error="OSError: boom"),    # a crash is not a zero
+            {"name": "b21", "variant": "raw", "rcs": {}, "gpap": {"error": "oversize"}}]
+    (tmp_path / "rivals_recurrent_rare.json").write_text(json.dumps(rows))
+    v = rival_cms_family(str(tmp_path), "recurrent_rare", "rcs")
+    assert v["inst"] == 10 and v["errors"] == 1 and v["cells"] == 10
+    assert v["n_gm"] == 3 and v["gm"] == pytest.approx((100 * 20 * 5) ** (1 / 3))
+    assert v["gm_paper"] == pytest.approx((100 * 20) ** 0.5) and v["n_paper"] == 2
+    assert v["inf"] == 1 and v["gpap0"] == 1 and v["both0"] == 1
+    assert v["vac"] == 1 and v["free"] == 1 and v["tiny"] == 0
+    assert v["noarm"] == 1 and v["cms_err"] == 1
+    assert v["inst"] == (v["n_gm"] + v["inf"] + v["gpap0"] + v["both0"] + v["free"] + v["tiny"]
+                         + v["vac"] + v["noarm"] + v["cms_err"])
+    assert v["wins"] == 4 and v["n"] == 5
+    assert v["gpap0_names"] == ["b03"] and v["both0_names"] == ["b13"]
+    assert v["cms_err_names"] == ["b09"] and v["noarm_names"] == ["b01"]
+    # e2e charges both sides for getting ready: GPAP's n / wall_total vs CMSGen's subprocess wall
+    assert v["gm_e2e"] == pytest.approx(v["gm"] / 1.8) and v["pre_frac"] == pytest.approx(0.5)
+    assert v["depth"] == "T=25" and v["encoder"] == "abc:fast" and v["patched"] is True
+    assert v["cores"] == ["libgpap 0.3.0+abc"] and v["unsound"] == 0 and v["cpu"] == "x"
+    # Table 3 over the SAME cells: the identity closes because every column shares one row set
+    p = rival_prop_rates(str(tmp_path), "recurrent_rare", "rcs")
+    assert p["n"] == 3 and p["encoder"] == "abc:fast"
+    assert p["ratio"] / p["work"] == pytest.approx(v["gm"])
+
+
+def test_a_rivals_only_sweep_has_no_table_1_and_a_refusal_is_not_a_zero(tmp_path):
+    """No CMSGen arm anywhere -> no Table 1 row (not a column of CMSGen zeros); a GPAP-side
+    refusal (oversize / envelope / encode failure) is an error, in no column."""
+    from eval.artifact.paper_tables import rival_cms_family
+
+    (tmp_path / "rivals_demotic_native.json").write_text(json.dumps(
+        {"rows": [rrow("c432", arm=False), rrow("c499", arm=False)]}))
+    assert rival_cms_family(str(tmp_path), "demotic_native", "demotic") is None
+    (tmp_path / "rivals_demotic_native.json").write_text(json.dumps(
+        {"rows": [rrow("c432"), {"name": "c7552", "variant": "raw", "demotic": {},
+                                 "gpap": {"error": "encode failed: no abc"}}]}))
+    v = rival_cms_family(str(tmp_path), "demotic_native", "demotic")
+    assert v["inst"] == 1 and v["errors"] == 1 and v["gpap0"] == 0 and v["both0"] == 0
+
+
+def test_verify_artifact_gates_the_cmsgen_arm_on_rival_rows(tmp_path):
+    """A campaign with no `gpap bench` directory at all is legitimate now (Table 1 comes off the
+    rival rows), and the SAME gates apply there: a clean stage passes; a floored zero, a
+    mixed-arm stage and a crashed subprocess each FAIL."""
+    riv = tmp_path / "riv"
+    riv.mkdir()
+    f = riv / "rivals_recurrent_rare.json"
+    f.write_text(json.dumps([rrow("s386"), rrow("b12")]))
+    r = _verify("--rivals", str(riv))
+    assert r.returncode == 0 and "CMSGen arm on 2/2" in r.stdout, r.stdout + r.stderr
+    f.write_text(json.dumps([rrow("s386"),
+                             rrow("b12", cms=0, cms_count_exact=False, cms_timed_out=True)]))
+    r = _verify("--rivals", str(riv))
+    assert r.returncode != 0 and "FLOORED" in r.stdout
+    f.write_text(json.dumps([rrow("s386"), rrow("b12", arm=False)]))
+    r = _verify("--rivals", str(riv))
+    assert r.returncode != 0 and "MIXED" in r.stdout
+    f.write_text(json.dumps([rrow("s386"), rrow("b12", cms=0, cms_error="boom")]))
+    r = _verify("--rivals", str(riv))
+    assert r.returncode != 0 and "ERRORED" in r.stdout
+    r = _verify()
+    assert r.returncode != 0, "nothing to verify must not read as publishable"
+
+
+def test_the_generator_survives_a_stage_whose_every_cell_is_degenerate(tmp_path):
+    """A rival stage where the only measured cell is a no-search cell (b13 at a shallow T
+    collapses to a 2-clause CNF under ABC) has no geomean at all; the caveat that quotes 'what
+    the geomean would read with them in' formatted None and crashed the whole generator on the
+    first campaign directory of the converged protocol. The generator must still write both
+    files, with the stage's Table 1 row present and its no-search count stated."""
+    import subprocess
+
+    riv = tmp_path / "riv"
+    riv.mkdir()
+    (riv / "rivals_recurrent_rare.json").write_text(json.dumps([rrow("b13", dec=0, impl=0)]))
+    (riv / "rivals_demotic_native.json").write_text(json.dumps({"rows": [rrow("c432")]}))
+    root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    r = subprocess.run([sys.executable, os.path.join(root, "eval", "artifact", "paper_tables.py"),
+                        "--rivals", str(riv), "--out-md", str(tmp_path / "R.md"),
+                        "--out-tex", str(tmp_path / "T.tex")], capture_output=True, text=True)
+    assert r.returncode == 0, r.stderr
+    md = (tmp_path / "R.md").read_text()
+    table1 = md.split("## Table 1")[1].split("## Table 2")[0]
+    t1 = [ln for ln in table1.splitlines()
+          if ln.startswith("| ITC'99") or ln.startswith("| ISCAS-85")]
+    assert len(t1) == 2, table1
+    rare = next(ln for ln in t1 if "| rare |" in ln)
+    assert "| — |" in rare and "CMSGen=0" not in rare, rare   # no geomean, and not blamed on CMSGen
+    assert "no **search at all**" in md or "no search at all" in md
+    assert "ISCAS-85" in (tmp_path / "T.tex").read_text()

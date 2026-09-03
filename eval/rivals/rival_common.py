@@ -143,6 +143,24 @@ def _core_build_id() -> str:
     return f"{os.path.basename(path)}:{h.hexdigest()[:16]}"
 
 
+@functools.lru_cache(maxsize=1)
+def _sampling_layer_id() -> str:
+    """SHA1 over the python modules whose contents decide a GPAP arm's result. Missing files are
+    hashed as their name alone, so a moved module is a cache MISS rather than a silent hit."""
+    import hashlib
+    from gpap import sampling
+    root = os.path.dirname(os.path.abspath(sampling.__file__))
+    h = hashlib.sha1()
+    for name in ("pipeline.py", "sampler.py", "preprocess.py"):
+        h.update(name.encode())
+        try:
+            with open(os.path.join(root, name), "rb") as f:
+                h.update(f.read())
+        except OSError:
+            pass
+    return h.hexdigest()[:16]
+
+
 def gpap_cache_key(sampled_file: str, task: dict) -> str:
     """Identity of one GPAP measurement. Includes the file's CONTENT, not its path — the rival
     harnesses write their inputs into per-run temp dirs, so paths differ every invocation while
@@ -159,6 +177,13 @@ def gpap_cache_key(sampled_file: str, task: dict) -> str:
     # comment claiming one of them cannot change. A reader who trusts that comment and drops the
     # "redundant" field brings the stale-arm bug straight back.
     env["build"] = _core_build_id()
+    # ...AND the PYTHON sampling layer, because the arm's answer is not decided by the C core
+    # alone. `gpap_build_id()` fingerprints libgpap's bytes; the portfolio, the defaults, the
+    # preprocessing and the coverage-run budget all live above it in `gpap/sampling/`, and a
+    # change there moves the number while leaving the build id untouched. That happened on
+    # 2026-09-03 (`pipeline.cov_batch`), and the comment right above this one warns about exactly
+    # this failure one layer down. Hash the source of the modules that decide the answer.
+    env["sampling_py"] = _sampling_layer_id()
     try:
         import torch
         env["gpu"] = torch.cuda.get_device_name(0) if torch.cuda.is_available() else "cpu"
@@ -253,6 +278,97 @@ def cached_gpap(cache_dir, sampled_file, task, compute):
 # ourselves. Override with GPAP_RIVAL_VRAM_FRACTION (or an explicit budget) when reproducing an
 # older sweep.
 
+# ---------------------------------------------------------------- oversize pre-check
+# THE RIVAL PATH CANNOT USE abc:fast. A circuit-level rival consumes .bench and unrolls it
+# itself, so our arm must encode THE SAME circuit — which means Tseitin, and Tseitin is far
+# larger: b19 at T=25 is 66,639 vars through abc:fast (what Table 1 uses) and 9,591,351 vars
+# through Tseitin, whose 2N=19,182,702 exceeds the packed 8|24 cap of 16,777,215.
+#
+# Worse than a clean refusal: building that CNF in Python exhausts host memory and the process
+# is KILLED, so no exception is raised and no row is written. Measured 2026-09-03 — b19
+# (231,266 gates x 25 = 5.8M unrolled) is OOM-killed; b18 (114,561 x 25 = 2.9M) completes. The
+# harness therefore ended four instances short (b20/b21/b22/s35932, all alphabetically after
+# b19) with nothing marking the gap.
+#
+# So the size is checked BEFORE anything is built, from the .bench alone, and an oversized
+# instance becomes a recorded row like any other refusal. The bound is deliberately below the
+# measured failure and above the measured success; it bounds the BUILD, not the envelope, which
+# is why it is a gate count and not a 2N figure.
+MAX_UNROLLED_GATES = 4_000_000
+
+# The SECOND term is the box's own RAM, because the first one is a fixed number and the machines
+# are not: the same instance that runs on a 47 GB workstation is an OOM kill on a 13 GB VM, and
+# an OOM kill is the failure with no exception to catch and no row to show for it.
+#
+# MEASURED on this suite (2026-09-03, one process per instance, peak RSS of the whole arm —
+# unroll + Tseitin + DIMACS round-trip + engine construction + the capped coverage collection):
+#
+#   b14  250,300 unrolled gates ->  2.12 GiB      b22    747,425 ->  4.30 GiB
+#   b20  504,300               ->  3.20 GiB      b18  2,864,025 -> 10.56 GiB
+#   b17  804,800               ->  3.77 GiB
+#
+# which is linear to ~15%: about 1.4 GiB fixed plus 3.3 GiB per million unrolled gates (the
+# Tseitin build alone is a very clean 0.73 GiB per million; the rest is the DIMACS parse and the
+# clause lists it produces). Refuse at 60% of AVAILABLE memory, not total: the campaign's own
+# torch process and the rival's are resident at the same time.
+PEAK_GIB_FIXED = 1.4
+PEAK_GIB_PER_MGATE = 3.3
+HOST_MEM_FRACTION = 0.60
+
+
+def _available_bytes():
+    """Available (not free) host RAM, or None when it cannot be read — in which case the memory
+    term is simply not applied, since refusing an instance on a guess is worse than attempting
+    it."""
+    try:
+        with open("/proc/meminfo") as fh:
+            for ln in fh:
+                if ln.startswith("MemAvailable:"):
+                    return int(ln.split()[1]) * 1024
+    except OSError:
+        pass
+    return None
+
+
+def peak_host_gib(unrolled_gates):
+    """Estimated peak host RSS of one rival-path GPAP arm, in GiB. See the fit above."""
+    return PEAK_GIB_FIXED + PEAK_GIB_PER_MGATE * (unrolled_gates / 1e6)
+
+
+def oversize_reason(bench_file, T, limit=MAX_UNROLLED_GATES, avail_bytes=None,
+                    encoder="tseitin"):
+    """A stated reason string when this (circuit, depth) must not be attempted, else None.
+
+    Both terms model the NATIVE TSEITIN build (the fit above is its peak RSS), so they apply
+    only when that is the encoder. Under `abc:fast` — the GPAP arm's encoder since 2026-09-03 —
+    the unroll happens inside `abc` and the CNF is 2-20x smaller (b14 at T=25: 41,938 vars vs
+    413,451; b18 19,859), and EVERY seq instance in the suite, b19 and s35932 at T=50 included,
+    built and sampled on the 13 GB L4 VM in the CMSGen stage of the 2026-09-02 campaign. A
+    Tseitin-calibrated refusal there would omit instances the campaign has already run, so the
+    guard passes them; an abc build that fails still becomes an error row, never a kill."""
+    if encoder != "tseitin":
+        return None
+    try:
+        n_gates = sum(1 for ln in open(bench_file)
+                      if "=" in ln and not ln.lstrip().startswith("#"))
+    except OSError:
+        return None
+    unrolled = n_gates * max(T, 1)
+    if unrolled > limit:
+        return (f"{n_gates:,} gates x T={T} = {unrolled:,} unrolled gates > {limit:,}: the "
+                f"Tseitin CNF the rival path requires exceeds the packed envelope and its build "
+                f"exhausts host memory (abc:fast, used in the CMSGen table, is far smaller)")
+    avail = _available_bytes() if avail_bytes is None else avail_bytes
+    if avail:
+        need, budget = peak_host_gib(unrolled), HOST_MEM_FRACTION * avail / (1 << 30)
+        if need > budget:
+            return (f"{n_gates:,} gates x T={T} = {unrolled:,} unrolled gates needs ~{need:.1f} "
+                    f"GiB of host RAM (measured fit), over {HOST_MEM_FRACTION:.0%} of the "
+                    f"{avail / (1 << 30):.1f} GiB available on this machine — refused here "
+                    f"rather than OOM-killed mid-build, which writes no row at all")
+    return None
+
+
 RIVAL_VRAM_FRACTION = 0.80
 
 
@@ -270,6 +386,38 @@ def rival_vram_budget(fraction: float = None) -> int:
     except Exception:                                   # noqa: BLE001 — sizing must never be fatal
         pass
     return 5 << 30
+
+
+# ---------------------------------------------------------------- the instance sets
+#
+# THE SET EACH RIVAL IS RUN AND SCORED ON IS ITS OWN PAPER'S — not a list we picked. ONE home:
+# the harnesses expand the instance name `paper` to it, and `eval/artifact/paper_tables.py`
+# imports it to decide what Table 2 scores, so the sweep and the table cannot drift (a curated
+# list is the one thing in this protocol a referee cannot check, and the drivers had already
+# drifted from each other twice).
+#   DEMOTIC   (arXiv 2502.08086 Table II): all 11 ISCAS-85, c17 included.
+#   Recurrent (arXiv 2502.21226 Table II): 8 ISCAS-89 + 8 ITC'99. Their "s35844" is s35932 — no
+#             such circuit exists in ISCAS-89 and s35932 is the only s359xx branch in their
+#             run.py. b17/b19/b22 are too large to commit; scripts/fetch_benchmarks.sh itc99
+#             installs them (a harness reports a missing one as skipped, never silently).
+PAPER_INSTANCES = {
+    "demotic": frozenset({"c17", "c432", "c499", "c880", "c1355", "c1908", "c2670", "c3540",
+                          "c5315", "c6288", "c7552"}),
+    "rcs": frozenset({"s208.1", "s386", "s526", "s832", "s1196", "s4863", "s15850.1", "s35932",
+                      "b01", "b06", "b10", "b12", "b15", "b17", "b19", "b22"}),
+}
+
+
+def expand_names(names, key):
+    """`paper` -> that rival's published set (sorted, so a sweep's order is reproducible);
+    anything else is passed through."""
+    out = []
+    for n in names:
+        if n == "paper":
+            out.extend(sorted(PAPER_INSTANCES[key]))
+        else:
+            out.append(n)
+    return out
 
 
 BATCH_LADDER = (1_000, 3_000, 10_000, 30_000, 100_000, 300_000, 1_000_000, 3_000_000)
@@ -365,55 +513,84 @@ def _one_line(err):
 
 
 def run_at_batch(run, batch, ladder=BATCH_LADDER, log=print):
-    """Run the rival at its granted batch — then check the two ways the grant can be wrong.
+    """ONE measured run per instance, at the rival's granted batch.
 
-    DOWN, if the driver refuses the size: 'device not ready' reproduces at a fixed size on some
-    models yet passes one rung lower, so the machine gets the last word over our estimate.
+    The only fallback is a DRIVER REFUSAL: 'device not ready' reproduces at a fixed size on some
+    models yet passes one rung lower, so when the granted rung produces no run at all the machine
+    gets the last word over our estimate and the next rung down is tried. A refused rung is not a
+    measurement, so the row still holds exactly one — the largest rung the driver accepted.
 
-    UP, once, if the granted rung ran: a single bytes-per-gate-row factor cannot be accurate
-    across the circuit sizes we run — MEASURED for DEMOTIC at batch 300k, peak VRAM per gate-row
-    falls from 23.0 B (c432, 160 gates) to 11.6 B (c3540, 1669 gates), because part of the cost
-    is per-ROW rather than per-gate. Any single factor therefore over-charges one end: at 20 B
-    the model rejects c2670 at batch 1M, which really needs ~16 GiB and fits an L4 fine. One
-    probe upward removes that under-grant, and it is kept ONLY if the bigger rung also runs
-    FASTER — which is the spill guard, since too-big does not always error (Recurrent on s386:
-    1M runs, and is slower than 300k).
+    A TIMEOUT is a result, not a refusal: the rival ran and did not finish inside its budget, and
+    it is recorded as such. It is NOT retried lower (their runtime grows with the batch, so a
+    smaller rung might come in under the cap — but that is a second configuration, and the rule
+    is one). The one-rung probe UPWARD that used to follow a successful run — kept only when the
+    bigger rung also ran faster — was likewise a best-of-two and is gone (2026-09-03).
 
     Returns (result, sweep) — every rung tried, so the row records what the rival was granted.
     """
     rungs = list(ladder)
-    start = max((k for k, b in enumerate(rungs) if b <= batch), default=0)
-    sweep, best, i, timeouts = [], None, start, 0
+    i = max((k for k, b in enumerate(rungs) if b <= batch), default=0)
+    sweep = []
     while i >= 0:
         r = run(rungs[i])
         sweep.append({"batch": rungs[i], "unique_per_s": r.get("unique_per_s"),
                       "error": _one_line(r.get("error"))})
         if "error" not in r:
-            best = r
-            break
-        # A TIMEOUT is not a memory refusal, and walking the whole ladder on one is pure waste:
-        # measured, HTS's three tseitin timeouts stepped 1M -> 1,000 at the full 300 s cap each,
-        # ~40 min per cell to record the error it already had. Their runtime does grow with the
-        # batch, so give it two rungs to come good and then stop.
+            return r, sweep
         if "timeout" in str(r.get("error", "")).lower():
-            timeouts += 1
-            if timeouts > 2:
-                log(f"    [batch] {rungs[i]:,} timed out again — recording the timeout")
-                break
+            log(f"    [batch] {rungs[i]:,} timed out — recording the timeout")
+            return r, sweep
         log(f"    [batch] {rungs[i]:,} refused ({_one_line(r.get('error'))[:60]}) — stepping down")
         i -= 1
-    if best is None:
-        return (sweep[-1] if sweep else {"error": "empty ladder"}), sweep
-    tried = {x["batch"] for x in sweep}
-    if i + 1 < len(rungs) and rungs[i + 1] not in tried:   # never re-run a rung that refused
-        r = run(rungs[i + 1])
-        sweep.append({"batch": rungs[i + 1], "unique_per_s": r.get("unique_per_s"),
-                      "error": _one_line(r.get("error"))})
-        if "error" in r:
-            log(f"    [batch] {rungs[i + 1]:,} refused — {rungs[i]:,} stands")
-        elif (r.get("unique_per_s") or 0) > (best.get("unique_per_s") or 0):
-            log(f"    [batch] {rungs[i + 1]:,} beats the granted {rungs[i]:,} — taking it")
-            best = r
-        else:
-            log(f"    [batch] {rungs[i + 1]:,} ran but is SLOWER (spilling) — {rungs[i]:,} stands")
-    return best, sweep
+    return (sweep[-1] if sweep else {"error": "empty ladder"}), sweep
+
+
+# ---------------------------------------------------------------- the CMSGen arm of a rival row
+
+def cmsgen_arm(cnf_path, cmsgen_bin, n, timeout, scratch, seed=None):
+    """CMSGen on the VERY CNF the GPAP arm sampled — the third tool of every rival row.
+
+    The converged protocol (docs/findings/RIVAL_FAIRNESS_FINDINGS.md §14) compares three tools
+    on one instance: the rival on its own circuit, GPAP on the `abc:fast` CNF of that circuit
+    and those pins, and CMSGen on that same CNF FILE. It used to be a separate `gpap bench`
+    sweep that pinned the circuits its own way (one output on ISCAS-85, the outputs directly
+    rather than a miter on the unrolls) and never saw a rival's own pins at all, so the CMSGen
+    table and the rival table described two different instance sets.
+
+    Same runner as `gpap bench` (gpap.benchmark.cmsgen_run): the patched binary timed under
+    `--nowrite` (emission-free, like our `collect=False` run) with `--maxtime` (it stops itself
+    and prints an EXACT count — a killed run reports a floored one), one run at the same
+    sampling budget the GPAP arm gets. The keys are the bench driver's own `cms_*` names, so
+    every reader of a bench row — `paper_tables.cms_arm_ran`, `verify_artifact`'s floored-count
+    and emission-mode checks, `check_emission_symmetry` — reads a rival row unchanged. A
+    subprocess failure is recorded as `cms_error` beside a count of 0: a crashed baseline is not
+    a zero (the ledger screens it; `verify_artifact` fails on it).
+    """
+    from gpap.benchmark import cmsgen_run
+    t = cmsgen_run(cnf_path, cmsgen_bin, n, scratch, timeout=timeout, write=False, seed=seed)
+    row = {"cms_mode": t.get("mode"), "cms_patched": t.get("patched"),
+           "cms_sps": t.get("samples_per_s"), "cms_sps_e2e": t.get("samples_per_s_e2e"),
+           "cms_n_samples": t.get("n_samples", 0), "cms_timed_out": t.get("timed_out"),
+           "cms_count_exact": t.get("count_exact"), "cms_budget_stop": t.get("budget_stop"),
+           "cms_wall_s": t.get("wall_s"), "cms_sampling_wall_s": t.get("sampling_wall_s"),
+           "cms_decisions_per_s": t.get("decisions_per_s"),
+           "cms_implications_per_s": t.get("implications_per_s"),
+           "cms_props_per_s": t.get("props_per_s"), "cms_conflicts": t.get("conflicts"),
+           "cms_n_requested": n, "cms_timeout_s": timeout}
+    if t.get("error"):
+        row["cms_error"] = t["error"]
+    return row
+
+
+def host_provenance(device):
+    """`cpu` + `gpu` on every rival row, the bench driver's own dicts.
+
+    A GPAP/CMSGen ratio is not interpretable without the CPU — CMSGen is single-core, and the
+    same instances read 0.41x differently between two hosts on the CPU alone — so the rival
+    rows, which now carry that ratio, record what `gpap bench` records (docs/BENCHMARKING.md)."""
+    from gpap.benchmark import _cpu_info, _gpu_info
+    try:
+        gpu = _gpu_info(device)
+    except Exception:                       # noqa: BLE001 — provenance must never break a sweep
+        gpu = {"name": str(device)}
+    return {"cpu": _cpu_info(), "gpu": gpu}

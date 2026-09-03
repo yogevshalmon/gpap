@@ -15,6 +15,7 @@ This module also owns `sound_verdict` / `merge_sound_check`, the tri-state reade
 `sound_check` key it writes — one definition, beside the writer, imported by every consumer.
 """
 import logging
+import os
 import time
 from enum import Enum
 from typing import NamedTuple
@@ -312,6 +313,46 @@ def sample_file(path, device, **kw):
                           _t_start=t_start, _phases=phases, _wire_map=wire_map, **kw)
 
 
+# ---------------------------------------------------------------- coverage-run host budget
+#
+# The coverage run RECONSTRUCTS every collected row into python objects: `sample()` turns the
+# kept (rows, N) bit matrix into a list of `nv` ints per row, and `_reconstruct` builds a second
+# one to map it back to original variables. MEASURED cost: **72 bytes per (row x variable)** —
+# 36 for each list, a CPython int object plus its slot.
+#
+# So the bound has to be on the PRODUCT. `cov_k_cap` bounded ROWS alone, which is the same thing
+# only while nv is small; it was calibrated on formulas of a few thousand variables and silently
+# became a 61 GB request on a large one. That is what killed the Recurrent table arm: its
+# fairness rule hands GPAP the same .bench the rival unrolls itself, so our side must use the
+# TSEITIN encoding (b14: 413,451 vars, against 41,938 through abc:fast), and 2048 rows x 413,451
+# vars x 72 B is 61 GB. The process was OOM-killed with no exception to catch and no row written,
+# and every instance after it in the sweep went unmeasured. Bound what actually costs.
+COV_BYTES_PER_CELL = 72
+
+# Peak host bytes the collection may take. Deliberately small: this is a DIAGNOSTIC readout
+# (`distinct_frac`), not the measurement, and it has to fit beside the timed run on the smallest
+# box a campaign uses (a ~13 GB Colab VM with torch already resident).
+COV_HOST_BUDGET = int(os.environ.get("GPAP_COV_HOST_BUDGET", 1 << 31))       # 2 GiB
+
+
+def cov_batch(nv: int, cov_k_cap: int = 2048, cov_chunks: int = 4,
+              budget: int | None = None) -> int:
+    """Rows the coverage run may collect PER CHUNK, from the host-RAM budget and `nv`.
+
+    Divided by `cov_chunks` because the kept rows ACCUMULATE: the coverage run asks the core for
+    an unlimited keep_cap and reconstructs every bucket at the end, so the peak is over the whole
+    run, not one chunk. Budgeting a single chunk left b14 at 5.2 GiB against a 2 GiB budget —
+    right mechanism, wrong multiplier.
+
+    Never 0: one row per chunk is always attempted, so a formula too large for the budget reports
+    a coverage sample of a few rows rather than silently reporting none. `unique_est_status`
+    already distinguishes "no coverage sample" from "not requested", and `n_collected` says how
+    many rows the estimate rests on."""
+    budget = COV_HOST_BUDGET if budget is None else budget
+    per_row = max(1, int(nv) * COV_BYTES_PER_CELL)
+    return max(1, min(int(cov_k_cap), int(budget) // (per_row * max(1, int(cov_chunks)))))
+
+
 def sample_clauses(nv, clauses, support, device, *, simplify=True, els=True, n_time=50_000,
                    n_cov=0, out_cap=0, b=8, k_cap="auto",
                    max_chunks=None, time_limit=60.0, cov_chunks=4,
@@ -336,8 +377,10 @@ def sample_clauses(nv, clauses, support, device, *, simplify=True, els=True, n_t
     one-entry portfolio, to pin the algorithm. The dominant config is REUSED for the coverage run.
 
     The coverage run COLLECTS models to host RAM (one chunk = K models × N ints reconstructed),
-    so its K is capped to `cov_k_cap` independently of the (full-K) timing run — otherwise a
-    large auto-K on a low-RAM host (12 GB Colab) OOM-kills the session collecting a full chunk.
+    so its K is capped independently of the (full-K) timing run — otherwise a large auto-K on a
+    low-RAM host (12 GB Colab) OOM-kills the session collecting a full chunk. The cap is
+    `min(cov_k_cap, cov_batch(nv))`: `cov_k_cap` is a row ceiling, `cov_batch` the actual
+    memory bound (rows × nv × 72 B), and on a large formula the second one is what binds.
 
     `k_cap="auto"` (default) uses the library's batch cap (engine.default_k_cap), which is the
     SAME number on every GPU so two machines' rows are comparable without pinning an override;
@@ -619,7 +662,9 @@ def sample_clauses(nv, clauses, support, device, *, simplify=True, els=True, n_t
         # is a hard requirement, not a preference — pin_batch guarantees it, whereas the old
         # `smp.K = min(smp.K, cov_k_cap)` left the fused boost on whenever K was already <=
         # cov_k_cap (the same hole that made one test collect a 242k-row chunk at 28 GB).
-        smp.pin_batch(min(smp.K, cov_k_cap))
+        # The bound is `cov_batch`, over rows x nv rather than rows (see above): a row costs
+        # 72 B per ORIGINAL variable, so a row count alone is not a memory bound.
+        smp.pin_batch(min(smp.K, cov_batch(nv, cov_k_cap, cov_chunks)))
     # Coverage / UNIQUE-solution run: collect models with the winning config and count distinct
     # support-projections. Deliberately SEPARATE from the timed run above (which is collect=False), so
     # the model reconstruction / dedup cost is NOT charged to samples/s — this is a correctness/quality

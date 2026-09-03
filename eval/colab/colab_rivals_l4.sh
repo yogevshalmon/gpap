@@ -8,7 +8,11 @@
 # it cannot finish. Everything else — instances, seeds, steps, timeouts, T — is IDENTICAL to
 # run_full_eval.sh's rivals stage, so rows are directly comparable to the 4080 run.
 #
-# CMSGen is deliberately absent: the CPU baseline belongs on the HPC cluster, not on a Colab vCPU.
+# THE CMSGEN ARM RIDES ON EVERY ROW (converged protocol, 2026-09-03): the patched binary on the
+# very CNF the GPAP arm sampled, same n and budget — three tools on one constraint per row, and
+# Table 1 is read off these files. So this driver IS the campaign; there is no separate CMSGen
+# sweep to run. The host CPU is recorded per row (a CMSGen ratio is meaningless without it).
+# CMSGEN=none runs the rival comparison alone (no Table 1 from those rows).
 #
 #   DEADLINE_H=4.3 bash eval/colab/colab_rivals_l4.sh
 set -uo pipefail
@@ -27,8 +31,17 @@ LOGS="$OUT/logs"
 mkdir -p "$OUT" "$LOGS"
 
 # --- identical to run_full_eval.sh's rivals stage --------------------------------------------
-SEQ_INSTS="${SEQ_INSTS:-b03 b04 b10 b11 b12 b13 s386 s832 s1196}"
-COMB_INSTS="${COMB_INSTS:-c432 c499 c880 c1355 c1908 c2670 c3540 c5315 c6288 c7552}"
+# INSTANCE SETS: Recurrent-CircuitSAT on EVERY b*/s* sequential circuit (their pins where their
+# table names the instance, our rare pin everywhere; what it cannot process is an error row,
+# omitted from the table with the count stated); DEMOTIC on its paper's 11 ISCAS-85 (`paper` ->
+# eval/rivals/rival_common.py::PAPER_INSTANCES, the dict paper_tables.py scores from). b17/b19/b22
+# are fetched, not committed: pull them first, or a fresh VM reports them as skipped. `itc99`
+# pulls only those ~25 MB and is a no-op when they are already installed.
+bash "$REPO_ROOT/scripts/fetch_benchmarks.sh" itc99 2>&1 | sed 's/^/[bench] /' || \
+    echo "[warn] could not fetch ITC'99 b17-b22 — the Recurrent stage will report them as skipped"
+SEQ_INSTS="${SEQ_INSTS:-$(cd "$REPO_ROOT/benchmarks/circuits/bench/seq" 2>/dev/null \
+    && ls *.bench 2>/dev/null | sed 's/\.bench$//' | tr '\n' ' ')}"
+COMB_INSTS="${COMB_INSTS:-paper}"
 # 3 seeds, NOT run_full_eval.sh's current RIVAL_SEEDS=5: the 4080 rows this run is compared
 # against were produced at median-of-3, and matching the protocol exactly is worth more than the
 # extra circuit-variant axis it costs (which is why Recurrent gets `raw` only below).
@@ -53,11 +66,40 @@ T="${T:-25}"
 # the recorded protocol (DEMOTIC raw+abc, Recurrent raw-only for cost). Override to converge a
 # campaign on one encoding — e.g. VARIANTS_DEM=abc VARIANTS_RCS=abc HTS_ENCS=abc for an
 # abc:fast-only sweep (2026-09-02: no tseitin arm anywhere in the tables).
-VARIANTS_DEM="${VARIANTS_DEM:-raw abc}"
+# ONE circuit variant per campaign: `paper_tables` pools every variant in a stage into one
+# geomean, so two variants count every instance twice. `raw` = both sides get the committed
+# .bench untouched (RIVAL_FAIRNESS_FINDINGS.md §13).
+VARIANTS_DEM="${VARIANTS_DEM:-raw}"
 VARIANTS_RCS="${VARIANTS_RCS:-raw}"
 HTS_ENCS="${HTS_ENCS:-tseitin abc}"
-STAGES="${STAGES:-demotic-native demotic-miter hts recurrent-rare recurrent-table steps-calib}"
+# HTS dropped 2026-09-02: its paper evaluates no circuit at all (see run_full_eval.sh).
+# `demotic-miter` is NOT in the default set: it is measured-but-unpublished (see
+# paper_tables.RIVALS — its instances are in neither paper), and it is the most expensive
+# DEMOTIC arm at ~50 min. Add it back explicitly to refresh the archived rows.
+# `steps-calib` (the rival at num_steps 1 vs 10) is a calibration, not a measurement — the
+# campaign runs each rival at the ONE setting its own script names (rival_common.RIVAL_STEPS);
+# add it to STAGES to re-derive the tie-break on this card.
+STAGES="${STAGES:-demotic-native demotic-comb-rare recurrent-rare recurrent-table}"
 want() { case " $STAGES " in *" $1 "*) return 0 ;; *) echo "[skip] $1 (not in STAGES)"; return 1 ;; esac; }
+
+# The CMSGen arm: a HARD preflight, like colab_cmsgen_circuits_abc_l4.sh — a stage resumed
+# without the binary would append armless rows to an armed file (absent is not zero, and
+# verify_artifact fails the mix). CMSGEN=none opts out explicitly.
+CMSGEN="${CMSGEN:-$REPO_ROOT/.gpap/bin/cmsgen}"
+CMS_ARGS=()
+if [ "$CMSGEN" != "none" ]; then
+    if [ ! -x "$CMSGEN" ]; then
+        echo "[FATAL] no cmsgen at $CMSGEN — every row of this campaign carries the CMSGen arm." >&2
+        echo "        Build it (scripts/build_cmsgen.sh) or set CMSGEN=none for a rivals-only run." >&2
+        exit 1
+    fi
+    if ! "$CMSGEN" --help 2>&1 | grep -q -- --nowrite || ! "$CMSGEN" --help 2>&1 | grep -q -- --maxtime; then
+        echo "[FATAL] cmsgen lacks scripts/cmsgen_gpap_eval.patch (--nowrite/--maxtime): it would be" >&2
+        echo "        timed WITH sample emission and a killed run would report a FLOORED count." >&2
+        exit 1
+    fi
+    CMS_ARGS=(--cmsgen "$CMSGEN")
+fi
 
 DEADLINE_H="${DEADLINE_H:-24}"
 START=$(date +%s)
@@ -91,8 +133,20 @@ save_cache() { tar czf "$CACHE_TGZ.tmp" -C "$OUT" .gpap_cache 2>/dev/null \
 if want demotic-native && have 25 "demotic-native"; then
     banner "DEMOTIC native (their ISCAS-85 pins, raw + abc)"
     $PY eval/rivals/rivals_demotic.py --mode native $COMB_INSTS --seeds $RSEEDS --steps "$STEPS" \
-        --timeout "$TIMEOUT" --circuit-variants $VARIANTS_DEM \
+        --timeout "$TIMEOUT" --circuit-variants $VARIANTS_DEM ${CMS_ARGS[@]+"${CMS_ARGS[@]}"} \
         --resume --output "$OUT/rivals_demotic_native.json" 2>&1 | tee -a "$LOGS/rivals.log"
+    save_cache
+fi
+
+# THE CONTROLLED CONTRAST: their own ISCAS-85 circuits under OUR rare pin. Paired with the
+# native arm above, the circuit is held fixed and only the TASK changes.
+if want demotic-comb-rare && have 25 "demotic-comb-rare"; then
+    banner "DEMOTIC (their ISCAS-85 circuits, OUR rare pin)"
+    $PY eval/rivals/rivals_demotic.py --mode miter $COMB_INSTS -T 1 --target rare \
+        --bench-dir benchmarks/circuits/bench/comb \
+        --seeds $RSEEDS --steps "$STEPS" --timeout "$TIMEOUT" --circuit-variants $VARIANTS_DEM \
+        ${CMS_ARGS[@]+"${CMS_ARGS[@]}"} \
+        --resume --output "$OUT/rivals_demotic_comb_rare.json" 2>&1 | tee -a "$LOGS/rivals.log"
     save_cache
 fi
 
@@ -100,6 +154,7 @@ if want demotic-miter && have 50 "demotic-miter"; then
     banner "DEMOTIC miter (our rare fixed-T instances, raw + abc)"
     $PY eval/rivals/rivals_demotic.py --mode miter $SEQ_INSTS -T "$T" --target rare \
         --seeds $RSEEDS --steps "$STEPS" --timeout "$TIMEOUT" --circuit-variants $VARIANTS_DEM \
+        ${CMS_ARGS[@]+"${CMS_ARGS[@]}"} \
         --resume --output "$OUT/rivals_demotic_miter.json" 2>&1 | tee -a "$LOGS/rivals.log"
     save_cache
 fi
@@ -134,7 +189,7 @@ fi
 if want recurrent-rare && have 60 "recurrent-rare"; then
     banner "Recurrent-CircuitSAT — OUR rare pins (raw)"
     $PY eval/rivals/rivals_recurrent.py $SEQ_INSTS -T "$T" --rare --seeds $RSEEDS --steps "$STEPS" \
-        --timeout "$TIMEOUT" --circuit-variants $VARIANTS_RCS \
+        --timeout "$TIMEOUT" --circuit-variants $VARIANTS_RCS ${CMS_ARGS[@]+"${CMS_ARGS[@]}"} \
         --resume --output "$OUT/rivals_recurrent_rare.json" 2>&1 | tee -a "$LOGS/rivals.log"
     save_cache
 fi
@@ -142,7 +197,7 @@ fi
 if want recurrent-table && have 30 "recurrent-table"; then
     banner "Recurrent-CircuitSAT — THEIR target table (raw)"
     $PY eval/rivals/rivals_recurrent.py $SEQ_INSTS -T "$T" --seeds $RSEEDS --steps "$STEPS" \
-        --timeout "$TIMEOUT" --circuit-variants $VARIANTS_RCS \
+        --timeout "$TIMEOUT" --circuit-variants $VARIANTS_RCS ${CMS_ARGS[@]+"${CMS_ARGS[@]}"} \
         --resume --output "$OUT/rivals_recurrent_table.json" 2>&1 | tee -a "$LOGS/rivals.log"
     save_cache
 fi

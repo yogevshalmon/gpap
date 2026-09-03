@@ -11,23 +11,38 @@
 #   eval/run_full_eval.sh seq
 #   nohup eval/run_full_eval.sh all > full_eval.log 2>&1 &   ;  tail -f full_eval.log
 #
+# THE PAPER'S EXPERIMENT (converged 2026-09-03, docs/EVAL_RUNBOOK.md) is ONE stage, `campaign`:
+#   1. the benchmarks are the GPU rivals' own published sets — DEMOTIC's 11 ISCAS-85, and every
+#      ITC'99 b* / ISCAS-89 s* sequential circuit Recurrent-CircuitSAT evaluates (all we can
+#      process; its paper's 16 are scored beside the whole set);
+#   2. each rival runs on its own set, under the pins its table names AND under our rare pin,
+#      one configuration each (its own script's num_steps, a granted batch, a 300 s budget);
+#   3. every one of those cells is then run by GPAP (abc:fast CNF of the same circuit + pins)
+#      and by CMSGen on that very CNF file — three tools, one constraint, one row.
+#   What a tool cannot process is an error row, omitted from the table with the count stated.
+#
 # Stages
 #   check    environment/readiness table (no runs)
 #   smoke    every stage, 1-2 instances each, tiny budgets (~minutes) — "does this machine run
 #            the whole pipeline?" Run it FIRST on a new box; the numbers are meaningless.
-#   seq      ITC'99 b* + ISCAS-89 s* sequential unrolls  — the flagship CircuitSAT family
-#   comb     ISCAS-85 c* combinational (T=1, single pinned output = the DEMOTIC-style setup)
+#   campaign THE PAPER RUN: `rivals` then `plots`
+#   rivals   DEMOTIC / Recurrent-CircuitSAT head-to-heads on the same GPU, each on its own
+#            paper's instances, ONE run per instance, GPAP + CMSGen arms on the same CNF
+#            (HTS is off: no circuit in its paper)
+#   plots    figures + summary tables from whatever JSONs exist
+#   --- supplementary family sweeps (`gpap bench` vs CMSGen on instances pinned OUR way; not the
+#       paper's instance set, printed by paper_tables only when present) ---
+#   seq      ITC'99 b* + ISCAS-89 s* sequential unrolls
+#   comb     ISCAS-85 c* combinational (T=1, single pinned output)
 #   sk       benchmarks/sampling/*.cnf — projected CNF sampling vs CMSGen (no encoder axis)
 #   epfl     EPFL combinational AIGs (T=1, all outputs pinned)
 #   hwmcc    HWMCC'17 single-property AIGs (T=CYCLES, the witness-sampling instances)
-#   rivals   DEMOTIC / Recurrent-CircuitSAT / HTS head-to-heads on the same GPU
-#   plots    figures + summary tables from whatever JSONs exist
 #   all      every stage above, in order
 #
-# Every circuit stage runs the full matrix: encoders x targets x unroll depths, i.e.
-#   ENCODERS="tseitin abc:fast"   TARGETS="rare random"   CYCLES="25 50"
-# (one `gpap bench` invocation per target x depth; both encoders run inside it, back to back, so
-# the A/B pair is measured in the same process on the same GPU state.) Override any of them:
+# The supplementary circuit stages run the matrix: encoders x targets x unroll depths, i.e.
+#   ENCODERS="abc:fast"   TARGETS="rare random"   CYCLES="25 50"
+# (one `gpap bench` invocation per target x depth; every listed encoder runs inside it, back to
+# back, so ENCODERS="tseitin abc:fast" gives an in-process A/B pair.) Override any of them:
 #   CYCLES=25 TARGETS=rare eval/run_full_eval.sh seq
 #   N_TIME=100000 TIME_LIMIT=120 eval/run_full_eval.sh sk
 set -uo pipefail
@@ -50,7 +65,10 @@ OUT="${OUT:-$REPO_ROOT/.experiments/full_eval/$GPU_SLUG}"
 LOGS="$OUT/logs"
 mkdir -p "$OUT" "$LOGS"
 
-ENCODERS="${ENCODERS:-tseitin abc:fast}"
+# abc:fast ONLY (2026-09-03, the campaign decision): the published tables are one encoder, and a
+# Tseitin arm doubles every circuit stage's wall for rows nothing publishes. ENCODERS="tseitin
+# abc:fast" restores the in-process A/B (docs/findings/KERNEL_AB_FINDINGS.md is where that lives).
+ENCODERS="${ENCODERS:-abc:fast}"
 TARGETS="${TARGETS:-rare random}"
 CYCLES="${CYCLES:-25 50}"
 N_TIME="${N_TIME:-50000}"
@@ -175,18 +193,34 @@ stage_hwmcc() {
 }
 
 stage_rivals() {
-    local seq_insts="${RIVAL_SEQ:-b03 b04 b10 b11 b12 b13 s386 s832 s1196}"
-    local comb_insts="${RIVAL_COMB:-c432 c499 c880 c1355 c1908 c2670 c3540 c5315 c6288 c7552}"
-    # ONE seed for the GPAP side here (the bench stages are where multi-seed medians matter).
-    # MEASURED: the rivals stage cost ~10 min/row, of which the rival subprocess was ~2.7 min —
-    # the rest was GPAP re-sampling at 3 seeds. These ratios span 2-5 orders of magnitude, so
-    # seed noise (+-40% worst case, docs/BENCHMARKING.md §3) cannot flip any of them.
-    local rseeds="${RIVAL_SEEDS:-5}"
+    # INSTANCE SETS (user's rule, 2026-09-03): Recurrent-CircuitSAT runs EVERY b*/s* sequential
+    # circuit in benchmarks/circuits/bench/seq — on its own target-table pins where its table
+    # names the instance, and on our rare pin everywhere. What a tool cannot process becomes an
+    # error row and is OMITTED from the table with the count stated. DEMOTIC runs its paper's
+    # 11 ISCAS-85 (`paper` -> eval/rivals/rival_common.py::PAPER_INSTANCES; paper_tables scores
+    # from the same dict). b17/b19/b22 are fetched, not committed: pulled here so a fresh box
+    # sweeps the full set.
+    bash scripts/fetch_benchmarks.sh itc99 2>&1 | sed 's/^/[bench] /' || \
+        echo "[warn] could not fetch ITC'99 b17-b22 — the Recurrent stage will report them as skipped"
+    local rec_seq
+    rec_seq="$(cd benchmarks/circuits/bench/seq && ls *.bench | sed 's/\.bench$//' | tr '\n' ' ')"
+    local seq_insts="${RIVAL_SEQ:-$rec_seq}"
+    local comb_insts="${RIVAL_COMB:-paper}"
+    # GPAP at median-of-3 seeds (docs/BENCHMARKING.md §3), the same protocol as
+    # eval/colab/colab_rivals_l4.sh: this stage IS the campaign now, and the CMSGen ratios on the
+    # rivals' own pins (rejection-easy, p_acc 0.03-0.5) sit in the 1-10x band where +-40% seed
+    # noise on a low-success instance could move a cell. The rival runs once (its own rule).
+    local rseeds="${RIVAL_SEEDS:-5 6 7}"
     local T="${RIVAL_T:-25}"
-    # Circuit VARIANTS: the rivals consume .bench and unroll it themselves, so when GPAP is
-    # measured on an ABC-optimized circuit they are handed the same optimized circuit (written
-    # back as a primitive-gate .bench and equivalence-checked) — never raw-vs-optimized.
-    local cvars="${RIVAL_VARIANTS:-raw abc}"
+    # Circuit VARIANT: `raw` only — both sides get the committed .bench, untouched; the rival
+    # unrolls it itself and GPAP encodes it abc:fast (RIVAL_FAIRNESS_FINDINGS.md §13). `abc`
+    # (both sides handed an ABC-optimized sequential circuit, equivalence-checked) is still
+    # available, but `paper_tables` pools every variant in one geomean, so run ONE per campaign.
+    local cvars="${RIVAL_VARIANTS:-raw}"
+    # THE CMSGEN ARM rides on every rival row (`--cmsgen`: the patched binary on the very CNF
+    # the GPAP arm sampled, same n / budget). Without a binary the rows carry no CMSGen columns
+    # and paper_tables prints no Table 1 — a warning was printed above; it is not a campaign.
+    [ -x "$CMSGEN" ] || echo "[warn] rivals stage without CMSGen: no Table 1 from these rows" >&2
     # 'auto' = each rival at the num_steps its own artifacts specify; see
     # eval/rivals/rival_common.py::RIVAL_STEPS for the values and the measurement behind them.
     local rsteps="${RIVAL_STEPS:-auto}"
@@ -198,12 +232,30 @@ stage_rivals() {
     if [ -d "$GPAP_HOME/src/Demotic/src" ]; then
         banner "rivals: DEMOTIC (their ISCAS-85 pins)"
         "$PY" eval/rivals/rivals_demotic.py --mode native $comb_insts --seeds $rseeds --steps "$rsteps" --timeout "$rto" \
-            --circuit-variants $cvars \
-            --output "$OUT/rivals_demotic_native.json" 2>&1 | tee -a "$LOGS/rivals.log"
-        banner "rivals: DEMOTIC (our rare fixed-T instances, as miters)"
-        "$PY" eval/rivals/rivals_demotic.py --mode miter $seq_insts -T "$T" --target rare \
+            --circuit-variants $cvars ${CMS_ARGS[@]+"${CMS_ARGS[@]}"} \
+            --resume --output "$OUT/rivals_demotic_native.json" 2>&1 | tee -a "$LOGS/rivals.log"
+        # THE CONTROLLED CONTRAST: their own ISCAS-85 circuits, our rare pin. The native arm
+        # above pins the 1-5 bits their table names (rejection-easy, p_acc 0.03-0.5); this one
+        # pins ALL outputs to a rare reachable pattern on the SAME circuits, so the only thing
+        # that changes between the two rows is the TASK. Without it the easy-pin and rare-pin
+        # numbers came from different circuits (ISCAS-85 vs unrolled ITC'99) and the comparison
+        # confounded task with instance.
+        banner "rivals: DEMOTIC (their ISCAS-85 circuits, OUR rare pin)"
+        "$PY" eval/rivals/rivals_demotic.py --mode miter $comb_insts -T 1 --target rare \
+            --bench-dir benchmarks/circuits/bench/comb \
             --seeds $rseeds --steps "$rsteps" --timeout "$rto" --circuit-variants $cvars \
-            --output "$OUT/rivals_demotic_miter.json" 2>&1 | tee -a "$LOGS/rivals.log"
+            ${CMS_ARGS[@]+"${CMS_ARGS[@]}"} \
+            --resume --output "$OUT/rivals_demotic_comb_rare.json" 2>&1 | tee -a "$LOGS/rivals.log"
+        # `demotic-miter` (DEMOTIC on OUR unrolled b*/s* instances as single-output miters) is
+        # measured-but-unpublished (paper_tables.RIVALS: its instances are in neither paper) and
+        # the most expensive DEMOTIC arm; RIVAL_DEMOTIC_MITER=1 runs it.
+        if [ "${RIVAL_DEMOTIC_MITER:-0}" = "1" ]; then
+            banner "rivals: DEMOTIC (our rare fixed-T instances, as miters)"
+            "$PY" eval/rivals/rivals_demotic.py --mode miter $seq_insts -T "$T" --target rare \
+                --seeds $rseeds --steps "$rsteps" --timeout "$rto" --circuit-variants $cvars \
+                ${CMS_ARGS[@]+"${CMS_ARGS[@]}"} \
+                --resume --output "$OUT/rivals_demotic_miter.json" 2>&1 | tee -a "$LOGS/rivals.log"
+        fi
     else
         echo "[skip] DEMOTIC not installed (eval/rivals/rivals_setup.sh)"
     fi
@@ -211,16 +263,22 @@ stage_rivals() {
         banner "rivals: Recurrent-CircuitSAT (their target table, then our rare pins)"
         "$PY" eval/rivals/rivals_recurrent.py $seq_insts -T "$T" --seeds $rseeds --steps "$rsteps" \
             --timeout "$rto" \
-            --circuit-variants $cvars \
-            --output "$OUT/rivals_recurrent_table.json" 2>&1 | tee -a "$LOGS/rivals.log"
+            --circuit-variants $cvars ${CMS_ARGS[@]+"${CMS_ARGS[@]}"} \
+            --resume --output "$OUT/rivals_recurrent_table.json" 2>&1 | tee -a "$LOGS/rivals.log"
         "$PY" eval/rivals/rivals_recurrent.py $seq_insts -T "$T" --rare --seeds $rseeds --steps "$rsteps" \
             --timeout "$rto" \
-            --circuit-variants $cvars \
-            --output "$OUT/rivals_recurrent_rare.json" 2>&1 | tee -a "$LOGS/rivals.log"
+            --circuit-variants $cvars ${CMS_ARGS[@]+"${CMS_ARGS[@]}"} \
+            --resume --output "$OUT/rivals_recurrent_rare.json" 2>&1 | tee -a "$LOGS/rivals.log"
     else
         echo "[skip] Recurrent-CircuitSAT not installed (eval/rivals/rivals_setup.sh)"
     fi
-    if [ -d "$GPAP_HOME/src/High-Throughput-SAT-Sampler/src" ]; then
+    # HTS is OFF by default since 2026-09-02 (RIVAL_HTS=1 re-enables it; nothing else changed).
+    # Its paper (arXiv 2502.08673) evaluates 60 instances and NONE of them is a circuit — random
+    # q-family, OR-configuration, prod-* and s15850a_* CNFs — so in a circuits-only evaluation it
+    # is the one rival that can never be measured on its own published ground, and every HTS cell
+    # would be our task on instances we chose. Its code is untouched and its stage still runs on
+    # request; see docs/EVAL_RUNBOOK.md §6.
+    if [ "${RIVAL_HTS:-0}" = "1" ] && [ -d "$GPAP_HOME/src/High-Throughput-SAT-Sampler/src" ]; then
         # HTS eats CNF, so build exactly the instances it should see (the bench stages delete
         # their intermediates — a full circuit matrix is tens of GB).
         local hts_dir="$OUT/hts_cnf"
@@ -260,6 +318,7 @@ case "$STAGE" in
     sk)     stage_sk ;;
     epfl)   stage_epfl ;;
     hwmcc)  stage_hwmcc ;;
+    campaign) stage_rivals; stage_plots ;;
     rivals) stage_rivals ;;
     plots)  stage_plots ;;
     all)    stage_check; stage_seq; stage_comb; stage_sk; stage_epfl; stage_hwmcc
