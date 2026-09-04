@@ -360,6 +360,42 @@ def test_rival_vacuous_pin_is_screened_like_table_1(tmp_path):
             + v["vacuous"]) == v["cells"]
 
 
+def test_rival_vacuous_pin_is_screened_before_the_rival_error_bucket(tmp_path):
+    """`b19` at T=25 is vacuous (measured p_accept 1.0) AND Recurrent-CircuitSAT fails to
+    initialize on it. Screens come before buckets in Table 2 exactly as in Table 1: with the
+    error bucket first, Table 1 counted b19 as vacuous while Table 2 booked the same row as a
+    rival failure — one stage, two ledgers (caught on the 2026-09-03 L4 campaign)."""
+    from eval.artifact.paper_tables import rival_cms_family
+    rows = [rrow("s386", p_acc=0.05),
+            rrow("b19", p_acc=1.0, rcs={"error": "did not initialize: a 1-step start_point probe"})]
+    (tmp_path / "rivals_recurrent_rare.json").write_text(json.dumps(rows))
+    t2 = rival_family(str(tmp_path), "recurrent_rare", "rcs")
+    t1 = rival_cms_family(str(tmp_path), "recurrent_rare", "rcs")
+    assert t2["vacuous"] == 1 and t2["errors"] == 0, \
+        "a vacuous instance was booked as a rival failure"
+    assert t1["vac"] == 1 and t1["vac_names"] == ["b19"]
+    assert t2["vacuous"] == t1["vac"], "Table 1 and Table 2 disagree about the same stage"
+    assert (t2["n"] + t2["both0"] + t2["nomeas"] + t2["errors"] + t2["free"] + t2["misaligned"]
+            + t2["vacuous"]) == t2["cells"]
+
+
+def test_rival_gpap_that_produced_nothing_is_a_zero_not_unmeasured(tmp_path):
+    """`b01` under Recurrent's own target at T=25 (p_accept < 7e-8): GPAP delivered 0 models in
+    3 x 60 s, so no kept row and no distinct fraction — `unique_est_status` "no-sample-rows".
+    That is a GPAP ZERO (the rival's depth-pooled count found 30), not "unmeasured": the
+    unmeasured bucket is for a run that DID deliver models and could not estimate its distinct
+    fraction, which is what its caveat says. Caught on the 2026-09-03 L4 campaign."""
+    rows = [rrow("s386", p_acc=0.05), rrow("b01", p_acc=0.0, p_accept_lt=7e-8, models=0)]
+    rows[1]["gpap"]["unique_est_status"] = "no-sample-rows"
+    rows[1]["rcs"] = {"unique_per_s": 3.66, "unique": 30, "unique_at_T": 0, "num_inputs": 40}
+    (tmp_path / "rivals_recurrent_table.json").write_text(json.dumps(rows))
+    v = rival_family(str(tmp_path), "recurrent_table", "rcs")
+    assert v["nomeas"] == 0 and v["gpap0"] == 1, "a GPAP zero was booked as 'unmeasured'"
+    # `n` counts the geomean's cells plus the two zero columns, as in Table 1
+    assert (v["n"] + v["both0"] + v["nomeas"] + v["errors"] + v["free"] + v["misaligned"]
+            + v["vacuous"]) == v["cells"]
+
+
 def test_rival_scatter_only_plots_cells_the_table_scores(tmp_path):
     """The rival unique/s scatter classifies cells through `rival_cells`, imported — so a cell
     Table 2 screens out (an unmeasured unique/s estimate, a failed rival run) must not become a
@@ -630,40 +666,59 @@ def test_batch_never_returns_something_that_cannot_run():
     assert fit_batch(10 ** 12, "recurrent", budget_bytes=1 << 20) == BATCH_LADDER[0]
 
 
-def test_run_at_batch_steps_down_when_the_card_refuses_and_records_the_rungs():
-    """'device not ready' reproduces at a fixed size on some models yet passes one rung lower, and
-    the measured VRAM factor is an average — so the driver, not our model, has the last word."""
-    from eval.rivals.rival_common import run_at_batch
-
-    def run(b):
-        return {"error": "CUDA driver error: device not ready"} if b > 10_000 \
-            else {"unique_per_s": float(b)}
-
-    best, sweep = run_at_batch(run, 300_000, log=lambda *_: None)
-    assert "error" not in best and best["unique_per_s"] == 10_000
-    assert any(s.get("error") for s in sweep), "the refusals belong in the recorded sweep"
-    # down to the rung that runs, one refusal at a time
-    assert [s["batch"] for s in sweep] == [300_000, 100_000, 30_000, 10_000]
-
-
-def test_run_at_batch_is_one_measurement_per_instance():
-    """Until 2026-09-03 a successful run was followed by ONE probe a rung up, kept if faster
-    (measured: DEMOTIC's peak VRAM per gate-row falls 23.0 -> 11.6 B from c432 to c3540, so a
-    static grant under-charges one end). That is a best-of-two over the rival's batch — the
-    same trap the paper forbids for our own encoder (RIVAL_FAIRNESS §8) — and it is gone: the
-    granted rung is the measurement, and a timeout there is the recorded result. The full
-    contract (timeouts, refusals) is pinned in tests/test_rival_targets.py."""
+def test_the_rival_is_granted_the_largest_rung_that_runs_not_the_modelled_one():
+    """THE grant rule (2026-09-04). Our VRAM model was measured at num_steps=10 and we run
+    num_steps=1, so it predicts LOW — and a gradient sampler's unique/s is near-proportional to
+    its batch, so predicting low takes the rival's score away. Measured on the L4 the day before
+    the 2026-09-03 campaign: the modelled rung under-grants c880 1.53x, c2670 2.12x, c3540 1.85x,
+    c7552 3.87x. That campaign shipped exactly that under-grant. The walk now starts at the TOP
+    of the ladder, and the model's opinion decides nothing."""
     from eval.rivals.rival_common import run_at_batch
     calls = []
 
     def run(b):
         calls.append(b)
-        return {"unique_per_s": float(b)}                # bigger WOULD be better here
+        return {"error": "CUDA out of memory"} if b > 100_000 else {"unique_per_s": float(b)}
+
+    best, sweep = run_at_batch(run, 10_000, log=lambda *_: None)      # model says 10k
+    assert best["unique_per_s"] == 100_000, "granted the model's rung instead of the largest"
+    assert calls == [3_000_000, 1_000_000, 300_000, 100_000]
+    assert [x["batch"] for x in sweep] == calls, "every rung tried belongs in the row"
+
+
+def test_run_at_batch_is_one_measurement_per_instance():
+    """Rungs are rejected on FEASIBILITY — OOM, driver refusal, or not finishing inside the wall
+    budget — never on throughput, and exactly one rung is ever measured. That is what separates
+    this from the one-rung-up probe removed on 2026-09-03, which kept the bigger rung when it
+    also ran FASTER: a best-of-two over the rival's batch."""
+    from eval.rivals.rival_common import run_at_batch
+    calls = []
+
+    def run(b):
+        calls.append(b)
+        return {"unique_per_s": float(b)}                # every rung runs; the top one wins
 
     best, sweep = run_at_batch(run, 100_000, log=lambda *_: None)
-    assert best["unique_per_s"] == 100_000 and calls == [100_000], \
+    assert best["unique_per_s"] == 3_000_000 and calls == [3_000_000], \
         f"the rival was measured more than once: {calls}"
-    assert [x["batch"] for x in sweep] == [100_000]
+    assert [x["batch"] for x in sweep] == [3_000_000]
+
+
+def test_the_first_run_of_a_process_is_discarded():
+    """The first GPU run of a session is ~3.3x slow (CUDA context, autotuning, clocks), and
+    whichever instance goes first eats all of it: `c1355` was published at 0.25x of its warm rate
+    on 2026-09-03 for exactly this reason. One discarded run per (tool, process) — per PROCESS,
+    because the supervisor resumes in a fresh interpreter after every VM reclaim."""
+    import eval.rivals.rival_common as rc
+    rc._WARMED.discard("toolX")
+    calls = []
+    rc.run_at_batch(lambda b: (calls.append(b), {"unique_per_s": 1.0})[1],
+                    1_000, log=lambda *_: None, tool="toolX")
+    assert calls[0] == 10_000, "no warmup run fired before the measurement"
+    n_first = len(calls)
+    rc.run_at_batch(lambda b: (calls.append(b), {"unique_per_s": 1.0})[1],
+                    1_000, log=lambda *_: None, tool="toolX")
+    assert len(calls) == n_first + 1, "the warmup fired twice in one process"
 
 
 # ------------------------------------------------- mirroring: results only exist once local
@@ -703,10 +758,12 @@ def test_mirror_rejects_a_download_caught_mid_write(tmp_path):
     assert not _intact(str(tmp_path / "half.tgz"))
 
 
-def test_a_timeout_does_not_walk_the_whole_batch_ladder():
-    """A timeout is not a memory refusal. Measured on the L4: HTS's three tseitin cells stepped
-    1M -> 1,000 at the full 300 s cap on every rung, ~40 min per cell to record an error it had
-    after the first run. Their runtime does grow with the batch, so allow two rungs, not eight."""
+def test_a_timeout_steps_down_but_the_probe_is_bounded():
+    """A rung the rival cannot FINISH with was not granted to it, so a timeout steps down like an
+    OOM — recording it as the rival's result is how a granted-too-large cell reads as a rival
+    failure. But the walk must stay bounded: measured on the L4, HTS's three tseitin cells
+    stepped 1M -> 1,000 at the full 300 s cap on every rung, ~40 min per cell. Past
+    `probe_budget_s` the walk jumps straight to the modelled rung and says so."""
     from eval.rivals.rival_common import run_at_batch
     calls = []
 
@@ -714,9 +771,12 @@ def test_a_timeout_does_not_walk_the_whole_batch_ladder():
         calls.append(b)
         return {"error": "timeout 300s"}
 
-    best, sweep = run_at_batch(run, 3_000_000, log=lambda *_: None)
+    best, sweep = run_at_batch(run, 30_000, log=lambda *_: None, probe_budget_s=0.0)
     assert "error" in best
-    assert len(calls) <= 3, f"walked the ladder on a timeout: {calls}"
+    assert calls[0] == 3_000_000, "did not start at the top of the ladder"
+    assert 30_000 in calls, "never fell back to the modelled rung"
+    assert any(x.get("probe_truncated") for x in sweep), "truncation not recorded in the row"
+    assert len(calls) < 8, f"walked the whole ladder on timeouts: {calls}"
 
 
 # --------------------------------------------------------------- one home for the screens
@@ -902,3 +962,268 @@ def test_the_generator_survives_a_stage_whose_every_cell_is_degenerate(tmp_path)
     assert "| — |" in rare and "CMSGen=0" not in rare, rare   # no geomean, and not blamed on CMSGen
     assert "no **search at all**" in md or "no search at all" in md
     assert "ISCAS-85" in (tmp_path / "T.tex").read_text()
+
+
+def test_table_2_prints_the_end_to_end_ratio_beside_the_steady_state_one(tmp_path):
+    """The rival-facing ratio is GPAP's STEADY-STATE unique/s over the rival's metric — it
+    excludes construction, mining and warm-up, as the rival's model_runtime excludes its model
+    build. Table 2 prints the e2e ratio (GPAP's whole wall) beside it, computed over the same
+    `ok` cells with the same distinct fraction; a paragraph once claimed the first column
+    'includes construction'. Here every seed's e2e rate is half its steady state."""
+    from eval.artifact.paper_tables import rival_family
+
+    rows = [rrow("s386", sps=1e6), rrow("b12", sps=2e5), rrow("b19", p_acc=1.0)]
+    for r in rows:
+        r["rcs"]["unique_per_s"] = 1e3
+    (tmp_path / "rivals_recurrent_rare.json").write_text(json.dumps(rows))
+    v = rival_family(str(tmp_path), "recurrent_rare", "rcs")
+    assert v["n"] == 2 and v["gm"] == pytest.approx((1e3 * 2e2) ** 0.5)
+    assert v["gm_e2e"] == pytest.approx(v["gm"] / 2)
+    assert v["vacuous"] == 1
+
+
+def test_verify_artifact_fails_a_rival_row_whose_samples_break_the_circuit(tmp_path):
+    riv = tmp_path / "riv"
+    riv.mkdir()
+    r = rrow("s386")
+    r["gpap"]["sim_check"], r["gpap"]["sim_check_bad"], r["gpap"]["sim_check_rows"] = "BAD", 3, 1000
+    (riv / "rivals_recurrent_rare.json").write_text(json.dumps([r, rrow("b12")]))
+    res = _verify("--rivals", str(riv))
+    assert res.returncode != 0 and "simulate check" in res.stdout
+    r["gpap"]["sim_check"], r["gpap"]["sim_check_bad"] = "ok", 0
+    (riv / "rivals_recurrent_rare.json").write_text(json.dumps([r, rrow("b12")]))
+    res = _verify("--rivals", str(riv))
+    assert res.returncode == 0 and "reproduce the pinned outputs" in res.stdout
+
+
+def test_tiny_space_reads_the_solution_count_not_the_input_hypercube():
+    """`c1355` under the rare pin: 41 input bits (2^41 points) yet 0.56 distinct in 1,000 kept
+    rows — ~700 solutions, a space both tools ENUMERATE. The old screen read the hypercube and
+    let it through; the estimate is now the minimum of the hypercube, p_accept x hypercube (or
+    its upper bound when no hit was observed) and the count the repeat rate implies."""
+    from eval.artifact.paper_tables import solution_space_estimate, tiny_space
+    from eval.rivals.rival_common import space_from_distinct
+
+    assert space_from_distinct(1000, 1000) is None, "no repeat seen: the window says nothing"
+    s = space_from_distinct(1000, 560)
+    assert 500 < s < 900
+    big_support = {"support": 41, "p_accept": 0.0, "p_accept_lt": 4.6e-8,
+                   "gpap": {"seeds": [{"unique_rows": 1000, "unique_distinct": 560}]}}
+    assert tiny_space(big_support), "700 solutions on 41 bits is enumerated, not sampled"
+    assert solution_space_estimate(big_support, 41) < 1000
+    no_repeats = {"support": 41, "p_accept": 0.1,
+                  "gpap": {"seeds": [{"unique_rows": 1000, "unique_distinct": 1000}]}}
+    assert not tiny_space(no_repeats)
+    assert tiny_space({"support": 41, "p_accept": 1e-10}), "p x 2^41 = 220 solutions"
+    assert tiny_space({"support": 41, "p_accept": 0.0, "p_accept_lt": 1e-10}), \
+        "the 95% upper bound is the honest estimate when no hit was observed"
+    assert not tiny_space({"support": 41, "p_accept": 0.0, "p_accept_lt": 1e-6})
+    # a bench row carries the repeat rate on the row itself (the coverage pass)
+    assert tiny_space({"support": 41, "n_collected": 2000, "n_distinct": 300})
+    assert not tiny_space({"support": 41}), "no evidence: the hypercube, as before"
+
+
+# ---------------------------------------------- the 2026-09-04 referee pass, screen by screen
+
+def test_the_whole_delivered_set_is_deduplicated_not_a_window():
+    """Both rivals dedup EXACTLY, over their whole output, off their own clock: Recurrent calls
+    `torch.unique(dim=0)` per depth, DEMOTIC once its timer stops. We estimated a distinct
+    fraction from 1,000 rows and applied it to runs delivering up to 1,048,576 models — and the
+    "bias bounded at 7e-4" claim that rested on it bounded the collision rate INSIDE the window,
+    not the run's distinct fraction. `exact_distinct` is the same quantity theirs is."""
+    import numpy as np
+    from eval.rivals.rival_common import exact_distinct
+
+    rows = np.array([[1, 0, 1], [1, 0, 1], [0, 1, 1], [0, 0, 0]], dtype=np.uint8)
+    assert exact_distinct(rows) == 3
+    assert exact_distinct(np.zeros((0, 5), dtype=np.uint8)) == 0
+    wide = np.zeros((1000, 250), dtype=np.uint8)          # packbits path, one distinct row
+    assert exact_distinct(wide) == 1
+
+
+def test_a_published_row_is_one_run_not_a_field_wise_median():
+    """Medianing every column independently publishes a row no execution produced: on the
+    2026-09-03 campaign 138 field/cell combinations came from a different seed than the row's
+    own rate, and Table 3 then divided one seed's implications by another seed's models."""
+    from eval.rivals.rival_common import median_run
+
+    runs = [{"seed": 5, "sps": 10.0, "n_models": 111, "impl": 1.0},
+            {"seed": 6, "sps": 30.0, "n_models": 222, "impl": 2.0},
+            {"seed": 7, "sps": 20.0, "n_models": 333, "impl": 3.0}]
+    pick, order = median_run(runs, "sps")
+    assert pick["seed"] == 7 and pick["sps"] == 20.0
+    assert (pick["n_models"], pick["impl"]) == (333, 3.0), "fields came from another run"
+    assert (order[0]["sps"], order[-1]["sps"]) == (10.0, 30.0), "spread must stay reportable"
+
+
+def test_a_proved_unsat_cell_is_screened_before_any_zero():
+    """`b01` under Recurrent's own target is unreachable at exactly T=25 (their sampler runs to
+    50 and pools every depth), so the 2026-09-03 campaign booked a GPAP=0 LOSS against a solution
+    that does not exist. Proved-UNSAT is a fact about the instance and gets its own column;
+    `None` (unasked, or unresolved inside the budget) is never read as satisfiable."""
+    from eval.artifact.paper_tables import rival_cells
+
+    row = rrow("b01", models=0, cms=0, p_acc=0.0)
+    row["gpap"]["unsat_at_T"] = True
+    row["rcs"] = {"unique_per_s": 30.0, "unique_at_T": 0, "num_inputs": 40}
+    (name, _, bucket, ours, theirs), = rival_cells([row], "rcs")
+    assert (name, bucket) == ("b01", "unsat")
+
+    unknown = rrow("b02x", models=0, cms=0, p_acc=1e-9)
+    unknown["gpap"]["unsat_at_T"] = None
+    unknown["rcs"] = {"unique_per_s": 0.0, "num_inputs": 40}
+    (_, _, bucket2, _, _), = rival_cells([unknown], "rcs")
+    assert bucket2 == "both0", "an unresolved UNSAT probe was read as a proof"
+
+
+def test_the_circuit_variant_scored_is_the_one_better_for_the_rival():
+    """We hand GPAP an ABC-optimized CNF; the rival must be able to have the ABC-optimized
+    CIRCUIT. Where a stage holds both variants the table takes the rival's better one — the same
+    tie-break `num_steps` uses — instead of pooling both, which would count every instance twice.
+    """
+    from eval.artifact.paper_tables import rival_cells
+
+    raw = rrow("c880", sps=1e6)
+    raw["variant"], raw["rcs"] = "raw", {"unique_per_s": 100.0, "num_inputs": 40}
+    abc = rrow("c880", sps=1e6)
+    abc["variant"], abc["rcs"] = "abc", {"unique_per_s": 250.0, "num_inputs": 40}
+    cells = list(rival_cells([raw, abc], "rcs"))
+    assert len(cells) == 1, "both variants were scored, counting the instance twice"
+    name, variant, bucket, ours, theirs = cells[0]
+    assert (variant, theirs) == ("abc", 250.0), "scored the variant worse for the rival"
+    assert ours / theirs == 1e6 / 250.0
+
+
+def test_a_nearly_free_cell_is_screened_like_a_free_one():
+    """`c432` under the rare pin leaves 4 effective variables and delivers a model per 1.08
+    IMPLICATIONS, against a next-lowest surviving cell of 44.1 — and being a hair off an exact
+    zero, it passed the knife-edge screen and became the ENTIRE DEMOTIC-rare geomean at 89,786x.
+    A sampler doing at most one implication per solution is reading bits out of a hypercube."""
+    from eval.artifact.paper_tables import zero_search
+
+    near_free = {"n_models": 933_900, "sps": 1.079e8, "decisions_per_s": 3.16e8,
+                 "implications_per_s": 1.176e8}                    # 1.09 impl / model, as measured
+    assert zero_search(near_free), "the c432-shaped cell is still in the geomean"
+    # the threshold sits in a two-order gap: the next unscreened cell on that campaign is b13 at
+    # 44.1 implications per model, so any value in (1.09, 44.1) gives the same partition
+    real = {"n_models": 50_000, "sps": 1e5, "decisions_per_s": 1e6, "implications_per_s": 4.41e6}
+    assert not zero_search(real), "a cell doing 44 implications per model is not free"
+    exact_zero = {"n_models": 10, "sps": 1e5, "decisions_per_s": 0, "implications_per_s": 0}
+    assert zero_search(exact_zero), "the original exact-zero rule must still fire"
+
+
+def test_the_emitted_latex_ledger_sums_to_the_cell_count(tmp_path):
+    """THE check a referee performs in ten seconds. Both LaTeX captions assert that their columns
+    account for every instance, and on the 2026-09-03 campaign neither did: the emitter dropped
+    `tiny` and `vacuous` from Table 1 (11 vs 10, 29 vs 24) and `n`, `tiny` and `vacuous` from
+    Table 2, so `89,786.0x` printed with nothing saying it was one cell. The Markdown emitter was
+    correct throughout — only the artifact that goes into the paper was wrong, which is exactly
+    why this asserts on the emitted file rather than on the dicts behind it."""
+    import json
+    import re
+    import subprocess
+    import sys
+
+    rows = [rrow("c17", models=8, cms=8, p_acc=0.5),                     # tiny space
+            rrow("b02", models=1000, p_acc=1.0),                         # vacuous pin
+            rrow("c880"), rrow("c2670"), rrow("c3540"),
+            rrow("b11", models=0, cms=500),                              # GPAP zero
+            rrow("b15", models=0, cms=0)]                                # both zero
+    rows[6]["gpap"]["unsat_at_T"] = True                                 # ...and proved UNSAT
+    for stem in ("demotic_native", "recurrent_table"):
+        (tmp_path / f"rivals_{stem}.json").write_text(json.dumps({"rows": rows}))
+    tex = tmp_path / "t.tex"
+    import os
+
+    from tests.conftest import REPO_ROOT
+    subprocess.run([sys.executable, os.path.join(REPO_ROOT, "eval", "artifact", "paper_tables.py"),
+                    "--rivals", str(tmp_path), "--out-tex", str(tex)],
+                   check=True, capture_output=True, cwd=REPO_ROOT)
+
+    checked = 0
+    for line in tex.read_text().splitlines():
+        if not line.startswith("    ") or "&" not in line or "multicolumn" in line:
+            continue
+        col = [c.strip() for c in line.strip().rstrip("\\\\").split("&")]
+        if col[0].startswith(("ISCAS", "ITC")) and len(col) == 15:       # Table 1
+            total, parts = int(col[4]), [int(col[5])] + [int(c) for c in col[8:]
+                                                         if re.fullmatch(r"\d+", c)]
+        elif col[0] in ("DEMOTIC", "Recurrent-CircuitSAT") and len(col) == 17:   # Table 2
+            total, parts = int(col[2]), [int(col[3])] + [int(c) for c in col[7:]
+                                                         if re.fullmatch(r"\d+", c)]
+        else:
+            continue
+        assert sum(parts) == total, f"ledger does not close on {col[0]}: {parts} vs {total}"
+        checked += 1
+    assert checked >= 2, "no ledger rows were emitted to check"
+
+
+def test_the_generated_methodology_text_describes_the_harness_that_exists():
+    """The tables carry their own methods paragraph, and it is the paper's. It described the
+    SUPERSEDED harness for one release — "stepping down a rung only if the driver refuses the
+    size ... a timeout recorded as the result" and "a FIXED 1,000 ... rows for the distinct-
+    fraction estimate" — both true before 2026-09-04 and false after, so regenerating the tables
+    would have shipped a methods section that misdescribed the run that produced them.
+
+    Prose cannot be gated by re-derivation, so it is gated by absence: the phrases that describe
+    the old rules must not reappear, and the ones naming the current rules must be present."""
+    import inspect
+
+    from eval.artifact import paper_tables
+
+    src = inspect.getsource(paper_tables)
+    gone = ["a timeout recorded as the result",
+            "stepping down a rung only if the driver refuses",
+            "FIXED 1,000 GPU-projected support-bit rows"]
+    for phrase in gone:
+        assert phrase not in src, f"the methods paragraph still describes the old harness: {phrase!r}"
+    # phrases short enough not to straddle a string-literal break in the source
+    for phrase in ["LARGEST rung of that ladder it can run to completion",
+                   "deduplicates", "discarded before anything is", "`lr`"]:
+        assert phrase in src, f"the methods paragraph does not state the current rule: {phrase!r}"
+
+
+def test_the_e2e_column_belongs_to_the_same_run_as_the_rate_it_is_paired_with():
+    """A row is ONE execution, and every column of it must come from that execution. `_gpap_e2e`
+    took its own median across seeds while `sps`/`unique_per_s_est` came from the picked run, so
+    Table 1's e2e ratio and Table 2's e2e column mixed two different seed selections inside one
+    quotient — the field-wise-median defect, reappearing in a derived quantity."""
+    from eval.artifact.paper_tables import _gpap_e2e
+
+    g = {"sps": 500.0, "sps_e2e": 400.0,
+         "seeds": [{"sps": 100.0, "sps_e2e": 90.0},
+                   {"sps": 500.0, "sps_e2e": 400.0},
+                   {"sps": 900.0, "sps_e2e": 111.0}]}
+    assert _gpap_e2e(g) == 400.0, "the e2e column came from a different seed than the row"
+    legacy = {"seeds": [{"sps_e2e": 90.0}, {"sps_e2e": 400.0}, {"sps_e2e": 111.0}]}
+    assert _gpap_e2e(legacy) == 111.0, "a pre-fix row must still read as it always did"
+
+
+def test_a_rival_that_found_a_handful_of_solutions_is_not_a_denominator():
+    """A ratio is only as good as its denominator, and this one bites on the RIVAL side an order
+    of magnitude harder than on CMSGen's. Measured 2026-09-04, rare pin: DEMOTIC found ONE
+    solution on `c880` (ratio 7,209,624x) and FOUR on `c3540` (86,202x); those two cells alone
+    would have carried the row at a geomean of 788,345x.
+
+    Handing the rival the ABC-simplified circuit is what created them — it let it scrape hits
+    where it previously found none, converting honest `rival=0` cells (excluded from the geomean
+    and counted as outright WINS) into finite ratios in the millions. Below the floor the cell is
+    a capability statement and gets its own column, which is conservative by construction: every
+    cell removed is a huge win of ours."""
+    from eval.artifact.paper_tables import RIVAL_MIN_SOLUTIONS, rival_cells
+
+    def cell(n_unique, ups):
+        r = rrow("c880", sps=8.45e6)
+        r["rcs"] = {"unique": n_unique, "unique_per_s": ups, "num_inputs": 40}
+        r["gpap"]["unique_per_s_est"] = 8.45e6
+        return r
+
+    (_, _, bucket, ours, rate), = rival_cells([cell(1, 1.2)], "rcs")
+    assert bucket == "rival_thin", "a one-solution denominator was published as a 7-million-fold win"
+    assert (ours, rate) == (0.0, 0.0), "a screened cell must carry no rates into the geomean"
+
+    (_, _, ok_bucket, o2, r2), = rival_cells([cell(RIVAL_MIN_SOLUTIONS * 10, 500.0)], "rcs")
+    assert ok_bucket == "ok" and o2 / r2 > 0, "a real measurement must still be scored"
+    # a rival that found NOTHING is a different thing — an outright win, not a thin denominator
+    (_, _, zero_bucket, _, _), = rival_cells([cell(0, 0.0)], "rcs")
+    assert zero_bucket == "rival0", "a rival zero must stay an outright win, not be screened away"

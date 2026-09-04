@@ -50,8 +50,10 @@ sys.path.insert(0, REPO_ROOT)
 
 from eval.rivals.rival_common import (VARIANTS, _available_bytes,       # noqa: E402
                                       cached_gpap, cmsgen_arm, expand_names, fit_batch,
-                                      host_provenance, prepare_variant, rival_commit,
-                                      rival_vram_budget, resolve_steps, run_at_batch,
+                                      host_provenance, native_pin_check, prepare_variant,
+                                      rival_commit,
+                                      RIVAL_SEED, rival_vram_budget, resolve_lr, resolve_steps,
+                                      run_at_batch,
                                       variant_note)
 from eval.rivals.rivals_recurrent import (GPAP_ENCODER, GPAP_PORTFOLIO,   # noqa: E402
                                           UNIQUE_ROWS, _cms_cols, build_arm_cnf,
@@ -96,29 +98,6 @@ def demotic_target(module_name: str, circuit_type: str):
                        "s1494", "s1512", "s3384", "s5378", "s6669", "s92341", "s9234"):
         return [0, 15, -1], [0, 1, 0]
     return [0, 15, 31, 63, -1], [1, 0, 1, 0, 1]
-
-
-def native_pin_check(orig, reordered, idx, vals, pin_n, T, n_words=256):
-    """Verify the native-mode constraint alignment END TO END: pinning the outputs at THEIR
-    table indices `idx` on the ORIGINAL file must accept exactly the same input sequences as
-    pinning the FIRST pin_n outputs of our REORDERED copy (what GPAP's build_cnf gets).
-
-    Both files share the same primary inputs in the same order, so the same rng feeds them
-    identical stimuli and the acceptance words must match BIT FOR BIT — the same style of check
-    the miter mode already runs (p_miter == p_accept). This closes the one link that was only
-    asserted by construction: negative-index resolution and the reorder itself. The remaining
-    cross-parser link — that DEMOTIC's own parser reads OUTPUT() in file order — is verified by
-    reading their comb_parser/seq_parser at the pinned commit (outputs.append per OUTPUT line,
-    emitted in that order by the generated forward)."""
-    import numpy as np
-    from gpap.circuits.bench import parse_bench
-    from gpap.circuits.simulate import _accept_words, _run_bench, _topo_gates
-    co, cr = parse_bench(orig), parse_bench(reordered)
-    tgt_o = {co[1][i]: bool(v) for i, v in zip(idx, vals)}
-    tgt_r = {w: bool(v) for w, v in zip(cr[1][:pin_n], vals)}
-    lo = _run_bench(co, _topo_gates(co), T, n_words, rng=np.random.default_rng(7))
-    lr = _run_bench(cr, _topo_gates(cr), T, n_words, rng=np.random.default_rng(7))
-    return bool(np.array_equal(_accept_words(lo, tgt_o), _accept_words(lr, tgt_r)))
 
 
 # ------------------------------------------------------------------ bench sanitising
@@ -177,7 +156,7 @@ def sanitize_bench(src: str, dst: str) -> bool:
 
 # ------------------------------------------------------------------ running DEMOTIC
 
-def run_demotic(root, bench_file, key, *, steps, batch, circuit_type, T, lr="15e0",
+def run_demotic(root, bench_file, key, *, steps, batch, circuit_type, T, lr=None,
                 timeout=DEFAULT_TIMEOUT, retry=True):
     """One DEMOTIC run; returns dict(unique, runtime_s, unique_per_s, ...) or {'error': ...}.
 
@@ -191,8 +170,14 @@ def run_demotic(root, bench_file, key, *, steps, batch, circuit_type, T, lr="15e
     for f in glob.glob(os.path.join(res_dir, f"sat_{key}.bench_*")):
         os.unlink(f)
     cmd = [sys.executable, os.path.join(root, "src", "pytorch", "run.py"),
-           "-d", f"../data/rival_tmp/{key}.bench", "-l", "--optimizer", "mse", "--lr", lr,
+           "-d", f"../data/rival_tmp/{key}.bench", "-l", "--optimizer", "mse",
+           # their own run script's value; RIVAL_LR carries the provenance and the tie-break
+           "--lr", f"{(lr if lr is not None else resolve_lr('demotic')[0]):g}e0"
+           if not isinstance(lr, str) else lr,
            "--problem_type", "BLIF", "--circuit_type", circuit_type,
+           # THEIR seed, passed explicitly so the row can say which initialization was measured
+           # (their flags.py defaults to it; we run one seed, on purpose — rival_common.RIVAL_SEED)
+           "--seed", str(RIVAL_SEED),
            "--num_steps", str(steps), "--batch_size", str(batch)]
     if circuit_type == "seq":
         cmd += ["--num_clock_cycles", str(T)]
@@ -242,15 +227,16 @@ def pick_batch(bench_file, T, budget_bytes=None):
 
 
 def run_demotic_ladder(root, bench_file, key, *, steps, batch, circuit_type, T,
-                       timeout=DEFAULT_TIMEOUT):
-    """run_demotic at its granted batch, stepping DOWN if the driver refuses the size ('device
-    not ready' reproduces at a fixed size on some models yet passes one rung lower). The rungs
-    tried are attached as `batch_sweep`: what parallelism the rival got belongs in the row, since
-    its unique/s is near-proportional to it (c432 1k -> 300k is 258x)."""
+                       timeout=DEFAULT_TIMEOUT, lr=None):
+    """run_demotic at the LARGEST ladder rung that completes (rival_common.run_at_batch, which
+    also fires this process's one discarded warmup run — the first DEMOTIC run of a session is
+    ~3.3x slow and used to be charged to whichever cell went first). The rungs tried are attached
+    as `batch_sweep`: what parallelism the rival got belongs in the row, since its unique/s is
+    near-proportional to it (c432 1k -> 300k is 258x)."""
     r, sweep = run_at_batch(
         lambda b: run_demotic(root, bench_file, key, steps=steps, batch=b,
-                              circuit_type=circuit_type, T=T, timeout=timeout),
-        batch)
+                              circuit_type=circuit_type, T=T, timeout=timeout, lr=lr),
+        batch, tool="demotic")
     return dict(r, batch_sweep=sweep) if isinstance(r, dict) else r
 
 
@@ -282,6 +268,9 @@ def main():
     ap.add_argument("--steps", default="auto",
                     help="their num_steps: 'auto' (default) = the value their own artifacts "
                          "specify, see rival_common.RIVAL_STEPS; or an explicit number")
+    ap.add_argument("--lr", default="auto",
+                    help="their learning rate: 'auto' (default) = their own run script's value "
+                         "(rival_common.RIVAL_LR); or an explicit number")
     ap.add_argument("--batch", type=int, default=None, help="their batch (default: fit to VRAM)")
     ap.add_argument("--gpap-cache", default=None,
                     help="directory of cached GPAP arms (default: <output dir>/.gpap_cache). "
@@ -322,6 +311,7 @@ def main():
     bench_dir = args.bench_dir or (BENCH_COMB if (args.mode == "native" and
                                                  args.circuit_type == "comb") else BENCH_SEQ)
     steps, steps_src = resolve_steps("demotic", args.steps)
+    lr, lr_src = resolve_lr("demotic", args.lr)
     tmp = tempfile.mkdtemp(prefix="rivals_demotic_")
     mode_txt = ("their target table" if args.mode == "native"
                 else f"OUR {args.target} fixed-T instance as a miter")
@@ -405,8 +395,17 @@ def main():
             # table pins MITER=1. Our side: the ORIGINAL circuit at the same T/target — the
             # miter writer self-checks that the two describe the same solution set.
             rival_file = os.path.join(tmp, f"{name}_{variant}_miter.bench")
-            n_in, p_miter = write_unrolled_miter(src, rival_file, args.cycles,
-                                                 args.target_seed, target_mode=args.target)
+            # The writer's self-check (p(MITER=1) == p_accept) used to RAISE, which killed the
+            # stage; a misaligned miter is a flagged row (`pin_check_ok: false`, the
+            # `misaligned` bucket, verify_artifact FAILS) like every other alignment failure.
+            try:
+                n_in, p_miter = write_unrolled_miter(src, rival_file, args.cycles,
+                                                     args.target_seed, target_mode=args.target)
+                pin_ok = True
+            except AssertionError as e:
+                n_in, p_miter, pin_ok = None, None, False
+                print(f"{name:<10}{variant:>6}  MITER CHECK FAILED — {str(e)[:60]}; row flagged",
+                      flush=True)
             key, circuit_type, T_rival = MITER_ALIAS, "comb", 1
             # OUR side must pin the SAME pattern the miter encodes — resolve it through the very
             # helper write_unrolled_miter used (same seed => same pins), never let build_cnf fall
@@ -443,9 +442,11 @@ def main():
         rival_file = rival_safe
         batch = args.batch or pick_batch(rival_file, T_rival)
         dem = run_demotic_ladder(args.demotic, rival_file, key, steps=steps, batch=batch,
-                                 circuit_type=circuit_type, T=T_rival, timeout=args.timeout)
+                                 circuit_type=circuit_type, T=T_rival, timeout=args.timeout, lr=lr)
         dem["renamed_wires"] = renamed
         dem["steps_source"] = steps_src
+        dem["lr"], dem["lr_source"] = lr, lr_src
+        dem["seed"], dem["seed_source"] = RIVAL_SEED, "their flags.py default; one run"
         task = {"harness": "demotic", "mode": args.mode, "cycles": gpap_T, "pin_outputs": pin_n,
                 "target": gpap_target, "seeds": args.seeds, "n_time": args.gpap_n,
                 "time_limit": args.gpap_time_limit, "portfolio": args.portfolio,
@@ -477,7 +478,7 @@ def main():
             os.remove(cnf_path)
         row = {"name": name, "mode": args.mode, "variant": variant, "circuit": vinfo,
                "pin": pin_desc, "cycles": gpap_T,
-               "pin_check_ok": (pin_ok if args.mode == "native" else True),
+               "pin_check_ok": pin_ok,
                "p_accept": sim["p_accept"], "p_accept_lt": sim.get("p_accept_lt"),
                "demotic": dem, "gpap": g, "batch": batch,
                "cnf": cnf_info, "support": (cnf_info or {}).get("support"),

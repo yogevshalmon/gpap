@@ -212,11 +212,20 @@ stage_rivals() {
     # noise on a low-success instance could move a cell. The rival runs once (its own rule).
     local rseeds="${RIVAL_SEEDS:-5 6 7}"
     local T="${RIVAL_T:-25}"
+    # BOTH unroll depths on the sequential set (2026-09-04): 25, and the 50 their own run script
+    # and paper use. A shallower unroll gives them a smaller depth pool, so publishing only 25
+    # would understate them. RIVAL_T2=none runs the shallow depth alone.
+    local T2="${RIVAL_T2:-50}"
     # Circuit VARIANT: `raw` only — both sides get the committed .bench, untouched; the rival
     # unrolls it itself and GPAP encodes it abc:fast (RIVAL_FAIRNESS_FINDINGS.md §13). `abc`
     # (both sides handed an ABC-optimized sequential circuit, equivalence-checked) is still
     # available, but `paper_tables` pools every variant in one geomean, so run ONE per campaign.
-    local cvars="${RIVAL_VARIANTS:-raw}"
+    # ...and BOTH circuit variants: the committed .bench and an ABC-simplified copy,
+    # equivalence-checked. `paper_tables.rival_cells` scores, per instance, whichever is better
+    # FOR THE RIVAL (it used to pool them, which counted every instance twice — hence the old
+    # raw-only default). This closes the "we optimize our CNF, they get the raw netlist"
+    # asymmetry for the price of running the axis.
+    local cvars="${RIVAL_VARIANTS:-raw abc}"
     # THE CMSGEN ARM rides on every rival row (`--cmsgen`: the patched binary on the very CNF
     # the GPAP arm sampled, same n / budget). Without a binary the rows carry no CMSGen columns
     # and paper_tables prints no Table 1 — a warning was printed above; it is not a campaign.
@@ -269,6 +278,17 @@ stage_rivals() {
             --timeout "$rto" \
             --circuit-variants $cvars ${CMS_ARGS[@]+"${CMS_ARGS[@]}"} \
             --resume --output "$OUT/rivals_recurrent_rare.json" 2>&1 | tee -a "$LOGS/rivals.log"
+        if [ "$T2" != "none" ] && [ "$T2" != "$T" ]; then
+            banner "rivals: Recurrent-CircuitSAT at T=$T2 (their own depth limit)"
+            "$PY" eval/rivals/rivals_recurrent.py $seq_insts -T "$T2" --seeds $rseeds --steps "$rsteps" \
+                --timeout "$rto" \
+                --circuit-variants $cvars ${CMS_ARGS[@]+"${CMS_ARGS[@]}"} \
+                --resume --output "$OUT/rivals_recurrent_table_t${T2}.json" 2>&1 | tee -a "$LOGS/rivals.log"
+            "$PY" eval/rivals/rivals_recurrent.py $seq_insts -T "$T2" --rare --seeds $rseeds --steps "$rsteps" \
+                --timeout "$rto" \
+                --circuit-variants $cvars ${CMS_ARGS[@]+"${CMS_ARGS[@]}"} \
+                --resume --output "$OUT/rivals_recurrent_rare_t${T2}.json" 2>&1 | tee -a "$LOGS/rivals.log"
+        fi
     else
         echo "[skip] Recurrent-CircuitSAT not installed (eval/rivals/rivals_setup.sh)"
     fi

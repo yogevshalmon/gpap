@@ -1022,6 +1022,33 @@ keys and the host CPU. `paper_tables --rivals` reads Tables 1/2/3 off those rows
 screens applied once; `verify_artifact --rivals` applies the bench-stage gates to them. The
 family matrix is supplementary now. Every earlier Table 1 is superseded (different instances).
 
+**A five-reviewer adversarial pass found four defects in the completed campaign, all of which
+moved numbers in our favour** (2026-09-04, docs/findings/RIVAL_FAIRNESS_FINDINGS.md §16). Every
+published figure re-derived exactly from the raw rows — the generator was honest — and the
+defects were elsewhere: a batch-grant regression made on the campaign's own launch day
+under-granted DEMOTIC 1.5-3.9x on 4 of 11 cells (**4.73x -> 2.99x**); one "rival failure" was our
+own results-file glob not stripping the dot from `s208.1`; the alphabetically-first cell ate the
+session's ~3.3x cold start; and the circuit standing in for their unreadable table row was the
+wrong one — their figures identify `s38584`, and the substituted `s35932` carried the sequential
+headline (**1,150x -> 759x** without it, on a ratio whose CMSGen denominator was ONE sample).
+Two metrics were the wrong shape: unique/s estimated a distinct fraction from a 1,000-row window
+where both rivals dedup their whole output exactly (now `exact_distinct`, and the correction cap
+it needed is deleted), and a published row was a field-wise median — a composite no execution
+produced, on 138 field/cell combinations. THE LESSON, which is the one this file keeps relearning
+from a new direction: **an error that flatters you is an error you will not go looking for.** The
+protocol choices that were ours rather than the rivals' (unroll depth 25 vs their script's 50;
+our ABC-optimized CNF against their raw netlist) are now run both ways with the tie-break to the
+rival.
+
+**The protocol campaign ran (2026-09-03/04, Colab L4, `$GPAP_RESULTS/l4_protocol_20260903`;
+docs/findings/RIVAL_FAIRNESS_FINDINGS.md §15).** 80 cells, 0 errors, 0 unsound, verify 0
+failures. GPAP/CMSGen 1,262x / 244x on DEMOTIC's set (its pins / our rare pin), 1,150x / 75x on
+Recurrent's set (its table / our rare pin); vs the rivals 4.7x (DEMOTIC, 9/10), 6.2x (Recurrent's
+table, 12/12), 338x (Recurrent, rare, 15/15); engine 1.71e9 impl/s. Losses named: `c499`,
+`b11`, `b18`, `b01`. Two ledger bugs the rows exposed are fixed and gated (screens before
+buckets in Table 2; zero models is a zero, not "unmeasured"), and the Recurrent egress bound is
+per card (0.1–15% on the L4) — quote the audit, not a typed number.
+
 **A rival was scored "incapable" on OUR stopwatch (2026-09-03,
 `docs/findings/RIVAL_FAIRNESS_FINDINGS.md` §11).** The Recurrent harness probes upward for a
 usable `--start_point` (their `backward()` raises while the pinned output has no gradient path to

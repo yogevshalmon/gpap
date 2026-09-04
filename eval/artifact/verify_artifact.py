@@ -340,19 +340,77 @@ def main():
             key = next((k for k in ("demotic", "rcs", "hts")
                         if any(k in r for r in rows)), None)
             errs = sum(1 for r in seen.values() if (r.get(key) or {}).get("error"))
+            # COUNT IT THE WAY THE TABLE DOES. A raw error tally and the generator's `error`
+            # bucket are different numbers whenever a failed cell is screened first — `b19` is
+            # vacuous AND Recurrent fails to initialize on it — and the 2026-09-03 gate warned
+            # "10/29 failed" beside a paper that said "9 of 29". The gate's verdict is
+            # "publishable PROVIDED every warning is stated", so a warning the paper cannot
+            # state verbatim is a defect in the gate.
+            from eval.artifact.paper_tables import rival_cells as _cells
+            tabled = sum(1 for _n, _v, b, _o, _r in _cells(rows, key) if b == "error") if key else 0
             if errs:
+                extra = ("" if tabled == errs else
+                         f"; {tabled} of them reach Table 2 as failures, the rest are screened "
+                         f"first (a vacuous pin or a proved-UNSAT cell is not a rival failure) "
+                         f"— quote {tabled}")
                 warn.append(f"{stem}: {errs}/{len(seen)} rival runs failed "
-                            f"(reported, not folded in as zeros)")
-            # ONE CIRCUIT VARIANT PER STAGE: `paper_tables.rival_cells` keys on (name, variant)
-            # and pools every cell of a stage into ONE geomean, so a stage holding `raw` and
-            # `abc` rows counts each instance twice (the campaign runs `raw` only).
+                            f"(reported, not folded in as zeros){extra}")
+            # MULTIPLE CIRCUIT VARIANTS ARE NOW EXPECTED (2026-09-04): the table scores the one
+            # BETTER FOR THE RIVAL per instance, so a stage holding `raw` and `abc` is the fair
+            # comparison, not a double count. What must still be checked is that every instance
+            # HAS the same variants — a half-run axis silently scores some instances raw-only.
             variants = {v for _n, v in seen}
-            if len(variants) > 1:
-                warn.append(f"{stem}: rows span circuit variants {sorted(variants)} — the table "
-                            f"pools them into one geomean, so every instance counts once per "
-                            f"variant. Publish ONE variant per stage.")
+            per_inst = {}
+            for _n, _v in seen:
+                per_inst.setdefault(_n, set()).add(_v)
+            ragged = sorted(n for n, vs in per_inst.items() if vs != variants)
+            if len(variants) > 1 and ragged:
+                warn.append(f"{stem}: circuit variants {sorted(variants)} are not run on every "
+                            f"instance ({len(ragged)} short: {', '.join(ragged[:6])}) — the "
+                            f"rival gets its better variant only where both exist")
             # A row whose constraint-alignment check FAILED compared two different tasks; the
             # tables exclude it (paper_tables.rival_family), and it must not go unnoticed here.
+            # HOW the rival's batch was reached is part of whether it was fairly granted.
+            # `probe_truncated`: the ladder walk hit its wall budget and fell back to the VRAM
+            # model's rung — the estimator that under-granted DEMOTIC 1.5-3.9x — so those cells
+            # may hold a smaller grant than an equally capable cell whose rungs failed fast.
+            # `budget_bound`: EVERY rung timed out, so the cell is bounded by our wall rather
+            # than by the rival's capability, and is re-runnable at a longer timeout.
+            trunc = [n for (n, _v), r in seen.items() if (r.get(key) or {}).get("probe_truncated")]
+            bound = [n for (n, _v), r in seen.items() if (r.get(key) or {}).get("budget_bound")]
+            if trunc:
+                warn.append(f"{stem}: {len(trunc)} cells fell back to the MODELLED batch rung "
+                            f"after the probe budget ({', '.join(sorted(trunc)[:6])}) — they may "
+                            f"be under-granted relative to cells whose rungs failed fast")
+            if bound:
+                warn.append(f"{stem}: {len(bound)} cells timed out at EVERY batch rung "
+                            f"({', '.join(sorted(bound)[:6])}) — bounded by our wall budget, not "
+                            f"by the rival's capability; state it or re-run them longer")
+            # A SCREEN THAT NEVER RAN IS NOT A SCREEN THAT FOUND NOTHING. The proved-UNSAT
+            # column reads `gpap.unsat_at_T`, which only exists on rows written by a harness
+            # that computed it; on an older campaign every cell reads False and the table prints
+            # a confident `unsat 0` for a question nobody asked. Same tri-state lesson as
+            # `sound_check` — "not run" is neither verdict.
+            zero_models = [r for r in seen.values() if not ((r.get("gpap") or {}).get("n_models"))]
+            asked = [r for r in zero_models if "unsat_at_T" in (r.get("gpap") or {})]
+            if zero_models and not asked:
+                warn.append(f"{stem}: {len(zero_models)} cells where GPAP emitted nothing, and "
+                            f"NONE carries an unsat_at_T verdict — the proved-UNSAT screen did "
+                            f"not run on this campaign, so its column is 'not asked', not 0")
+            # The unique/s figure is an exact dedup of the rows the gather returned; if that was
+            # a PREFIX of what the run delivered it is a fraction over a prefix, which is the
+            # estimate this metric was changed to stop publishing silently.
+            # Re-derive rather than trust the stored string: rows written before 2026-09-04
+            # carry a `partial-gather` status that compared the WINNER's kept rows against ALL
+            # configs' model count, which a healthy adaptive run trips by construction. The
+            # condition that matters is whether the gather cap actually bound.
+            partial = [n for (n, _v), r in seen.items()
+                       if ((r.get("gpap") or {}).get("unique_est_status") == "partial-gather"
+                           and ((r.get("gpap") or {}).get("unique_rows") or 0) >= 4_000_000)]
+            if partial:
+                warn.append(f"{stem}: {len(partial)} cells' distinct fraction is over a PREFIX of "
+                            f"the delivered rows ({', '.join(sorted(partial)[:6])}) — raise "
+                            f"rivals_recurrent.UNIQUE_ROWS or state it")
             mis = [r["name"] for r in seen.values() if r.get("pin_check_ok") is False]
             if mis:
                 fail.append(f"{stem}: {len(mis)} row(s) FAILED the constraint-alignment check "
@@ -402,6 +460,18 @@ def main():
             uns = [r.get("name", "?") for r in meas if sound_failed(r.get("gpap") or {})]
             for n in uns:
                 fail.append(f"UNSOUND cell {stem}/{n}")
+            # ...and the ENCODER-INDEPENDENT check: the kept output rows simulated through the
+            # original circuit must reproduce the pinned outputs (`sim_check`, run by the arm on
+            # every row with a wire map). BAD is a hard failure; "off" is counted, not required.
+            simbad = [r.get("name", "?") for r in meas
+                      if (r.get("gpap") or {}).get("sim_check") == "BAD"]
+            for n in simbad:
+                fail.append(f"{stem}/{n}: kept samples FAIL the circuit-level simulate check "
+                            f"(encoder-independent) — the unroll/encoder chain broke")
+            nsim = sum(1 for r in meas if (r.get("gpap") or {}).get("sim_check") == "ok")
+            if nsim:
+                ok.append(f"{stem}: {nsim}/{len(meas)} rows' kept samples reproduce the pinned "
+                          f"outputs through the ORIGINAL circuit (encoder-independent)")
             cores = {}
             for r in meas:
                 c = ((r.get("gpap") or {}).get("engine") or {}).get("core")

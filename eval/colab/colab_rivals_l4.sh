@@ -66,11 +66,13 @@ T="${T:-25}"
 # the recorded protocol (DEMOTIC raw+abc, Recurrent raw-only for cost). Override to converge a
 # campaign on one encoding — e.g. VARIANTS_DEM=abc VARIANTS_RCS=abc HTS_ENCS=abc for an
 # abc:fast-only sweep (2026-09-02: no tseitin arm anywhere in the tables).
-# ONE circuit variant per campaign: `paper_tables` pools every variant in a stage into one
-# geomean, so two variants count every instance twice. `raw` = both sides get the committed
-# .bench untouched (RIVAL_FAIRNESS_FINDINGS.md §13).
-VARIANTS_DEM="${VARIANTS_DEM:-raw}"
-VARIANTS_RCS="${VARIANTS_RCS:-raw}"
+# BOTH circuit variants (2026-09-04). GPAP samples an ABC-optimized CNF, so the rival must be
+# able to have the ABC-optimized CIRCUIT; `paper_tables.rival_cells` now scores, per instance,
+# whichever variant is BETTER FOR THE RIVAL — the same tie-break `num_steps` uses — instead of
+# pooling both (which counted every instance twice, the reason this used to be raw-only).
+# Measured: the ABC-simplified sequential netlist is worth geomean 1.34x to DEMOTIC.
+VARIANTS_DEM="${VARIANTS_DEM:-raw abc}"
+VARIANTS_RCS="${VARIANTS_RCS:-raw abc}"
 HTS_ENCS="${HTS_ENCS:-tseitin abc}"
 # HTS dropped 2026-09-02: its paper evaluates no circuit at all (see run_full_eval.sh).
 # `demotic-miter` is NOT in the default set: it is measured-but-unpublished (see
@@ -79,7 +81,12 @@ HTS_ENCS="${HTS_ENCS:-tseitin abc}"
 # `steps-calib` (the rival at num_steps 1 vs 10) is a calibration, not a measurement — the
 # campaign runs each rival at the ONE setting its own script names (rival_common.RIVAL_STEPS);
 # add it to STAGES to re-derive the tie-break on this card.
-STAGES="${STAGES:-demotic-native demotic-comb-rare recurrent-rare recurrent-table}"
+# BOTH UNROLL DEPTHS on the sequential set (2026-09-04): T=25 was described as the rival's own
+# default and it is not — their run script says `--num_clock_cycles 50` and their paper sets
+# eta=50, over which their sampler pools every depth, so a shallower unroll hands them a smaller
+# pool. Both are run; `paper_tables` reports them as separate rows.
+STAGES="${STAGES:-lr-calib demotic-native demotic-comb-rare recurrent-rare recurrent-table \
+recurrent-rare-t50 recurrent-table-t50}"
 want() { case " $STAGES " in *" $1 "*) return 0 ;; *) echo "[skip] $1 (not in STAGES)"; return 1 ;; esac; }
 
 # The CMSGen arm: a HARD preflight, like colab_cmsgen_circuits_abc_l4.sh — a stage resumed
@@ -202,6 +209,22 @@ if want recurrent-table && have 30 "recurrent-table"; then
     save_cache
 fi
 
+if want recurrent-rare-t50 && have 90 "recurrent-rare-t50"; then
+    banner "Recurrent-CircuitSAT — OUR rare pins, T=50 (their own depth limit)"
+    $PY eval/rivals/rivals_recurrent.py $SEQ_INSTS -T 50 --rare --seeds $RSEEDS --steps "$STEPS" \
+        --timeout "$TIMEOUT" --circuit-variants $VARIANTS_RCS ${CMS_ARGS[@]+"${CMS_ARGS[@]}"} \
+        --resume --output "$OUT/rivals_recurrent_rare_t50.json" 2>&1 | tee -a "$LOGS/rivals.log"
+    save_cache
+fi
+
+if want recurrent-table-t50 && have 45 "recurrent-table-t50"; then
+    banner "Recurrent-CircuitSAT — THEIR target table, T=50 (their own depth limit)"
+    $PY eval/rivals/rivals_recurrent.py $SEQ_INSTS -T 50 --seeds $RSEEDS --steps "$STEPS" \
+        --timeout "$TIMEOUT" --circuit-variants $VARIANTS_RCS ${CMS_ARGS[@]+"${CMS_ARGS[@]}"} \
+        --resume --output "$OUT/rivals_recurrent_table_t50.json" 2>&1 | tee -a "$LOGS/rivals.log"
+    save_cache
+fi
+
 # ------------------------------------------------------- 4. the num_steps tie-break, on THIS card
 # EVIDENCE, not configuration. RIVAL_STEPS pins one of the two values each tool itself ships,
 # choosing the one better for the rival; that choice was first measured on an RTX 4080. This
@@ -213,6 +236,18 @@ if want steps-calib && have 15 "steps-calib"; then
     $PY eval/rivals/steps_calibration.py --timeout "$TIMEOUT" \
         --hts-cnfs "$OUT/hts_cnf/*.cnf" \
         --out "$OUT/rivals_steps_calibration.json" 2>&1 | tee -a "$LOGS/rivals.log"
+    save_cache
+fi
+
+# THE LEARNING-RATE TIE-BREAK, on this card. Recurrent ships two values for the knob a gradient
+# method depends on most — 15 in its run script, 50 in its paper text — so the rule that applies
+# to num_steps applies here: run it at whichever is better FOR THE RIVAL. Cheap (one instance,
+# two arms, our arm pinned to a token budget) and it is EVIDENCE, not configuration: a flip is
+# reported loudly and RIVAL_LR is changed deliberately, never mid-sweep.
+if want lr-calib && have 15 "lr-calib"; then
+    banner "learning-rate tie-break (Recurrent: their script's 15 vs their paper's 50)"
+    $PY eval/rivals/steps_calibration.py --axis lr --tools recurrent --timeout "$TIMEOUT" \
+        --out "$OUT/rivals_lr_calibration.json" 2>&1 | tee -a "$LOGS/rivals.log"
     save_cache
 fi
 

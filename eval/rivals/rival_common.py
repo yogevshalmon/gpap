@@ -26,6 +26,7 @@ which is itself the point: their gap is not an encoding artifact.
 import functools
 import os
 import subprocess
+import time
 
 VARIANTS = ("raw", "abc")
 
@@ -150,15 +151,55 @@ def _sampling_layer_id() -> str:
     import hashlib
     from gpap import sampling
     root = os.path.dirname(os.path.abspath(sampling.__file__))
+    pkg = os.path.dirname(root)                       # gpap/
+    here = os.path.dirname(os.path.abspath(__file__))  # eval/rivals/
     h = hashlib.sha1()
-    for name in ("pipeline.py", "sampler.py", "preprocess.py"):
-        h.update(name.encode())
+    # EVERY file that decides what a GPAP arm returns, not just the ones in the sampling package.
+    # This was stopped one directory short twice: first at the C core (the python layer moved the
+    # number while `gpap_build_id` did not), then at `gpap/sampling/` (the ARM itself — the
+    # encoder call, the portfolio, the dedup, the rate accounting — lives in the harness files,
+    # and a logic fix there changed no key at all). The rule is the same each time: hash the
+    # source of everything that computes the answer.
+    files = [os.path.join(root, n) for n in ("pipeline.py", "sampler.py", "preprocess.py")]
+    files += [os.path.join(here, n) for n in ("rival_common.py", "rivals_recurrent.py",
+                                              "rivals_demotic.py", "rivals_hts.py")]
+    files += [os.path.join(pkg, "mining.py"),
+              os.path.join(pkg, "engine", "calibrate.py")]
+    circuits = os.path.join(pkg, "circuits")
+    files += [os.path.join(circuits, n) for n in
+              ("bench.py", "abc_backend.py", "aig2cnf.py", "simulate.py")]
+    for path in files:
+        h.update(os.path.basename(path).encode())
         try:
-            with open(os.path.join(root, name), "rb") as f:
+            with open(path, "rb") as f:
                 h.update(f.read())
         except OSError:
             pass
     return h.hexdigest()[:16]
+
+
+@functools.lru_cache(maxsize=1)
+def _abc_fingerprint() -> str:
+    """Identity of the `abc` binary that encodes the arm's CNF, as its content hash.
+
+    `--version` would be weaker: ABC's version string moves far less often than its behaviour.
+    A missing binary hashes to "absent", which is itself a distinguishing value — a run without
+    abc cannot produce an abc:fast arm at all.
+    """
+    import hashlib
+    try:
+        from gpap import paths
+        exe = os.path.join(paths.gpap_home(), "bin", "abc")
+    except Exception:                                          # noqa: BLE001
+        return "unknown"
+    try:
+        h = hashlib.sha1()
+        with open(exe, "rb") as f:
+            for chunk in iter(lambda: f.read(1 << 20), b""):
+                h.update(chunk)
+        return h.hexdigest()[:16]
+    except OSError:
+        return "absent"
 
 
 def gpap_cache_key(sampled_file: str, task: dict) -> str:
@@ -184,6 +225,11 @@ def gpap_cache_key(sampled_file: str, task: dict) -> str:
     # 2026-09-03 (`pipeline.cov_batch`), and the comment right above this one warns about exactly
     # this failure one layer down. Hash the source of the modules that decide the answer.
     env["sampling_py"] = _sampling_layer_id()
+    # ...AND THE ENCODER BINARY. The arm samples the abc:fast CNF of the circuit, so the CNF is
+    # a function of the `abc` executable as much as of the .bench bytes — and nothing else in
+    # this key can see an ABC rebuild that changes what it emits. Hash the binary's own bytes;
+    # a missing one is recorded as such rather than skipped silently.
+    env["abc"] = _abc_fingerprint()
     try:
         import torch
         env["gpu"] = torch.cuda.get_device_name(0) if torch.cuda.is_available() else "cpu"
@@ -396,14 +442,19 @@ def rival_vram_budget(fraction: float = None) -> int:
 # list is the one thing in this protocol a referee cannot check, and the drivers had already
 # drifted from each other twice).
 #   DEMOTIC   (arXiv 2502.08086 Table II): all 11 ISCAS-85, c17 included.
-#   Recurrent (arXiv 2502.21226 Table II): 8 ISCAS-89 + 8 ITC'99. Their "s35844" is s35932 — no
-#             such circuit exists in ISCAS-89 and s35932 is the only s359xx branch in their
-#             run.py. b17/b19/b22 are too large to commit; scripts/fetch_benchmarks.sh itc99
+#   Recurrent (arXiv 2502.21226 Table II): 8 ISCAS-89 + 8 ITC'99. Their 8th ISCAS-89 row is
+#             `s38584` — 12 PI / 278 PO / 19,253 gates / 1,452 DFF, which is exactly the
+#             s38584.bench in their own data/ISCAS/. THIS WAS WRONG UNTIL 2026-09-04: the row
+#             was read as "s35844" and `s35932` substituted for it, because s35932 is the only
+#             s359xx branch in their run.py. Their code covers more circuits than their paper
+#             reports; the paper is what PAPER_INSTANCES is a list of. s35932 stays in the swept
+#             set as a circuit WE added, and is scored outside their 16.
+#             b17/b19/b22 are too large to commit; scripts/fetch_benchmarks.sh itc99
 #             installs them (a harness reports a missing one as skipped, never silently).
 PAPER_INSTANCES = {
     "demotic": frozenset({"c17", "c432", "c499", "c880", "c1355", "c1908", "c2670", "c3540",
                           "c5315", "c6288", "c7552"}),
-    "rcs": frozenset({"s208.1", "s386", "s526", "s832", "s1196", "s4863", "s15850.1", "s35932",
+    "rcs": frozenset({"s208.1", "s386", "s526", "s832", "s1196", "s4863", "s15850.1", "s38584",
                       "b01", "b06", "b10", "b12", "b15", "b17", "b19", "b22"}),
 }
 
@@ -491,6 +542,39 @@ RIVAL_STEPS = {
     "hts":       (10, "their src/pytorch/flags.py default", 5),
 }
 
+# THE LEARNING RATE, by the same rule — and it is the knob that matters most to a method whose
+# whole search IS gradient descent, so leaving it undocumented was the `num_steps` hole one knob
+# along. Both rivals' own run scripts say `--lr 15e0` (DEMOTIC script/run_sampler_comb.sh:6,
+# Recurrent script/run_sampler_seq.sh), which is the value we run and the same artifact
+# RIVAL_STEPS is taken from. Recurrent's PAPER text names 50 instead, so that tool ships two
+# values and the tie-break rule applies: whichever is better FOR THE RIVAL, re-derived on the
+# campaign's own card by eval/rivals/steps_calibration.py --axis lr.
+# THE RIVAL'S SEED, and the fact that there is exactly one of it. Both tools take `--seed`
+# (their `src/pytorch/flags.py`, default 0) and neither harness used to pass it — so "the rival
+# ran once" was true, but the row could not say at WHICH initialization, and a second run would
+# have re-measured the same one without anyone noticing. It is now passed explicitly and recorded.
+#
+# ONE seed is a deliberate protocol choice (2026-09-04), not an oversight: the rival is run in
+# exactly one configuration, at the value its own artifacts default to, and the asymmetry against
+# GPAP's median-of-three is STATED rather than hidden. Three rival seeds would cost about an hour
+# and a half per campaign and would narrow an interval we do not use — what the tables need from
+# the rival is one honest measurement at its own settings.
+RIVAL_SEED = 0
+
+RIVAL_LR = {
+    # tool:      (lr,  where the value comes from,                    the other value it ships)
+    "demotic":   (15.0, "their script/run_sampler_comb.sh", None),
+    "recurrent": (15.0, "their script/run_sampler_seq.sh", 50.0),
+}
+
+
+def resolve_lr(tool, requested="auto"):
+    """The learning rate this run should use, and where it came from. `auto` = RIVAL_LR."""
+    lr, src, _other = RIVAL_LR.get(tool, (15.0, "harness default", None))
+    if requested in (None, "auto"):
+        return lr, src
+    return float(requested), "explicit --lr"
+
 
 def resolve_steps(tool, requested="auto"):
     """(steps, provenance) for a rival. `requested` is a number, or "auto" for the tool's own.
@@ -512,37 +596,131 @@ def _one_line(err):
     return (line[-1] if line else str(err))[:160]
 
 
-def run_at_batch(run, batch, ladder=BATCH_LADDER, log=print):
-    """ONE measured run per instance, at the rival's granted batch.
+# The first GPU run of a process is SLOW — CUDA context, kernel autotuning and clocks ramping —
+# and whichever instance goes first eats all of it. Measured on the L4 the day before the
+# 2026-09-03 campaign: the first DEMOTIC run of a session is ~3.3x slower than the same run
+# later (c432, same unique count, 1.60s vs 0.48s). That campaign fired no warmup, so `c1355`
+# — alphabetically first in the DEMOTIC stage — was published at 0.25x of its warm rate.
+# One discarded run per (tool, process) fixes it; the probe scripts in the calibration directory
+# have always done this and the campaign harness did not.
+_WARMED = set()
 
-    The only fallback is a DRIVER REFUSAL: 'device not ready' reproduces at a fixed size on some
-    models yet passes one rung lower, so when the granted rung produces no run at all the machine
-    gets the last word over our estimate and the next rung down is tried. A refused rung is not a
-    measurement, so the row still holds exactly one — the largest rung the driver accepted.
 
-    A TIMEOUT is a result, not a refusal: the rival ran and did not finish inside its budget, and
-    it is recorded as such. It is NOT retried lower (their runtime grows with the batch, so a
-    smaller rung might come in under the cap — but that is a second configuration, and the rule
-    is one). The one-rung probe UPWARD that used to follow a successful run — kept only when the
-    bigger rung also ran faster — was likewise a best-of-two and is gone (2026-09-03).
+def warmup_rival(tool, run, batch=10_000, log=print):
+    """Discard one run before this process measures anything for `tool`. Returns True if it fired.
+
+    Called by run_at_batch, so both circuit harnesses get it without remembering to. It must be
+    per PROCESS, not per campaign: the Colab supervisor rebuilds the VM on reclaim and the driver
+    resumes in a fresh interpreter, so the first cell measured after every resume would otherwise
+    pay the cold start again.
+    """
+    if tool in _WARMED:
+        return False
+    _WARMED.add(tool)
+    t0 = time.perf_counter()
+    try:
+        run(batch)
+    except Exception as e:                                    # noqa: BLE001
+        log(f"    [warmup] {tool} warmup raised ({_one_line(e)[:60]}) — continuing")
+    log(f"    [warmup] {tool}: discarded run at batch {batch:,} ({time.perf_counter() - t0:.1f}s)")
+    return True
+
+
+def run_at_batch(run, batch, ladder=BATCH_LADDER, log=print, tool=None, probe_budget_s=1200.0):
+    """ONE measured run per instance: the LARGEST ladder rung that COMPLETES.
+
+    THE RULE (2026-09-04). Walk DOWN from the top of the ladder; the first rung that runs to
+    completion is the measurement. `batch` — the rung our VRAM model predicts — no longer
+    decides anything and is recorded beside the sweep as the model's opinion.
+
+    WHY NOT THE MODEL: `GRAPH_BYTES` was measured on a 4080 at `num_steps=10`, and we run
+    `num_steps=1`, where the autograd graph is far smaller — so the model predicts LOW. A
+    gradient sampler's unique/s is near-proportional to its batch, so predicting low is taking
+    the rival's score away. Measured on the L4 (gpap-results/demotic_config_calibration_20260902,
+    finding 4): the modelled rung under-grants c880 1.53x, c2670 2.12x, c3540 1.85x, c7552 3.87x.
+    The 2026-09-03 campaign shipped exactly that under-grant, because the one-rung-up probe that
+    had been masking it was removed the same day for being a best-of-two.
+
+    THIS IS NOT A BEST-OF-N, and that distinction is the whole design: a rung is rejected on
+    FEASIBILITY — it OOM'd, the driver refused it, or it did not finish inside the wall budget —
+    never on throughput, and exactly one rung is ever measured. Rejecting a rung the rival cannot
+    finish with is not charity either: the previous rule recorded that timeout AS the result,
+    which is how a granted-too-large cell reads as a rival failure.
+
+    `probe_budget_s` bounds the search: a ladder of timeouts could otherwise cost 8 x the wall
+    budget on one instance. When probing has spent that much, the walk jumps straight to the
+    modelled rung and the sweep records `probe_truncated`.
 
     Returns (result, sweep) — every rung tried, so the row records what the rival was granted.
     """
+    if tool:
+        warmup_rival(tool, run, log=log)
     rungs = list(ladder)
-    i = max((k for k, b in enumerate(rungs) if b <= batch), default=0)
-    sweep = []
+    sweep, spent, truncated = [], 0.0, False
+    grant = {}                       # what the row must say about HOW the grant was reached
+    i = len(rungs) - 1
     while i >= 0:
+        t0 = time.perf_counter()
         r = run(rungs[i])
-        sweep.append({"batch": rungs[i], "unique_per_s": r.get("unique_per_s"),
-                      "error": _one_line(r.get("error"))})
+        spent += time.perf_counter() - t0
+        entry = {"batch": rungs[i], "unique_per_s": r.get("unique_per_s"),
+                 "error": _one_line(r.get("error"))}
+        if truncated:
+            entry["probe_truncated"] = True
+        sweep.append(entry)
         if "error" not in r:
-            return r, sweep
-        if "timeout" in str(r.get("error", "")).lower():
-            log(f"    [batch] {rungs[i]:,} timed out — recording the timeout")
-            return r, sweep
-        log(f"    [batch] {rungs[i]:,} refused ({_one_line(r.get('error'))[:60]}) — stepping down")
+            if rungs[i] > batch:
+                log(f"    [batch] granted {rungs[i]:,} — the VRAM model said {batch:,}")
+            return dict(r, **grant), sweep
+        why = "timed out" if "timeout" in str(r.get("error", "")).lower() else "refused"
+        log(f"    [batch] {rungs[i]:,} {why} ({_one_line(r.get('error'))[:60]}) — stepping down")
+        if spent > probe_budget_s and not truncated and batch < rungs[i]:
+            log(f"    [batch] probe budget {probe_budget_s:.0f}s spent — jumping to the "
+                f"modelled rung {batch:,}")
+            # THE ROW HAS TO SAY THIS. Truncating falls back to the VRAM model's rung — the very
+            # estimator measured under-granting DEMOTIC 1.5-3.9x — so a cell whose oversized rungs
+            # fail SLOWLY (timeouts) can settle for a smaller grant than one whose rungs fail fast
+            # (OOM), on two circuits of equal capability. The evidence was buried in `batch_sweep`
+            # with no consumer; it is now a row-level flag the tables and the gate can count.
+            truncated = True
+            grant["probe_truncated"] = True
+            i = max((k for k, b in enumerate(rungs) if b <= batch), default=0)
+            continue
         i -= 1
-    return (sweep[-1] if sweep else {"error": "empty ladder"}), sweep
+    # EVERY rung failed. If they all failed for the same reason and that reason is the wall,
+    # the cell is bounded by OUR budget rather than by the rival's capability, and those are
+    # different findings — the first is re-runnable at a longer timeout, the second is a result.
+    if sweep and all("timeout" in str(x.get("error") or "").lower() for x in sweep):
+        grant["budget_bound"] = True
+    return (dict(sweep[-1], **grant) if sweep else {"error": "empty ladder"}), sweep
+
+
+# ---------------------------------------------------------------- constraint alignment
+# Shared by BOTH circuit harnesses: for one release only the DEMOTIC harness ran it, so the
+# headline sequential rows carried no alignment evidence and Table 2's `misaligned` column
+# could never fire for them (RIVAL_FAIRNESS_FINDINGS.md §14).
+
+def native_pin_check(orig, reordered, idx, vals, pin_n, T, n_words=256):
+    """Verify the native-mode constraint alignment END TO END: pinning the outputs at THEIR
+    table indices `idx` on the ORIGINAL file must accept exactly the same input sequences as
+    pinning the FIRST pin_n outputs of our REORDERED copy (what GPAP's build_cnf gets).
+
+    Both files share the same primary inputs in the same order, so the same rng feeds them
+    identical stimuli and the acceptance words must match BIT FOR BIT — the same style of check
+    the miter mode already runs (p_miter == p_accept). This closes the one link that was only
+    asserted by construction: negative-index resolution and the reorder itself. The remaining
+    cross-parser link — that DEMOTIC's own parser reads OUTPUT() in file order — is verified by
+    reading their comb_parser/seq_parser at the pinned commit (outputs.append per OUTPUT line,
+    emitted in that order by the generated forward)."""
+    import numpy as np
+    from gpap.circuits.bench import parse_bench
+    from gpap.circuits.simulate import _accept_words, _run_bench, _topo_gates
+    co, cr = parse_bench(orig), parse_bench(reordered)
+    tgt_o = {co[1][i]: bool(v) for i, v in zip(idx, vals)}
+    tgt_r = {w: bool(v) for w, v in zip(cr[1][:pin_n], vals)}
+    lo = _run_bench(co, _topo_gates(co), T, n_words, rng=np.random.default_rng(7))
+    lr = _run_bench(cr, _topo_gates(cr), T, n_words, rng=np.random.default_rng(7))
+    return bool(np.array_equal(_accept_words(lo, tgt_o), _accept_words(lr, tgt_r)))
 
 
 # ---------------------------------------------------------------- the CMSGen arm of a rival row
@@ -594,3 +772,119 @@ def host_provenance(device):
     except Exception:                       # noqa: BLE001 — provenance must never break a sweep
         gpu = {"name": str(device)}
     return {"cpu": _cpu_info(), "gpu": gpu}
+
+
+# ---------------------------------------------------------------- how big is the solution space?
+
+def median_run(runs, key="sps"):
+    """THE run whose `key` is the median — not a median of each field across runs.
+
+    A row assembled field by field is a composite no execution ever produced: on the 2026-09-03
+    campaign 138 field/cell combinations came from a different seed than the row's own rate, so
+    Table 3 divided one seed's implication count by another seed's model count. Repeat-runs exist
+    to damp noise in ONE number; the honest way to spend them is to pick the run that number
+    puts in the middle and report that run.
+
+    Odd n gives the median; even n gives the lower middle, so the result is always a real run.
+    """
+    order = sorted(runs, key=lambda r: (r.get(key) or 0.0))
+    return order[(len(order) - 1) // 2], order
+
+
+def exact_distinct(bits):
+    """The number of DISTINCT support projections among `bits`, exactly.
+
+    THE RULE (2026-09-04): the GPAP arm deduplicates every row the timed run delivered, because
+    that is what both circuit rivals do. Recurrent calls `torch.unique(dim=0)` over its whole
+    candidate set per depth and counts the survivors that hit the target; DEMOTIC calls
+    `torch.unique` over its whole solution list once its timer has stopped. Both dedup EXACTLY,
+    over the WHOLE run, off the clock.
+
+    Until now our arm estimated the distinct fraction from a 1,000-row window and applied it to
+    runs delivering up to a million models — a window that shows no repeat certifies far less
+    than it looks like it does, and the "bias bounded at 7e-4" claim that rested on it bounded
+    the wrong quantity (the collision rate INSIDE the window, not the run's distinct fraction).
+    With the whole set deduplicated there is no estimator left to bound, and no need for the
+    unique/s cap that used to correct it.
+
+    Packed to bits first: a (10^6, 250) uint8 matrix is 250 MB and np.unique over it is slow,
+    while the packed (10^6, 32) view is 32 MB and dedups as fixed-width records.
+    """
+    import numpy as np
+    a = np.ascontiguousarray(np.asarray(bits, dtype=np.uint8))
+    if a.size == 0:
+        return 0
+    packed = np.ascontiguousarray(np.packbits(a, axis=1))
+    return int(len(np.unique(packed.view([("", packed.dtype)] * packed.shape[1]))))
+
+
+def unsat_at_depth(cnf_path, conf_budget=2_000_000, provenance=None):
+    """Is this pinned instance UNSATISFIABLE at the depth it was built for? True / False / None.
+
+    A cell where BOTH samplers produce nothing is ambiguous: either the task is hard, or it has
+    no solution at all. `b01` under Recurrent's own target is the second — its published target
+    pattern is unreachable at exactly T=25 (their own sampler runs to 50 and pools every depth)
+    — and booking that as a GPAP zero scores us against a solution that does not exist. A cell
+    proved UNSAT belongs in its own column, like a vacuous pin: it measures the instance, not
+    the sampler.
+
+    Bounded by a conflict budget so a hard-but-satisfiable instance returns None (unknown)
+    rather than hanging the sweep. None is NOT "satisfiable" and must not be bucketed as one.
+    """
+    # WHICH solver said so, and under what budget, belongs in the row: `python-sat` is installed
+    # unpinned, so a re-run can resolve a different version — or lose Cadical153 and fall back —
+    # and silently move a cell between the `unsat` bucket and `both0` with no trace.
+    name = None
+    try:
+        from pysat.formula import CNF
+        from pysat.solvers import Cadical153 as _Solver
+        name = "Cadical153"
+    except ImportError:
+        try:
+            from pysat.formula import CNF
+            from pysat.solvers import Minisat22 as _Solver
+            name = "Minisat22"
+        except ImportError:
+            if provenance is not None:
+                provenance.update(solver=None, conf_budget=conf_budget)
+            return None
+    if provenance is not None:
+        try:
+            import pysat
+            ver = getattr(pysat, "__version__", "?")
+        except Exception:                                      # noqa: BLE001
+            ver = "?"
+        provenance.update(solver=name, pysat=ver, conf_budget=int(conf_budget))
+    try:
+        with _Solver(bootstrap_with=CNF(from_file=cnf_path).clauses) as sv:
+            sv.conf_budget(int(conf_budget))
+            res = sv.solve_limited(expect_interrupt=False)
+    except Exception:                                          # noqa: BLE001
+        return None
+    return None if res is None else (not res)
+
+
+def space_from_distinct(n_rows, n_distinct):
+    """|S| such that `n_rows` uniform draws from |S| points yield `n_distinct` distinct ones in
+    expectation, E[d] = S(1 - (1 - 1/S)^n), solved by bisection. None when no repeat was seen
+    (d == n): the window then says nothing beyond S >~ n^2/2.
+
+    THE HOLE THIS CLOSES (second referee pass, 2026-09-03): a 1,000-row distinct fraction is a
+    narrower deduplication window than a rival's whole-run dedup. On `c1355` under the rare pin
+    the window showed 0.56 (|S| ~ 700) while the run delivered ~800k models, so the whole-run
+    unique count cannot exceed ~700 and 'samples/s x 0.56' overstated unique/s by ~10^5. The
+    `tiny` screen could not catch it either: it read 2^|S| with |S| = 41 input bits, and the
+    SOLUTION space, not the input hypercube, is what is enumerated. So the repeat rate the row
+    already carries is turned into a size estimate, and both the screen (paper_tables.tiny_space)
+    and the estimate (rivals_recurrent.run_gpap's cap of unique/s at |S| per run) read it."""
+    n, d = int(n_rows), int(n_distinct)
+    if n <= 0 or d <= 0 or d >= n:
+        return None
+    lo, hi = float(d), 1e15
+    for _ in range(200):
+        mid = (lo * hi) ** 0.5
+        if mid * (1.0 - (1.0 - 1.0 / mid) ** n) < d:
+            lo = mid
+        else:
+            hi = mid
+    return hi

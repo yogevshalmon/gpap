@@ -101,7 +101,10 @@ PYFIX
     # table below always PROBED pysat but this line never installed it (caught live on the
     # 2026-09-02 L4 rivals sweep: 40/40 rows errored before anything was measured).
     # pandas/tqdm usually come with the Colab image; install whatever is missing.
-    "$PY_BIN" -m pip install -q pycryptosat python-sat pandas tqdm \
+    # python-sat is BOUNDED: it adjudicates the proved-UNSAT screen (rival_common.unsat_at_depth),
+    # so which version — and which solver classes it ships — can move a cell between the `unsat`
+    # bucket and `both0`. Keep in step with pyproject.toml's extras.
+    "$PY_BIN" -m pip install -q pycryptosat "python-sat>=0.1.8.dev0,<1.10" pandas tqdm \
         || echo "[warn] rival python deps (pycryptosat/python-sat/pandas/tqdm) failed to install"
 
     # THE ENGINE. Since the engine became a C++ library there is no Python fallback: without
