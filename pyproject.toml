@@ -31,9 +31,16 @@ build = ["triton>=3.2"]       # rebuilding cpp/kernels/*.py into cubins (>=3.2: 
 # LOAD-BEARING: python-sat publishes only pre-releases for recent CPython, and PEP 440 makes pip
 # ignore pre-releases unless the specifier itself names one — a plain `>=0.1.8` fails to resolve
 # on a clean recent Python.
-solver = ["python-sat>=0.1.8.dev0"]
-eval = ["matplotlib>=3.7", "python-sat>=0.1.8.dev0"]    # eval/ plots + rival/oracle harnesses
-dev = ["pytest>=7.4", "ruff>=0.4", "python-sat>=0.1.8.dev0"]
+# ...and BOUNDED ABOVE, because a solver is now an ADJUDICATOR, not just a utility: a cell where
+# both samplers emit nothing is screened as `unsat` only when python-sat PROVES it (see
+# eval/rivals/rival_common.py::unsat_at_depth), and which solver class is available decides that
+# verdict — `Cadical153` where present, `Minisat22` as the fallback. An unpinned floor let a
+# re-run resolve a different version, or lose a solver class, and move a cell between the `unsat`
+# bucket and `both0` with nothing in the row to say so. The verdict now records the solver, its
+# version and the conflict budget per row; this pin is the other half.
+solver = ["python-sat>=0.1.8.dev0,<1.10"]
+eval = ["matplotlib>=3.7", "python-sat>=0.1.8.dev0,<1.10"]   # eval/ plots + rival/oracle harnesses
+dev = ["pytest>=7.4", "ruff>=0.4", "python-sat>=0.1.8.dev0,<1.10"]
 
 [project.scripts]
 gpap = "gpap.cli:main"

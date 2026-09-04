@@ -336,10 +336,16 @@ def test_an_exhausted_budget_reads_as_did_not_initialize(monkeypatch):
     assert "budget" in why
 
 
-def test_the_ladder_runs_once_and_never_probes_upward_or_retries_a_timeout():
-    """`run_at_batch` = ONE measured configuration per instance. A timeout is recorded as the
-    result (never retried at a smaller batch), a driver refusal steps ONE rung down, and a
-    successful run is never followed by a bigger probe. Shared by every rival harness."""
+def test_the_ladder_measures_the_largest_rung_that_completes():
+    """`run_at_batch` = ONE measured configuration per instance, and it is the LARGEST rung the
+    rival can actually finish on (2026-09-04). Rungs are rejected on FEASIBILITY — OOM, a driver
+    refusal, or not finishing inside the wall budget — never on throughput, so this is still one
+    measurement and not a best-of-N. Shared by every rival harness.
+
+    It used to start at our VRAM model's rung and step down only on a driver refusal, recording
+    a TIMEOUT as the rival's result. Both halves were wrong: the model was measured at
+    num_steps=10 and we run 1, so it under-granted DEMOTIC 1.5-3.9x on 4 of 11 ISCAS-85 cells,
+    and a batch the rival cannot finish with was never granted to it in the first place."""
     from eval.rivals.rival_common import run_at_batch
 
     calls = []
@@ -348,7 +354,8 @@ def test_the_ladder_runs_once_and_never_probes_upward_or_retries_a_timeout():
         calls.append(b)
         return {"unique_per_s": 1.0}
     r, sweep = run_at_batch(ok, 3000, ladder=[100, 1000, 3000, 10000], log=lambda *_: None)
-    assert calls == [3000] and [s["batch"] for s in sweep] == [3000]
+    assert calls == [10000], "did not take the largest rung the rival can run"
+    assert [s["batch"] for s in sweep] == [10000]
 
     calls.clear()
 
@@ -356,18 +363,19 @@ def test_the_ladder_runs_once_and_never_probes_upward_or_retries_a_timeout():
         calls.append(b)
         return {"error": "timeout 300.0s"}
     r, sweep = run_at_batch(timeout, 3000, ladder=[100, 1000, 3000], log=lambda *_: None)
-    assert calls == [3000] and "timeout" in r["error"]
+    assert "timeout" in r["error"], "an all-timeout ladder must still report the timeout"
+    assert calls[0] == 3000, "did not start at the top of the ladder"
 
     calls.clear()
 
     def refused_then_ok(b):
         calls.append(b)
-        return {"error": "RuntimeError: CUDA driver error: device not ready"} if b == 3000 \
+        return {"error": "RuntimeError: CUDA driver error: device not ready"} if b >= 3000 \
             else {"unique_per_s": 1.0}
-    r, sweep = run_at_batch(refused_then_ok, 3000, ladder=[100, 1000, 3000],
+    r, sweep = run_at_batch(refused_then_ok, 100, ladder=[100, 1000, 3000],
                             log=lambda *_: None)
-    assert calls == [3000, 1000] and "error" not in r
-    assert [s["batch"] for s in sweep] == [3000, 1000]
+    assert calls == [3000, 1000] and "error" not in r, "the refusal did not step down"
+    assert [s["batch"] for s in sweep] == [3000, 1000], "the rungs tried belong in the row"
 
 
 def test_each_rival_scores_on_its_own_papers_instances_from_one_home():
@@ -475,7 +483,7 @@ def _tiny_bench(tmp_path):
     return str(b)
 
 
-def _stub_arm(monkeypatch, samples, sps=1000.0, n_models=5000):
+def _stub_arm(monkeypatch, samples, sps=1000.0, n_models=5000, wall_total=10.0, proj_s=0.0):
     """Stub the encoder and the pipeline under `run_gpap`; returns the recorded call kwargs."""
     import numpy as np
 
@@ -490,7 +498,11 @@ def _stub_arm(monkeypatch, samples, sps=1000.0, n_models=5000):
 
     def fake_sample_file(path, device, **kw):
         seen["sample_kw"] = kw
-        return {"samples_per_s": sps, "sps_e2e_total": sps, "success_rate": 0.5,
+        # `sps_e2e_total` is the library's own e2e rate, which CARRIES the output projection;
+        # the arm recomputes its own with that phase removed (see the offline-dedup test).
+        return {"samples_per_s": sps, "sps_e2e_total": n_models / wall_total,
+                "success_rate": 0.5, "wall_total_s": wall_total,
+                "phases": {"sample": wall_total - proj_s, "output": proj_s},
                 "n_models": n_models, "sound_check": "ok",
                 "samples": np.asarray(samples, dtype=np.uint8)}
 
@@ -516,17 +528,22 @@ def test_the_gpap_arm_encodes_with_abc_fast_and_says_so(tmp_path, monkeypatch):
 
 def test_the_gpap_arm_runs_no_coverage_pass_and_measures_distinctness_on_its_own_rows(
         tmp_path, monkeypatch):
-    """`unique_per_s_est` = samples/s x the distinct fraction of the timed run's OWN kept output
-    rows (`out_cap=UNIQUE_ROWS`, GPU-projected support bits), with `n_cov=0`: the coverage pass
-    reconstructed rows x nv x 72 B of full models on the host and OOM-killed b14 (61 GB), and the
-    user's rule is that the eval does not need it at all."""
+    """`unique_per_s_est` = samples/s x the EXACT distinct fraction of everything the timed run
+    delivered (`out_cap=UNIQUE_ROWS`, now above any recorded delivery), with `n_cov=0`: the
+    coverage pass reconstructed rows x nv x 72 B of full models on the host and OOM-killed b14
+    (61 GB), and the user's rule is that the eval does not need it.
+
+    The cap was 1,000 until 2026-09-04, which made this an ESTIMATE from a window applied to runs
+    delivering up to a million models — while both rivals deduplicate their whole output exactly,
+    off their own clock. Same metric, same way, or it is not their metric."""
     from eval.rivals import rivals_recurrent as rr
 
-    seen = _stub_arm(monkeypatch, samples=[[0, 1], [1, 0], [0, 1], [0, 1]], sps=1000.0)
+    seen = _stub_arm(monkeypatch, samples=[[0, 1], [1, 0], [0, 1], [0, 1]], sps=1000.0,
+                     n_models=4)
     g = rr.run_gpap(_tiny_bench(tmp_path), 3, 1, None, [5], 100, "cpu", time_limit=1.0)
     kw = seen["sample_kw"]
     assert kw["n_cov"] == 0, "the coverage pass must not run on the rival arm"
-    assert kw["out_cap"] == rr.UNIQUE_ROWS == 1000
+    assert kw["out_cap"] == rr.UNIQUE_ROWS >= 4_000_000, "the arm must dedup the whole run"
     assert kw["verify_sound"] is True
     r = g["seeds"][0]
     assert r["unique_rows"] == 4 and r["unique_distinct"] == 2
@@ -675,3 +692,226 @@ def test_both_harnesses_run_the_cmsgen_arm_on_the_cnf_the_gpap_arm_sampled():
         assert re.search(rf"cnf=\({path}, \w+\)", src), f"{mod.__name__}: run_gpap not on {path}"
         assert re.search(rf"cmsgen_arm\({path}, ", src), f"{mod.__name__}: cmsgen_arm not on {path}"
         assert "host_provenance(device)" in src, f"{mod.__name__}: no cpu/gpu provenance"
+
+
+# ---------------------------------------------------------------- alignment + circuit-level checks
+
+def test_the_recurrent_miter_self_checks_and_catches_an_inverted_miter(tmp_path):
+    """The rare-mode miter's P[MITER=1] must equal the instance's own p_accept — the check the
+    DEMOTIC arm always ran and the Recurrent arm asserted by construction only. Sabotage: an
+    inverted miter (P ~ 1 - p) must be caught, or the check proves nothing."""
+    from eval.rivals import rivals_recurrent as rr
+
+    src = os.path.join(REPO, "benchmarks", "circuits", "bench", "seq", "b06.bench")
+    dst = str(tmp_path / "b06_rare.bench")
+    pattern, est, p_miter, ok = rr.miter_bench(src, dst, 3, 5)
+    assert ok and 0.0 <= p_miter <= 1.0 and pattern and est is not None
+    text = open(dst).read()
+    assert text.count("OUTPUT(") == 1 and "OUTPUT(GPAPMITER)" in text
+    bad = str(tmp_path / "b06_inverted.bench")
+    inv = re.sub(r"^GPAPMITER = (AND|NOT)\(", lambda m: f"GPAPMITER = {'NAND' if m.group(1) == 'AND' else 'BUFF'}(",
+                 text, flags=re.M)
+    assert inv != text
+    open(bad, "w").write(inv)
+    p_bad, ok_bad = rr.miter_self_check(src, bad, 3, 5)
+    assert not ok_bad and p_bad > p_miter, "an inverted miter must fail the self-check"
+
+
+def test_both_harnesses_verify_constraint_alignment_per_row():
+    """Table 2's text says alignment is VERIFIED per row and the `misaligned` bucket exists for
+    it; for one release only the DEMOTIC harness ran the check, so the headline sequential rows
+    carried no evidence at all. Both mains must call it and write `pin_check_ok`."""
+    import inspect
+
+    from eval.rivals import rival_common, rivals_demotic, rivals_recurrent
+
+    assert hasattr(rival_common, "native_pin_check"), "one home for the check"
+    for mod in (rivals_recurrent, rivals_demotic):
+        src = inspect.getsource(mod.main)
+        assert "native_pin_check(" in src, mod.__name__
+        assert '"pin_check_ok"' in src, mod.__name__
+    assert "miter_self_check(" in inspect.getsource(rivals_recurrent.miter_bench)
+
+
+def _stub_arm_with_cols(monkeypatch, samples_by_label, sps=1000.0):
+    """Like `_stub_arm`, but the fake pipeline also returns the kept rows' column ids and the
+    wire map, exactly as `sample_file` does — so the arm's simulate check can run."""
+    import numpy as np
+
+    from gpap.circuits import abc_backend, bench
+    from gpap.sampling import pipeline
+
+    seen = {}
+
+    def fake_abc(circ, path, T, seed, pin_outputs=None, *, abc=None, opt="auto", target=None):
+        b, support, tgt, labels = bench.build_cnf(circ, T, seed=seed, pin_outputs=pin_outputs,
+                                                  target=target)
+        seen["support"], seen["labels"] = list(support), list(labels)
+        return b, support, tgt, labels
+
+    def fake_sample_file(path, device, **kw):
+        labels = seen["labels"]
+        rows = [[row.get(lbl, 0) for lbl in labels] for row in samples_by_label]
+        return {"samples_per_s": sps, "sps_e2e_total": sps, "success_rate": 0.5,
+                "n_models": 10, "sound_check": "ok",
+                "samples": np.asarray(rows, dtype=np.uint8), "cols": seen["support"],
+                "wire_map": dict(zip(seen["support"], labels))}
+
+    monkeypatch.setattr(abc_backend, "build_cnf_abc", fake_abc)
+    monkeypatch.setattr(pipeline, "sample_file", fake_sample_file)
+    return seen
+
+
+def test_the_arm_simulates_its_kept_rows_through_the_original_circuit(tmp_path, monkeypatch):
+    """Encoder-independent soundness ON THE CAMPAIGN PATH: the kept output rows are simulated
+    through the original circuit and must reproduce the pinned outputs. The tiny bench is
+    z = AND(DFF(a), b), so at T=3 the last-cycle output is a@1 & b@2: a row with those two bits
+    set passes, the all-zero row fails, and the verdict folds BAD over ok over off."""
+    from eval.rivals import rivals_recurrent as rr
+
+    good = {"a@1": 1, "b@2": 1}
+    bad = {}
+    _stub_arm_with_cols(monkeypatch, [good, bad])
+    g = rr.run_gpap(_tiny_bench(tmp_path), 3, 1, {"z": True}, [5], 100, "cpu", time_limit=1.0)
+    assert g["sim_check"] == "BAD" and g["sim_check_bad"] == 1 and g["sim_check_rows"] == 2
+    _stub_arm_with_cols(monkeypatch, [good, good])
+    g = rr.run_gpap(_tiny_bench(tmp_path), 3, 1, {"z": True}, [5], 100, "cpu", time_limit=1.0)
+    assert g["sim_check"] == "ok" and g["sim_check_bad"] == 0 and g["sim_check_rows"] == 2
+    # no explicit target (never the harness's case) -> the check is OFF, never a silent pass
+    _stub_arm(monkeypatch, samples=[[0, 1], [1, 0]])
+    g = rr.run_gpap(_tiny_bench(tmp_path), 3, 1, None, [5], 100, "cpu", time_limit=1.0)
+    assert g["sim_check"] == "off" and g["sim_check_rows"] == 0
+
+
+def test_repeats_size_the_space_but_no_longer_cap_our_own_rate(tmp_path, monkeypatch):
+    """THE CAP IS GONE, because what it corrected is gone (2026-09-04).
+
+    It existed because `unique_per_s_est` was a 1,000-row window's distinct fraction applied to a
+    whole run: where the window showed repeats, the implied |S| bounded what a run can deliver
+    (each solution at most once) and the figure was capped at |S|/wall. Now the arm deduplicates
+    every delivered row exactly, so the rate IS the measurement and there is nothing to correct.
+
+    The cap was also defeated by the median that followed it: on both 2026-09-03 cells where it
+    fired the capped seed was the slowest, so the median discarded it and the row published an
+    uncapped number under a `unique_capped: true` flag.
+
+    The space estimate stays — it feeds the `tiny` screen, and over the whole run it is a far
+    better estimator than it was over 1,000 rows."""
+    from eval.rivals import rivals_recurrent as rr
+
+    rows = [[(i % 100) >> b & 1 for b in range(7)] for i in range(1000)]
+    _stub_arm(monkeypatch, samples=rows, sps=1000.0, n_models=1000)
+    g = rr.run_gpap(_tiny_bench(tmp_path), 3, 1, None, [5], 100, "cpu", time_limit=1.0)
+    s = g["seeds"][0]
+    assert s["unique_distinct"] == 100 and 80 < s["space_est"] < 130
+    assert "unique_capped" not in g and "unique_capped" not in s, "the cap outlived its cause"
+    assert g["unique_per_s_est"] == pytest.approx(1000.0 * 100 / 1000), \
+        "the rate must be the measured distinct fraction, uncorrected"
+    # below the row floor the repeat rate is too noisy to size a space: no estimate
+    _stub_arm(monkeypatch, samples=[[0, 1], [1, 0], [0, 1], [0, 1]], sps=1000.0, n_models=4)
+    g = rr.run_gpap(_tiny_bench(tmp_path), 3, 1, None, [5], 100, "cpu", time_limit=1.0)
+    assert g["seeds"][0]["space_est"] is None
+    assert g["unique_per_s_est"] == pytest.approx(1000.0 * 2 / 4)
+
+
+def test_a_failed_demotic_miter_check_flags_the_row_instead_of_killing_the_stage():
+    import inspect
+
+    from eval.rivals import rivals_demotic
+
+    src = inspect.getsource(rivals_demotic.main)
+    i = src.index("write_unrolled_miter(")
+    assert "except AssertionError" in src[i:i + 900], "the self-check must flag, not raise"
+    assert '"pin_check_ok": pin_ok,' in src
+
+
+def test_deduplication_is_offline_and_is_charged_to_no_rate(tmp_path, monkeypatch):
+    """THE unique/s figure must cost the sampler nothing, on either clock.
+
+    Two halves. The dedup itself runs after `sample_file` returns, so it is outside every clock
+    the sampler keeps — `distinct_s` records what it cost, because "off the clock" is a claim and
+    a claim needs evidence. The GATHER rides along inside the timed loop: `samples_per_s` already
+    subtracts it (`phases["output"]`), but `sps_e2e_total` CARRIES it, which was a rounding error
+    at 1,000 kept rows and is not at a million. Both rivals deduplicate their whole output off
+    their own timer, so ours comes off both of ours or the e2e column pays for an instrument the
+    rival is never charged for.
+    """
+    from eval.rivals import rivals_recurrent as rr
+
+    rows = [[i & 1, (i >> 1) & 1] for i in range(400)]
+    _stub_arm(monkeypatch, samples=rows, sps=1000.0, n_models=400,
+              wall_total=10.0, proj_s=4.0)                     # 40% of the wall is delivery
+    g = rr.run_gpap(_tiny_bench(tmp_path), 3, 1, None, [5], 100, "cpu", time_limit=1.0)
+    seed = g["seeds"][0]
+
+    assert seed["out_project_s"] == 4.0, "the projection wall must be recorded, not assumed"
+    assert seed["distinct_s"] >= 0.0, "the offline dedup must be timed"
+    # e2e is computed on the wall WITHOUT the gather: 400 / (10 - 4), not 400 / 10
+    assert seed["sps_e2e"] == pytest.approx(400 / 6.0)
+    assert seed["sps_e2e_with_delivery"] == pytest.approx(400 / 10.0), \
+        "the library's delivery-carrying rate must still be recorded for audit"
+    assert g["sps_e2e"] == pytest.approx(400 / 6.0)
+    # and the steady-state rate is untouched by any of it
+    assert g["sps"] == 1000.0
+
+
+def test_how_the_batch_grant_was_reached_reaches_the_row():
+    """Two ways the ladder can hand a rival less than the rule promises, both of which used to be
+    invisible outside `batch_sweep`, which nothing read.
+
+    `probe_truncated`: the walk spent its probe budget and fell back to the VRAM model's rung —
+    the estimator measured under-granting DEMOTIC 1.5-3.9x — so a cell whose oversized rungs fail
+    SLOWLY (timeouts) can settle for a smaller grant than an equally capable cell whose rungs fail
+    fast (OOM). `budget_bound`: every rung timed out, so the cell is bounded by OUR wall rather
+    than by the rival's capability, which is a different finding and a re-runnable one."""
+    import eval.rivals.rival_common as rc
+
+    rc._WARMED.add("probe-test")
+    r, sweep = rc.run_at_batch(lambda b: {"error": "timeout 300s"}, 30_000,
+                               log=lambda *_: None, probe_budget_s=0.0, tool="probe-test")
+    assert r.get("budget_bound") and r.get("probe_truncated"), \
+        "an all-timeout ladder must say so in the ROW, not only in the sweep"
+
+    ok, _ = rc.run_at_batch(lambda b: {"unique_per_s": 1.0} if b <= 100_000
+                            else {"error": "CUDA out of memory"}, 10_000, log=lambda *_: None)
+    assert "budget_bound" not in ok and "probe_truncated" not in ok, \
+        "a clean grant must not be flagged"
+
+
+def test_every_paper_set_instance_has_a_target_even_on_their_default_branch():
+    """A circuit their run.py handles through its catch-all `else` still needs an entry here, or
+    the table-mode loop drops it with `if name not in TARGETS: continue`.
+
+    That silent skip has now cost three instances: `b15` and `s208.1` in earlier sweeps, and it
+    was waiting for `s38584` — the circuit their Table II's 8th ISCAS-89 row actually names, added
+    to the paper set on 2026-09-04. The existing transcription test only checks circuits with a
+    NAMED branch in their source, so a catch-all instance passes it while never being measured.
+    This asserts the property that matters: everything we claim to score is scoreable."""
+    from eval.rivals.rival_common import PAPER_INSTANCES
+    from eval.rivals.rivals_recurrent import TARGETS
+
+    missing = sorted(n for n in PAPER_INSTANCES["rcs"] if n not in TARGETS)
+    assert not missing, (
+        "these instances are in the rival's published set but have no pin transcription, so "
+        f"table mode would skip them without failing: {missing}")
+
+
+def test_the_rival_is_run_at_a_recorded_seed():
+    """The rivals take `--seed` (their own `flags.py`, default 0) and neither harness passed it,
+    so "the rival ran once" was true but the row could not say at WHICH initialization — and a
+    second run would have silently re-measured the same one.
+
+    One seed is the protocol (`rival_common.RIVAL_SEED`): the rival is measured in exactly one
+    configuration, at its own default, and the asymmetry against GPAP's median-of-three is stated
+    rather than hidden. What this asserts is that the choice is EXPLICIT — passed on the command
+    line and recorded — not inherited from a default that could move under us."""
+    import inspect
+
+    from eval.rivals import rival_common, rivals_demotic, rivals_recurrent
+
+    assert rival_common.RIVAL_SEED == 0, "the rivals' own default is 0; changing it is a protocol change"
+    for mod in (rivals_recurrent, rivals_demotic):
+        src = inspect.getsource(mod)
+        assert '"--seed", str(RIVAL_SEED)' in src, \
+            f"{mod.__name__} does not pass the rival its seed explicitly"
+        assert '"seed_source"' in src, f"{mod.__name__} does not record which seed it measured"

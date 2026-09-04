@@ -579,6 +579,35 @@ Gated by `tests/test_rival_targets.py` (the arm is the bench runner, emission-fr
 CNF the GPAP arm sampled, in both harnesses) and `tests/test_paper_tables.py` (the ledger
 identity on rival rows; the verifier's gates with no bench directory at all).
 
+**Review of the protocol text (2026-09-03, second pass) closed three more gaps in the ROWS
+rather than in the wording.** (1) The rival-facing ratio was described as "GPAP's rate
+includes construction"; it is the winning config's STEADY-STATE rate (`samples_per_s`), which
+excludes parsing, construction, ELS, mining and warm-up exactly as the rival's `model_runtime`
+excludes its model build. Table 2 now prints the e2e ratio (`gm_e2e`: GPAP's `sps_e2e`, the
+same distinct fraction, the rival's unchanged timer) beside the steady-state one, and the
+caption says which is which. (2) Constraint alignment was asserted per row by the DEMOTIC
+harness only: `native_pin_check` moved to `rival_common` and the Recurrent harness runs it in
+table mode, and `rivals_recurrent.miter_self_check` (P[MITER=1] = p_accept, the check
+`write_unrolled_miter` always ran) flags the rare rows — `pin_check_ok` on every row of every
+stage, so the `misaligned` bucket can fire on the headline sequential rows. (3) The
+encoder-independent check (`gpap sample --sim-check`) never ran on the campaign path: the arm
+now simulates its 1,000 kept rows through the ORIGINAL circuit (`sim_check` ok | BAD | off,
+`sim_check_rows`, `sim_check_bad`); `verify_artifact` FAILS a BAD row and counts the ok ones.
+Gated by tests/test_rival_targets.py (an inverted miter is caught; both mains call the pin
+check; the simulate check passes a satisfying row and fails the all-zero one) and
+tests/test_paper_tables.py (the e2e column; the verifier's sim-check gate).
+
+**Third pass: the SOLUTION space, not the input hypercube.** `tiny_space` read `2^|support|`,
+so `c1355` under the rare pin (41 input bits, 2^41 points) passed the screen while its kept
+rows were 0.56 distinct — ~700 solutions, which both tools enumerate — and the 1,000-row window
+let `unique_per_s_est` read ~10^5x the whole-run bound (800k models delivered from ~700
+solutions). Now `rival_common.space_from_distinct` turns a repeat rate into a size,
+`paper_tables.solution_space_estimate` takes the minimum of the hypercube, p_accept (or its
+upper bound) x hypercube and that size, `tiny_space` screens on it in BOTH tables, and
+`run_gpap` caps unique/s at |S| per timed wall (`unique_capped`, `space_est` per row — it can
+only lower ours). The DEMOTIC-rare miter self-check no longer raises: a failure is a flagged
+row like every other alignment failure. Gated by tests in both test files.
+
 ## 10. Still open after §6-§9 — things a referee can still ask
 
 Carried over from the 2026-08-26 audit; none is a correctness bug, all are statements the text
@@ -639,3 +668,204 @@ Two audit claims were REFUTED and should not be revived: "the unique/s ratio div
 estimators" (bounded at 7e-4, and in the wrong direction) and "`ratio=inf` wins the argmax so the
 CMSGen=0 win column is populated by encoder choice" (the mechanism is real, the causation is not —
 it was a wording problem, and §8 removed the argmax anyway).
+
+## 15. The campaign under the protocol: Colab L4, 2026-09-03/04 — and what the rows taught
+
+`$GPAP_RESULTS/l4_protocol_20260903` (its README is the record). 80 cells, 0 errors, 0 unsound,
+`verify_artifact --rivals` 0 failures, emission audit PASS; 6 VM lifetimes, no row lost. Run on
+the L4 rather than the laptop because the laptop's 4080 sat at a 40 W power cap (default 80 W,
+~1.1 GHz under load, un-liftable from WSL) — check `nvidia-smi -q -d POWER,PERFORMANCE` before
+any local measurement.
+
+Headline (screens applied): GPAP/CMSGen 1,262x on DEMOTIC's set under its pins (10), 244x under
+our rare pin (6, five cells tiny); 1,150x on Recurrent's set under its table (16), 75x under our
+rare pin (17, 17/19 wins); GPAP/rival 4.7x vs DEMOTIC on its pins (9/10), 6.2x vs Recurrent on
+its table (12/12), 338x vs Recurrent under our rare pin (15/15); engine 1.71e9 impl/s, 548x
+CMSGen's counters. Losses by name: `c499` to DEMOTIC (0.50x); `b11`, `b18` to CMSGen under the
+rare pin (the rejection collapse, success 4e-6 / 7e-4); `b01` under Recurrent's target is a
+GPAP zero against its depth-pooled count (0 at T=25 for everyone). Recurrent did not initialize
+within 300 s on 10/11 of 29 — every large circuit, so its geomeans are over its easier half.
+
+What the rows exposed, fixed in `paper_tables.py` and gated by tests:
+- **Screens before buckets, in Table 2 as in Table 1.** `b19` is vacuous at T=25 (p_accept
+  1.0) AND Recurrent fails on it; with the error bucket first, Table 1 said vacuous and Table 2
+  said rival failure — one stage, two ledgers. The vacuous list is per PIN, not per circuit:
+  `b13` is a tautology under Recurrent's own target and not under our rare pin.
+- **A run with zero models is a GPAP zero, not "unmeasured".** `unique_est_status`
+  "no-sample-rows" with `n_models` 0 was booked as no-verdict (`b01`).
+- **The Recurrent egress bound is per card.** 0.7–1.4% of `model_runtime` on the 4080 became
+  0.1–15% (30% pessimistic on s208.1) on the L4; the typed number left the source files, the
+  audit's section 4 is the figure to quote. Uncorrected either way, in the rival's favour.
+- **Two cells the screens do not catch, named instead**: `c432` under the rare pin propagates
+  to 4 effective variables (3 decisions and 1 implication per model, 1.1e8 unique/s vs
+  DEMOTIC's 1,201 — the only DEMOTIC-rare cell with a ratio), and one repeat in 1,000 kept rows
+  implies ~5e5 solutions (`c1908` its pins, `c432` rare, one seed each) — weak evidence that the
+  3-seed median absorbed. Widening the free screen or flooring the space estimate at a rival's
+  observed unique count are protocol decisions, not taken here.
+
+
+## §16 — The referee pass on the l4_protocol_20260903 campaign (2026-09-04)
+
+Five independent adversarial reviews of the completed campaign, each re-deriving numbers from the
+raw rows rather than reading the prose. Every published figure in `RESULTS.md` reproduced exactly
+— the generator is honest — and the defects were in the harness, in two metric definitions, and
+in what the LaTeX emitter printed. **The campaign is superseded**; what follows is what changed
+and why, so the re-run can be read against it.
+
+**Four defects that moved published numbers, all in our favour.** That direction is the finding:
+a result that looks good does not get investigated.
+
+1. **DEMOTIC was under-granted on 4 of 11 ISCAS-85 cells.** `run_at_batch` started at our VRAM
+   model's rung and only stepped *down*; the one-rung-up probe that had been masking the model's
+   error was removed on 2026-09-03, the campaign's own launch day, for being a best-of-two. The
+   model was measured at `num_steps=10` and we run 1, so it predicts low — and a gradient
+   sampler's unique/s is near-proportional to its batch. Our own L4 calibration of the previous
+   day names the four cells (c880 1.53x, c2670 2.12x, c3540 1.85x, c7552 3.87x). Rescored at the
+   largest rung that runs, **DEMOTIC-native 4.73x → 2.99x**.
+   FIX: walk the ladder DOWN from the top; reject a rung only on feasibility (OOM, driver
+   refusal, or not finishing inside the wall budget), never on throughput. Still one measured
+   configuration, so the best-of-N objection does not apply. `probe_budget_s` bounds the search.
+2. **`s208.1` was our bug, published as one of the rival's 11 failures.** Their `run.py` strips
+   dots from the dataset name when it writes its results CSV (`sat_s2081_1_...`); we globbed the
+   key verbatim. It ran at all six rungs and every result was discarded. It is the ONLY one of
+   the 11 with `rungs=6, "no results csv"` — the other ten are genuine `start_point` failures.
+   `s15850.1` and `s38584.1` are the same shape.
+3. **`c1355` ate the session's cold start.** The first DEMOTIC run of a process is ~3.3x slow
+   (measured, and the calibration probes have always discarded a warm-up run); the campaign
+   harness fired none, so the alphabetically-first cell was published at 0.25x of its warm rate.
+   FIX: one discarded run per (tool, process) inside `run_at_batch` — per PROCESS, because the
+   supervisor resumes in a fresh interpreter after every VM reclaim.
+4. **`s35932` is not their circuit.** Their Table II's 8th ISCAS-89 row reads 12 PI / 278 PO /
+   19,253 gates / 1,452 DFF, which is `s38584` exactly; we read the row's name as "s35844" and
+   substituted `s35932` on the weaker evidence that it is the only `s359xx` branch in their code.
+   Their code covers more circuits than their paper reports. `s35932` also carried the sequential
+   headline: dropping it moves the full-set geomean **1,150.2x → 759.0x** and the paper-set
+   **1,704.5x → 821.3x**, and its ratio is 586,616x because CMSGen produced ONE sample in 60 s.
+   FIX: `s38584` is in `PAPER_INSTANCES` and committed; `s35932` stays as a circuit we add.
+
+**Two metric definitions that were the wrong shape.**
+
+* **Unique/s was an estimate where the rivals measure.** We took the distinct fraction of a
+  1,000-row window and applied it to runs delivering up to 1,048,576 models; both rivals
+  deduplicate their whole output exactly, off their own clock (`torch.unique`, after the timer).
+  The "bias bounded at 7e-4" claim had no derivation in the repo and bounded the collision rate
+  *inside the window*, not the run's distinct fraction. FIX: `exact_distinct` over every
+  delivered row (worst recorded cell: 262 MB gathered, 32 MB packed, both off the timed clock).
+  The unique/s CAP goes with it — with an exact dedup there is nothing to correct, and the cap
+  was in any case discarded by the median that followed it (on both cells where it fired, the
+  capped seed was the slowest).
+* **A published row was a composite no execution produced.** `sps`, `n_models`, `success` and the
+  counters were each medianed independently across seeds: **138 field/cell combinations** took
+  their value from a different seed than the row's own rate, so Table 3 divided one seed's
+  implications by another seed's models. FIX: `median_run` picks the run whose rate is the median
+  and publishes all of ITS fields; the safety verdicts (`sound_check`, `sim_check`) still fold
+  over every seed, and `sps_min`/`sps_max` record the spread — p90 of max/min was 1.51 on this
+  campaign and six published wins sat inside their own seed spread.
+
+**Three screens, and an artifact that contradicted its own caption.**
+
+* `zero_search` was a knife-edge at exactly zero counters. `c432` under the rare pin leaves 4
+  effective variables and delivers a model per 1.09 implications — against a next-lowest
+  surviving cell of 44.1 — and was the ENTIRE DEMOTIC-rare geomean at 89,786x. The screen is now
+  continuous (fewer than two implications per delivered model), with the threshold placed inside
+  that two-order gap rather than fitted. DEMOTIC-rare then honestly has no geomean at all:
+  5 rival zeros, 5 tiny, 1 free.
+* A cell **proved UNSAT at its depth** gets its own column. `b01` under Recurrent's own target is
+  unreachable at exactly T=25 (their sampler runs to 50 and pools every depth), and we booked a
+  GPAP=0 loss against a solution that does not exist.
+* The **LaTeX emitter dropped `tiny` and `vacuous`** from Table 1 and `n`, `tiny` and `vacuous`
+  from Table 2, so neither table's columns summed to the instance count its caption promised, and
+  `89,786.0x` printed with nothing saying it was one cell. The Markdown was correct throughout.
+  Gated now by a test that parses the emitted `.tex`.
+* The inflation caveat reported `max()` over stages — the one row where screening was
+  conservative (1.42x down) — while hiding that the screens RAISE the other three headlines by
+  1.19–1.24x. Now reported per stage, in both directions.
+
+**Two protocol choices that were ours, not theirs, and are now the rival's.**
+
+* **Depth.** T=25 was described as "the rival's own default depth". Their run script says
+  `--num_clock_cycles 50` and their paper sets η=50. Both depths are now run and reported.
+* **The circuit.** We sampled an ABC-optimized CNF while handing the rivals the raw netlist and
+  disclosing it. The capability to hand them the optimized circuit existed and was used before
+  (worth geomean 1.34x to DEMOTIC). Both variants are now run and the table scores, per instance,
+  whichever is **better for the rival** — the same tie-break `num_steps` uses. `--lr` joins
+  `--num_steps` under that rule: both rivals' run scripts say 15, Recurrent's paper text says 50,
+  so the tie-break is re-derived on the campaign's card (`steps_calibration.py --axis lr`).
+
+**Left standing, verified by more than one reviewer**: soundness (two independent checks, 80/80,
+no verdict over an empty set), emission symmetry with Recurrent's in-timer copy quantified and
+left uncorrected in its favour, absent-is-not-zero, `cms_count_exact` on 80/80 with no floored
+zeros, one engine build id across 6 VM rebuilds, `pin_check_ok` 80/80, and the 60 s vs 300 s
+budget asymmetry (no rival run timed out; max observed wall 259 s).
+
+**Still open, deferred by the user**: the uniformity claim reports Barbarik pass counts only, and
+our own exact-oracle instrument reads the shipped configuration 1.31x worse than CMSGen on TV.
+Nothing false is published, and the data exists; converge on it before submission.
+
+### §16b — Second referee pass, on the fixed tree (2026-09-04)
+
+Five more reviewers, told exactly what §16 changed and asked to verify the fixes rather than
+re-report them. The fixes held. What they found was a further layer, mostly of the same kind —
+a rule stated in one place and not carried through to another.
+
+* **`s38584` had no pin transcription.** It was added to `PAPER_INSTANCES` and committed as a
+  benchmark, but `rivals_recurrent.TARGETS` had no entry, and table mode drops an untranscribed
+  name with `continue`. The re-run would have silently skipped the very circuit §16 added — the
+  same silent skip that previously cost `b15` and `s208.1`. The existing transcription test could
+  not see it, because it only checks circuits with a NAMED branch in the rival's source and
+  `s38584` takes their catch-all. Now transcribed, and gated by "every paper-set instance is
+  scoreable".
+* **The GPAP-arm cache key stopped one directory short, again.** §16 added `rival_common.py` to
+  it; the harness files where `run_gpap` actually lives, the circuit encoders, the miner and the
+  Python K-sizing were all still outside it, as was the `abc` BINARY whose output the arm samples.
+  A logic fix in `run_gpap` changed no key at all. All now hashed.
+* **The field-wise median came back in a derived column.** `_gpap_e2e` took its own median across
+  seeds while every other field came from the picked run, so Table 1's e2e ratio and Table 2's
+  e2e column mixed two seed selections inside one quotient. It now reads the picked run's own
+  `sps_e2e`.
+* **The LaTeX ledger was fixed and the MARKDOWN one was not** — `unsat` was missing from both
+  Markdown tables, and Table 2's `n` printed the WIN denominator under the header Table 1 uses
+  for the geomean's count, so its columns summed to 30 against 29 cells. Both now sum.
+* **The both-directions screen caveat was gated on the wrong thing** — on whether a stage had a
+  vacuous cell, which silently dropped both ISCAS-85 stages, the two the screens HELP. It is now
+  gated on whether the screens moved the geomean at all, and reports all four stages.
+* **The generated methodology paragraph still described the superseded harness** ("a timeout
+  recorded as the result", "a FIXED 1,000 ... rows"). It is regenerated into the paper, so a
+  refreshed table would have shipped a methods section describing a harness that no longer
+  exists. Fixed and gated by a drift test.
+* **Evidence the tables could not see.** `probe_truncated` (the ladder fell back to the modelled
+  rung) and a new `budget_bound` (every rung timed out, so the cell is bounded by OUR wall rather
+  than the rival's capability) were buried in `batch_sweep` with no consumer; both are now
+  row-level and the gate counts them. The gate also warns when the proved-UNSAT screen never ran
+  on a campaign — "not asked" is not the same as zero — and when a distinct fraction was taken
+  over a prefix of the delivered rows.
+* **Two claims of ours were wrong.** The miter control in `protocol.tex` said GPAP's rate moves
+  "by at most 1%" on the tautology cells; `b05` moves 4.3x, where the adaptive portfolio switches
+  configuration on a formula propagation has already solved. And `docs/paper/README.md`'s own
+  "never quote a number from this file" paragraph went stale within the hour, on the next
+  regeneration; it now carries no numbers at all.
+* **The failure regime is now a boundary, generated from the rows**: every loss to CMSGen is a
+  cell where amplification (success / p_accept) is at most 1.94x AND success is at most 6.9e-4,
+  with zero winning cells meeting both conditions. Cells whose baseline delivered fewer than 30
+  samples in its whole budget are named separately, so a ratio like `s35932`'s — one CMSGen
+  sample in 60 s — reads as "CMSGen could not sample this" rather than as a measured factor.
+
+**The three open items were decided (2026-09-04) and are now protocol, not gaps.**
+
+* **One rival seed, its own default.** `RIVAL_SEED = 0` is passed explicitly on both rivals'
+  command lines and recorded per row with its source. The rival is measured in exactly one
+  configuration; the asymmetry against GPAP's median-of-three is stated in the protocol rather
+  than closed, because what the tables need from the rival is one honest measurement at its own
+  settings, not a narrower interval. (Three seeds would have cost ~1.7 h per campaign, and until
+  now would have measured nothing new at all: without `--seed` on the command line every "repeat"
+  re-ran the same initialization.)
+* **The 300 s wall stays.** It is ours, not theirs, and it is now falsifiable per cell rather
+  than by inference: a cell that exhausted the budget at every batch rung is flagged
+  `budget_bound`, counted apart from a capability failure, and warned about by the gate. The
+  T=50 stages will therefore say for themselves whether the budget binds at the deeper unroll.
+* **`python-sat` is pinned** (`>=0.1.8.dev0,<1.10`) in `pyproject.toml` and `rivals_setup.sh`,
+  because it ADJUDICATES the proved-UNSAT screen: which version is resolved, and which solver
+  classes it ships, decides whether a cell lands in `unsat` or `both0`. The verdict also records
+  the solver, its version and the conflict budget per row, so the pin and the evidence agree.
+
+The uniformity question from §16 is unchanged and remains deferred.

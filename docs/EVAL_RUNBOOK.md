@@ -4,7 +4,7 @@ How to reproduce every experiment behind the paper on any CUDA machine: the benc
 the `abc:fast` encoder, both target regimes, GPAP vs CMSGen, GPAP vs the GPU gradient-descent
 rivals, the kernel A/B, the uniformity certificates, and the figures and tables.
 
-## 0. The protocol (converged 2026-09-03)
+## 0. The protocol (converged 2026-09-03, corrected 2026-09-04)
 
 Three steps, one stage (`eval/run_full_eval.sh campaign`, or `eval/colab/colab_rivals_l4.sh`
 on a rented GPU), and every published table is read off its rows:
@@ -13,24 +13,45 @@ on a rented GPU), and every published table is read off its rows:
    ISCAS-85 combinational circuits, T=1. Recurrent-CircuitSAT (MLCAD'25): the ITC'99 `b*` and
    ISCAS-89 `s*` sequential circuits it evaluates — every one we can process (all of
    `benchmarks/circuits/bench/seq/`, b17-b22 fetched by `scripts/fetch_benchmarks.sh itc99`),
-   unrolled T=25, with its paper's 16 (`rival_common.PAPER_INSTANCES`) scored beside the whole
-   set. Nothing of ours is added: no EPFL, no HWMCC, no `sk_` CNFs, no `random` targets, no T=50.
+   unrolled at **T=25 and T=50**, with its paper's 16 (`rival_common.PAPER_INSTANCES`) scored
+   beside the whole set. Their Table II's 8th ISCAS-89 row prints "s35844", which is no ISCAS-89
+   circuit; its figures (12 PI / 278 PO / 1,452 DFF) identify **`s38584`**, and that is what the
+   paper set holds — `s35932`, substituted for it until 2026-09-04, stays as a circuit WE add.
+   T=50 is theirs too (`--num_clock_cycles 50` in their run script, η=50 in their paper), and a
+   shallower unroll gives them a smaller depth pool, so both are run and neither is pooled.
+   Nothing of ours is added: no EPFL, no HWMCC, no `sk_` CNFs, no `random` targets.
 2. **Each rival runs on its own set, under two tasks: the pins its own table names, and our
    rare pin** (the rarest output pattern observed in a 262k-sequence simulation, all outputs,
    as a miter) on the same circuits — so across a pair of rows only the task changes. One
-   configuration per rival, and it is theirs: its own script's `num_steps` (1 for both), the
-   largest batch that fits 0.80 of free VRAM (the share GPAP's K takes), a 300 s budget for
-   Recurrent's `start_point` initialization. What a tool cannot process is an error row,
-   omitted from the table with the count stated — never a zero.
+   configuration per rival, and it is theirs: its own script's `num_steps` (1 for both) and
+   `lr` (15 for both; where a tool ships two values — Recurrent's paper says 50 — the tie-break
+   goes to whichever is better FOR THE RIVAL, re-derived on the campaign's card by
+   `steps_calibration.py --axis lr`), and the **largest batch rung it can run to completion**,
+   found by walking the ladder DOWN from the top (a rung is rejected only when the tool cannot
+   finish on it — OOM, driver refusal, or past the wall — never on how fast it was, so exactly
+   one configuration is measured), at its own default seed (`rival_common.RIVAL_SEED = 0`,
+   passed explicitly and recorded in the row) and run ONCE at it — one configuration, one
+   measurement, with the asymmetry against our median-of-3 stated rather than hidden. Plus a
+   300 s wall per run and another 300 s for Recurrent's `start_point`; that budget is OURS, so
+   a cell that exhausted it at every batch rung is flagged `budget_bound` and counted apart from
+   a capability failure. The first run of every process is DISCARDED (a cold CUDA context costs
+   the session's first instance ~3.3x). Each rival is also handed an ABC-simplified copy of the circuit as well as the raw
+   one, and the table scores whichever variant is better for it. What a tool cannot process is
+   an error row, omitted with the count stated — never a zero.
 3. **Every one of those cells is then run by GPAP and by CMSGen on the same constraint**: GPAP
    on the `abc:fast` CNF of that circuit and those pins (the default `circuit` portfolio, 60 s,
-   median of seeds 5/6/7, on-device soundness re-check of every emitted model), and CMSGen
+   the **median-rate seed's run** of seeds 5/6/7 — one execution's numbers, never a field-wise
+   median across seeds — with an on-device soundness re-check of every emitted model and an
+   EXACT deduplication of every delivered row for the unique/s figure, the same way both rivals
+   compute theirs), and CMSGen
    (patched: `--nowrite`, `--maxtime 60`) on that very CNF file (`rivals_*.py --cmsgen`,
    `rival_common.cmsgen_arm`). Three tools, one constraint, one row.
 
 Why this shape: every number is measured on ground a rival chose, the CMSGen comparison and the
 rival comparison are the same cells (Table 1 and Table 2 line up instance by instance), and
-nothing is selected — one encoder, one config per tool, no best-of. HTS is off (its paper
+nothing is selected on the statistic being published — one encoder, one config per tool, no
+best-of on throughput; where a choice must be made (the batch rung, the circuit variant, a knob
+the tool ships twice) it is made on feasibility or in the rival's favour. HTS is off (its paper
 evaluates no circuit). Uniformity is a separate claim (Barbarik, §7). The older family matrix
 (seq/comb/sk/epfl/hwmcc × targets × depths, `gpap bench` on instances pinned our way) still
 runs as supplementary stages and `paper_tables` prints its rows only when their JSONs exist.
@@ -68,7 +89,7 @@ Measured end to end on an RTX 4080 laptop (2026-07-28; 357 rows, 13 stages, 0 er
 | `epfl` | ~45 m | 20 × 2 encoders × 2 targets |
 | `comb` | ~15 m | 10 × 2 encoders × 2 targets |
 | `sk` | ~15 m | 29 CNFs |
-| `rivals` / `campaign` | ~3–4 h | four protocols (§6) × ~80 rows; the CMSGen arm adds ~1 min per row |
+| `rivals` / `campaign` | ~6 h on a Colab L4 (measured 2026-09-03: 5 h 50 m wall across 6 VM lifetimes, ~25 min of it VM rebuilds) | four protocols (§6) × 80 rows; the large ITC'99 circuits cost ~10 min each (the rival's 300 s init budget + 3 GPAP seeds + CMSGen's 60 s), the rest ~3 min |
 | `plots` | < 1 m | |
 
 The wall is **budget-bound, not GPU-bound**: most of it is instances sitting at the 60 s
@@ -259,8 +280,13 @@ each was a wrong number once; the measurements are in
   zeros; `paper_tables` prints the count. ⚠️ Measured: b14 at T=25 needs 1,025 s at its granted
   batch (probe alone 743 s) and b17 1,134 s of model build per probe — both are error rows under
   the rule, and the cap is OURS: state it and how many rows it excludes.
-- **Constraint alignment is verified**: miter mode asserts p(MITER=1) equals the instance's
-  `p_accept`; native mode asserts bit-identical acceptance words (`pin_check_ok`).
+- **Constraint alignment is verified on every row of both harnesses** (`pin_check_ok`): under
+  their pins, bit-identical acceptance words between their index table on the original file
+  and our reordered prefix (`rival_common.native_pin_check`); under the rare pin, the miter's
+  p(MITER=1) equals the instance's `p_accept` (`unroll_to_bench.write_unrolled_miter`,
+  `rivals_recurrent.miter_self_check`). A failed row is the `misaligned` bucket and fails
+  `verify_artifact`. The GPAP arm also simulates its kept output rows through the ORIGINAL
+  circuit (`sim_check`, the encoder-independent check), beside the on-device clause check.
 - **The same circuit on both sides** (`--circuit-variants raw abc`; the campaign runs `raw` ONLY,
   because `paper_tables` pools every variant in a stage into one geomean): GPAP's ABC arm
   must not face a rival holding the raw circuit, so `rival_common` ABC-optimizes the sequential

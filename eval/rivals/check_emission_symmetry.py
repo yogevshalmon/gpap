@@ -52,8 +52,9 @@ EGRESS_NAMES = {"open", "print"}
 # it is charged to THEM, i.e. it can only make our ratio look better than it is.
 ALLOWED = {
     ("Recurrent-CircuitSAT-Sampler", "run_back_prop_seq", "cpu"):
-        "per-depth candidate-solution snapshot — measured at 0.7-1.4% of their model_runtime "
-        "(section 4), left uncorrected so their rate stays the one they publish",
+        "per-depth candidate-solution snapshot — its share of their model_runtime is bounded "
+        "per row in section 4 (it depends on the card), left uncorrected so their rate stays "
+        "the one they publish",
 }
 
 RIVALS = [("Demotic", "src/pytorch/run.py"),

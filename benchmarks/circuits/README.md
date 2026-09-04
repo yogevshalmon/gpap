@@ -6,7 +6,7 @@ the full upstream sets into `.gpap/benchmarks/` (beside the repo) for breadth ru
 | directory | suite | source | license / terms | cite |
 |---|---|---|---|---|
 | `bench/comb/` | ISCAS-85, **all 11** (c17, c432…c7552) | classic distribution (via the DEMOTIC instance set) | de-facto public research benchmarks | Brglez & Fujiwara, ISCAS 1985 |
-| `bench/seq/s*.bench` | ISCAS-89 (the 8 in Recurrent-CircuitSAT's Table II) | classic distribution; `s208.1`, `s4863`, `s15850.1`, `s35932` taken from the rivals' own pinned checkouts | de-facto public research benchmarks | Brglez, Bryan & Kozminski, ISCAS 1989 |
+| `bench/seq/s*.bench` | ISCAS-89 (the 8 in Recurrent-CircuitSAT's Table II) | classic distribution; `s208.1`, `s4863`, `s15850.1`, `s35932`, `s38584` taken from the rivals' own pinned checkouts | de-facto public research benchmarks | Brglez, Bryan & Kozminski, ISCAS 1989 |
 | `bench/seq/b*.bench` | ITC'99 (I99T) | [cad-polito-it/I99T](https://github.com/cad-polito-it/I99T) | **EUPL-1.2** (see upstream LICENSE) | Corno, Sonza Reorda & Squillero, *IEEE D&T* 17(3), 2000 |
 | `epfl/` | EPFL combinational suite (arithmetic + random_control, AIG) | [lsils/benchmarks](https://github.com/lsils/benchmarks) | freely usable research benchmarks (MIT-licensed repo) | Amarù, Gaillardon & De Micheli, IWLS 2015 |
 | `hwmcc17/` | HWMCC'17 single-property AIGs (curated) | [fmv.jku.at/hwmcc17](https://fmv.jku.at/hwmcc17/) | competition benchmarks, free for research use | Biere, van Dijk & Heljanko, *HWMCC 2017* (FMCAD'17 report) |
@@ -17,8 +17,11 @@ Notes for the sampling use case:
   evaluate on, so the head-to-head instance list follows from their protocols rather than from a
   choice of ours — ISCAS-85 in full (DEMOTIC, arXiv 2502.08086 Table II) and the 8 ISCAS-89
   instances of Recurrent-CircuitSAT's Table II (arXiv 2502.21226). Their table prints `s35844`,
-  which is not an ISCAS-89 circuit; `s35932` is the only `s359xx` branch in their `run.py` and is
-  what we ship. The other ~39 ISCAS-89 circuits ship inside both rival checkouts under
+  which is not an ISCAS-89 circuit. Its row reads 12 PI / 278 PO / 19,253 gates / 1,452 DFF,
+  which is `s38584` exactly — that is the circuit of their 8th ISCAS-89 row and what their set
+  means. Until 2026-09-04 we substituted `s35932` instead, on the weaker evidence that it is the
+  only `s359xx` branch in their `run.py`; their code covers more circuits than their paper
+  reports. Both are shipped: `s38584` as one of their 16, `s35932` as a circuit we add. The other ~39 ISCAS-89 circuits ship inside both rival checkouts under
   `.gpap/src/*/data/ISCAS/` but appear in NEITHER paper, so they are not committed here.
   ITC'99 `b17`/`b19`/`b22` are in Recurrent's table but are 1.3-14.5 MB; `scripts/fetch_benchmarks.sh`
   fetches them and **installs them into `bench/seq/` alongside the committed circuits** (they are

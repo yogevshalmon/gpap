@@ -54,7 +54,6 @@ import json
 import os
 import re
 import shutil
-import statistics
 import subprocess
 import sys
 import tempfile
@@ -66,7 +65,9 @@ sys.path.insert(0, REPO_ROOT)
 from eval.rivals.rival_common import (CACHE_MISS, VARIANTS, cache_peek,  # noqa: E402
                                       cache_store, cached_gpap, cmsgen_arm, fit_batch,
                                       _available_bytes, expand_names, host_provenance,
-                                      oversize_reason, prepare_variant,
+                                      native_pin_check, oversize_reason, prepare_variant,
+                                      RIVAL_SEED, exact_distinct, median_run, resolve_lr,
+                                      space_from_distinct, unsat_at_depth,
                                       resolve_steps, rival_commit, rival_vram_budget,
                                       run_at_batch, variant_note)
 from eval.rivals.unroll_to_bench import and_tree                      # noqa: E402
@@ -131,6 +132,12 @@ TARGETS = {
     "s5378": ([0, 1], [1, 0]),
     "s35932": ([0, 15, 31, -1], [1, 1, 1, 0]),
     "s15850.1": ([0, 15, 31, 63, -1], [1, 0, 1, 1, 1]),        # their default branch
+    # ...and so is s38584, the circuit their Table II's 8th ISCAS-89 row actually names (their
+    # run.py has no branch for it, so it takes the same `else`). Missing this entry would have
+    # SILENTLY SKIPPED the instance in table mode — `if name not in TARGETS: continue` — which
+    # is exactly how `b15` and `s208.1` disappeared from earlier sweeps, and it would have gone
+    # unnoticed because the transcription test only checked circuits with a NAMED branch.
+    "s38584": ([0, 15, 31, 63, -1], [1, 0, 1, 1, 1]),          # their default branch
 }
 RARE_ALIAS = "b13"      # any of their [-1]=1 names; the rare-mode MITER copy is keyed to it
 
@@ -171,10 +178,33 @@ def reorder_bench(src, dst, idx):
     return picked
 
 
+def miter_self_check(src, dst, T, seed, n_words=2048):
+    """P[MITER=1] on the miter copy must equal the ORIGINAL instance's rare-pin acceptance
+    probability: the same check `unroll_to_bench.write_unrolled_miter` runs for the DEMOTIC
+    arm, so both harnesses' rare rows carry the same alignment evidence (RIVAL_FAIRNESS_FINDINGS
+    §14 — for one release the Recurrent miter was asserted by construction only). Returns
+    (p_miter, ok); a failure is a row flag (`pin_check_ok: false`, the `misaligned` bucket,
+    verify_artifact FAILS), never a dead harness. Tolerance is 4 sigma of the simulation
+    estimate, floored at 1e-5 — at a rare pin both probabilities sit near the floor, so the
+    check has power against a WRONG pattern (p_miter 0 vs a p_accept of order 1e-4 and up) and
+    against an inverted miter, not against a one-in-a-million miss."""
+    import numpy as np
+    from gpap.circuits.bench import parse_bench
+    from gpap.circuits.simulate import _popcount, _run_bench, _topo_gates, sim_baseline
+    mcirc = parse_bench(dst)
+    outs = _run_bench(mcirc, _topo_gates(mcirc), T, n_words, rng=np.random.default_rng(3))
+    p_miter = _popcount(outs["GPAPMITER"]) / (n_words * 64)
+    p_ref = sim_baseline(src, T, seed, target_mode="rare", n_min=n_words * 64,
+                         budget_s=0.5, hard_cap_s=5.0)["p_accept"]
+    tol = 4 * max((p_ref * (1 - p_ref) / (n_words * 64)) ** 0.5, 1e-5)
+    ok = abs(p_miter - p_ref) <= tol or (p_ref == 0 and p_miter == 0)
+    return p_miter, bool(ok)
+
+
 def miter_bench(src, dst, T, seed):
     """Copy `src` with a single MITER output = [outputs at the last cycle == rare pattern],
     the rare pattern taken over ALL outputs at depth T (gpap.circuits.simulate.rare_target).
-    Returns (pattern, est_freq)."""
+    Returns (pattern, est_freq, p_miter, pin_ok) — the last two from `miter_self_check`."""
     from gpap.circuits.bench import parse_bench
     from gpap.circuits.simulate import rare_target
     circ = parse_bench(src)
@@ -201,13 +231,14 @@ def miter_bench(src, dst, T, seed):
     lines = _replace_outputs(lines, ["GPAPMITER"])
     with open(dst, "w") as f:
         f.write("\n".join(lines) + "\n" + "\n".join(extra) + "\n")
-    return pattern, est
+    p_miter, ok = miter_self_check(src, dst, T, seed)
+    return pattern, est, p_miter, ok
 
 
 # ---------------------------------------------------------------- the two samplers
 
 def run_recurrent(rival, bench_file, key, T, steps, batch, start_point,
-                  timeout=DEFAULT_TIMEOUT, retry=True):
+                  timeout=DEFAULT_TIMEOUT, retry=True, lr=None):
     """One run of their sampler; returns dict or {'error': ...}. `key` = the filename stem the
     copy is given (their target table and results csv are keyed on it)."""
     data_dir = os.path.join(rival, "data", "rival_tmp")
@@ -216,9 +247,14 @@ def run_recurrent(rival, bench_file, key, T, steps, batch, start_point,
     for f in glob.glob(os.path.join(rival, "src", "results", f"sat_{key}_*")):
         os.unlink(f)
     cmd = [sys.executable, os.path.join(rival, "src", "pytorch", "run.py"),
-           "-d", f"../data/rival_tmp/{key}.bench", "-l", "--optimizer", "mse", "--lr", "15e0",
+           "-d", f"../data/rival_tmp/{key}.bench", "-l", "--optimizer", "mse",
+           # their own run script's value; RIVAL_LR carries the provenance and the tie-break
+           "--lr", f"{(lr if lr is not None else resolve_lr('recurrent')[0]):g}e0",
            "--problem_type", "BLIF", "--circuit_type", "seq", "--num_steps", str(steps),
            "--batch_size", str(batch), "--num_clock_cycles", str(T),
+           # THEIR seed, passed explicitly so the row can say which initialization was measured
+           # (their flags.py defaults to it; we run one seed, on purpose — rival_common.RIVAL_SEED)
+           "--seed", str(RIVAL_SEED),
            "--start_point", str(start_point)]
     env = dict(os.environ, CUDA_VISIBLE_DEVICES="0")
     t0 = time.perf_counter()
@@ -236,7 +272,13 @@ def run_recurrent(rival, bench_file, key, T, steps, batch, start_point,
             return run_recurrent(rival, bench_file, key, T, steps, batch, start_point,
                                  timeout=timeout, retry=False)
         return {"error": err, "wall_s": wall}
-    hits = glob.glob(os.path.join(rival, "src", "results", f"sat_{key}_*"))
+    # THEIR filename, not ours: run.py builds `f"{problem_type}_{dataset_str}_{num_steps}"` with
+    # `dataset_str = basename.replace('.bench','').replace('.','')` — the DOT IS STRIPPED. Globbing
+    # the key verbatim finds nothing for a dotted instance, and "the rival produced no results"
+    # is then recorded for a run that in fact completed. It cost `s208.1` its whole table-mode
+    # row in the 2026-09-03 campaign — six rungs ran, all six were discarded, and the cell was
+    # published as one of that rival's 11 failures. `s15850.1` and `s38584.1` are the same shape.
+    hits = glob.glob(os.path.join(rival, "src", "results", f"sat_{key.replace('.', '')}_*"))
     if not hits:
         return {"error": "no results csv", "wall_s": wall}
     import csv
@@ -314,16 +356,16 @@ def _remember_sp(cache_dir, bench_file, T, max_sp, sp):
 
 
 def run_recurrent_once(rival, bench_file, key, T, steps, batch, start_point,
-                       timeout=DEFAULT_TIMEOUT):
-    """ONE measured run at the granted batch (rival_common.run_at_batch: the only fallback is a
-    driver refusal, which is not a measurement). The rungs tried are attached as `batch_sweep`:
-    their unique/s is near-proportional to the batch (s386 T=25: 10k -> 300k is 18.6x, with
-    model_runtime almost flat), so what the rival was granted belongs in the row next to its
-    score."""
+                       timeout=DEFAULT_TIMEOUT, lr=None):
+    """ONE measured run at the rival's granted batch — the LARGEST ladder rung that completes
+    (rival_common.run_at_batch, which also fires this process's one discarded warmup run). The
+    rungs tried are attached as `batch_sweep`: their unique/s is near-proportional to the batch
+    (s386 T=25: 10k -> 300k is 18.6x, with model_runtime almost flat), so what the rival was
+    granted belongs in the row next to its score."""
     r, sweep = run_at_batch(
         lambda b: run_recurrent(rival, bench_file, key, T, steps, b, start_point,
-                                timeout=timeout),
-        batch)
+                                timeout=timeout, lr=lr),
+        batch, tool="recurrent")
     return dict(r, batch_sweep=sweep) if isinstance(r, dict) else r
 
 
@@ -359,12 +401,23 @@ GPAP_PORTFOLIO = "circuit"
 # silently different encoding under the same label. Recorded in every row as `encoder`.
 GPAP_ENCODER = "abc:fast"
 
-# Rows of the timed run's own output kept for the distinct-fraction estimate. This is what
+# Rows of the timed run's own output kept, to DEDUPLICATE — not to estimate from. This is what
 # `--out`/`--max-samples` keep: GPU-projected support bits of the WINNING config, `out_project_s`
-# excluded from every rate — so the estimate costs rows x |support| bits of host memory, not the
-# coverage run's rows x nv x 72 B (which is what OOM-killed b14 and took 7 instances out of a
-# sweep with it). The coverage pass (`n_cov`) is not run on this path at all.
-UNIQUE_ROWS = 1000
+# excluded from every rate — so it costs rows x |support| bits of host memory, not the coverage
+# run's rows x nv x 72 B (which is what OOM-killed b14 and took 7 instances out of a sweep with
+# it). The coverage pass (`n_cov`) is not run on this path at all.
+#
+# IT USED TO BE 1,000, AND THAT WAS THE WRONG SHAPE OF ANSWER (2026-09-04). Both rivals dedup
+# their WHOLE output exactly, off their own clock; we alone estimated a distinct fraction from a
+# window and applied it to runs delivering up to 1,048,576 models. The cap is now above any
+# delivered count we have ever recorded, so `unique/s` is measured the same way theirs is. Cost
+# at the worst cell on record (b13, 1,048,576 models x 250 support bits): 262 MB gathered,
+# 32 MB packed, both off the timed clock. If a future run ever delivers more than this, the row
+# says so — `unique_rows` is recorded and `unique_est_status` reads `capped-gather`.
+UNIQUE_ROWS = 4_000_000
+# Below this many kept rows a repeat rate is too noisy to size the solution space from. The
+# space estimate now feeds only the `tiny` screen, never a cap on our own rate.
+UNIQUE_CAP_MIN_ROWS = 100
 
 
 def build_arm_cnf(bench_file, T, pin_outputs, target, cnf_path, encoder=GPAP_ENCODER):
@@ -414,7 +467,7 @@ def run_gpap(bench_file, T, pin_outputs, target, seeds, n_time, device, time_lim
         info, own = build_arm_cnf(bench_file, T, pin_outputs, target, cnf_path, encoder), True
     else:
         (cnf_path, info), own = cnf, False
-    runs = []
+    runs, unsat, unsat_prov = [], None, {}
     try:
         for s in seeds:
             # verify_sound: this row RECORDS `sound_check`, so it has to run the check —
@@ -429,15 +482,71 @@ def run_gpap(bench_file, T, pin_outputs, target, seeds, n_time, device, time_lim
             # honest on tiny ones where re-sampling dominates.
             bits = g.get("samples")
             n_coll = 0 if bits is None else len(bits)
-            n_distinct = len(np.unique(np.asarray(bits), axis=0)) if n_coll else 0
+            # OFFLINE, AND MEASURABLY SO. The dedup itself runs here, after the sampler has
+            # returned, so it is outside every clock the sampler keeps — and it is timed anyway,
+            # because "it is off the clock" is a claim and `distinct_s` is its evidence.
+            _t0 = time.perf_counter()
+            n_distinct = exact_distinct(bits) if n_coll else 0
+            distinct_s = time.perf_counter() - _t0
+            # The GATHER is the other half, and it is not free at this row count: the projection
+            # rides along inside the timed loop and is billed to phases["output"], which
+            # `samples_per_s` already subtracts — but `sps_e2e_total` CARRIES it, which was
+            # harmless at 1,000 rows and is not at a million. Both rivals deduplicate their whole
+            # output OFF their own timer, so ours must come off both of our clocks or the e2e
+            # column pays for an instrument the rival is not charged for. Recomputed here rather
+            # than in the library, because a real `--out` user genuinely does pay delivery; it is
+            # only as a MEASUREMENT that it belongs outside the wall.
+            proj_s = float((g.get("phases") or {}).get("output") or 0.0)
+            wall_e2e = float(g.get("wall_total_s") or 0.0) - proj_s
+            sps_e2e = (g["n_models"] / wall_e2e) if wall_e2e > 0 else None
+            # ENCODER-INDEPENDENT soundness on the kept rows: simulate each through the
+            # ORIGINAL circuit and require the pinned outputs (the `gpap sample --sim-check`
+            # check, on the campaign path). The on-device re-check above verifies the CNF; this
+            # verifies the unroll + ABC + Tseitin chain that produced it. Runs only with an
+            # explicit target (the harnesses always pass one) and a wire map for every kept
+            # column; otherwise "off", never a silent pass.
+            sim_bad, sim_rows = None, 0
+            cols, wm = g.get("cols"), g.get("wire_map") or {}
+            if n_coll and target is not None and cols is not None and all(v in wm for v in cols):
+                from gpap.circuits.simulate import simulate_check
+                sim_bad = simulate_check(bench_file, T, 5, np.asarray(bits), [wm[v] for v in cols],
+                                         pin_outputs=pin_outputs, target=target)
+                sim_rows = n_coll
             # KEEP None. `or 0.0` turned "nothing to measure on" into "GPAP produced nothing",
             # and every consumer buckets a zero as an outright loss — b11-c25 at a rare pin
             # delivered models at ~15x the rival's rate and was published as a loss to it.
+            # EXACT, over everything the timed run delivered — the same quantity the rivals
+            # report. `n_coll == n_models` unless the gather cap bound (recorded), in which case
+            # this is a distinct fraction over a prefix and the status says so.
             uniq = (g["samples_per_s"] * n_distinct / n_coll) if n_coll else None
-            runs.append({"seed": s, "sps": g["samples_per_s"], "sps_e2e": g.get("sps_e2e_total"),
-                         "unique_per_s_est": uniq,
-                         "unique_est_status": "ok" if uniq is not None else "no-sample-rows",
+            # TRUNCATION means the GATHER CAP BOUND, and nothing else. Comparing the kept rows
+            # against `n_models` looks right and is wrong: on the adaptive path `n_models` counts
+            # every config's models while the kept rows are the WINNER's only (one sampler is
+            # delivered, never a mixture), so a healthy bandit run trips it by construction. It
+            # did on 3 of 82 cells in the 2026-09-04 campaign (b14 1,666 rows of 2,672 models,
+            # b18 8,125 of 10,263, s4863 34,272 of 38,073) and every one was a false alarm: the
+            # distinct fraction is the winner's, multiplied by the winner's rate, which is
+            # coherent. What is NOT coherent is a fraction taken over a capped prefix, so that is
+            # what this flags.
+            partial = bool(n_coll >= unique_rows)
+            # The space estimate survives ONLY to feed the `tiny` screen (paper_tables): a
+            # measured repeat rate over the whole run is a far better estimator than the same
+            # rate over 1,000 rows. It no longer caps anything — with an exact dedup there is
+            # nothing left to correct, and the cap it used to apply was in any case discarded by
+            # the median that followed it (the capped seed was the slowest on both cells where
+            # it fired, so the row published an uncapped number under a `unique_capped` flag).
+            space = (space_from_distinct(n_coll, n_distinct)
+                     if n_coll >= UNIQUE_CAP_MIN_ROWS else None)
+            runs.append({"seed": s, "sps": g["samples_per_s"], "sps_e2e": sps_e2e,
+                         # what the offline dedup cost, and what it would have cost the e2e rate
+                         # had it been left inside: the audit trail for the sentence above
+                         "distinct_s": distinct_s, "out_project_s": proj_s,
+                         "sps_e2e_with_delivery": g.get("sps_e2e_total"),
+                         "unique_per_s_est": uniq, "space_est": space,
+                         "unique_est_status": ("partial-gather" if partial else
+                                               "ok" if uniq is not None else "no-sample-rows"),
                          "unique_rows": n_coll, "unique_distinct": n_distinct,
+                         "sim_check_bad": sim_bad, "sim_check_rows": sim_rows,
                          "success": g["success_rate"], "n_models": g["n_models"],
                          # engine provenance per row, same as the CMSGen sweeps: sound_check is
                          # the on-device model check (opt-in), dec/s + impl/s let the zero-search screen
@@ -449,33 +558,61 @@ def run_gpap(bench_file, T, pin_outputs, target, seeds, n_time, device, time_lim
                          # exactly what a `gpap bench` row records — verify_artifact's
                          # one-engine-per-stage check reads it here too
                          "engine": g.get("engine")})
+        # NOTHING AT ALL? Then ask whether there is anything to find. A cell where both
+        # samplers come up empty is ambiguous — hard, or empty — and `b01` under Recurrent's own
+        # target is the second: its published pattern is unreachable at exactly T=25 (their
+        # sampler runs to 50 and pools every depth), so booking a GPAP zero there scores us
+        # against a solution that does not exist. Proved-UNSAT cells get their own column.
+        # Budgeted, and `None` (unknown) is never read as satisfiable.
+        if not any(r["n_models"] for r in runs):
+            unsat = unsat_at_depth(cnf_path, provenance=unsat_prov)
     finally:
         if own:
             os.unlink(cnf_path)
-    med = lambda k: statistics.median(r[k] for r in runs)
-    med0 = lambda k: statistics.median((r.get(k) or 0.0) for r in runs)
-    # The unique estimate is median over the seeds that HAVE one; None (not 0.0) when no seed
-    # kept a row, so a consumer can tell "not measured" from "produced nothing".
-    uq = [r["unique_per_s_est"] for r in runs if r["unique_per_s_est"] is not None]
+    # THE MEDIAN RUN, not a median of each field (2026-09-04). Taking `statistics.median` of
+    # every column independently publishes a row NO EXECUTION EVER PRODUCED: on the 2026-09-03
+    # campaign 138 field/cell combinations came from a different seed than the row's own `sps`,
+    # and Table 3 then divided one seed's implication count by another seed's model count. The
+    # row is now ONE run — the one whose sampling rate is the median — and every rate, count and
+    # counter in it belongs to that run.
+    #
+    # The SAFETY verdicts are still folded over ALL seeds, and must be: an unsound row or a
+    # failed circuit-level check anywhere in the set cannot be hidden by which run got picked.
+    pick, order = median_run(runs, "sps")
     return {"seeds": runs,
             # WHICH sampler produced this row. A fixed config is only a fixed config if the row
             # says which one; `config_breakdown` is per-seed and this is the claim itself.
             "portfolio": portfolio_name,
+            # True only when a solver PROVED there is none at this depth; None = not asked, or
+            # asked and not resolved inside the budget. paper_tables screens True, never None.
+            "unsat_at_T": unsat, "unsat_probe": (unsat_prov or None),
             "adaptive": len(portfolio(portfolio_name)) > 1,
             # WHICH formula: the encoder is a claim about the row as much as the portfolio is.
             "encoder": encoder, "encode_s": info["encode_s"],
-            "engine": runs[0].get("engine") if runs else None,
-            "unique_per_s_est": (statistics.median(uq) if uq else None),
-            "unique_est_status": ("ok" if uq else
-                                  (runs[0].get("unique_est_status") or "no-sample-rows")),
-            "sps": med("sps"),
-            "success": med("success"), "n_vars": info["n_vars"], "n_clauses": info["n_clauses"],
+            "engine": pick.get("engine"),
+            "median_seed": pick["seed"],
+            "unique_per_s_est": pick["unique_per_s_est"],
+            "space_est": pick.get("space_est"),
+            "unique_rows": pick.get("unique_rows"),
+            "unique_distinct": pick.get("unique_distinct"),
+            "unique_est_status": (pick.get("unique_est_status") or "no-sample-rows"),
+            "sps": pick["sps"], "sps_e2e": pick.get("sps_e2e"),
+            "success": pick["success"], "n_vars": info["n_vars"], "n_clauses": info["n_clauses"],
             # merge_sound_check, not seed 0's verdict: UNSOUND dominates and "ok" beats "off",
             # so a mixed set of seeds cannot publish the first seed's silence as the answer.
             "sound_check": merge_sound_check(*(sound_verdict(r) for r in runs)),
-            "decisions_per_s": med0("decisions_per_s"),
-            "implications_per_s": med0("implications_per_s"),
-            "n_models": int(med("n_models"))}
+            # the circuit-level check, folded the same way: BAD dominates, "ok" beats "off"
+            "sim_check": ("BAD" if any((r.get("sim_check_bad") or 0) > 0 for r in runs) else
+                          "ok" if any(r.get("sim_check_rows") for r in runs) else "off"),
+            "sim_check_rows": sum(r.get("sim_check_rows") or 0 for r in runs),
+            "sim_check_bad": sum(r.get("sim_check_bad") or 0 for r in runs),
+            "decisions_per_s": pick.get("decisions_per_s") or 0.0,
+            "implications_per_s": pick.get("implications_per_s") or 0.0,
+            # spread over the seeds, so a reader can see how much the median is worth: a cell
+            # whose seeds span 3x is not evidence for a 1.06x win (2026-09-03: p90 of max/min
+            # was 1.51 and six published wins sat inside their own seed spread).
+            "sps_min": order[0]["sps"], "sps_max": order[-1]["sps"],
+            "n_models": int(pick["n_models"])}
 
 
 def _cms_cols(g, cms):
@@ -511,6 +648,11 @@ def main():
     ap.add_argument("--steps", default="auto",
                     help="their num_steps: 'auto' (default) = the value their own artifacts "
                          "specify, see rival_common.RIVAL_STEPS; or an explicit number")
+    ap.add_argument("--lr", default="auto",
+                    help="their learning rate: 'auto' (default) = the value their own run "
+                         "script specifies (rival_common.RIVAL_LR); or an explicit number. "
+                         "Their paper text names 50 where their script says 15, so the "
+                         "tie-break is re-derived by steps_calibration.py --axis lr")
     ap.add_argument("--gpap-cache", default=None,
                     help="directory of cached GPAP arms (default: <output dir>/.gpap_cache). "
                          "GPAP_RIVAL_CACHE=0 disables reuse entirely.")
@@ -549,6 +691,7 @@ def main():
     from gpap.circuits.simulate import sim_baseline
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     steps, steps_src = resolve_steps("recurrent", args.steps)
+    lr, lr_src = resolve_lr("recurrent", args.lr)
     tmp = tempfile.mkdtemp(prefix="rivals_recurrent_")
     mode = "rare(fixed-T pattern, MITER)" if args.rare else "their target table"
     if args.cmsgen and not os.access(args.cmsgen, os.X_OK):
@@ -621,11 +764,15 @@ def main():
             continue
         if args.rare:
             rival_file = os.path.join(tmp, f"{name}_{variant}_rare.bench")
-            pattern, est = miter_bench(src, rival_file, args.cycles, args.target_seed)
+            pattern, est, p_miter, pin_ok = miter_bench(src, rival_file, args.cycles,
+                                                        args.target_seed)
             key = RARE_ALIAS                       # their table: [-1]=1 == MITER=1
             gpap_file, pin_n = rival_file, None    # single MITER output, pin all(=1)
             gpap_target = {"GPAPMITER": True}
             pin_desc = f"rare|{len(pattern)}o"
+            if not pin_ok:
+                print(f"{name:<10}{variant:>6}  MITER CHECK FAILED — p(MITER=1)={p_miter:.3e} "
+                      f"differs from the instance's p_accept; row flagged", flush=True)
         else:
             if name not in TARGETS:
                 print(f"{name:<10}  not in their target table, skipped")
@@ -639,6 +786,13 @@ def main():
             gpap_target = {w: bool(v) for w, v in zip(picked, vals)}
             pin_n = len(idx)
             pin_desc = ",".join(f"[{i}]={v}" for i, v in zip(idx, vals))
+            # Their index table on the ORIGINAL file and our reordered prefix must accept
+            # bit-identical input sequences — the same per-row check the DEMOTIC harness runs.
+            p_miter = None
+            pin_ok = native_pin_check(src, gpap_file, idx, vals, pin_n, args.cycles)
+            if not pin_ok:
+                print(f"{name:<10}{variant:>6}  PIN CHECK FAILED — reordered pins do not match "
+                      f"their index table; row flagged", flush=True)
         sim = sim_baseline(gpap_file, args.cycles, args.target_seed, pin_outputs=pin_n,
                            target=gpap_target)
         sp, why = probe_start_point(args.rival, rival_file, key, args.cycles,
@@ -651,8 +805,10 @@ def main():
         else:
             batch = pick_batch(rival_file, args.cycles)
             rcs = run_recurrent_once(args.rival, rival_file, key, args.cycles, steps,
-                                     batch, sp, timeout=args.timeout)
+                                     batch, sp, timeout=args.timeout, lr=lr)
             rcs["steps_source"] = steps_src
+            rcs["lr"], rcs["lr_source"] = lr, lr_src
+            rcs["seed"], rcs["seed_source"] = RIVAL_SEED, "their flags.py default; one run"
         task = {"harness": "recurrent", "mode": "rare" if args.rare else "table",
                 "cycles": args.cycles, "pin_outputs": pin_n, "target": gpap_target,
                 "seeds": args.seeds, "n_time": args.gpap_n,
@@ -719,6 +875,14 @@ def main():
             os.remove(cnf_path)                 # a b19-class CNF is hundreds of MB; not kept
         row = {"name": name, "mode": "rare" if args.rare else "table", "pin": pin_desc,
                "variant": variant, "circuit": vinfo, "cycles": args.cycles,
+               # constraint alignment, verified per row: table mode = bit-identical acceptance
+               # words (native_pin_check); rare mode = the miter's P[MITER=1] equals p_accept
+               "pin_check_ok": pin_ok, "p_miter": p_miter,
+               # WAS THIS ARM MEASURED IN THIS RUN, OR SERVED FROM THE CACHE? Printed to the log
+               # since the cache existed, but never written to the row — so an artifact evaluator
+               # reading the JSON alone could not tell a freshly measured cell from one restored
+               # from a cache keyed on an older build.
+               "gpap_cache_hit": bool(hit),
                "p_accept": sim["p_accept"], "p_accept_lt": sim.get("p_accept_lt"),
                "rival_commit": rival_commit(args.rival), "rcs": rcs, "gpap": g,
                # the ONE formula both of our arms ran (encoder, sizes, support width); `support`
