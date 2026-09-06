@@ -53,10 +53,15 @@ STEPS="${STEPS:-auto}"
 # Per-run wall for the rival subprocess, and Recurrent's SEPARATE initialization budget
 # (2026-09-05): every one of the 2026-09-04 campaign's 20 Recurrent failures was the 300 s
 # initialization budget expiring, and §11 had measured b14 initializing at ~743 s. 1200 s for
-# both — the cap that same measurement used to show b17 does NOT initialize — and the
-# initialization wall is counted in the rival's e2e, as our preparation is in ours.
+# both — the cap that same measurement used to show b17 does NOT initialize. The
+# initialization wall BOUNDS the search and is in no published rate (protocol v1.0, §17).
 TIMEOUT="${TIMEOUT:-1200}"
 INIT_BUDGET="${INIT_BUDGET:-1200}"
+# GRANTS=<grants file> pins every recorded cell's batch rung (and Recurrent's start_point) to
+# the values a previous campaign measured — no ladder walk, no probe (rival_common.load_grants;
+# eval/rivals/extract_grants.py writes the file). The rule is unchanged; the search is skipped.
+GRANT_ARGS=()
+[ -n "${GRANTS:-}" ] && GRANT_ARGS=(--grants "$GRANTS")
 # RETRY_ERRORS=1 re-runs rows that errored (the budget-bound cells of a resumed campaign);
 # off by default because a rival timeout costs the full budget to rediscover on every restart.
 RETRY_ARGS=()
@@ -92,12 +97,12 @@ HTS_ENCS="${HTS_ENCS:-tseitin abc}"
 # `steps-calib` (the rival at num_steps 1 vs 10) is a calibration, not a measurement — the
 # campaign runs each rival at the ONE setting its own script names (rival_common.RIVAL_STEPS);
 # add it to STAGES to re-derive the tie-break on this card.
-# BOTH UNROLL DEPTHS on the sequential set (2026-09-04): T=25 was described as the rival's own
-# default and it is not — their run script says `--num_clock_cycles 50` and their paper sets
-# eta=50, over which their sampler pools every depth, so a shallower unroll hands them a smaller
-# pool. Both are run; `paper_tables` reports them as separate rows.
-STAGES="${STAGES:-lr-calib demotic-native demotic-comb-rare recurrent-rare recurrent-table \
-recurrent-rare-t50 recurrent-table-t50}"
+# PROTOCOL v1.0 (frozen 2026-09-06, docs/EVAL_RUNBOOK.md §0): the campaign is the four T=25
+# stages + the calibrations. T=50 is the rival's own script depth (`--num_clock_cycles 50`,
+# eta=50, over which its sampler pools every depth) and is an ADDITIVE appendix run under the
+# identical protocol — STAGES="recurrent-rare-t50 recurrent-table-t50 steps-calib-t50" —
+# reported beside the T=25 rows, never in their place.
+STAGES="${STAGES:-lr-calib demotic-native demotic-comb-rare recurrent-rare recurrent-table steps-calib}"
 want() { case " $STAGES " in *" $1 "*) return 0 ;; *) echo "[skip] $1 (not in STAGES)"; return 1 ;; esac; }
 
 # The CMSGen arm: a HARD preflight, like colab_cmsgen_circuits_abc_l4.sh — a stage resumed
@@ -158,7 +163,7 @@ trap 'kill $CACHE_PACKER 2>/dev/null' EXIT
 if want demotic-native && have 25 "demotic-native"; then
     banner "DEMOTIC native (their ISCAS-85 pins, raw + abc)"
     $PY eval/rivals/rivals_demotic.py --mode native $COMB_INSTS --seeds $RSEEDS --steps "$STEPS" \
-        --timeout "$TIMEOUT" --circuit-variants $VARIANTS_DEM ${CMS_ARGS[@]+"${CMS_ARGS[@]}"} \
+        --timeout "$TIMEOUT" --circuit-variants $VARIANTS_DEM ${GRANT_ARGS[@]+"${GRANT_ARGS[@]}"} ${CMS_ARGS[@]+"${CMS_ARGS[@]}"} \
         --resume --output "$OUT/rivals_demotic_native.json" 2>&1 | tee -a "$LOGS/rivals.log"
     save_cache
 fi
@@ -169,7 +174,7 @@ if want demotic-comb-rare && have 25 "demotic-comb-rare"; then
     banner "DEMOTIC (their ISCAS-85 circuits, OUR rare pin)"
     $PY eval/rivals/rivals_demotic.py --mode miter $COMB_INSTS -T 1 --target rare \
         --bench-dir benchmarks/circuits/bench/comb \
-        --seeds $RSEEDS --steps "$STEPS" --timeout "$TIMEOUT" --circuit-variants $VARIANTS_DEM \
+        --seeds $RSEEDS --steps "$STEPS" --timeout "$TIMEOUT" --circuit-variants $VARIANTS_DEM ${GRANT_ARGS[@]+"${GRANT_ARGS[@]}"} \
         ${CMS_ARGS[@]+"${CMS_ARGS[@]}"} \
         --resume --output "$OUT/rivals_demotic_comb_rare.json" 2>&1 | tee -a "$LOGS/rivals.log"
     save_cache
@@ -178,7 +183,7 @@ fi
 if want demotic-miter && have 50 "demotic-miter"; then
     banner "DEMOTIC miter (our rare fixed-T instances, raw + abc)"
     $PY eval/rivals/rivals_demotic.py --mode miter $SEQ_INSTS -T "$T" --target rare \
-        --seeds $RSEEDS --steps "$STEPS" --timeout "$TIMEOUT" --circuit-variants $VARIANTS_DEM \
+        --seeds $RSEEDS --steps "$STEPS" --timeout "$TIMEOUT" --circuit-variants $VARIANTS_DEM ${GRANT_ARGS[@]+"${GRANT_ARGS[@]}"} \
         ${CMS_ARGS[@]+"${CMS_ARGS[@]}"} \
         --resume --output "$OUT/rivals_demotic_miter.json" 2>&1 | tee -a "$LOGS/rivals.log"
     save_cache
@@ -214,7 +219,7 @@ fi
 if want recurrent-rare && have 60 "recurrent-rare"; then
     banner "Recurrent-CircuitSAT — OUR rare pins (raw)"
     $PY eval/rivals/rivals_recurrent.py $SEQ_INSTS -T "$T" --rare --seeds $RSEEDS --steps "$STEPS" \
-        --timeout "$TIMEOUT" --init-budget "$INIT_BUDGET" --circuit-variants $VARIANTS_RCS \
+        --timeout "$TIMEOUT" --init-budget "$INIT_BUDGET" --circuit-variants $VARIANTS_RCS ${GRANT_ARGS[@]+"${GRANT_ARGS[@]}"} \
         ${CMS_ARGS[@]+"${CMS_ARGS[@]}"} ${RETRY_ARGS[@]+"${RETRY_ARGS[@]}"} \
         --resume --output "$OUT/rivals_recurrent_rare.json" 2>&1 | tee -a "$LOGS/rivals.log"
     save_cache
@@ -223,7 +228,7 @@ fi
 if want recurrent-table && have 30 "recurrent-table"; then
     banner "Recurrent-CircuitSAT — THEIR target table (raw)"
     $PY eval/rivals/rivals_recurrent.py $SEQ_INSTS -T "$T" --seeds $RSEEDS --steps "$STEPS" \
-        --timeout "$TIMEOUT" --init-budget "$INIT_BUDGET" --circuit-variants $VARIANTS_RCS \
+        --timeout "$TIMEOUT" --init-budget "$INIT_BUDGET" --circuit-variants $VARIANTS_RCS ${GRANT_ARGS[@]+"${GRANT_ARGS[@]}"} \
         ${CMS_ARGS[@]+"${CMS_ARGS[@]}"} ${RETRY_ARGS[@]+"${RETRY_ARGS[@]}"} \
         --resume --output "$OUT/rivals_recurrent_table.json" 2>&1 | tee -a "$LOGS/rivals.log"
     save_cache
@@ -232,7 +237,7 @@ fi
 if want recurrent-rare-t50 && have 90 "recurrent-rare-t50"; then
     banner "Recurrent-CircuitSAT — OUR rare pins, T=50 (their own depth limit)"
     $PY eval/rivals/rivals_recurrent.py $SEQ_INSTS -T 50 --rare --seeds $RSEEDS --steps "$STEPS" \
-        --timeout "$TIMEOUT" --init-budget "$INIT_BUDGET" --circuit-variants $VARIANTS_RCS \
+        --timeout "$TIMEOUT" --init-budget "$INIT_BUDGET" --circuit-variants $VARIANTS_RCS ${GRANT_ARGS[@]+"${GRANT_ARGS[@]}"} \
         ${CMS_ARGS[@]+"${CMS_ARGS[@]}"} ${RETRY_ARGS[@]+"${RETRY_ARGS[@]}"} \
         --resume --output "$OUT/rivals_recurrent_rare_t50.json" 2>&1 | tee -a "$LOGS/rivals.log"
     save_cache
@@ -241,7 +246,7 @@ fi
 if want recurrent-table-t50 && have 45 "recurrent-table-t50"; then
     banner "Recurrent-CircuitSAT — THEIR target table, T=50 (their own depth limit)"
     $PY eval/rivals/rivals_recurrent.py $SEQ_INSTS -T 50 --seeds $RSEEDS --steps "$STEPS" \
-        --timeout "$TIMEOUT" --init-budget "$INIT_BUDGET" --circuit-variants $VARIANTS_RCS \
+        --timeout "$TIMEOUT" --init-budget "$INIT_BUDGET" --circuit-variants $VARIANTS_RCS ${GRANT_ARGS[@]+"${GRANT_ARGS[@]}"} \
         ${CMS_ARGS[@]+"${CMS_ARGS[@]}"} ${RETRY_ARGS[@]+"${RETRY_ARGS[@]}"} \
         --resume --output "$OUT/rivals_recurrent_table_t50.json" 2>&1 | tee -a "$LOGS/rivals.log"
     save_cache

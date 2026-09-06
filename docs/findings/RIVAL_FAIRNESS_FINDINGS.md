@@ -1136,3 +1136,125 @@ accounting the numbers rest on, and in the prose around them. Fixed:
 with `init_s` and the rejected rungs' walls added; a taller batch ladder for the six ladder-topped
 cells; `b22`-rare re-measured on a clean device (its GPAP arm ran at 7.3 of 23.7 GB free). None
 can lower a published GPAP ratio.
+
+## 17. Protocol v1.0 — the freeze (2026-09-06)
+
+Four review rounds (§16–§16e) each found real defects, and each also moved a published column:
+Table 2's end-to-end ratio was defined four different ways in three rounds (0.8x, 7.6x,
+20.9x/132.0x, 11.8x/68.8x on the same rows); Recurrent's initialization budget went 60 s →
+1,200 s → 300 s → 1,200 s; the circuit handed to the rivals went raw → raw+abc (best for the
+rival) → abc; the unroll depth 25 → 25+50 → 25; the rival's step count from our 10 to their
+script's 1 with a tie-break, to the paper-config question, to the script with the paper values
+measured beside it. Every one of those changes was defensible on its own. Together they are the
+reason the user called a halt ("each time we are going from one point to another, back and
+forth, with no end") and asked for a protocol that does not change. This section is that
+protocol's record: what was decided, what was removed, what was considered and not adopted,
+and the rule that stops a fifth round.
+
+**The diagnosis.** Three causes, and only one of them is a fixable class of bug. (1) Reviews were
+allowed to change metric DEFINITIONS, not only fix errors — and a redefinition always has a
+next, fairer version. (2) A few quantities have no right answer because they compare things the
+two tools define differently: an end-to-end wall across an in-process sampler and a subprocess
+gradient tool is our invention, and on DEMOTIC's cells the rival's timed loop is 0.3–0.7 s
+inside a ~5 s process while GPAP's real work is also under a second, so whatever that column read
+was process start-up. (3) Scope grew sideways (T=50, raw+abc, paper configs, HTS, seeds), and
+every widening created new cells to get wrong.
+
+**The principle.** Publish only quantities each tool defines for itself, under one stated rule
+for what we hand it; remove the columns that are our invention across tools; every tool at the
+configuration its authors ship, and the batch by one rule.
+
+**Decided (the user, 2026-09-06), in one place — docs/EVAL_RUNBOOK.md §0 is the frozen text:**
+
+1. **The headline is the full set** (30 sequential circuits; 11 ISCAS-85). The rival paper's
+   16 are printed beside it on every row, never instead of it. "We don't want to present a
+   partial result as the headline."
+2. **T=25 is the paper's depth. T=50 is run AFTER the freeze, as an additive appendix** under
+   the identical protocol, reported beside the T=25 rows and never in their place.
+3. **One cleanup run before the freeze**, then nothing: the cells whose grant the old
+   3,000,000 ladder top had bound (six DEMOTIC circuits under both tasks, `b02`/`b06` under
+   both Recurrent tasks — every cell whose sweep was the single top rung) re-walked from a
+   30,000,000 top, and `b22`-rare's GPAP arm re-measured on a clean device (it had run with
+   7.3 of 23.7 GB free). Rows removed to `rerun_20260906/`, re-measured in two concurrent Colab
+   sessions (`launch_cleanup_{A,B}.sh`, `merge_cleanup.py`), everything else untouched.
+4. **GPAP keeps its shipped `circuit` portfolio.** Every tool at its authors' shipped default
+   is the one principle; the bandit asymmetry stays disclosed with its measured price (§12).
+5. **Governance.** From the freeze, a review may fix a bug in a number (fix, regenerate, say
+   so) and fix prose. It may not change a metric definition, a configuration, a screen, a
+   budget or the cell set. Such a proposal is logged below, with its reason, and not acted on.
+
+**Removed by rule: Table 2's `e2e` column.** The rivals' metric is unique solutions per second
+of their own `model_runtime`, which excludes their model build; GPAP's comparable figure excludes
+construction the same way, and that is the one comparison the rivals themselves define. The
+column, its four definitions, `_gpap_e2e_full`, the start-up floor and the `gm_e2e_nosub` upper
+bound are gone from `paper_tables.rival_family`; the generator's Table 2 text and the LaTeX
+caption say why; `test_table_2_has_one_clock_the_rivals_own_and_no_end_to_end_column` pins the
+absence (the rows in that test carry every wall field the old column read, and nothing may read
+them). Table 1 keeps both clocks: there sampling wall meets sampling wall and whole process
+meets whole process, and that column never moved. Removing Table 2's e2e also dissolves two
+deferred items of §16e — recording `init_s` in the rival's e2e and adding the rejected rungs'
+walls — since neither touches the rivals' metric.
+
+**Two harness pieces added for the freeze, neither a protocol change.**
+
+* **The batch ladder's top is 30,000,000** (`rival_common.BATCH_LADDER`, rungs 10M and 30M
+  added). §16e found that on six cells the 3M top completed first try, so the ladder and not
+  the card set the grant — a fourth rejection reason the "feasibility only" rule did not state.
+  On the campaign's 24 GB L4 no scored cell completes 30M (c17 would, and is screened as a tiny
+  space), so the card bounds every grant; `paper_tables` still names any cell whose top rung
+  completes first try, which is the mechanical check that a larger card cannot re-open the
+  hole. The two extra rungs cost a big circuit two more doomed model builds on a FRESH card
+  only (the OOM ceiling is cached, and a recorded grant skips the walk).
+* **The grant is part of the record.** `eval/rivals/extract_grants.py` reads every rival row's
+  granted rung and, for Recurrent, its settled `start_point` into
+  `eval/rivals/grants/<campaign>.json` (committed); `rivals_{demotic,recurrent}.py --grants
+  FILE` pins them (`GRANTS=` for the Colab driver; `run_full_eval.sh` defaults to the committed
+  file) — no ladder walk, no start_point probe, one run at the recorded rung, `grant_source`
+  and `start_point_source` on the row. A pinned rung this card cannot finish on is walked down
+  from, so the rule "largest rung that completes" holds on any card; a cell the record holds
+  as a rival failure has no grant and is re-measured, never copied. The walk and the probe were
+  the bulk of a campaign's wall on the large circuits (whole VM lifetimes on `b21`) and neither
+  is a measurement, so this is what makes a re-run reproducible and cheap. Gated by five tests
+  in tests/test_rival_targets.py (ladder top and start, pinned walk and descent, the harness
+  pinning both halves, the extractor's keys and the never-pin-a-failure rule, the committed
+  file's consistency with the ladder).
+
+**Considered, not adopted — the standing list.** A future review that proposes one of these
+gets pointed here, not a re-run.
+
+| proposal | why not |
+|---|---|
+| a fifth definition of Table 2's e2e (init_s, rejected rungs, any start-up rule) | the column is removed; the rivals define one clock and it is printed |
+| pin GPAP to `b8` so every side runs one fixed config | every tool at its shipped default is the principle; the price is measured (§12, 4.5–8.7%) and disclosed per row (`portfolio`, `adaptive`) |
+| run the rivals' PAPER configurations as configuration | decided 2026-09-05 (§16d); measured beside the script setting and printed (0.16x / 0.26x of it) |
+| the raw circuit variant, or raw+abc best-for-rival | decided 2026-09-05 (§16d): one variant everywhere; the axis stays implemented, not run |
+| more rival seeds | decided 2026-09-04 (§16b): one run at its own default, the asymmetry stated |
+| HTS | its paper evaluates no circuit (§0 of the runbook) |
+| a TV / exact-oracle uniformity number in the paper tables | uniformity is Barbarik CM_test with both controls, only (the user's rule, 2026-09-01) |
+| widening the free / tiny / vacuous / thin screens | mechanical, per row, applied before the ledger in every table; a threshold moved after seeing the rows is a fitted screen |
+| a taller ladder still, or a per-rung optimum for the rival | the 30M top is above the card's reach on every scored cell and the generator checks it; the grant is a share-of-the-machine rule, not a search for the rival's fastest rung (§16d) |
+| the paper set as the headline | the user's rule: the full set is the headline, the paper set beside it |
+
+**What still changes numbers after the freeze, legitimately:** the cleanup run's rows (item 3,
+recorded below when merged), the T=50 appendix rows (additive), and a bug in a number — fixed,
+regenerated and recorded here, with the protocol untouched.
+
+**The cleanup run, measured (2026-09-06, 09:13–09:52 local, two concurrent Colab L4 sessions,
+one VM lifetime each; the campaign README's last section is the record).** 17 cells re-walked
+from the 30,000,000 top. **One cell moved: `c432` under DEMOTIC's pins completes the 10,000,000
+rung** (30,000,000 OOMs) and DEMOTIC runs 8,952,982 u/s there against 8,157,612 at 3,000,000 —
+GPAP 9,925,487 u/s, **1.11x with a seed band of 0.98–1.13x: a tie, where the ladder-bound row
+had read a 1.21x win** (DEMOTIC-native `wins` 8/10 → 7/10 + 1 tie; the 2.2x geomean is
+unchanged). §16e's suspicion about this cell was right, and it is exactly the direction a
+ladder-bound grant hides. Every other re-walked cell OOMs at 10,000,000 and is granted
+3,000,000 again at a rate within noise of its earlier row, so the card and not the ladder
+bounds them; `c17` completes the 30,000,000 top (89 / 16 u/s) and is screened as a tiny space
+on both tables — DEMOTIC's own exception — so it carries no number. `b22`-rare's GPAP arm on a
+clean device (23.5 of 23.7 GB free) still delivers 0 models: the residency was not the cause,
+the cell is a genuine limit of the comparison, and its caveat is gone. The GPAP and CMSGen arms
+of the 17 cells were re-measured with them (the GPAP-arm cache keys on the harness source, so
+the ladder change was a miss by design): all within seed noise. Headlines after the run — vs
+CMSGen 1,243.7x / 230.4x / 820.4x / 73.2x; vs DEMOTIC 2.2x (7/10, 1 tie); vs Recurrent 21.5x
+on its table (paper set 10.2x) and 93.9x under our rare pin (49.0x) — `verify_artifact` 19 ok /
+2 warnings / 0 failures, emission audit PASS. The grants file was regenerated off the merged
+rows (74 pinned cells, 8 recorded failures). **The protocol is frozen from here.**

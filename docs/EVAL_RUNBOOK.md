@@ -4,7 +4,14 @@ How to reproduce every experiment behind the paper on any CUDA machine: the benc
 the `abc:fast` encoder, both target regimes, GPAP vs CMSGen, GPAP vs the GPU gradient-descent
 rivals, the kernel A/B, the uniformity certificates, and the figures and tables.
 
-## 0. The protocol (converged 2026-09-03, corrected 2026-09-04)
+## 0. The protocol — v1.0, FROZEN 2026-09-06
+
+**This is the final evaluation protocol, and it does not change.** It converged over four
+adversarial review rounds (findings/RIVAL_FAIRNESS_FINDINGS.md §14–§17), each of which had
+moved a column; the freeze is the user's rule of 2026-09-06. From this date a review may do two
+things: fix a bug in a number (fix, regenerate, say so) and fix prose. It may not change a
+metric definition, a tool configuration, a screen, a budget, or the cell set. A proposal of that
+kind is logged under "considered, not adopted" in §17 with its reason, and is not acted on.
 
 Three steps, one stage (`eval/run_full_eval.sh campaign`, or `eval/colab/colab_rivals_l4.sh`
 on a rented GPU), and every published table is read off its rows:
@@ -12,67 +19,82 @@ on a rented GPU), and every published table is read off its rows:
 1. **The benchmarks are the GPU rivals' own published sets.** DEMOTIC (ASP-DAC'25): its 11
    ISCAS-85 combinational circuits, T=1. Recurrent-CircuitSAT (MLCAD'25): the ITC'99 `b*` and
    ISCAS-89 `s*` sequential circuits it evaluates — every one we can process (all of
-   `benchmarks/circuits/bench/seq/`, b17-b22 fetched by `scripts/fetch_benchmarks.sh itc99`),
-   unrolled at **T=25** (the T=50 stages are implemented and were deliberately NOT run in this
-   campaign — the tables print them "not run"), with its paper's 16
-   (`rival_common.PAPER_INSTANCES`) scored beside the whole set. Their Table II's 8th ISCAS-89 row prints "s35844", which is no ISCAS-89
-   circuit; its figures (12 PI / 278 PO / 1,452 DFF) identify **`s38584`**, and that is what the
-   paper set holds — `s35932`, substituted for it until 2026-09-04, stays as a circuit WE add.
-   T=50 is theirs too (`--num_clock_cycles 50` in their run script, η=50 in their paper), and a
-   shallower unroll gives them a smaller depth pool, so the T=25 figures may understate them; the
-   T=50 stages exist and were not run, which is stated, not pooled.
-   Nothing of ours is added: no EPFL, no HWMCC, no `sk_` CNFs, no `random` targets.
+   `benchmarks/circuits/bench/seq/`, b17-b22 fetched by `scripts/fetch_benchmarks.sh itc99`;
+   30 circuits), unrolled at **T=25**, with its paper's 16 (`rival_common.PAPER_INSTANCES`)
+   scored beside the whole set. Their Table II's 8th ISCAS-89 row prints "s35844", which is no
+   ISCAS-89 circuit; its figures (12 PI / 278 PO / 1,452 DFF) identify **`s38584`**, and that is
+   what the paper set holds — `s35932` is a circuit WE add. **The headline is the full set**
+   (the user's rule: a partial set is not a headline); the paper-set geomean is printed beside
+   it on every row. T=50 is the rival's own script depth; it is an ADDITIVE appendix run under
+   the identical protocol (`RIVAL_T2=50`, the `*-t50` stages), reported beside the T=25 rows
+   and never in place of them. Nothing of ours is added: no EPFL, no HWMCC, no `sk_` CNFs, no
+   `random` targets, no second encoder.
 2. **Each rival runs on its own set, under two tasks: the pins its own table names, and our
    rare pin** (the rarest output pattern observed in a 262k-sequence simulation, all outputs,
    as a miter) on the same circuits — so across a pair of rows only the task changes. One
-   configuration per rival, and it is theirs: its own run script's `num_steps` (1 for both) and
-   `lr` (15 for both). Their papers state other values (DEMOTIC 10 iterations; Recurrent 5 at
-   `lr` 50) — the campaign runs the SHIPPED script configuration, one per tool (2026-09-05, the
-   user's call: one configuration, no tie-break, no sweep), which is also the better of the two
-   for each tool on this card at T=25; the paper values, singly and paired, are measured beside
-   it by `steps_calibration.py` (T=25 and T=50) as evidence for the text, never as
-   configuration. Then the **largest batch rung it can run to completion**,
-   found by walking the ladder DOWN from the top (a rung is rejected only when the tool cannot
+   configuration per rival, and it is theirs: its own run script's `num_steps` (1 for both)
+   and `lr` (15 for both). Their papers state other values (DEMOTIC 10 iterations; Recurrent 5
+   at `lr` 50); the paper values, singly and paired, are measured beside the script setting by
+   `steps_calibration.py` and PRINTED under Table 2 as evidence, never run as configuration.
+   Then the **largest batch rung it can run to completion**, found by walking the decade-and-
+   triple ladder DOWN from its top (30,000,000 — above what the campaign's 24 GB card completes
+   on any scored cell; `paper_tables` names any cell whose top rung completed first try, so a
+   larger card cannot silently re-open the hole): a rung is rejected only when the tool cannot
    finish on it — OOM, driver refusal, or past the wall — never on how fast it was, so exactly
-   one configuration is measured), at its own default seed (`rival_common.RIVAL_SEED = 0`,
-   passed explicitly and recorded in the row) and run ONCE at it — one configuration, one
-   measurement, with the asymmetry against our median-of-3 stated rather than hidden. Plus a
-   1,200 s wall per run and a separate 1,200 s initialization budget for Recurrent's
-   `start_point` search (2026-09-05; it was 300 s, and every one of the 2026-09-04 campaign's 20
-   Recurrent failures was that budget expiring — §11 had measured `b14` initializing at ~743 s).
-   The initialization wall BOUNDS the search; it is not added to the rival's published e2e
-   figure (the harness records no `init_s`), an omission that only lowers the rival's e2e and
-   raises our ratio — §16e. Its steady-state metric is untouched either way. That budget is OURS, so a cell that exhausted it at
-   every batch rung is flagged `budget_bound` and one that did not initialize inside it is
-   reported with the budget named (the reason is phrased at the search level — the search had the
-   whole budget; a single timing-out probe got only what its predecessors left) — both counted
-   apart from a capability failure. The first
-   run of every process is DISCARDED (a cold CUDA context costs the session's first instance
-   ~3.3x). **One circuit variant, everywhere**: every tool is handed the SAME
-   sequential-ABC-simplified netlist GPAP encodes from (2026-09-05, the user's call). Measured,
-   that choice is nobody's friend — it cost GPAP `b12` outright and cost Recurrent `b09` 58x under
-   one pin while helping it 1.6x under another (§16c) — and the residual (GPAP's post-unroll
-   ABC pass, which has no sequential equivalent a rival could consume) is stated, not
-   corrected. The raw-vs-abc axis stays implemented and is not part of the protocol. What a
-   tool did not produce a measurement for is an error row, omitted with the count and the
-   reason stated — never a zero.
+   one configuration is measured, at its own default seed (`RIVAL_SEED = 0`, passed explicitly
+   and recorded), run ONCE, the asymmetry against our median-of-3 stated. A 1,200 s wall per
+   run and a separate 1,200 s initialization budget for Recurrent's `start_point` search; the
+   budget BOUNDS the search and is in no published rate. A cell that does not initialize
+   inside it is reported with the budget named, apart from a capability failure, never a zero.
+   The first run of every process is DISCARDED (a cold CUDA context costs the session's first
+   instance ~3.3x). **One circuit variant, everywhere**: every tool is handed the SAME
+   sequential-ABC-simplified netlist GPAP encodes from, equivalence-checked (§16d: it is
+   nobody's friend, and the residual — GPAP's post-unroll pass, which has no sequential
+   equivalent — is stated). What a tool did not produce a measurement for is an error row,
+   omitted with the count and the reason stated — never a zero.
 3. **Every one of those cells is then run by GPAP and by CMSGen on the same constraint**: GPAP
-   on the `abc:fast` CNF of that circuit and those pins (the default `circuit` portfolio, 60 s,
-   the **median-rate seed's run** of seeds 5/6/7 — one execution's numbers, never a field-wise
-   median across seeds — with an on-device soundness re-check of every emitted model and an
-   EXACT deduplication of every delivered row for the unique/s figure, the same way both rivals
-   compute theirs), and CMSGen
-   (patched: `--nowrite`, `--maxtime 60`) on that very CNF file (`rivals_*.py --cmsgen`,
-   `rival_common.cmsgen_arm`). Three tools, one constraint, one row.
+   on the `abc:fast` CNF of that circuit and those pins (the SHIPPED default: the adaptive
+   `circuit` portfolio — every tool at the configuration its authors ship, and the one
+   asymmetry it is, a bandit measuring two uniformity-safe configs inside the wall against
+   rivals that run one, is stated with its measured price, §12 — 60 s, the median-rate seed's
+   run of seeds 5/6/7, an on-device soundness re-check of every emitted model, the kept rows
+   simulated through the original netlist, and an EXACT deduplication of every delivered row
+   for the unique/s figure, the way both rivals compute theirs), and CMSGen (patched:
+   `--nowrite`, `--maxtime 60`) on that very CNF file (`rival_common.cmsgen_arm`). Three
+   tools, one constraint, one row.
+
+**What is published, and on which clock.** Table 1 (GPAP vs CMSGen, the same cells): two
+clocks, each charging both sides alike — steady state (sampling rate vs CMSGen's samples per
+sampling wall) and end to end (GPAP's whole wall vs CMSGen's whole subprocess); quote `e2e` for
+a delivered-samples claim. Table 2 (GPAP vs each rival): ONE clock, the rival's own metric —
+unique solutions per second of its `model_runtime`, which excludes its model build, against
+GPAP's steady-state unique/s, which excludes construction the same way. Table 2 has no
+end-to-end column by rule (§17: an end-to-end ratio across an in-process sampler and a
+subprocess gradient tool had four definitions in three rounds and measured process start-up
+on cells whose real work is under a second). Table 3: the engine's implication rate and the
+identity that splits engine from rejection cost, over Table 1's rows. Table 4b: Barbarik CM_test
+with both controls — the only uniformity claim. Screens, applied before any ledger and in every
+table: vacuous pin, free cell, tiny space, proved-UNSAT, a 30-sample floor on both sides, and a
+tie for any cell whose sign lies inside GPAP's own seed band; every ledger column sums to the
+cell count. Every headline is quoted with its structure (median, seed band, top cells, the
+geomean without them) — `paper_tables` prints it.
+
+**Reproducing a campaign pays no search.** The grant each rival received — its batch rung and,
+for Recurrent, its `start_point` — is part of the record: `eval/rivals/extract_grants.py`
+writes them per campaign to `eval/rivals/grants/<campaign>.json`, and both drivers pin them
+(`GRANTS=…` for the Colab driver; `run_full_eval.sh` defaults to the committed file,
+`RIVAL_GRANTS=none` walks and probes from scratch). A pinned rung this card cannot finish on is
+walked down from, so the rule holds on any card, and the row says which happened
+(`grant_source`). A cell the record holds as a rival failure is re-measured, never copied.
 
 Why this shape: every number is measured on ground a rival chose, the CMSGen comparison and the
 rival comparison are the same cells (Table 1 and Table 2 line up instance by instance), and
 nothing is selected on the statistic being published — one encoder, one config per tool, no
 best-of on throughput; where a choice must be made (the batch rung, the circuit variant, a knob
 the tool ships twice) it is made on feasibility or in the rival's favour. HTS is off (its paper
-evaluates no circuit). Uniformity is a separate claim (Barbarik, §7). The older family matrix
-(seq/comb/sk/epfl/hwmcc × targets × depths, `gpap bench` on instances pinned our way) still
-runs as supplementary stages and `paper_tables` prints its rows only when their JSONs exist.
+evaluates no circuit). The older family matrix (seq/comb/sk/epfl/hwmcc × targets × depths,
+`gpap bench` on instances pinned our way) still runs as supplementary stages and `paper_tables`
+prints its rows only when their JSONs exist.
 
 **Run it from a shell, not a notebook cell.** Every stage checkpoints after each row and resumes;
 a Colab cell that looks idle gets reaped, a `nohup`'d process does not.
@@ -244,7 +266,8 @@ with the harnesses' `paper` keyword): DEMOTIC (arXiv 2502.08086 Table II) on all
 circuits, Recurrent-CircuitSAT (arXiv 2502.21226 Table II) on its 8 ISCAS-89 + 8 ITC'99. ⚠️ The
 two sets give different headlines and the wider one flatters us: on the 2026-09-02 rows,
 Recurrent's rare-pin geomean is **62.1x over their 16 and 97.7x over all b*/s*** (their target
-table: 3.0x vs 4.5x). Both are printed; quote one and say which.
+table: 3.0x vs 4.5x). Both are printed; **the FULL set is the headline** (protocol v1.0 — a
+partial set is not a headline) and the paper set is quoted beside it, always.
 
 **HTS is off by default.** Its paper (arXiv 2502.08673) evaluates 60 instances and not one is a
 netlist — random q-family, OR-configuration, `prod-*` and `s15850a_*` CNFs (the last two are
@@ -288,15 +311,15 @@ each was a wrong number once; the measurements are in
   (b12 1.04x, b04 1.25x, b13 2.19x, b14 4.80x), and are superseded. The arm also runs NO
   coverage pass any more: `unique_per_s_est`'s distinct fraction is measured on EVERY delivered
   row (`rivals_recurrent.UNIQUE_ROWS = 4,000,000`, one projected support-bit row per sample up to
-  the cap), the projection wall subtracted from the steady-state rate and charged in Table 2's
-  e2e.
+  the cap), the projection wall subtracted from the steady-state rate (Table 2 has ONE clock,
+  the rival's own — §0; the end-to-end comparison is Table 1's).
 - **Recurrent-CircuitSAT is scored on a depth-POOLED superset** — its loop applies the target at
   every depth `start_point..T` and pools unique solutions, an easier task than the fixed-depth
   CNF every other row measures. Generous, kept, stated; `unique_at_T` is recorded per row.
 - **Recurrent gets ONE configuration** (§11 there, settled 2026-09-03; budgets raised
   2026-09-05, §16d): the `start_point` search is its INITIALIZATION and gets one 1,200 s
   budget (`--init-budget`, separate from the 1,200 s per-run `--timeout`; each probe on what is
-  left), which bounds the search (its wall is NOT added to the published e2e; §16e), then one
+  left), which bounds the search and is in no published rate (§17), then one
   measured run at the granted batch with its own script's
   `num_steps=1`. No up-probe of the batch, no retry of a timeout at a smaller batch. The
   failures are named (`no gradient path` / `did not initialize: ... 1200s initialization

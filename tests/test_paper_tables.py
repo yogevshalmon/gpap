@@ -157,52 +157,6 @@ def test_the_thin_denominator_floor_is_the_same_on_both_sides_of_both_tables(tmp
     assert p["n"] == v["n_gm"] == 2
 
 
-def test_table_2_e2e_is_one_definition_charged_the_same_way_on_both_sides(tmp_path):
-    """Table 2's `e2e` has been wrong three ways in three rounds: dividing GPAP's wall by the
-    rival's UNCHANGED timer (0.8x); then by the rival's whole SUBPROCESS wall, which charged it
-    ~4.5 s of interpreter + CUDA start-up per cell that GPAP's in-process wall never pays, while
-    our side subtracted its delivery and carried no encoding (7.6x on cells whose whole wall is
-    under a second). ONE definition now: each side's whole wall on the instance, process
-    start-up excluded on both — GPAP charged encoding and delivery; the rival its timed loop plus
-    its non-timed wall above the tool's start-up floor, the smallest non-timed wall it showed."""
-    import json as _json
-
-    from eval.artifact.paper_tables import rival_family
-
-    def cell(name, unique, runtime, wall, encode_s, n_models, rate_with_delivery):
-        r = rrow(name, sps=1000.0)
-        r["gpap"].update({"sps_e2e": 500.0, "unique_per_s_est": 1000.0, "n_models": n_models,
-                          "median_seed": 5,
-                          "seeds": [{"seed": 5, "sps_e2e": 500.0,
-                                     "sps_e2e_with_delivery": rate_with_delivery}]})
-        r["cnf"] = {"encode_s": encode_s}
-        r["demotic"] = {"unique": unique, "runtime_s": runtime, "wall_s": wall,
-                        "unique_per_s": unique / runtime, "num_inputs": 40}
-        return r
-
-    # A: the tool's smallest non-timed wall (4 s) — pure start-up, so its e2e is its steady state.
-    # B: 7 s non-timed, of which 3 s exceed the floor (a real model build) and are charged.
-    a = cell("c1", unique=100, runtime=1.0, wall=5.0, encode_s=0.0, n_models=1000,
-             rate_with_delivery=500.0)
-    b = cell("c2", unique=200, runtime=2.0, wall=9.0, encode_s=1.0, n_models=1000,
-             rate_with_delivery=400.0)
-    (tmp_path / "rivals_demotic_native.json").write_text(_json.dumps([a, b]))
-    v = rival_family(str(tmp_path), "demotic_native", "demotic")
-    assert abs(v["startup_s"] - 4.0) < 1e-9, "the floor is the smallest non-timed wall"
-    # GPAP A: 1000 models / (1000/500 + 0) = 500/s; rival A: 100 / (1.0 + 0) = 100/s -> 5x
-    # GPAP B: 1000 / (1000/400 + 1.0) = 285.7/s; rival B: 200 / (2.0 + 3.0) = 40/s -> 7.14x
-    ga, gb = 500.0, 1000.0 / (1000.0 / 400.0 + 1.0)
-    ea, eb = ga / 100.0, gb / 40.0
-    assert abs(v["gm_e2e"] - (ea * eb) ** 0.5) < 1e-9, "e2e: start-up excluded on both sides"
-    # the printed upper bound charges the rival its WHOLE subprocess wall
-    na, nb = ga / (100.0 / 5.0), gb / (200.0 / 9.0)
-    assert abs(v["gm_e2e_nosub"] - (na * nb) ** 0.5) < 1e-9
-    assert v["e2e_nodelivery"] == 0
-    # a row without the delivery split is counted, not silently accepted
-    b["gpap"]["seeds"][0].pop("sps_e2e_with_delivery")
-    (tmp_path / "rivals_demotic_native.json").write_text(_json.dumps([a, b]))
-    assert rival_family(str(tmp_path), "demotic_native", "demotic")["e2e_nodelivery"] == 1
-
 
 def test_a_cell_whose_sign_is_inside_gpap_seed_band_is_a_tie_not_a_win(tmp_path):
     """`wins 20/20` beside a caveat calling two of those cells ties contradicted itself. A cell
@@ -849,7 +803,8 @@ def test_the_rival_is_granted_the_largest_rung_that_runs_not_the_modelled_one():
 
     best, sweep = run_at_batch(run, 10_000, log=lambda *_: None)      # model says 10k
     assert best["unique_per_s"] == 100_000, "granted the model's rung instead of the largest"
-    assert calls == [3_000_000, 1_000_000, 300_000, 100_000]
+    assert calls == [30_000_000, 10_000_000, 3_000_000, 1_000_000, 300_000, 100_000], \
+        "the walk starts at the ladder's TOP (30,000,000 since protocol v1.0)"
     assert [x["batch"] for x in sweep] == calls, "every rung tried belongs in the row"
 
 
@@ -866,9 +821,9 @@ def test_run_at_batch_is_one_measurement_per_instance():
         return {"unique_per_s": float(b)}                # every rung runs; the top one wins
 
     best, sweep = run_at_batch(run, 100_000, log=lambda *_: None)
-    assert best["unique_per_s"] == 3_000_000 and calls == [3_000_000], \
+    assert best["unique_per_s"] == 30_000_000 and calls == [30_000_000], \
         f"the rival was measured more than once: {calls}"
-    assert [x["batch"] for x in sweep] == [3_000_000]
+    assert [x["batch"] for x in sweep] == [30_000_000]
 
 
 def test_the_first_run_of_a_process_is_discarded():
@@ -940,7 +895,7 @@ def test_a_timeout_steps_down_but_the_probe_is_bounded():
 
     best, sweep = run_at_batch(run, 30_000, log=lambda *_: None, probe_budget_s=0.0)
     assert "error" in best
-    assert calls[0] == 3_000_000, "did not start at the top of the ladder"
+    assert calls[0] == 30_000_000, "did not start at the top of the ladder"
     assert 30_000 in calls, "never fell back to the modelled rung"
     assert any(x.get("probe_truncated") for x in sweep), "truncation not recorded in the row"
     assert len(calls) < 8, f"walked the whole ladder on timeouts: {calls}"
@@ -1131,25 +1086,46 @@ def test_the_generator_survives_a_stage_whose_every_cell_is_degenerate(tmp_path)
     assert "ISCAS-85" in (tmp_path / "T.tex").read_text()
 
 
-def test_table_2_prints_the_end_to_end_ratio_beside_the_steady_state_one(tmp_path):
-    """The rival-facing ratio is GPAP's STEADY-STATE unique/s over the rival's metric — it
-    excludes construction, mining and warm-up, as the rival's model_runtime excludes its model
-    build. Table 2 prints the e2e ratio beside it — GPAP's whole wall over the RIVAL'S whole
-    wall (2026-09-05; it used to be over the rival's unchanged timer; since 2026-09-06 with the
-    fixed process start-up excluded on both sides) — computed over the same `ok` cells with the
-    same distinct fraction; a paragraph once claimed the first column 'includes construction'.
-    Here every seed's e2e rate is half its steady state and the rival's non-timed wall is zero,
-    so its whole-wall rate equals its timed rate and e2e must read exactly gm / 2."""
+def test_table_2_has_one_clock_the_rivals_own_and_no_end_to_end_column(tmp_path):
+    """Protocol v1.0 (2026-09-06, RIVAL_FAIRNESS_FINDINGS.md §17). The rival-facing ratio is
+    GPAP's STEADY-STATE unique/s over the rival's own metric — it excludes construction, mining
+    and warm-up, as the rival's model_runtime excludes its model build — and that is the ONLY
+    clock Table 2 has. An end-to-end column across an in-process sampler and a subprocess
+    gradient tool had four definitions in three review rounds (0.8x, 7.6x, 20.9x, 11.8x on the
+    same rows) and measured process start-up on cells whose real work is under a second; it is
+    removed by rule, not redefined. The rows below carry every wall field the old column read,
+    and nothing may read them: the aggregate has no e2e key, the Markdown and LaTeX headers no
+    e2e column, and the steady-state ratio is unchanged by the walls."""
+    import os
+    import subprocess
+    import sys
+
     from eval.artifact.paper_tables import rival_family
+    from tests.conftest import REPO_ROOT
 
     rows = [rrow("s386", sps=1e6), rrow("b12", sps=2e5), rrow("b19", p_acc=1.0)]
     for r in rows:
-        r["rcs"].update({"unique_per_s": 1e3, "unique": 1e3, "runtime_s": 1.0, "wall_s": 1.0})
+        r["rcs"].update({"unique_per_s": 1e3, "unique": 1e3, "runtime_s": 1.0, "wall_s": 9.0})
+        r["gpap"].update({"sps_e2e": r["gpap"]["sps"] / 2, "n_models": 1000})
     (tmp_path / "rivals_recurrent_rare.json").write_text(json.dumps(rows))
     v = rival_family(str(tmp_path), "recurrent_rare", "rcs")
     assert v["n"] == 2 and v["gm"] == pytest.approx((1e3 * 2e2) ** 0.5)
-    assert v["gm_e2e"] == pytest.approx(v["gm"] / 2)
     assert v["vacuous"] == 1
+    assert not any(k.startswith(("gm_e2e", "e2e", "startup")) for k in v), sorted(v)
+    md, tex = tmp_path / "R.md", tmp_path / "T.tex"
+    subprocess.run([sys.executable, os.path.join(REPO_ROOT, "eval", "artifact", "paper_tables.py"),
+                    "--rivals", str(tmp_path), "--out-md", str(md), "--out-tex", str(tex)],
+                   check=True, capture_output=True, cwd=REPO_ROOT)
+    t2 = md.read_text().split("## Table 2")[1].split("## Table 3")[0].split("\n## ")[0]
+    header = next(ln for ln in t2.splitlines() if ln.startswith("| rival | protocol"))
+    assert "| e2e |" not in header and "| GPAP/rival | paper set | wins |" in header
+    assert "NO end-to-end column" in t2, "the table must say why the column is absent"
+    tex_hdr = next(ln for ln in tex.read_text().splitlines()
+                   if ln.strip().startswith("rival & protocol & cells"))
+    assert "e2e" not in tex_hdr
+    t1 = md.read_text().split("## Table 1")[1].split("## Table 2")[0]
+    assert "| e2e |" in next(ln for ln in t1.splitlines() if ln.startswith("| instance set")), \
+        "Table 1 keeps its end-to-end column: both of ITS walls are the same kind of thing"
 
 
 def test_verify_artifact_fails_a_rival_row_whose_samples_break_the_circuit(tmp_path):
@@ -1318,8 +1294,8 @@ def test_the_emitted_latex_ledger_sums_to_the_cell_count(tmp_path):
         if col[0].startswith(("ISCAS", "ITC")) and len(col) == 20:       # Table 1 (+C<30, paper set, e2e, pre%, refused)
             total, parts = int(col[4]), [int(col[5])] + [int(c) for c in col[11:19]
                                                          if re.fullmatch(r"\d+", c)]
-        elif col[0] in ("DEMOTIC", "Recurrent-CircuitSAT") and len(col) == 20:   # Table 2 (+paper set, ties)
-            total, parts = int(col[2]), [int(col[3])] + [int(c) for c in col[9:]
+        elif col[0] in ("DEMOTIC", "Recurrent-CircuitSAT") and len(col) == 19:   # Table 2 (+paper set, ties; no e2e)
+            total, parts = int(col[2]), [int(col[3])] + [int(c) for c in col[8:]
                                                          if re.fullmatch(r"\d+", c)]
         else:
             continue

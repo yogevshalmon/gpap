@@ -1065,3 +1065,143 @@ def test_a_known_oom_rung_is_not_walked_twice(tmp_path):
     assert known_ladder(cache, str(bench), 25, (1_000, 3_000, 10_000, 30_000))[0] == (1_000, 3_000)
     # a different depth is a different circuit
     assert known_ladder(cache, str(bench), 50, (1_000, 3_000, 10_000, 30_000))[1] is None
+
+
+# --------------------------------------------------------------- protocol v1.0: the grant record
+
+def test_the_ladder_top_is_above_the_cards_reach_and_the_walk_starts_there():
+    """Six cells of the 2026-09-04 campaign completed the ladder's 3,000,000 top rung first try,
+    so the LADDER bound their grant rather than the card — a rejection reason the "feasibility
+    only" rule does not state (RIVAL_FAIRNESS_FINDINGS.md §16e). The top is 30,000,000 now; the
+    walk still starts at the top; and the rungs are the decade-and-triple ladder throughout."""
+    from eval.rivals.rival_common import BATCH_LADDER, run_at_batch
+
+    assert BATCH_LADDER[-1] >= 30_000_000
+    assert list(BATCH_LADDER) == sorted(BATCH_LADDER)
+    for a, b in zip(BATCH_LADDER, BATCH_LADDER[1:]):
+        assert b / a in (3.0, 10 / 3), "not the decade-and-triple ladder"
+    calls = []
+    run_at_batch(lambda b: (calls.append(b), {"unique_per_s": 1.0})[1], 1_000,
+                 log=lambda *_: None)
+    assert calls == [BATCH_LADDER[-1]], "the walk must start at the (new) top"
+
+
+def test_a_recorded_grant_pins_the_walk_and_only_descends_when_this_card_cannot_finish():
+    """A grants file (eval/rivals/extract_grants.py) turns the ladder into `pinned_ladder`: the
+    recorded rung is measured FIRST and nothing above it is offered, so a reproduction pays no
+    walk. The rule is unchanged — on a card that cannot finish on that rung the walk descends
+    from it exactly as before — and the row says which of the two happened (`grant_source`)."""
+    import eval.rivals.rival_common as rc
+    from eval.rivals.rival_common import grant_source, pinned_ladder, run_at_batch
+
+    assert pinned_ladder((1_000, 3_000, 10_000, 30_000), 10_000) == (1_000, 3_000, 10_000)
+    assert pinned_ladder((1_000, 3_000, 10_000), 5_000) == (1_000, 3_000, 5_000), \
+        "a pinned value off the ladder is its own top rung"
+    calls = []
+    ok, sweep = run_at_batch(lambda b: (calls.append(b), {"unique_per_s": 1.0, "batch": b})[1],
+                             1_000, ladder=pinned_ladder(rc.BATCH_LADDER, 3_000),
+                             log=lambda *_: None)
+    assert calls == [3_000] and [s["batch"] for s in sweep] == [3_000]
+    assert grant_source(3_000, ok, "pinned from g.json") == "pinned from g.json"
+    calls.clear()
+    small_card = lambda b: (calls.append(b), {"error": "CUDA out of memory"}  # noqa: E731
+                            if b > 1_000 else {"unique_per_s": 1.0, "batch": b})[1]
+    r, sweep = run_at_batch(small_card, 1_000, ladder=pinned_ladder(rc.BATCH_LADDER, 3_000),
+                            log=lambda *_: None)
+    assert calls == [3_000, 1_000] and r["batch"] == 1_000
+    assert "did not complete on this card, walked down" in grant_source(3_000, r, "pinned from g.json")
+    assert grant_source(None, r, None) == "walked down from the ladder top"
+
+
+def test_the_recurrent_harness_pins_both_the_rung_and_the_start_point_from_a_grant(tmp_path, monkeypatch):
+    """The two halves of Recurrent's search — the start_point probe and the ladder walk — are
+    the hours of a campaign and neither is a measurement. Given a grant, `run_recurrent_once`
+    runs ONCE at the recorded rung and stamps the row; given none, it walks as before."""
+    import eval.rivals.rival_common as rc
+    import eval.rivals.rivals_recurrent as rr
+
+    rc._WARMED.add("recurrent")                      # no warm-up subprocess in a unit test
+    calls = []
+    monkeypatch.setattr(rr, "run_recurrent",
+                        lambda rival, f, key, T, steps, batch, sp, timeout=0, lr=None:
+                        (calls.append((batch, sp)), {"unique_per_s": 1.0, "batch": batch,
+                                                     "start_point": sp})[1])
+    bench = tmp_path / "x.bench"
+    bench.write_text("INPUT(a)\nOUTPUT(y)\ny = DFF(a)\n")
+    grant = {"batch": 3_000, "start_point": 2, "source": "pinned from g.json"}
+    r = rr.run_recurrent_once("rival", str(bench), "x", 25, 1, 1_000, grant["start_point"],
+                              cache_dir=str(tmp_path / "c"), grant=grant)
+    assert calls == [(3_000, 2)], "one run, at the recorded rung and start_point"
+    assert r["grant_source"] == "pinned from g.json" and r["batch_sweep"][0]["batch"] == 3_000
+    calls.clear()
+    r = rr.run_recurrent_once("rival", str(bench), "x", 25, 1, 1_000, 2,
+                              cache_dir=str(tmp_path / "c"))
+    assert calls[0][0] == rc.BATCH_LADDER[-1] and r["grant_source"] == "walked down from the ladder top"
+
+
+def test_extract_grants_reads_the_grant_off_the_rows_and_never_pins_a_failure(tmp_path):
+    """The grants file is READ OFF the campaign rows (the rung in `batch`, the rungs tried in
+    `batch_sweep`, Recurrent's `start_point`), keyed the way the harnesses look it up — the
+    DEMOTIC native row runs a combinational circuit at T=1 whatever its file header says. A
+    rival failure is recorded with its reason and WITHOUT a batch, so `lookup_grant` returns
+    None for it and the harness re-measures rather than copies it."""
+    import json
+
+    from eval.rivals.extract_grants import extract
+    from eval.rivals.rival_common import load_grants, lookup_grant
+
+    dem = {"mode": "native", "circuit_type": "comb", "cycles": 25, "rows": [
+        {"name": "c432", "variant": "abc", "mode": "native", "cycles": 25,
+         "gpu": {"name": "NVIDIA L4"},
+         "demotic": {"batch": 3_000_000, "unique_per_s": 8.1e6,
+                     "batch_sweep": [{"batch": 10_000_000, "error": "torch.OutOfMemoryError"},
+                                     {"batch": 3_000_000, "error": None}]}}]}
+    rcs = [{"name": "b06", "variant": "abc", "mode": "table", "cycles": 25,
+            "gpu": {"name": "NVIDIA L4"},
+            "rcs": {"batch": 3_000_000, "start_point": 1, "unique_per_s": 1.1e6,
+                    "batch_sweep": [{"batch": 3_000_000, "error": None}]}},
+           {"name": "b17", "variant": "abc", "mode": "table", "cycles": 25,
+            "rcs": {"error": "did not initialize: ... 1200s initialization budget"}}]
+    (tmp_path / "rivals_demotic_native.json").write_text(json.dumps(dem))
+    (tmp_path / "rivals_recurrent_table.json").write_text(json.dumps(rcs))
+    (tmp_path / "rivals_steps_calibration.json").write_text(json.dumps({"tools": {}}))
+    g = extract(str(tmp_path))
+    assert g["gpu"] == "NVIDIA L4"
+    assert g["demotic"]["c432|native|1|abc"]["batch"] == 3_000_000, "native comb = depth 1"
+    assert g["demotic"]["c432|native|1|abc"]["oom_min"] == 10_000_000
+    assert g["recurrent"]["b06|table|25|abc"] == {
+        "batch": 3_000_000, "rungs_tried": [3_000_000], "oom_min": None,
+        "unique_per_s": 1.1e6, "stage": "recurrent_table", "start_point": 1}
+    assert g["recurrent"]["b17|table|25|abc"]["batch"] is None
+    path = tmp_path / "g.json"
+    path.write_text(json.dumps(g))
+    grants = load_grants(str(path))
+    assert lookup_grant(grants, "recurrent", "b06", "table", 25) == {
+        "batch": 3_000_000, "start_point": 1, "source": "pinned from g.json"}
+    assert lookup_grant(grants, "recurrent", "b17", "table", 25) is None, "a failure is not pinned"
+    assert lookup_grant(grants, "demotic", "c432", "native", 1)["start_point"] is None
+    assert lookup_grant({}, "demotic", "c432", "native", 1) is None
+    (tmp_path / "bad.json").write_text("{}")
+    with pytest.raises(ValueError):
+        load_grants(str(tmp_path / "bad.json"))
+
+
+def test_the_committed_grants_file_is_the_campaigns_and_every_pinned_rung_is_on_the_ladder():
+    """eval/rivals/grants/<campaign>.json is what a reproduction pins to; it must load, name
+    its card, and pin only rungs the ladder has."""
+    import glob
+    import os
+
+    from eval.rivals.rival_common import BATCH_LADDER, load_grants
+    from tests.conftest import REPO_ROOT
+
+    files = glob.glob(os.path.join(REPO_ROOT, "eval", "rivals", "grants", "*.json"))
+    assert files, "no committed grants file"
+    for f in files:
+        g = load_grants(f)
+        assert g.get("gpu") and g.get("campaign")
+        pinned = [e for t in ("demotic", "recurrent") for e in g[t].values() if e.get("batch")]
+        assert len(pinned) >= 50, f"{f}: only {len(pinned)} pinned cells"
+        assert all(e["batch"] in BATCH_LADDER for e in pinned)
+        assert all(e.get("start_point") is not None for e in g["recurrent"].values()
+                   if e.get("batch")), "a pinned Recurrent cell must carry its start_point"

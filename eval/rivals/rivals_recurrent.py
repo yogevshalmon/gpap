@@ -69,7 +69,8 @@ from eval.rivals.rival_common import (BATCH_LADDER, CACHE_MISS, VARIANTS, cache_
                                       RIVAL_SEED, exact_distinct, median_run, resolve_lr,
                                       space_from_distinct, unsat_at_depth,
                                       resolve_steps, rival_commit, rival_vram_budget,
-                                      run_at_batch, variant_note)
+                                      run_at_batch, variant_note, grant_source, load_grants,
+                                      lookup_grant, pinned_ladder)
 from eval.rivals.unroll_to_bench import and_tree                      # noqa: E402
 
 from gpap import paths
@@ -447,14 +448,19 @@ def remember_oom_ceiling(cache_dir, bench_file, T, sweep, prior=None):
 
 
 def run_recurrent_once(rival, bench_file, key, T, steps, batch, start_point,
-                       timeout=DEFAULT_TIMEOUT, lr=None, cache_dir=None):
+                       timeout=DEFAULT_TIMEOUT, lr=None, cache_dir=None, grant=None):
     """ONE measured run at the rival's granted batch — the LARGEST ladder rung that completes
     (rival_common.run_at_batch, which also fires this process's one discarded warmup run). The
     rungs tried are attached as `batch_sweep`: their unique/s is near-proportional to the batch
     (s386 T=25: 10k -> 300k is 18.6x, with model_runtime almost flat), so what the rival was
     granted belongs in the row next to its score. Rungs a previous walk saw OOM are skipped
-    (`known_ladder`) and the row says so in `oom_ceiling_cached`."""
+    (`known_ladder`) and the row says so in `oom_ceiling_cached`. A RECORDED grant (`grant`,
+    from a grants file) pins the walk to its rung — measured first, descended from only if this
+    card cannot finish on it — and the row says so in `grant_source`."""
     ladder, prior = known_ladder(cache_dir, bench_file, T)
+    pinned = grant["batch"] if grant else None
+    if pinned:
+        ladder = pinned_ladder(ladder, pinned)
     r, sweep = run_at_batch(
         lambda b: run_recurrent(rival, bench_file, key, T, steps, b, start_point,
                                 timeout=timeout, lr=lr),
@@ -464,6 +470,7 @@ def run_recurrent_once(rival, bench_file, key, T, steps, batch, start_point,
         r = dict(r, batch_sweep=sweep)
         if prior:
             r["oom_ceiling_cached"] = prior
+        r["grant_source"] = grant_source(pinned, r, grant["source"] if grant else None)
     return r
 
 
@@ -767,8 +774,13 @@ def main():
                          "is an error row, not a zero")
     ap.add_argument("--init-budget", type=float, default=INIT_BUDGET_S,
                     help="total wall for the start_point initialization search per instance "
-                         "(s), counted in the rival's e2e figure; a cell that does not "
-                         "initialize inside it is an error row naming the budget")
+                         "(s); it BOUNDS the search and is in no published rate. A cell that "
+                         "does not initialize inside it is an error row naming the budget")
+    ap.add_argument("--grants", default=None, metavar="FILE",
+                    help="a grants file (eval/rivals/extract_grants.py): pin each cell's batch "
+                         "rung and start_point to the values a previous campaign measured — "
+                         "no ladder walk, no probe; a rung this card cannot finish on is "
+                         "walked down from. Cells recorded as rival failures are re-measured.")
     ap.add_argument("--gpap-time-limit", type=float, default=60.0,
                     help="per-seed sampling wall cap for the GPAP side (s)")
     ap.add_argument("--cmsgen", default=None,
@@ -789,6 +801,10 @@ def main():
     args.names = expand_names(args.names, "rcs")
     if not os.path.isdir(os.path.join(args.rival, "src")):
         sys.exit(f"no rival checkout at {args.rival} (see module docstring)")
+    grants = load_grants(args.grants)          # {} = walk the ladder and probe, as always
+    if grants:
+        print(f"[grants] {args.grants}: {len(grants.get('recurrent') or {})} recorded "
+              f"Recurrent cells (measured on {grants.get('gpu')}); pinned where recorded")
     import torch
     from gpap.circuits.simulate import sim_baseline
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -915,9 +931,19 @@ def main():
                       f"their index table; row flagged", flush=True)
         sim = sim_baseline(gpap_file, args.cycles, args.target_seed, pin_outputs=pin_n,
                            target=gpap_target)
-        sp, why = probe_start_point(args.rival, rival_file, key, args.cycles,
-                                    budget=args.init_budget,               # bounded, see above
-                                    cache_dir=cache_dir, run_timeout=args.timeout)
+        # A RECORDED grant pins both halves of the rival's search — the start_point its
+        # initialization settled on and the rung it was granted — so a reproduction pays
+        # neither (rival_common.load_grants). A cell the record holds as a failure has no
+        # grant and is probed like any other.
+        grant = lookup_grant(grants, "recurrent", name, "rare" if args.rare else "table",
+                             args.cycles, variant)
+        if grant and grant.get("start_point") is not None:
+            sp, why, sp_src = int(grant["start_point"]), None, grant["source"]
+        else:
+            sp, why = probe_start_point(args.rival, rival_file, key, args.cycles,
+                                        budget=args.init_budget,           # bounded, see above
+                                        cache_dir=cache_dir, run_timeout=args.timeout)
+            sp_src = "probed"
         if sp is None:
             # `why` is one of two rival outcomes under a stated rule (no gradient path, or did
             # not initialize within the budget); it is recorded verbatim, never as a zero.
@@ -926,7 +952,8 @@ def main():
             batch = pick_batch(rival_file, args.cycles)
             rcs = run_recurrent_once(args.rival, rival_file, key, args.cycles, steps,
                                      batch, sp, timeout=args.timeout, lr=lr,
-                                     cache_dir=cache_dir)
+                                     cache_dir=cache_dir, grant=grant)
+            rcs["start_point_source"] = sp_src
             rcs["steps_source"] = steps_src
             rcs["lr"], rcs["lr_source"] = lr, lr_src
             rcs["seed"], rcs["seed_source"] = RIVAL_SEED, "their flags.py default; one run"

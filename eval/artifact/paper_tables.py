@@ -756,30 +756,15 @@ def rival_family(d, stem, key):
     seen = {}
     for r in rows:
         seen[(r["name"], r.get("variant", "-"))] = r
-    # THE SECOND CLOCK — ONE definition, charged the same way on BOTH sides (2026-09-06; the
-    # fourth revision of this column, which is why it is spelled out): each side's WHOLE wall
-    # on the instance, with the tool's fixed process start-up excluded on both.
-    #   GPAP:  encoding + parse + construction + ELS + mining + warm-up + the timed run + the
-    #          projection of every delivered row (`_gpap_e2e_full`; in-process, so it never
-    #          carries interpreter or CUDA-context start-up).
-    #   rival: its timed loop plus whatever of its non-timed subprocess wall (unroll, model
-    #          build, dedup, results write) EXCEEDS the tool's fixed process start-up, estimated
-    #          as the SMALLEST non-timed wall (`wall_s - runtime_s`) the tool showed on any
-    #          measured cell of this stage. That floor still holds the smallest model build, so
-    #          the subtraction takes too much off the rival, never too little.
-    # History. Until 2026-09-05 the column divided GPAP's wall by the rival's UNCHANGED timer
-    # (DEMOTIC on its pins 0.8x). The 2026-09-05 fix divided by the rival's whole subprocess
-    # wall (7.6x) — which charged it ~4.5 s of interpreter + CUDA start-up per cell that GPAP's
-    # in-process wall never pays, while our side subtracted its delivery and carried no
-    # encoding: three asymmetries, each in our favour, on cells whose whole wall is under a
-    # second. `gm_e2e_nosub` keeps the no-subtraction figure as the printed upper bound. NOT in
-    # any wall: Recurrent's start_point search and the ladder rungs rejected above the grant
-    # (the harness records neither; both would lower the rival's e2e further).
-    nontimed = [rv["wall_s"] - rv["runtime_s"] for r in seen.values()
-                for rv in [r.get(key) or {}]
-                if rv.get("wall_s") and rv.get("runtime_s") and not rv.get("error")]
-    startup = min(nontimed) if nontimed else 0.0
-    e2e, e2e_nosub, nodeliv = [], [], 0
+    # NO SECOND CLOCK IN THIS TABLE (protocol v1.0, 2026-09-06 — RIVAL_FAIRNESS_FINDINGS.md
+    # §17). Table 2 is the rivals' OWN metric — unique solutions per second of their
+    # `model_runtime`, which excludes their model build — and GPAP's figure excludes construction
+    # the same way. An end-to-end column across an in-process sampler and a subprocess gradient
+    # tool has no definition either tool would recognise: it had FOUR in three review rounds
+    # (0.8x, 7.6x, 20.9x/132x, 11.8x/68.8x on the same rows), and on DEMOTIC's cells both tools
+    # finish the real work in under a second, so whatever it read was process start-up. Removed
+    # by rule, not redefined a fifth time; the end-to-end comparison lives in Table 1, where the
+    # two walls are the same kind of thing. Nothing here reads `wall_s`.
     okc, unsat_rival, low_vram, ladder_top, small = [], [], [], [], []
     for name, variant, bucket, ours, rate in cells:
         r = seen[(name, variant)]
@@ -805,20 +790,11 @@ def rival_family(d, stem, key):
         # not state; disclosed in the caveats)
         if rv.get("batch") and len(sweep) == 1 and rv["batch"] == (sweep[0].get("batch") or 0):
             ladder_top.append((name, rv["batch"]))
-        gf = _gpap_e2e_full(g, r)
-        if gf and not (_picked_seed(g) or {}).get("sps_e2e_with_delivery"):
-            nodeliv += 1
-        if gf and rv.get("wall_s") and rv.get("runtime_s") and rv.get("unique"):
-            extra = max(0.0, (rv["wall_s"] - rv["runtime_s"]) - startup)
-            e2e.append(gf / (rv["unique"] / (rv["runtime_s"] + extra)))
-            e2e_nosub.append(gf / (rv["unique"] / rv["wall_s"]))
     okc.sort(key=lambda t: -t[0])
     ties = sum(1 for _, _, _, st in okc if st)
     small_names = {nm for _, nm, _ in small}
     rest = [x for x, nm, _, _ in okc if nm not in small_names]
     return {"cells": len(cells), "gm": gm(ratios), "n": len(ratios) + zero + gzero,
-            "gm_e2e": gm(e2e), "gm_e2e_nosub": gm(e2e_nosub), "startup_s": startup,
-            "e2e_nodelivery": nodeliv,
             "gm_paper": gm(paper_ratios), "n_paper": len(paper_ratios),
             "offpaper": len(ratios) - len(paper_ratios),
             # a straddling cell is a TIE: neither a win nor a loss (`ties` says how many)
@@ -908,24 +884,6 @@ def _picked_seed(g):
         if s.get("sps_e2e") and g.get("sps_e2e") and abs(s["sps_e2e"] - g["sps_e2e"]) < 1e-9:
             return s
     return None
-
-
-def _gpap_e2e_full(g, r):
-    """GPAP's rate over its WHOLE wall on the instance: encoding + parse + construction + ELS +
-    mining + warm-up + the timed run + the projection of every delivered row. This is what
-    Table 2's e2e divides by (see `rival_family`). `sps_e2e` is Table 1's convention — it
-    subtracts the projection (symmetric there, since CMSGen writes nothing under --nowrite)
-    and carries no encoding (charged to no sampler where both tools read one file). Against a
-    rival whose process wall holds its own unroll, model build, dedup and results write, both
-    belong on our side. None when the row cannot support it; a row without the delivery split
-    (pre-2026-09 harness) falls back to `sps_e2e` and is counted by the caller."""
-    n = g.get("n_models") or 0
-    s = _picked_seed(g) or {}
-    rate = s.get("sps_e2e_with_delivery") or _gpap_e2e(g)
-    if not (n and rate):
-        return None
-    enc = ((r.get("cnf") or {}).get("encode_s")) or 0.0
-    return n / (n / rate + enc)
 
 
 def seed_band(g, ours, rate):
@@ -1468,26 +1426,25 @@ def build(args):
     pa_rare = _pa_range([_rival_rows(args.rivals, st) or {}
                          for st, _k, _r, pr in RIVALS if "rare" in st])
     M += ["", "## Table 2 — GPAP vs the GPU gradient samplers", "",
-          "| rival | protocol | cells | n_gm | GPAP/rival | paper set | e2e | wins | ties "
+          "| rival | protocol | cells | n_gm | GPAP/rival | paper set | wins | ties "
           "| rival=0 | GPAP=0 | both=0 | u/s unmeasured | rival<30 | no-search | tiny-space "
           "| vacuous | unsat | misaligned | rival failed | out-of-envelope |",
-          "|---|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|"]
+          "|---|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|"]
     for stem, _, rival, proto in RIVALS:
         v = riv.get(stem)
         if not v:
-            M.append(f"| {rival} | {proto} | — | — | not run | — | — | — | — | — | — | — | — "
+            M.append(f"| {rival} | {proto} | — | — | not run | — | — | — | — | — | — | — "
                      f"| — | — | — | — | — | — | — | — |")
             continue
         gs = f"{v['gm']:,.1f}x" if v["gm"] else "—"
         ps = (f"{v['gm_paper']:,.1f}x ({v['n_paper']})" if v.get("gm_paper") else "—")
-        es = f"{v['gm_e2e']:,.1f}x" if v.get("gm_e2e") else "—"
         # `n` in Table 1 is the geomean's instance count and EXCLUDES the zero buckets; here
         # `v["n"]` is the WIN denominator and includes them. Printing that under the same header
         # made the two tables' `n` mean different things and made this row fail an addition a
         # reader is invited to do (13 + 0 + 1 + 5 + 11 = 30 against 29 cells). Print both: the
         # geomean's count, and the win fraction over its own denominator.
         n_gm_ok = v["n"] - v["zero"] - v["gpap0"]
-        M.append(f"| {rival} | {proto} | {v['cells']} | {n_gm_ok} | {gs} | {ps} | {es} | "
+        M.append(f"| {rival} | {proto} | {v['cells']} | {n_gm_ok} | {gs} | {ps} | "
                  f"{v['wins']}/{v['n']} | {v.get('ties', 0)} | {v['zero']} | {v['gpap0']} | {v['both0']} "
                  f"| {v.get('nomeas', 0)} | {v.get('thin', 0)} | {v.get('free', 0)} "
                  f"| {v.get('tiny', 0)} | {v.get('vacuous', 0)} | {v.get('unsat', 0)} "
@@ -1536,10 +1493,9 @@ def build(args):
           "`steps`/`steps_source` and `lr`/`lr_source`. Nothing is swept, since a "
           "swept-and-best-of setting invites \"why stop there?\". Recurrent's `start_point` "
           "initialization search is given its own 1,200 s budget per instance, which BOUNDS the "
-          "search; its wall is not added to the rival's published e2e figure (the harness records "
-          "no init time), an omission that only lowers the rival's e2e and raises our ratio, and "
-          "it is never in the steady-state metric; a cell that does not initialize inside the "
-          "budget is reported with that budget named, never as a zero. "
+          "search and is in no published rate (this table carries no end-to-end column, see "
+          "below); a cell that does not initialize inside the budget is reported with that "
+          "budget named, never as a zero. "
           "Rows recorded on or before 2026-08-26 pinned 10 for both, which taxes DEMOTIC "
           "2.6x and Recurrent 8.5x (both saturate their batch on the first step) and is why the "
           "DEMOTIC and Recurrent rows here are far below their previously recorded values. "
@@ -1565,18 +1521,18 @@ def build(args):
           "uncorrected so its rate is exactly the one it publishes. Deducting it would RAISE "
           "the ratios below, so those rows under-report GPAP rather than flattering it."]
     M += ["",
-          "**`e2e` and `ties`.** `e2e` is each side's WHOLE wall on the instance with the fixed "
-          "process start-up excluded on both: GPAP's encoding + parse + construction + ELS + "
-          "mining + warm-up + the timed run + the projection of every delivered row, against the "
-          "rival's timed loop plus its instance-specific non-timed wall (unroll, model build, "
-          "dedup, results write) above the tool's start-up floor — its smallest non-timed wall on "
-          "the row set, printed per row group in the caveats together with the figure the column "
-          "would read if the rival were charged its whole subprocess. This is the fourth "
-          "definition this column has had (0.8x, 7.6x, and now the symmetric one on DEMOTIC's "
-          "pins), and the history is in RIVAL_FAIRNESS_FINDINGS.md §16e. `ties` counts cells whose "
-          "win/loss sign lies inside GPAP's own seed band (the ratio at its slowest and fastest "
-          "seed straddles 1.0, against a rival that ran once); `wins` excludes them, so "
-          "wins + ties + losses = the win denominator."]
+          "**One clock, and `ties`.** This table has NO end-to-end column, by rule (protocol "
+          "v1.0, RIVAL_FAIRNESS_FINDINGS.md §17): the rivals' metric is unique solutions per "
+          "second of their own `model_runtime`, which excludes their model build, and GPAP's "
+          "figure excludes its construction the same way — that is the one comparison the "
+          "rivals themselves define. An end-to-end ratio across an in-process sampler and a "
+          "subprocess gradient tool had four definitions in three review rounds (0.8x, 7.6x, "
+          "20.9x/132.0x and 11.8x/68.8x on the same rows), and on DEMOTIC's cells both tools "
+          "finish the real work in under a second, so it measured process start-up; the "
+          "end-to-end comparison is Table 1's, where both walls are the same kind of thing. "
+          "`ties` counts cells whose win/loss sign lies inside GPAP's own seed band (the ratio "
+          "at its slowest and fastest seed straddles 1.0, against a rival that ran once); "
+          "`wins` excludes them, so wins + ties + losses = the win denominator."]
     cal = rival_calibration(args.rivals) if args.rivals else []
     if cal:
         M += [""] + cal
@@ -1781,7 +1737,7 @@ def build(args):
     T += [r"\begin{table}[t]", r"  \centering", r"  \small",
           r"  \caption{\textbf{GPAP vs the GPU gradient samplers}, their metric "
           r"(unique solutions / their \texttt{model\_runtime}, which excludes their model build "
-          r"and \emph{GPAP/rival} uses our steady-state rate, which likewise excludes construction; \emph{e2e} is each side's WHOLE wall on the instance with the fixed process start-up excluded on both --- GPAP's encoding, preparation, timed run and delivery against the rival's timed loop plus its non-timed wall above the tool's start-up floor, its smallest non-timed wall on the row set, which the caveats print; \emph{ties} counts cells whose sign lies inside GPAP's own seed band and \emph{wins} excludes them; \emph{paper set} is the same ratio over the rival's own published instances). Rival failures (timeout / no gradient path) are "
+          r"and \emph{GPAP/rival} uses our steady-state rate, which likewise excludes construction --- the one clock this table has, since it is the one the rivals define; the end-to-end comparison is Table~\ref{tab:cmsgen}'s; \emph{ties} counts cells whose sign lies inside GPAP's own seed band and \emph{wins} excludes them; \emph{paper set} is the same ratio over the rival's own published instances). Rival failures (timeout / no gradient path) are "
           r"counted, never folded in as zeros. As in Table~\ref{tab:cmsgen}, an instance where "
           r"either side emitted nothing carries no finite ratio and is counted separately: "
           r"\emph{R$=$0} (rival silent), \emph{G$=$0} (GPAP silent), \emph{both}. "
@@ -1793,24 +1749,23 @@ def build(args):
           r"taken over, and every column sums to \emph{cells}. "
           r"$^{\ddagger}$geomean over fewer than three instances.}",
           r"  \label{tab:rivals}",
-          r"  \begin{tabular}{@{}llrrrrrrrrrrrrrrrrrr@{}}", r"    \toprule",
-          r"    rival & protocol & cells & $n$ & GPAP/rival & paper set & e2e & wins & ties & "
+          r"  \begin{tabular}{@{}llrrrrrrrrrrrrrrrrr@{}}", r"    \toprule",
+          r"    rival & protocol & cells & $n$ & GPAP/rival & paper set & wins & ties & "
           r"R$=$0 & G$=$0 & both & u$/$s n$/$a & R$<$30 & free & tiny & vac. & unsat & mis. & "
           r"failed \\",
           r"    \midrule"]
     for stem, _, rival, proto in RIVALS:
         v = riv.get(stem)
         if not v:
-            T.append(f"    {rival} & {tex_escape(proto)} & \\multicolumn{{18}}{{c}}{{not run}} \\\\")
+            T.append(f"    {rival} & {tex_escape(proto)} & \\multicolumn{{17}}{{c}}{{not run}} \\\\")
             continue
         g = f"${v['gm']:,.1f}\\times$" if v["gm"] else "---"
         ps = (f"${v['gm_paper']:,.1f}\\times$ ({v['n_paper']})" if v.get("gm_paper") else "---")
-        e = f"${v['gm_e2e']:,.1f}\\times$" if v.get("gm_e2e") else "---"
         n_gm_ok = v["n"] - v["zero"] - v["gpap0"]        # cells carrying a finite ratio
         if v["gm"] and n_gm_ok < 3:
             g += "$^{\\ddagger}$"
         T.append(f"    {rival} & {tex_escape(proto)} & {v['cells']} & {n_gm_ok} & {g} & {ps} & "
-                 f"{e} & {v['wins']}/{v['n']} & {v.get('ties', 0)} & {v['zero']} & {v['gpap0']} & "
+                 f"{v['wins']}/{v['n']} & {v.get('ties', 0)} & {v['zero']} & {v['gpap0']} & "
                  f"{v['both0']} & "
                  f"{v.get('nomeas', 0)} & {v.get('thin', 0)} & {v.get('free', 0)} & "
                  f"{v.get('tiny', 0)} & {v.get('vacuous', 0)} & {v.get('unsat', 0)} & "
@@ -2144,20 +2099,10 @@ def build(args):
             C.append(f"**{rival} ({proto}): on {len(v['ladder_top'])} cell(s) the batch ladder's "
                      f"TOP rung completed first try** (" + ", ".join(f"`{nm}` {b:,}" for nm, b in v["ladder_top"])
                      + "), so the card never bound the grant — the ladder did. The rival's rate is "
-                     "near-proportional to its batch, so those cells may under-grant it; a taller "
-                     "ladder is the fix and the re-run is the evidence (RIVAL_FAIRNESS_FINDINGS.md §16e).")
-        if v.get("gm_e2e"):
-            C.append(f"{rival} ({proto}) `e2e` = each side's WHOLE wall on the instance with the "
-                     f"fixed process start-up excluded on both: GPAP's encoding + parse + build + "
-                     f"ELS + mining + warm-up + timed run + delivery, against the rival's timed "
-                     f"loop plus its instance-specific non-timed wall above the tool's start-up "
-                     f"floor ({v['startup_s']:.1f} s here, its smallest non-timed wall — a floor "
-                     f"that still holds a model build, so it favours the rival). Charging the rival "
-                     f"its whole subprocess instead would read {v['gm_e2e_nosub']:,.1f}x."
-                     + (f" {v['e2e_nodelivery']} row(s) lack the delivery split and fall back to "
-                        f"`sps_e2e`." if v.get("e2e_nodelivery") else "")
-                     + (" Recurrent's start_point search is in NO wall (not recorded); it would "
-                        "lower the rival's figure further." if key == "rcs" else ""))
+                     "near-proportional to its batch, so those cells may under-grant it: re-walk "
+                     "them from a taller ladder (the top is 30,000,000 since protocol v1.0; "
+                     "RIVAL_FAIRNESS_FINDINGS.md §16e/§17) — this caveat is the mechanical check "
+                     "that the ladder's top is above the card's reach on every scored cell.")
     C.append("Rare-target rival ratios rest on near-zero denominators and a single rival run "
              "against GPAP's 3-seed median: read them as orders of magnitude, not constants.")
     M += ["", "## Caveats that MUST appear in the text", ""] + [f"* {c}" for c in C]

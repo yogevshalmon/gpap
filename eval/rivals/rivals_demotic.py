@@ -48,13 +48,13 @@ import time
 REPO_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))  # eval/<sub>/ -> repo
 sys.path.insert(0, REPO_ROOT)
 
-from eval.rivals.rival_common import (VARIANTS, _available_bytes,       # noqa: E402
+from eval.rivals.rival_common import (BATCH_LADDER, VARIANTS, _available_bytes,  # noqa: E402
                                       cached_gpap, cmsgen_arm, expand_names, fit_batch,
                                       host_provenance, native_pin_check, prepare_variant,
                                       rival_commit,
                                       RIVAL_SEED, rival_vram_budget, resolve_lr, resolve_steps,
-                                      run_at_batch,
-                                      variant_note)
+                                      run_at_batch, grant_source, load_grants, lookup_grant,
+                                      pinned_ladder, variant_note)
 from eval.rivals.rivals_recurrent import (GPAP_ENCODER, GPAP_PORTFOLIO,   # noqa: E402
                                           UNIQUE_ROWS, _cms_cols, build_arm_cnf,
                                           reorder_bench, run_gpap)
@@ -227,17 +227,24 @@ def pick_batch(bench_file, T, budget_bytes=None):
 
 
 def run_demotic_ladder(root, bench_file, key, *, steps, batch, circuit_type, T,
-                       timeout=DEFAULT_TIMEOUT, lr=None):
+                       timeout=DEFAULT_TIMEOUT, lr=None, grant=None):
     """run_demotic at the LARGEST ladder rung that completes (rival_common.run_at_batch, which
     also fires this process's one discarded warmup run — the first DEMOTIC run of a session is
     ~3.3x slow and used to be charged to whichever cell went first). The rungs tried are attached
     as `batch_sweep`: what parallelism the rival got belongs in the row, since its unique/s is
-    near-proportional to it (c432 1k -> 300k is 258x)."""
+    near-proportional to it (c432 1k -> 300k is 258x). A RECORDED grant (`grant`, from a grants
+    file) pins the walk to its rung — measured first, descended from only if this card cannot
+    finish on it — and the row says so in `grant_source`."""
+    pinned = grant["batch"] if grant else None
+    ladder = pinned_ladder(BATCH_LADDER, pinned) if pinned else BATCH_LADDER
     r, sweep = run_at_batch(
         lambda b: run_demotic(root, bench_file, key, steps=steps, batch=b,
                               circuit_type=circuit_type, T=T, timeout=timeout, lr=lr),
-        batch, tool="demotic")
-    return dict(r, batch_sweep=sweep) if isinstance(r, dict) else r
+        batch, ladder=ladder, tool="demotic")
+    if isinstance(r, dict):
+        r = dict(r, batch_sweep=sweep)
+        r["grant_source"] = grant_source(pinned, r, grant["source"] if grant else None)
+    return r
 
 
 # ------------------------------------------------------------------ driver
@@ -271,7 +278,13 @@ def main():
     ap.add_argument("--lr", default="auto",
                     help="their learning rate: 'auto' (default) = their own run script's value "
                          "(rival_common.RIVAL_LR); or an explicit number")
-    ap.add_argument("--batch", type=int, default=None, help="their batch (default: fit to VRAM)")
+    ap.add_argument("--batch", type=int, default=None,
+                    help="pin ONE batch rung for every instance (default: the largest rung of "
+                         "the ladder that completes, walked down from the top)")
+    ap.add_argument("--grants", default=None, metavar="FILE",
+                    help="a grants file (eval/rivals/extract_grants.py): pin each cell's batch "
+                         "rung to the value a previous campaign measured — no ladder walk; a "
+                         "rung this card cannot finish on is walked down from")
     ap.add_argument("--gpap-cache", default=None,
                     help="directory of cached GPAP arms (default: <output dir>/.gpap_cache). "
                          "GPAP_RIVAL_CACHE=0 disables reuse entirely.")
@@ -303,6 +316,10 @@ def main():
                          "was ENVIRONMENTAL (e.g. a missing dependency), not the rival's.")
     args = ap.parse_args()
     args.names = expand_names(args.names, "demotic")
+    grants = load_grants(args.grants)          # {} = walk the ladder, as always
+    if grants:
+        print(f"[grants] {args.grants}: {len(grants.get('demotic') or {})} recorded DEMOTIC "
+              f"cells (measured on {grants.get('gpu')}); pinned where recorded")
     if not os.path.isdir(os.path.join(args.demotic, "src")):
         sys.exit(f"no DEMOTIC checkout at {args.demotic} (see module docstring)")
     import torch
@@ -441,8 +458,13 @@ def main():
         renamed = sanitize_bench(rival_file, rival_safe)
         rival_file = rival_safe
         batch = args.batch or pick_batch(rival_file, T_rival)
+        # a recorded grant pins the walk (rival_common.load_grants); `--batch` pins every cell
+        grant = ({"batch": args.batch, "start_point": None, "source": "pinned by --batch"}
+                 if args.batch else
+                 lookup_grant(grants, "demotic", name, args.mode, T_rival, variant))
         dem = run_demotic_ladder(args.demotic, rival_file, key, steps=steps, batch=batch,
-                                 circuit_type=circuit_type, T=T_rival, timeout=args.timeout, lr=lr)
+                                 circuit_type=circuit_type, T=T_rival, timeout=args.timeout,
+                                 lr=lr, grant=grant)
         dem["renamed_wires"] = renamed
         dem["steps_source"] = steps_src
         dem["lr"], dem["lr_source"] = lr, lr_src

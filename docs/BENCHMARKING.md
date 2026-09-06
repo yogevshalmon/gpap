@@ -145,6 +145,12 @@ generator imports them ([`paper/README.md`](paper/README.md)). In prose:
 - **Steady-state vs end-to-end.** `samples_per_s` excludes parse, construction, ELS, warmup and
   mining (a median 21% of GPAP's wall); CMSGen's rate carries its setup. Print both; quote the
   `e2e` column for a delivered-samples claim.
+- **Against the GPU rivals, one clock — theirs.** Table 2 is unique solutions per second of the
+  rival's own `model_runtime` against GPAP's steady-state unique/s, and has no end-to-end
+  column by rule (protocol v1.0, [`EVAL_RUNBOOK.md`](EVAL_RUNBOOK.md) §0): across an
+  in-process sampler and a subprocess gradient tool that ratio had four definitions in three
+  review rounds and measured process start-up. The headline is the full circuit set; the rival
+  paper's subset is printed beside it.
 - **Rare targets.** At random output pins CPU rejection sampling beats every CNF sampler, so a
   win there is not a sampling result. Quote `--target rare` and report `p_acc` / `amp` beside it.
 - **Screen degenerate cells first, then bucket**: vacuous pins (constant outputs — `b02`, `b05`,
