@@ -2,14 +2,20 @@
 """EMISSION SYMMETRY: prove that no tool in the comparison is charged for delivering its
 solutions while another is not.
 
-GPAP's timed run emits NOTHING — `sample(collect=False)` never gathers a model row to the host
-(`keep_rows` is False, so `var_bits` is not called), and the sample writer runs in a separate
-pass after the clock stops. The ONE bounded exception is the rival GPAP arm
-(eval/rivals/rivals_recurrent.py::run_gpap, since 2026-09-03): it keeps `UNIQUE_ROWS` (1,000)
-GPU-projected support-bit rows of the winning config for the distinct-fraction estimate — a
-fixed number of rows, not one per sample, whose projection wall the pipeline measures and
-subtracts from the timed wall (`out_project_s`; checked below, [2]). It replaced a separate
-coverage run that reconstructed thousands of full models on the host and OOM-killed b14.
+GPAP's timed run gathers no MODEL to the host — `sample(collect=False)` never reconstructs a
+model row (`keep_rows` is False, so `var_bits` is not called), and the sample writer runs after
+the clock stops. What the timed run CAN do is project the delivered rows' support bits on the
+device as it goes (`out_cap`): the benchmark driver leaves it at 0, and the rival GPAP arm
+(eval/rivals/rivals_recurrent.py::run_gpap) sets it to `UNIQUE_ROWS` (4,000,000) so that EVERY
+delivered row is kept for the exact distinct count — one projected row per sample, up to the
+cap (measured: `unique_rows == n_models` on 71 of 74 campaign cells, up to 1,048,576 rows). That
+is symmetric only because the pipeline measures the projection wall (`out_project_s`) and
+subtracts it from the STEADY-STATE wall (checked below, [2]); Table 2's e2e column CHARGES it,
+beside the rival's own dedup and results write (paper_tables.rival_family). It replaced a
+separate coverage run that reconstructed thousands of full models on the host and OOM-killed
+b14. Until 2026-09-06 this docstring and the printed verdict below said "a FIXED 1,000 rows,
+not one per sample" — 4,000x stale, and the check could not see the value it named because it
+accepts `out_cap` as a bare parameter name (it re-derives only the subtraction).
 CMSGen is timed with the patch's `--nowrite` for exactly this
 reason (a stock binary writing every sample cost 8.2x of its wall on 27.sk_3_32). The GPU
 gradient rivals must therefore also be timed on generation alone — otherwise our ratio is
@@ -163,10 +169,10 @@ def scan_gpap():
 
     `out_cap` is the second way the timed run can deliver rows to the host: it projects each
     chunk's support bits as the run goes (that is what makes `gpap sample --out` cheap). The
-    benchmark driver never sets it; the rival GPAP arm sets it to a FIXED 1,000 rows (module
-    docstring), which is only symmetric because the pipeline subtracts the projection wall from
-    the timed wall — so this check also re-derives THAT: the `wall = ...` assignment that closes
-    the window must subtract `proj_s`. Re-deriving the property instead of asserting a claim
+    benchmark driver never sets it; the rival GPAP arm sets it to UNIQUE_ROWS, one projected
+    row per delivered sample up to 4,000,000 (module docstring), which is only symmetric because
+    the pipeline subtracts the projection wall from the timed wall — so this check also
+    re-derives THAT: the `wall = ...` assignment that closes the window must subtract `proj_s`. Re-deriving the property instead of asserting a claim
     that used to follow from `collect=False` alone and no longer does."""
     path = os.path.join(REPO_ROOT, "gpap", "sampling", "pipeline.py")
     tree = ast.parse(open(path).read())
@@ -214,15 +220,29 @@ def scan_gpap():
               f"  {'OK' if (good and oc_ok) else 'FAIL'}")
         ok &= good and oc_ok
     ok &= proj_ok
-    print("    => the timed run never gathers a model row to the host (collect=False, out_cap 0 "
-          "on every benchmarked call), and the rival arm's fixed 1,000 projected rows are "
-          "excluded from its wall" if ok else "    => TIMED RUN MAY EMIT")
+    print("    => the timed run never gathers a MODEL row to the host (collect=False on every "
+          "benchmarked call); `out_cap` is a parameter the benchmark driver passes as 0 and the "
+          "rival arm as UNIQUE_ROWS (one projected support-bit row per delivered sample, up to "
+          "4,000,000), whose wall `out_project_s` is subtracted from the steady-state wall here "
+          "and CHARGED in Table 2's e2e" if ok else "    => TIMED RUN MAY EMIT")
     return ok
+
+
+def campaign_jsons(results, pattern):
+    """The campaign's OWN result files: the top level of `results` when it holds any, else a
+    recursive walk (the older per-GPU layout). A campaign directory also keeps its history —
+    `rerun_*/` removed-row archives, `split_*/` per-session mirrors — and scanning those as rows
+    reported a 208% worst-case bound off a superseded `s208.1` row that the live file had
+    already replaced (2026-09-06). History is evidence for the README, not rows for the audit."""
+    top = sorted(glob.glob(os.path.join(results, pattern)))
+    if top:
+        return top
+    return sorted(glob.glob(os.path.join(results, "**", pattern), recursive=True))
 
 
 def scan_cmsgen(results):
     print("\n[3] CMSGen emission mode")
-    files = sorted(glob.glob(os.path.join(results, "**", "*.json"), recursive=True))
+    files = campaign_jsons(results, "*.json")
     modes, n = {}, 0
     for f in files:
         try:
@@ -263,8 +283,7 @@ def recurrent_egress(results, cycles=25):
     bench = os.path.join(REPO_ROOT, "benchmarks", "circuits", "bench", "seq")
     print("\n[4] Recurrent-CircuitSAT per-depth host snapshot — measured bound")
     rows = []
-    for f in sorted(glob.glob(os.path.join(results, "**", "rivals_recurrent_*.json"),
-                              recursive=True)):
+    for f in campaign_jsons(results, "rivals_recurrent_*.json"):
         mode = os.path.basename(f).replace("rivals_recurrent_", "").replace(".json", "")
         for r in json.load(open(f)):
             rcs = r.get("rcs") or {}
@@ -282,17 +301,21 @@ def recurrent_egress(results, cycles=25):
     if not rows:
         print("    no timed Recurrent cells found")
         return True
-    print(f"    {'mode':<7}{'inst':<8}{'copies':>8}{'GiB':>7}{'their rt':>10}"
-          f"{'egress s':>10}{'%':>7}{'% pessim':>10}")
+    print(f"    {'mode':<7}{'inst':<9}{'copies':>8}{'GiB':>7}{'their rt':>10}"
+          f"{'egress s':>10}{'%':>9}{'% pessim':>11}")
     worst = 0.0
     for mode, name, copies, gib, rt, sec in rows:
         pct, pes = 100 * sec / rt, 100 * sec * PESSIMISM / rt
         worst = max(worst, pes)
-        print(f"    {mode:<7}{name:<8}{copies:>8,}{gib:>7.2f}{rt:>10.1f}{sec:>10.2f}"
-              f"{pct:>6.2f}%{pes:>9.2f}%")
-    print(f"    => worst case {worst:.2f}% of their reported model_runtime. NOT corrected: it is "
-          f"one rival, worth ~1%, and\n       deducting it would RAISE our ratio — so an "
-          f"uncorrected cell under-reports us, it never flatters us.")
+        # a share >= 100% is exactly the row a reader must be able to see: at width 6 the
+        # percent fused with the egress column (`3.46104.23%`) and a column parser dropped it
+        print(f"    {mode:<7}{name:<9}{copies:>8,}{gib:>7.2f}{rt:>10.1f}{sec:>10.2f}"
+              f"{pct:>8.2f}%{pes:>10.2f}%")
+    print(f"    => worst case {worst:.2f}% of their reported model_runtime (the bound is per "
+          f"card and per row; it is\n       typically a few percent and can exceed 100% on a row "
+          f"whose reported runtime is anomalously short). NOT corrected:\n       deducting it "
+          f"would RAISE our ratio — so an uncorrected cell under-reports us, it never flatters "
+          f"us.")
     return True
 
 

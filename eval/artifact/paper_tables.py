@@ -413,6 +413,15 @@ def _pre_frac(r):
                ("parse", "construct", "warmup", "mine", "rebuild", "recheck")) / wt
 
 
+#: Fewest samples a tool must deliver before its rate is a ratio's denominator — ONE floor for
+#: both sides of both tables. Below it the cell says the tool could not sample the instance,
+#: which is a result, not a factor (Poisson relative error at n=30 is ~18%; at n=1 the figure
+#: means nothing). Until 2026-09-05 the floor was ENFORCED on the rival side of Table 2 and only
+#: NARRATED on the CMSGen side of Table 1, where `b14` (13 CMSGen samples in 60 s) sat inside the
+#: rare-pin geomean at full weight — the per-column-filtering trap between two tables.
+MIN_SOLUTIONS = 30
+
+
 def cms_family(d, stem, encoder):
     payload = load(os.path.join(d, f"{stem}.json")) if d else None
     if not payload:
@@ -459,6 +468,7 @@ def cms_family(d, stem, encoder):
     # both fell through every branch and vanished, at the same time as CMSGen-zero rows were
     # counted as wins. That is an asymmetric ledger. A reader must be able to add the columns up.
     finite, gpap_zero, cms_zero, both_zero, weird, cms_err = {}, [], [], [], [], []
+    cms_thin = []
     for k, r in kept.items():
         # A crashed CMSGen subprocess is recorded as `cms_error` with a count of 0 — an
         # environment failure, not a measurement. Scoring that 0 as "CMSGen sampled nothing"
@@ -468,6 +478,11 @@ def cms_family(d, stem, encoder):
             cms_err.append(k)
             continue
         g, c = scored(r, "n_models"), scored(r, "cms_n_samples")
+        # A handful of CMSGen samples is a capability statement, not a denominator — the same
+        # floor Table 2 applies to the rival (MIN_SOLUTIONS), so one rule screens both sides.
+        if g and c and (r.get("cms_n_samples") or 0) < MIN_SOLUTIONS:
+            cms_thin.append(k)
+            continue
         if g and c:
             if r.get("ratio") and math.isfinite(r["ratio"]):
                 finite[k] = r
@@ -520,6 +535,7 @@ def cms_family(d, stem, encoder):
         "gpap0_names": sorted(gpap_zero), "both0_names": sorted(both_zero),
         "noarm": len(noarm), "noarm_names": noarm,
         "cms_err": len(cms_err), "cms_err_names": sorted(cms_err),
+        "cms_thin": len(cms_thin), "cms_thin_names": sorted(cms_thin),
         "skipped": sum(1 for r in allr if r.get("skipped")),
         "errors": sum(1 for r in allr if r.get("error")),
         "unsound": sum(1 for r in rows if sound_failed(r)),
@@ -599,9 +615,8 @@ def _prop_stats(quads, encoder):
 
 # ------------------------------------------------------------------ GPAP vs GPU rivals
 
-#: Fewest solutions a rival must deliver before its rate is used as a ratio's denominator.
-#: Below it the cell says the rival could not sample the instance, which is a result, not a factor.
-RIVAL_MIN_SOLUTIONS = 30
+#: The rival-side name of the one floor above (kept: consumers and tests import it by this name).
+RIVAL_MIN_SOLUTIONS = MIN_SOLUTIONS
 
 
 def rival_cells(rows, key):
@@ -738,28 +753,86 @@ def rival_family(d, stem, key):
     paper_ratios = [ours / rate for name, _, bucket, ours, rate in cells
                     if bucket == "ok" and in_paper(name)]
     zero, gzero = n.get("rival0", 0), n.get("gpap0", 0)
-    # THE SECOND CLOCK, as in Table 1. `ours` is the winning config's STEADY-STATE rate times
-    # the distinct fraction — it excludes parsing, construction, ELS, mining and warm-up, as the
-    # rival's `model_runtime` excludes its model build. `e2e` charges GPAP its whole wall
-    # (`sps_e2e`, n / wall_total) against the rival's unchanged timer; printed beside the
-    # steady-state ratio so a reader sees what preparation costs (it used to be described as
-    # "includes construction", which it did not — RIVAL_FAIRNESS_FINDINGS.md §14).
     seen = {}
     for r in rows:
         seen[(r["name"], r.get("variant", "-"))] = r
-    e2e = []
+    # THE SECOND CLOCK — ONE definition, charged the same way on BOTH sides (2026-09-06; the
+    # fourth revision of this column, which is why it is spelled out): each side's WHOLE wall
+    # on the instance, with the tool's fixed process start-up excluded on both.
+    #   GPAP:  encoding + parse + construction + ELS + mining + warm-up + the timed run + the
+    #          projection of every delivered row (`_gpap_e2e_full`; in-process, so it never
+    #          carries interpreter or CUDA-context start-up).
+    #   rival: its timed loop plus whatever of its non-timed subprocess wall (unroll, model
+    #          build, dedup, results write) EXCEEDS the tool's fixed process start-up, estimated
+    #          as the SMALLEST non-timed wall (`wall_s - runtime_s`) the tool showed on any
+    #          measured cell of this stage. That floor still holds the smallest model build, so
+    #          the subtraction takes too much off the rival, never too little.
+    # History. Until 2026-09-05 the column divided GPAP's wall by the rival's UNCHANGED timer
+    # (DEMOTIC on its pins 0.8x). The 2026-09-05 fix divided by the rival's whole subprocess
+    # wall (7.6x) — which charged it ~4.5 s of interpreter + CUDA start-up per cell that GPAP's
+    # in-process wall never pays, while our side subtracted its delivery and carried no
+    # encoding: three asymmetries, each in our favour, on cells whose whole wall is under a
+    # second. `gm_e2e_nosub` keeps the no-subtraction figure as the printed upper bound. NOT in
+    # any wall: Recurrent's start_point search and the ladder rungs rejected above the grant
+    # (the harness records neither; both would lower the rival's e2e further).
+    nontimed = [rv["wall_s"] - rv["runtime_s"] for r in seen.values()
+                for rv in [r.get(key) or {}]
+                if rv.get("wall_s") and rv.get("runtime_s") and not rv.get("error")]
+    startup = min(nontimed) if nontimed else 0.0
+    e2e, e2e_nosub, nodeliv = [], [], 0
+    okc, unsat_rival, low_vram, ladder_top, small = [], [], [], [], []
     for name, variant, bucket, ours, rate in cells:
+        r = seen[(name, variant)]
+        g, rv = r.get("gpap") or {}, r.get(key) or {}
+        if bucket == "unsat" and rv.get("unique_per_s"):
+            unsat_rival.append((name, rv["unique_per_s"]))
+        gpu = r.get("gpu") or {}
+        if gpu.get("total_gb") and gpu.get("free_gb") is not None and "sps" in g \
+                and gpu["free_gb"] < 0.5 * gpu["total_gb"]:
+            low_vram.append((name, gpu["free_gb"], gpu["total_gb"]))
         if bucket != "ok":
             continue
-        g = seen[(name, variant)].get("gpap") or {}
-        ge = _gpap_e2e(g)
-        if ge and g.get("sps") and rate:
-            e2e.append((ours * ge / g["sps"]) / rate)
+        x = ours / rate
+        band = seed_band(g, ours, rate)
+        okc.append((x, name, band, straddles(band)))
+        sweep = rv.get("batch_sweep") or []
+        # cells the rival ran at its two smallest surviving rungs with a rung above rejected:
+        # the card bound the grant there, and the cell measures the tool at a small batch
+        if rv.get("batch") and rv["batch"] <= 10_000 and len(sweep) > 1:
+            small.append((x, name, rv["batch"]))
+        # cells where the ladder's TOP rung completed first try: nothing above it was offered,
+        # so the ladder bound the grant, not the card (a fourth rejection reason the rule does
+        # not state; disclosed in the caveats)
+        if rv.get("batch") and len(sweep) == 1 and rv["batch"] == (sweep[0].get("batch") or 0):
+            ladder_top.append((name, rv["batch"]))
+        gf = _gpap_e2e_full(g, r)
+        if gf and not (_picked_seed(g) or {}).get("sps_e2e_with_delivery"):
+            nodeliv += 1
+        if gf and rv.get("wall_s") and rv.get("runtime_s") and rv.get("unique"):
+            extra = max(0.0, (rv["wall_s"] - rv["runtime_s"]) - startup)
+            e2e.append(gf / (rv["unique"] / (rv["runtime_s"] + extra)))
+            e2e_nosub.append(gf / (rv["unique"] / rv["wall_s"]))
+    okc.sort(key=lambda t: -t[0])
+    ties = sum(1 for _, _, _, st in okc if st)
+    small_names = {nm for _, nm, _ in small}
+    rest = [x for x, nm, _, _ in okc if nm not in small_names]
     return {"cells": len(cells), "gm": gm(ratios), "n": len(ratios) + zero + gzero,
-            "gm_e2e": gm(e2e),
+            "gm_e2e": gm(e2e), "gm_e2e_nosub": gm(e2e_nosub), "startup_s": startup,
+            "e2e_nodelivery": nodeliv,
             "gm_paper": gm(paper_ratios), "n_paper": len(paper_ratios),
             "offpaper": len(ratios) - len(paper_ratios),
-            "wins": sum(1 for x in ratios if x >= 1) + zero, "errors": n.get("error", 0),
+            # a straddling cell is a TIE: neither a win nor a loss (`ties` says how many)
+            "wins": sum(1 for x, _, _, st in okc if x >= 1 and not st) + zero,
+            "ties": ties, "errors": n.get("error", 0),
+            "gm_lo": gm([b[0] if b else x for x, _, b, _ in okc]),
+            "gm_hi": gm([b[1] if b else x for x, _, b, _ in okc]),
+            "median": statistics.median([x for x, _, _, _ in okc]) if okc else None,
+            "top": [(x, nm) for x, nm, _, _ in okc[:6]],
+            "gm_wo_top1": gm([x for x, _, _, _ in okc[1:]]) if len(okc) > 1 else None,
+            "gm_wo_top4": gm([x for x, _, _, _ in okc[4:]]) if len(okc) > 4 else None,
+            "small_grant": sorted(small, reverse=True),
+            "gm_small": gm([x for x, _, _ in small]), "gm_rest": gm(rest), "n_rest": len(rest),
+            "unsat_rival": unsat_rival, "low_vram": low_vram, "ladder_top": ladder_top,
             "zero": zero, "gpap0": gzero, "both0": n.get("both0", 0),
             "free": n.get("free", 0), "nomeas": n.get("nomeas", 0),
             "misaligned": n.get("misaligned", 0), "vacuous": n.get("vacuous", 0),
@@ -769,6 +842,26 @@ def rival_family(d, stem, key):
 
 
 # ------------------------------------------------------------------ GPAP vs CMSGen, on the rival rows
+
+def _pa_range(rowsets):
+    """'0.020–0.97, 2 cell(s) bounded below 8.1e-08–2.3e-05 where no hit was observed' — the
+    measured acceptance probabilities of a protocol's non-tautological cells, from the rows."""
+    meas, bounded = [], []
+    for rows in rowsets:
+        for r in rows.values():
+            p, lt = r.get("p_accept"), r.get("p_accept_lt")
+            if p and p < 1:
+                meas.append(p)
+            elif not p and lt:
+                bounded.append(lt)
+    if not meas:
+        return "not recorded"
+    out = f"{min(meas):.2g}–{max(meas):.2g}"
+    if bounded:
+        out += (f", {len(bounded)} cell(s) bounded below {min(bounded):.1e}–{max(bounded):.1e} "
+                f"where no hit was observed")
+    return out
+
 
 def _rival_rows(d, stem):
     """The (name, variant) -> row map of a rival stage; a retry supersedes its error row."""
@@ -803,6 +896,50 @@ def _gpap_e2e(g):
     if g.get("sps_e2e"):
         return g["sps_e2e"]
     return med([s.get("sps_e2e") for s in (g.get("seeds") or []) if s.get("sps_e2e")])
+
+
+def _picked_seed(g):
+    """The `seeds[]` entry of the run the row publishes (`median_seed` is the seed VALUE)."""
+    seeds = g.get("seeds") or []
+    for s in seeds:
+        if s.get("seed") == g.get("median_seed"):
+            return s
+    for s in seeds:
+        if s.get("sps_e2e") and g.get("sps_e2e") and abs(s["sps_e2e"] - g["sps_e2e"]) < 1e-9:
+            return s
+    return None
+
+
+def _gpap_e2e_full(g, r):
+    """GPAP's rate over its WHOLE wall on the instance: encoding + parse + construction + ELS +
+    mining + warm-up + the timed run + the projection of every delivered row. This is what
+    Table 2's e2e divides by (see `rival_family`). `sps_e2e` is Table 1's convention — it
+    subtracts the projection (symmetric there, since CMSGen writes nothing under --nowrite)
+    and carries no encoding (charged to no sampler where both tools read one file). Against a
+    rival whose process wall holds its own unroll, model build, dedup and results write, both
+    belong on our side. None when the row cannot support it; a row without the delivery split
+    (pre-2026-09 harness) falls back to `sps_e2e` and is counted by the caller."""
+    n = g.get("n_models") or 0
+    s = _picked_seed(g) or {}
+    rate = s.get("sps_e2e_with_delivery") or _gpap_e2e(g)
+    if not (n and rate):
+        return None
+    enc = ((r.get("cnf") or {}).get("encode_s")) or 0.0
+    return n / (n / rate + enc)
+
+
+def seed_band(g, ours, rate):
+    """(lo, hi): the cell's ratio at GPAP's slowest and fastest of its seeds, or None."""
+    lo, hi, sps = g.get("sps_min"), g.get("sps_max"), g.get("sps")
+    if not (lo and hi and sps and rate and ours):
+        return None
+    a, b = ours * lo / sps / rate, ours * hi / sps / rate
+    return (min(a, b), max(a, b))
+
+
+def straddles(band):
+    """The win/loss sign lies inside GPAP's own seed band: a tie, not a tally."""
+    return band is not None and band[0] < 1.0 <= band[1]
 
 
 def _cms_ratio(r):
@@ -847,12 +984,17 @@ def rival_cms_family(d, stem, key):
     noarm = sorted(k[0] for k, r in kept.items() if not cms_arm_ran(r))
     kept = {k: r for k, r in kept.items() if cms_arm_ran(r)}
     finite, gpap_zero, cms_zero, both_zero, weird, cms_err = {}, [], [], [], [], []
+    cms_thin = []
     for k, r in kept.items():
         if r.get("cms_error"):
             cms_err.append(k[0])
             continue
         g = r["gpap"]
         gs, cs = (g.get("n_models") or 0) > 0, (r.get("cms_n_samples") or 0) > 0
+        # the CMSGen-side floor, the same MIN_SOLUTIONS the rival side of Table 2 is held to
+        if gs and cs and (r.get("cms_n_samples") or 0) < MIN_SOLUTIONS:
+            cms_thin.append(k[0])
+            continue
         if gs and cs:
             x = _cms_ratio(r)
             if x:
@@ -902,6 +1044,7 @@ def rival_cms_family(d, stem, key):
         "gpap0_names": sorted(gpap_zero), "both0_names": sorted(both_zero),
         "noarm": len(noarm), "noarm_names": noarm,
         "cms_err": len(cms_err), "cms_err_names": sorted(cms_err),
+        "cms_thin": len(cms_thin), "cms_thin_names": sorted(cms_thin),
         "skipped": 0, "errors": errors,
         "unsound": sum(1 for r in cells.values()
                        if sound_failed(r["gpap"]) or r["gpap"].get("sim_check") == "BAD"),
@@ -931,6 +1074,11 @@ def rival_prop_rates(d, stem, key):
         if not cms_arm_ran(r) or r.get("cms_error"):
             continue
         if vacuous_pin(r, name.split(".")[0]) or zero_search(g) or tiny_space(r, key):
+            continue
+        # the two screens Table 1 applies that this loop did not: a proved-UNSAT cell and a
+        # CMSGen count under the floor. Without them Table 3 is over a different row set than
+        # Table 1, which is the one failure the algebraic identity exists to catch.
+        if unsat_at_depth(r) or 0 < (r.get("cms_n_samples") or 0) < MIN_SOLUTIONS:
             continue
         quads.append((g.get("implications_per_s"), r.get("cms_implications_per_s"),
                       g.get("sps"), r.get("cms_sps"),
@@ -1027,7 +1175,9 @@ def barbarik(paths):
     eligible, rejected, errored = buckets(rows)
     return {"summary": arm_summary(rows, eligible), "eligible": sorted(eligible),
             "control_rejected": sorted(rejected), "control_errored": sorted(errored),
-            "params": {"epsilon": eps, "eta": eta, "delta": delta}}
+            "params": {"epsilon": eps, "eta": eta, "delta": delta},
+            # provenance: this table is its own campaign, and the header above it is not its host
+            "source": sorted(os.path.abspath(p) for p in (paths or []) if os.path.exists(p))}
 
 
 # ------------------------------------------------------------------ reproducibility
@@ -1075,6 +1225,80 @@ def stage_encoders(d, stem):
     """Which encoders a stage's JSON contains. One table row is emitted per (family, encoder)."""
     payload = load(os.path.join(d, f"{stem}.json")) if d else None
     return encoders_in(payload) if payload else []
+
+
+# The rival-configuration EVIDENCE files (eval/rivals/steps_calibration.py): each rival's
+# shipped script value, its argparse default and its PAPER value for the knob, plus the paper's
+# PAIRED setting, each measured once on the campaign's own card. Schema {generated, tools:
+# {tool: {pinned, pinned_source, measured_best, agrees, cycles, arms: {str(value): {unique_per_s,
+# wall_s, error}}}}} — no `rows` key, which is how verify_artifact tells it from an arm.
+CALIBRATION_FILES = (("rivals_steps_calibration.json", "num_steps"),
+                     ("rivals_steps_calibration_t50.json", "num_steps"),
+                     ("rivals_lr_calibration.json", "lr"))
+
+
+def rival_calibration(rivals_dir):
+    """Markdown lines stating what the rivals' OTHER author-shipped values measured, or [].
+
+    The methods paragraph says the campaign runs each rival at its shipped script setting and
+    that the papers' values are "measured beside it". Until this existed the measurement lived
+    only in a JSON nobody opened: the prose pointed at a file and the text never said the
+    number, so a reader could not tell whether the script setting flattered us. Now the
+    generator prints every arm, its ratio to the PINNED arm and the tie-break verdict, so the
+    disclosure is produced by the same run that produces the tables (evidence, never
+    configuration — a FLIP is printed, not acted on)."""
+    import json as _json
+    out = []
+    for fn, knob in CALIBRATION_FILES:
+        path = os.path.join(rivals_dir or "", fn)
+        if not os.path.isfile(path):
+            continue
+        try:
+            d = _json.load(open(path)) or {}
+        except Exception as e:                       # noqa: BLE001 — a corrupt file is stated, not hidden
+            out.append(f"* `{fn}`: unreadable ({e})")
+            continue
+        for tool, v in sorted((d.get("tools") or {}).items()):
+            arms = v.get("arms") or {}
+            pinned = v.get("pinned")
+            pin = arms.get(str(pinned)) or {}
+            pin_rate = pin.get("unique_per_s") or None
+            # `depth` is the depth the probe RAN at (recorded by steps_calibration since
+            # 2026-09-06); `cycles` was the CLI argument, which DEMOTIC's combinational probe
+            # ignores, so an older file mislabelled DEMOTIC "at T=25". No depth, no claim.
+            T = v.get("depth")
+            out += ["", f"**{tool}** — `{knob}`" + (f" at T={T}" if T else "") +
+                    f", pinned {pinned} ({v.get('pinned_source', '?')}); file `{fn}`"
+                    + (f", measured {d.get('generated')}" if d.get("generated") else ""), "",
+                    f"| {knob} | unique/s | wall s | vs pinned | |", "|---|---:|---:|---:|---|"]
+            for k, a in arms.items():
+                rate = a.get("unique_per_s")
+                ratio = (f"{rate / pin_rate:.2f}x" if (rate is not None and pin_rate) else "—")
+                tag = ("**pinned**" if k == str(pinned) else
+                       "paper (paired)" if k.startswith("paper(") else "")
+                if a.get("error"):
+                    tag = (tag + " " if tag else "") + f"error: {str(a['error'])[:60]}"
+                rate_s = f"{rate:,.0f}" if rate is not None else "—"
+                wall_s = f"{a['wall_s']:.0f}" if a.get("wall_s") is not None else "—"
+                out.append(f"| {k} | {rate_s} | {wall_s} | {ratio} | {tag} |")
+            ag = v.get("agrees")
+            verdict = ("tie-break HOLDS: the pinned value is the best of the tool's own values"
+                       if ag is True else
+                       f"**FLIP**: {v.get('measured_best')} measured faster than the pinned "
+                       f"{pinned} — recorded, not acted on (change the pin deliberately, in one place)"
+                       if ag is False else
+                       "INCONCLUSIVE: no arm scored")
+            out.append("")
+            out.append(f"* {verdict}.")
+    if out:
+        out = ["### Rival configuration — what their other values measured on this card", "",
+               "EVIDENCE, not configuration: every campaign row runs the rival at its shipped "
+               "script setting (the **pinned** arm). The other arms are the values the tool's own "
+               "artifacts also give the knob — its argparse default and its PAPER — each measured "
+               "once, on one instance, on the campaign's card, so the text can state what the "
+               "paper's setting would have given the tool. A paper arm below 1.00x means the "
+               "script setting the campaign used is the BETTER one for the rival."] + out
+    return out
 
 
 def build(args):
@@ -1134,6 +1358,7 @@ def build(args):
         if v and stem not in one_per_stem:
             one_per_stem[stem] = v
     tot = {kk: sum(v[kk] for v in cms.values() if v) for kk in ("cells", "unsound")}
+    tot["refused"] = sum(v.get("errors", 0) for v in cms.values() if v)
     tot.update({kk: sum(v[kk] for v in one_per_stem.values())
                 for kk in ("inst", "skipped", "errors")})
 
@@ -1143,8 +1368,9 @@ def build(args):
          f"* engine {', '.join(f'`{c}`' for c in cores) or '`not recorded`'} (per-row build id)"
          f"  |  tables generated at `{commit}`"
          f"  |  CMSGen patched (`--nowrite`): **{prov.get('patched')}**",
-         f"* **{tot['cells']} cells, {tot['inst']} instance-slots, {tot['skipped']} skipped, "
-         f"{tot['errors']} errors, {tot['unsound']} unsound**", "",
+         f"* **{tot['cells'] + tot['refused']} rows: {tot['cells']} measured cells + "
+         f"{tot['refused']} refused (GPAP's encoder or envelope), {tot['inst']} instance-slots, "
+         f"{tot['skipped']} skipped, {tot['errors']} errors, {tot['unsound']} unsound**", "",
          "Generated by `eval/artifact/paper_tables.py`. Vacuous pins excluded from sequential geomeans; "
          "an instance where EITHER sampler emitted nothing has no finite ratio and is reported in "
          "its own column instead of the geomean.", "",
@@ -1158,7 +1384,8 @@ def build(args):
          "supplementary and printed only when present. One encoder; nothing selects between "
          "runs (a per-instance best-of keyed on the ratio would let CMSGen's number pick which "
          "of ours is published).", "",
-         "Columns add up: `inst` = `n_gm` + CMSGen=0 + GPAP=0 + both=0 + no-search + tiny-space + vacuous. "
+         "Columns add up: `inst` = `n_gm` + CMSGen=0 + GPAP=0 + both=0 + no-search + tiny-space "
+         "+ vacuous + unsat + CMSGen<30. "
          "Every one of those instances is counted exactly once, `wins/n` is counted over the "
          "same set the geomean is (plus the two zero columns), and the degenerate cells are "
          "screened out BEFORE the ledger rather than only out of the geomean.", "",
@@ -1177,8 +1404,8 @@ def build(args):
          "the sampler.)", "",
          "| instance set | depth | pins | enc | inst | n_gm | GPAP/CMSGen | paper set | e2e "
          "| pre% | wins | CMSGen=0 | GPAP=0 | both=0 | no-search | tiny-space | vacuous | unsat "
-         "| refused |" + (" ref GPU |" if ref else ""),
-         "|---|---|---|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|"
+         "| CMSGen<30 | refused |" + (" ref GPU |" if ref else ""),
+         "|---|---|---|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|"
          + ("---:|" if ref else "")]
     for (stem, enc), label, depth, tgt in t1:
         v = cms[(stem, enc)]
@@ -1201,7 +1428,7 @@ def build(args):
                  f"| {v['n_gm']} | {gms} | {ps} | {e2e} | {100 * v.get('pre_frac', 0):.0f}% "
                  f"| {v['wins']}/{v['n']} | {v['inf']} | {v['gpap0']} | {v['both0']} "
                  f"| {v['free']} | {v.get('tiny', 0)} | {v['vac']} | {v.get('unsat', 0)} "
-                 f"| {v.get('errors', 0)} |{refs}")
+                 f"| {v.get('cms_thin', 0)} | {v.get('errors', 0)} |{refs}")
     g0 = sorted({n for v in cms.values() if v for n in v["gpap0_names"]})
     b0 = sorted({n for v in cms.values() if v for n in v["both0_names"]})
     M += ["",
@@ -1211,16 +1438,45 @@ def build(args):
           "**Instances neither sampler could touch**: "
           + (", ".join(f"`{n}`" for n in b0) if b0 else "none")
           + " — these bound the reach of the whole comparison, not of either tool."]
+    # THE CIRCUIT HANDED TO THE RIVAL, stated from the rows rather than from a fixed string. This
+    # paragraph claimed "as well as the raw one ... whichever suits it" over a campaign in which
+    # every row was the ABC variant (2026-09-04) — a fairness procedure asserted and not
+    # performed. It now names what actually ran.
+    variants = sorted({v for stem, _k, _r, _p in RIVALS
+                       for (_n, v) in (_rival_rows(args.rivals, stem) or {})})
+    if len(variants) > 1:
+        variant_sentence = ("Each rival is handed an ABC-simplified copy of the circuit as well "
+                            "as the raw one and is scored on whichever suits it.")
+    elif variants == ["abc"]:
+        variant_sentence = ("Every rival is handed the SAME circuit file GPAP encodes from — the "
+                            "sequential-ABC-simplified netlist (`variant: abc` on every row). "
+                            "The raw-netlist axis was not run in this campaign, and GPAP's "
+                            "post-unroll ABC pass has no sequential equivalent the rival could "
+                            "be given; that residual is a property of GPAP's encoder and is "
+                            "stated, not corrected.")
+    elif variants == ["raw"]:
+        variant_sentence = ("Every rival is handed the raw netlist (`variant: raw` on every row) "
+                            "while GPAP encodes an ABC-optimized CNF of it — an asymmetry in "
+                            "the rival's disfavour that is stated, not corrected.")
+    else:
+        variant_sentence = "Circuit variant per row: " + (", ".join(variants) or "none") + "."
+    # THE ACCEPTANCE PROBABILITIES, read off the rows rather than typed: the fixed strings this
+    # paragraph carried ("0.03–0.5", "~1e-2–1e-6") were the 20260903 campaign's and wrong on
+    # both ends for its successor (0.020–0.97; 0.5 down to 3.9e-8).
+    pa_their = _pa_range([_rival_rows(args.rivals, st) or {}
+                          for st, _k, _r, pr in RIVALS if "rare" not in st])
+    pa_rare = _pa_range([_rival_rows(args.rivals, st) or {}
+                         for st, _k, _r, pr in RIVALS if "rare" in st])
     M += ["", "## Table 2 — GPAP vs the GPU gradient samplers", "",
-          "| rival | protocol | cells | n_gm | GPAP/rival | paper set | e2e | wins | rival=0 "
-          "| GPAP=0 | both=0 | u/s unmeasured | rival<30 | no-search | tiny-space | vacuous "
-          "| unsat | misaligned | rival failed | out-of-envelope |",
-          "|---|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|"]
+          "| rival | protocol | cells | n_gm | GPAP/rival | paper set | e2e | wins | ties "
+          "| rival=0 | GPAP=0 | both=0 | u/s unmeasured | rival<30 | no-search | tiny-space "
+          "| vacuous | unsat | misaligned | rival failed | out-of-envelope |",
+          "|---|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|"]
     for stem, _, rival, proto in RIVALS:
         v = riv.get(stem)
         if not v:
             M.append(f"| {rival} | {proto} | — | — | not run | — | — | — | — | — | — | — | — "
-                     f"| — | — | — | — | — | — | — |")
+                     f"| — | — | — | — | — | — | — | — |")
             continue
         gs = f"{v['gm']:,.1f}x" if v["gm"] else "—"
         ps = (f"{v['gm_paper']:,.1f}x ({v['n_paper']})" if v.get("gm_paper") else "—")
@@ -1232,15 +1488,15 @@ def build(args):
         # geomean's count, and the win fraction over its own denominator.
         n_gm_ok = v["n"] - v["zero"] - v["gpap0"]
         M.append(f"| {rival} | {proto} | {v['cells']} | {n_gm_ok} | {gs} | {ps} | {es} | "
-                 f"{v['wins']}/{v['n']} | {v['zero']} | {v['gpap0']} | {v['both0']} "
+                 f"{v['wins']}/{v['n']} | {v.get('ties', 0)} | {v['zero']} | {v['gpap0']} | {v['both0']} "
                  f"| {v.get('nomeas', 0)} | {v.get('thin', 0)} | {v.get('free', 0)} "
                  f"| {v.get('tiny', 0)} | {v.get('vacuous', 0)} | {v.get('unsat', 0)} "
                  f"| {v.get('misaligned', 0)} | {v['errors']} | {v.get('gpap_error', 0)} |")
     M += ["",
           "The two protocols are DIFFERENT TASKS and must never be pooled: 'their pins' rows "
           "pin the 1–5 outputs the rival's own table names (rejection-easy by construction — "
-          "p_accept is 0.03–0.5 there, printed per row), while miter/rare rows pin ALL outputs "
-          "to a rare reachable pattern (p_accept ~1e-2–1e-6). Recurrent-CircuitSAT is scored on "
+          f"measured p_accept {pa_their}, printed per row), while miter/rare rows pin ALL outputs "
+          f"to a rare reachable pattern (p_accept {pa_rare}). Recurrent-CircuitSAT is scored on "
           "its own depth-POOLED unique count — solutions satisfying the target at ANY unroll "
           "depth start_point..T, a superset of the fixed-depth task every other row measures "
           "(the fixed-depth-only count is recorded per row as `unique_at_T`). **The batch a rival "
@@ -1250,13 +1506,18 @@ def build(args):
           "granted the LARGEST rung of that ladder it can run to completion: the ladder is walked "
           "DOWN from the top and a rung is rejected only on feasibility — out of memory, refused "
           "by the driver, or not finished inside the wall budget — never on how fast it was, so "
-          "exactly ONE configuration is measured per instance. (Until 2026-09-04 the walk started "
+          "exactly ONE configuration is measured per instance. It is a share-of-the-machine rule, "
+          "not a search for the rival's fastest rung: unique/s stops tracking the batch once the "
+          "model saturates the card, so a smaller rung CAN score higher, and because the walk "
+          "stops at the first rung that completes the rival's per-rung optimum is neither sought "
+          "nor reported — a cell where a shorter earlier budget had measured a smaller rung "
+          "faster is disclosed in the campaign notes (RIVAL_FAIRNESS_FINDINGS §16c). "
+          "(Until 2026-09-04 the walk started "
           "at our VRAM model's rung, which is calibrated at num_steps=10 while we run 1 and so "
           "under-granted DEMOTIC 1.5-3.9x on 4 of 11 ISCAS-85 cells, and a timeout was recorded "
           "AS the rival's result.) The first run of every process is discarded before anything is "
-          "measured, because a cold CUDA context costs the session's first instance ~3.3x. Each "
-          "rival is handed an ABC-simplified copy of the circuit as well as the raw one and is "
-          "scored on whichever suits it. The rungs tried are recorded per row as `batch_sweep`, "
+          "measured, because a cold CUDA context costs the session's first instance ~3.3x. "
+          + variant_sentence + " The rungs tried are recorded per row as `batch_sweep`, "
           "the resolved budget as `vram_budget_bytes`. Their own defaults cannot serve as the rule — all three "
           "argparse defaults are `--batch_size 10` and their demo scripts are per-instance "
           "one-liners spanning 1,000 to 1,000,000 on comparably tiny circuits, which on our "
@@ -1265,13 +1526,20 @@ def build(args):
           "**Their `--num_steps` and `--lr` are theirs, not ours**: the batch is a share of the machine and "
           "must be granted, but the gradient-step count and the learning rate are tool settings "
           "with author-chosen values, so each rival runs at the ones its OWN artifacts specify — "
-          "`num_steps` 1 and `lr` 15 for both (their `script/run_sampler_*.sh`). Where "
-          "a tool ships two, the tie-break goes to whichever is better FOR THE RIVAL, which can "
-          "only move a ratio against us — Recurrent's paper text names `lr` 50 where its script "
-          "says 15 — and it is recorded per row as `steps`/`steps_source` and `lr`/`lr_source`, "
-          "re-derived on the campaign's own card by `eval/rivals/steps_calibration.py --axis "
-          "steps|lr`. It is deliberately not swept, since a "
-          "swept-and-best-of setting invites \"why stop there?\". "
+          "`num_steps` 1 and `lr` 15 for both (their `script/run_sampler_*.sh`). Their PAPERS "
+          "state other values — DEMOTIC 10 iterations at `lr` 15, Recurrent 5 iterations at "
+          "`lr` 50 — and the campaign runs the SHIPPED script configuration, one per tool, "
+          "which is also the better of the two for each tool on this card at the depth measured "
+          "(both saturate their batch on the first step; the paper values, singly and as the "
+          "paired setting, are measured beside it in `rivals_steps_calibration*.json` so the "
+          "text can say what they would have given the tool). Recorded per row as "
+          "`steps`/`steps_source` and `lr`/`lr_source`. Nothing is swept, since a "
+          "swept-and-best-of setting invites \"why stop there?\". Recurrent's `start_point` "
+          "initialization search is given its own 1,200 s budget per instance, which BOUNDS the "
+          "search; its wall is not added to the rival's published e2e figure (the harness records "
+          "no init time), an omission that only lowers the rival's e2e and raises our ratio, and "
+          "it is never in the steady-state metric; a cell that does not initialize inside the "
+          "budget is reported with that budget named, never as a zero. "
           "Rows recorded on or before 2026-08-26 pinned 10 for both, which taxes DEMOTIC "
           "2.6x and Recurrent 8.5x (both saturate their batch on the first step) and is why the "
           "DEMOTIC and Recurrent rows here are far below their previously recorded values. "
@@ -1296,6 +1564,22 @@ def build(args):
           "the campaign's figure, it depends on the card's transfer rate) and left "
           "uncorrected so its rate is exactly the one it publishes. Deducting it would RAISE "
           "the ratios below, so those rows under-report GPAP rather than flattering it."]
+    M += ["",
+          "**`e2e` and `ties`.** `e2e` is each side's WHOLE wall on the instance with the fixed "
+          "process start-up excluded on both: GPAP's encoding + parse + construction + ELS + "
+          "mining + warm-up + the timed run + the projection of every delivered row, against the "
+          "rival's timed loop plus its instance-specific non-timed wall (unroll, model build, "
+          "dedup, results write) above the tool's start-up floor — its smallest non-timed wall on "
+          "the row set, printed per row group in the caveats together with the figure the column "
+          "would read if the rival were charged its whole subprocess. This is the fourth "
+          "definition this column has had (0.8x, 7.6x, and now the symmetric one on DEMOTIC's "
+          "pins), and the history is in RIVAL_FAIRNESS_FINDINGS.md §16e. `ties` counts cells whose "
+          "win/loss sign lies inside GPAP's own seed band (the ratio at its slowest and fastest "
+          "seed straddles 1.0, against a rival that ran once); `wins` excludes them, so "
+          "wins + ties + losses = the win denominator."]
+    cal = rival_calibration(args.rivals) if args.rivals else []
+    if cal:
+        M += [""] + cal
     soli = []
     if any(prop.values()):
         M += ["", "## Table 3 — propagation throughput (the engine, not the sampler)", "",
@@ -1303,7 +1587,12 @@ def build(args):
               "CMSGen's from its own `--statsevery` counters. The last three columns factor the "
               "sample-rate result exactly — **engine advantage / work per sample = samples/s "
               "ratio** — because GPAP discards a conflicted trajectory (rejection sampling) "
-              "where CMSGen backtracks and keeps the partial work.", "",
+              "where CMSGen backtracks and keeps the partial work. That identity is ALGEBRAIC, "
+              "not a validation: defining work-per-sample as the quotient of the two rates "
+              "makes it true by construction, so it can only fail if an aggregation mixes row "
+              "sets — which is exactly the per-column-filtering error it is here to catch, and "
+              "all it should be claimed to catch. The rows are Table 1's, under every one of "
+              "its screens.", "",
               "| family | depth | targets | enc | n | GPAP impl/s | CMSGen impl/s "
               "| impl/s ratio | dec/s ratio | GPAP impl/sample | CMSGen impl/sample "
               "| work penalty |",
@@ -1372,6 +1661,13 @@ def build(args):
               f"Rejected on them — a non-independent sampling set, or a delta-level false "
               f"rejection of an exactly uniform sampler; either way the test cannot speak about "
               f"the instance; {len(barb['control_errored'])} dropped on a reference error).", "",
+              "**A separate campaign.** Source: "
+              + ", ".join(f"`{os.path.relpath(p)}`" for p in barb.get("source") or [])
+              + " — its own run, on its own host and its own instances (our pins on the "
+                "circuit families), not the cells of Tables 1–3 above; see that campaign's "
+                "README for the host. A CM_test verdict is a property of the sampler's "
+                "distribution, not of the card, so the header's GPU line does not apply here.",
+              "",
               "| sampler under test | Accept | Reject | no verdict | mean bias | max bias |",
               "|---|---:|---:|---:|---:|---:|"]
         for arm, a in barb["summary"].items():
@@ -1442,18 +1738,27 @@ def build(args):
          r"which makes the geomeans conservative), \emph{G$=$0} (GPAP silent --- an outright "
          r"loss), \emph{both} (neither sampler reached the instance). Every instance is counted "
          r"exactly once: $\emph{inst} = n + \text{C}{=}0 + \text{G}{=}0 + \text{both} + "
-         r"\text{free} + \text{tiny} + \text{vac.} + \text{unsat}$ --- where \emph{tiny} "
-         r"holds fewer solutions than the sample request and \emph{unsat} was PROVED to have "
-         r"none at this depth --- and the win count is taken over the same rows as the "
-         r"geomean plus the two zero columns. Each encoder is reported as its own row; nothing "
+         r"\text{free} + \text{tiny} + \text{vac.} + \text{unsat} + \text{C}{<}30$ --- where "
+         r"\emph{tiny} holds fewer solutions than the sample request, \emph{unsat} was PROVED "
+         r"to have none at this depth and \emph{C$<$30} is a CMSGen count under the same "
+         r"30-sample floor the rival side of Table~\ref{tab:rivals} is held to --- and the win "
+         r"count is taken over the same rows as the "
+         r"geomean plus the two zero columns. \emph{paper set} is the same ratio over the "
+         r"instances the rival's own paper evaluates, \emph{e2e} charges both sides their whole "
+         r"wall (GPAP parse-to-finish, CMSGen its whole subprocess; neither side's wall holds "
+         r"delivery, since CMSGen writes nothing under \texttt{--nowrite}), \emph{pre\%} is "
+         r"preparation's median share of GPAP's wall, and \emph{refused} counts rows GPAP's "
+         r"encoder or envelope refused, which lie outside \emph{inst}. "
+         r"Each encoder is reported as its own row; nothing "
          r"selects between them, since a per-instance best-of keyed on the ratio would let "
          r"CMSGen's number choose which of our runs is published. "
          r"$^{\dagger}$incomplete stage; $^{\ddagger}$geomean over fewer than three instances "
          r"(CMSGen scored zero on the rest), so it is an illustration, not an estimate.}",
          r"  \label{tab:cmsgen}",
-         r"  \begin{tabular}{@{}llllrrrrrrrrrrr@{}}", r"    \toprule",
-         r"    family & depth & targets & enc & inst & $n$ & GPAP/CMSGen & wins & C$=$0 & "
-         r"G$=$0 & both & free & tiny & vac. & unsat \\",
+         r"  \begin{tabular}{@{}llllrrrrrrrrrrrrrrrr@{}}", r"    \toprule",
+         r"    family & depth & targets & enc & inst & $n$ & GPAP/CMSGen & paper set & e2e & "
+         r"pre\% & wins & C$=$0 & G$=$0 & both & free & tiny & vac. & unsat & C$<$30 & "
+         r"refused \\",
          r"    \midrule"]
     for (stem, enc), label, depth, tgt in t1:
         v = cms[(stem, enc)]
@@ -1462,17 +1767,21 @@ def build(args):
         gtex = f"${v['gm']:,.1f}\\times$" if v["gm"] else "---"
         if v["gm"] and v["n_gm"] < 3:
             gtex += "$^{\\ddagger}$"
+        pstex = (f"${v['gm_paper']:,.1f}\\times$ ({v['n_paper']})" if v.get("gm_paper") else "---")
+        e2tex = f"${v['gm_e2e']:,.1f}\\times$" if v.get("gm_e2e") else "---"
         T.append(f"    {tex_escape(label)} & ${depth}$ & {tgt} & "
                  f"{tex_escape(enc or '---')} & {v['inst']}{mark} & {v['n_gm']} & "
-                 f"{gtex} & {v['wins']}/{v['n']} & {v['inf']} & {v['gpap0']} & "
+                 f"{gtex} & {pstex} & {e2tex} & {100 * v.get('pre_frac', 0):.0f} & "
+                 f"{v['wins']}/{v['n']} & {v['inf']} & {v['gpap0']} & "
                  f"{v['both0']} & {v['free']} & {v.get('tiny', 0)} & "
-                 f"{v.get('vac', 0)} & {v.get('unsat', 0)} \\\\")
+                 f"{v.get('vac', 0)} & {v.get('unsat', 0)} & {v.get('cms_thin', 0)} & "
+                 f"{v.get('errors', 0)} \\\\")
     T += [r"    \bottomrule", r"  \end{tabular}", r"\end{table}", ""]
 
     T += [r"\begin{table}[t]", r"  \centering", r"  \small",
           r"  \caption{\textbf{GPAP vs the GPU gradient samplers}, their metric "
           r"(unique solutions / their \texttt{model\_runtime}, which excludes their model build "
-          r"and \emph{GPAP/rival} uses our steady-state rate, which likewise excludes construction; \emph{e2e} charges GPAP its whole wall against the rival\'s unchanged timer). Rival failures (timeout / no gradient path) are "
+          r"and \emph{GPAP/rival} uses our steady-state rate, which likewise excludes construction; \emph{e2e} is each side's WHOLE wall on the instance with the fixed process start-up excluded on both --- GPAP's encoding, preparation, timed run and delivery against the rival's timed loop plus its non-timed wall above the tool's start-up floor, its smallest non-timed wall on the row set, which the caveats print; \emph{ties} counts cells whose sign lies inside GPAP's own seed band and \emph{wins} excludes them; \emph{paper set} is the same ratio over the rival's own published instances). Rival failures (timeout / no gradient path) are "
           r"counted, never folded in as zeros. As in Table~\ref{tab:cmsgen}, an instance where "
           r"either side emitted nothing carries no finite ratio and is counted separately: "
           r"\emph{R$=$0} (rival silent), \emph{G$=$0} (GPAP silent), \emph{both}. "
@@ -1484,22 +1793,25 @@ def build(args):
           r"taken over, and every column sums to \emph{cells}. "
           r"$^{\ddagger}$geomean over fewer than three instances.}",
           r"  \label{tab:rivals}",
-          r"  \begin{tabular}{@{}llrrrrrrrrrrrrrrrr@{}}", r"    \toprule",
-          r"    rival & protocol & cells & $n$ & GPAP/rival & e2e & wins & R$=$0 & G$=$0 & "
-          r"both & u$/$s n$/$a & R$<$30 & free & tiny & vac. & unsat & mis. & failed \\",
+          r"  \begin{tabular}{@{}llrrrrrrrrrrrrrrrrrr@{}}", r"    \toprule",
+          r"    rival & protocol & cells & $n$ & GPAP/rival & paper set & e2e & wins & ties & "
+          r"R$=$0 & G$=$0 & both & u$/$s n$/$a & R$<$30 & free & tiny & vac. & unsat & mis. & "
+          r"failed \\",
           r"    \midrule"]
     for stem, _, rival, proto in RIVALS:
         v = riv.get(stem)
         if not v:
-            T.append(f"    {rival} & {tex_escape(proto)} & \\multicolumn{{11}}{{c}}{{not run}} \\\\")
+            T.append(f"    {rival} & {tex_escape(proto)} & \\multicolumn{{18}}{{c}}{{not run}} \\\\")
             continue
         g = f"${v['gm']:,.1f}\\times$" if v["gm"] else "---"
+        ps = (f"${v['gm_paper']:,.1f}\\times$ ({v['n_paper']})" if v.get("gm_paper") else "---")
         e = f"${v['gm_e2e']:,.1f}\\times$" if v.get("gm_e2e") else "---"
         n_gm_ok = v["n"] - v["zero"] - v["gpap0"]        # cells carrying a finite ratio
         if v["gm"] and n_gm_ok < 3:
             g += "$^{\\ddagger}$"
-        T.append(f"    {rival} & {tex_escape(proto)} & {v['cells']} & {n_gm_ok} & {g} & {e} & "
-                 f"{v['wins']}/{v['n']} & {v['zero']} & {v['gpap0']} & {v['both0']} & "
+        T.append(f"    {rival} & {tex_escape(proto)} & {v['cells']} & {n_gm_ok} & {g} & {ps} & "
+                 f"{e} & {v['wins']}/{v['n']} & {v.get('ties', 0)} & {v['zero']} & {v['gpap0']} & "
+                 f"{v['both0']} & "
                  f"{v.get('nomeas', 0)} & {v.get('thin', 0)} & {v.get('free', 0)} & "
                  f"{v.get('tiny', 0)} & {v.get('vacuous', 0)} & {v.get('unsat', 0)} & "
                  f"{v.get('misaligned', 0)} & {v['errors']} \\\\")
@@ -1525,12 +1837,12 @@ def build(args):
               r"\emph{both} samplers emitted, since a work-per-sample figure needs both; "
               r"$^{\ddagger}$marks rows where that leaves fewer than three.}",
               r"  \label{tab:prop}",
-              r"  \begin{tabular}{@{}llllrrrrrr@{}}", r"    \toprule",
+              r"  \begin{tabular}{@{}llllrrrrrrrr@{}}", r"    \toprule",
               r"    & & & & & \multicolumn{2}{c}{implications/s} & "
-              r"\multicolumn{2}{c}{implications/sample} & \\",
+              r"\multicolumn{2}{c}{implications/sample} & & & \\",
               r"    \cmidrule(lr){6-7}\cmidrule(lr){8-9}",
               r"    family & depth & targets & enc & $n$ & GPAP & CMSGen & GPAP & CMSGen & "
-              r"ratio \\", r"    \midrule"]
+              r"impl ratio & dec/s ratio & work penalty \\", r"    \midrule"]
         for (stem, enc), label, depth, tgt in t1:
             v = prop.get((stem, enc))
             if not v:
@@ -1538,12 +1850,14 @@ def build(args):
             # same low-n flag as Table 1: these rows carry the families where CMSGen scored
             # zero almost everywhere, so `n` is 1-2 and the row illustrates, not estimates
             nmark = "$^{\\ddagger}$" if v["n"] < 3 else ""
+            dectex = f"${v['dec']:,.0f}\\times$" if v.get("dec") else "---"
             T.append(f"    {tex_escape(label)} & ${depth}$ & {tgt} & "
                      f"{tex_escape(enc or '---')} & {v['n']}{nmark} & "
                      f"${v['gpap'] / 1e9:.2f}\\!\\times\\!10^{{9}}$ & "
                      f"${v['cms'] / 1e6:.2f}\\!\\times\\!10^{{6}}$ & "
                      f"{v['gper']:,.0f} & {v['cper']:,.0f} & "
-                     f"${v['ratio']:,.0f}\\times$ \\\\")
+                     f"${v['ratio']:,.0f}\\times$ & {dectex} & "
+                     f"${v['work']:,.3g}\\times$ \\\\")
         T += [r"    \bottomrule", r"  \end{tabular}", r"\end{table}", ""]
 
     if uni:
@@ -1633,13 +1947,30 @@ def build(args):
                      f"({', '.join('`' + n + '`' for n in v['cms_err_names'])}). A crashed "
                      f"baseline is not a zero; excluded from every column — re-run before "
                      f"publishing.")
-    for stem, _, rival, proto in RIVALS:
+    for stem, key, rival, proto in RIVALS:
         v = riv.get(stem)
         if v and v["errors"]:
-            C.append(f"{rival} ({proto}): **{v['errors']} of {v['cells']}** runs failed (did not "
-                     f"initialize within the 300 s budget, timed out, or no gradient path). "
-                     f"They are omitted from the geomean — instances the rival cannot process "
-                     f"— never counted as zeros.")
+            # Name the budget the rows were measured under — it is in every error reason
+            # ("... within the 1200s initialization budget"), and "the budget" without a number
+            # is exactly the sentence a referee cannot check.
+            import re as _re
+            budgets = sorted({int(m.group(1)) for r in (_rival_rows(args.rivals, stem) or {}).values()
+                              for m in [_re.search(r"within the (\d+)s initialization budget",
+                                                   str((r.get(key) or {}).get("error") or ""))]
+                              if m})
+            budget = (f"the {budgets[0]:,} s initialization budget" if len(budgets) == 1 else
+                      "the initialization budget" if not budgets else
+                      "the initialization budget (" + "/".join(f"{b:,} s" for b in budgets)
+                      + " — MIXED, re-run to one budget before publishing)")
+            C.append(f"{rival} ({proto}): **{v['errors']} of {v['cells']}** runs produced no "
+                     f"measurement inside the budget (did not initialize within {budget}, "
+                     f"timed out, or no gradient path — the reason is recorded per row). They "
+                     f"are omitted from the geomean and never counted as zeros. This is a "
+                     f"statement about OUR budget, not about the rival's capability: a cell "
+                     f"that did not initialize in time is re-runnable at a longer one; which "
+                     f"cells did when the budget was raised, and which still did not, is "
+                     f"recorded per campaign (docs/findings/RIVAL_FAIRNESS_FINDINGS.md §11, "
+                     f"§16d).")
         if v and v["gpap0"]:
             C.append(f"{rival} ({proto}): **GPAP emitted nothing on {v['gpap0']} instance(s)** "
                      f"that the rival sampled. Losses, excluded from the geomean for lack of a "
@@ -1690,7 +2021,7 @@ def build(args):
         moved = "; ".join(f"{k} {f:,.2f}x ({'the screens LOWER this headline' if f > 1 else 'the screens RAISE this headline'})"
                           for k, f in effects)
         C.append("What the degeneracy screens (vacuous pins, no-search and tiny-space cells) do "
-                 "to each geomean, in **both** directions — screened / unscreened: " + moved
+                 "to each geomean, in **both** directions — unscreened / screened: " + moved
                  + ". A screen that raises a headline is reported here exactly as loudly as one "
                    "that lowers it.")
     # THE FAILURE REGIME, AS A BOUNDARY. Amplification (success / p_accept) is what propagation
@@ -1733,13 +2064,100 @@ def build(args):
     for stem, _key, _rival, _proto in RIVALS:
         for (nm, _v), r in (_rival_rows(args.rivals, stem) or {}).items():
             n_s = r.get("cms_n_samples")
-            if r.get("cms_sps") and n_s is not None and n_s < 30:
+            if r.get("cms_sps") and n_s is not None and 0 < n_s < MIN_SOLUTIONS:
                 thin.append((nm, n_s))
     if thin:
-        C.append("Cells where CMSGen delivered fewer than 30 samples in its whole budget — "
-                 + "; ".join(f"`{n}` ({c})" for n, c in sorted(thin))
-                 + " — carry a ratio whose denominator is a handful of events. Read them as "
-                   "'CMSGen could not sample this', not as a measured factor.")
+        C.append(f"Cells where CMSGen delivered fewer than {MIN_SOLUTIONS} samples in its whole "
+                 "budget — " + "; ".join(f"`{n}` ({c})" for n, c in sorted(thin))
+                 + " — are SCREENED into the `CMSGen<30` column, the same floor the rival side "
+                   "of Table 2 is held to, and do not enter the geomean. Read them as 'CMSGen "
+                   "could not sample this', not as a measured factor.")
+    # THE SIGN OF A NEAR-PARITY CELL. GPAP's row is the median-rate seed of three and carries
+    # `sps_min`/`sps_max`; the rival ran once. Where the ratio at our slowest and at our fastest
+    # seed straddle 1.0, the win/loss verdict is inside our own seed band, and a "wins n/n"
+    # that counts it is a coin flip presented as a tally.
+    straddle = []
+    for stem, key, rival, proto in RIVALS:
+        rows = _rival_rows(args.rivals, stem) or {}
+        for name, variant, bucket, ours, rate in rival_cells(list(rows.values()), key):
+            if bucket != "ok" or not rate or not ours:
+                continue
+            g = rows[(name, variant)].get("gpap") or {}
+            lo, hi, sps = g.get("sps_min"), g.get("sps_max"), g.get("sps")
+            if not (lo and hi and sps):
+                continue
+            r_lo, r_hi = ours * lo / sps / rate, ours * hi / sps / rate
+            if min(r_lo, r_hi) < 1.0 <= max(r_lo, r_hi):
+                straddle.append((rival, proto, name, ours / rate, r_lo, r_hi))
+    if straddle:
+        C.append("**Cells whose win/loss sign lies inside GPAP's own seed band** — the ratio at "
+                 "our slowest and fastest of three seeds straddles 1.0, against a rival that ran "
+                 "once: "
+                 + "; ".join(f"`{n}` ({rv}, {p}: {x:.2f}x, band {a:.2f}–{b:.2f}x)"
+                             for rv, p, n, x, a, b in straddle)
+                 + ". Count them as ties, not as wins or losses.")
+    # WHAT THE RIVAL GEOMEANS ARE MADE OF, generated per row (2026-09-06, referee round 4): a
+    # headline of 21.5x that is 116x over six cells and 10x over the other fourteen has to say
+    # so where the paper text will see it, and so does a row with no measured ratio at all.
+    for stem, key, rival, proto in RIVALS:
+        v = riv.get(stem)
+        if not v:
+            continue
+        n_ok = v["n"] - v["zero"] - v["gpap0"]
+        if v.get("gm") and n_ok >= 3:
+            parts = [f"**{rival} ({proto}): what the {v['gm']:,.1f}x is made of.** "
+                     f"Median cell {v['median']:,.1f}x; GPAP's seed band moves the geomean to "
+                     f"{v['gm_lo']:,.1f}–{v['gm_hi']:,.1f}x; {v.get('ties', 0)} tie(s) "
+                     f"(sign inside that band) are excluded from `wins`"]
+            if n_ok >= 8:
+                parts.append("top cells " + ", ".join(f"`{nm}` {x:,.1f}x" for x, nm in v["top"][:4])
+                             + f"; without the top cell {v['gm_wo_top1']:,.1f}x, without the top "
+                             f"four {v['gm_wo_top4']:,.1f}x over {n_ok - 4}")
+            if v.get("small_grant"):
+                parts.append(f"{len(v['small_grant'])} cell(s) measured at the rival's smallest "
+                             f"surviving batch (≤10,000, the rung above rejected by the card: "
+                             + ", ".join(f"`{nm}` {b:,}" for _, nm, b in v["small_grant"])
+                             + f") geomean {v['gm_small']:,.1f}x, against {v['gm_rest']:,.1f}x "
+                             f"over the other {v['n_rest']} — a statement about this card's "
+                             f"memory as much as about the tool; quote it as 'on an L4'")
+            C.append("; ".join(parts) + ".")
+        elif v["cells"] and n_ok == 0:
+            C.append(f"**{rival} ({proto}): NO measured ratio exists on this row** — "
+                     f"{v['zero']} rival=0, {v.get('thin', 0)} rival<30, {v.get('tiny', 0)} tiny, "
+                     f"{v.get('free', 0)} free, {v.get('vacuous', 0)} vacuous, "
+                     f"{v['errors']} rival failed, {v.get('gpap0', 0)} GPAP=0 of {v['cells']} cells. "
+                     f"Its `wins` counts the rival-zero cells; read the row as a capability "
+                     f"contrast, not a rate.")
+        for nm, rate in v.get("unsat_rival") or []:
+            C.append(f"**`{nm}` ({rival}, {proto}) is proved UNSAT at this depth and screened, "
+                     f"yet the rival scores {rate:,.0f} unique/s there** — its depth-POOLED count "
+                     f"admits solutions at shallower unroll depths, which the fixed-depth task has "
+                     f"none of. GPAP delivers 0 on it. It is the one cell in the campaign where "
+                     f"the pooled superset produces a rival-only result, and the `unsat` column "
+                     f"is where it lives; say so.")
+        for nm, free, total in v.get("low_vram") or []:
+            C.append(f"`{nm}` ({rival}, {proto}): GPAP's arm ran with {free:.1f} of {total:.1f} GB "
+                     f"free (a rival process still releasing the card), so its batch K was sized "
+                     f"on a fraction of the device. Recorded per row (`gpu.free_gb`); the cell's "
+                     f"verdict may be the residency, not the instance.")
+        if v.get("ladder_top"):
+            C.append(f"**{rival} ({proto}): on {len(v['ladder_top'])} cell(s) the batch ladder's "
+                     f"TOP rung completed first try** (" + ", ".join(f"`{nm}` {b:,}" for nm, b in v["ladder_top"])
+                     + "), so the card never bound the grant — the ladder did. The rival's rate is "
+                     "near-proportional to its batch, so those cells may under-grant it; a taller "
+                     "ladder is the fix and the re-run is the evidence (RIVAL_FAIRNESS_FINDINGS.md §16e).")
+        if v.get("gm_e2e"):
+            C.append(f"{rival} ({proto}) `e2e` = each side's WHOLE wall on the instance with the "
+                     f"fixed process start-up excluded on both: GPAP's encoding + parse + build + "
+                     f"ELS + mining + warm-up + timed run + delivery, against the rival's timed "
+                     f"loop plus its instance-specific non-timed wall above the tool's start-up "
+                     f"floor ({v['startup_s']:.1f} s here, its smallest non-timed wall — a floor "
+                     f"that still holds a model build, so it favours the rival). Charging the rival "
+                     f"its whole subprocess instead would read {v['gm_e2e_nosub']:,.1f}x."
+                     + (f" {v['e2e_nodelivery']} row(s) lack the delivery split and fall back to "
+                        f"`sps_e2e`." if v.get("e2e_nodelivery") else "")
+                     + (" Recurrent's start_point search is in NO wall (not recorded); it would "
+                        "lower the rival's figure further." if key == "rcs" else ""))
     C.append("Rare-target rival ratios rest on near-zero denominators and a single rival run "
              "against GPAP's 3-seed median: read them as orders of magnitude, not constants.")
     M += ["", "## Caveats that MUST appear in the text", ""] + [f"* {c}" for c in C]

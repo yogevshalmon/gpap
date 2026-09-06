@@ -37,6 +37,7 @@ import os
 import sys
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
+from gpap.sampling.pipeline import sound_verdict                       # noqa: E402
 from eval.artifact.paper_tables import (CMS_FAMILIES, cms_arm_ran,          # noqa: E402
                                         sound_failed, sound_unchecked)
 
@@ -63,6 +64,10 @@ def main():
                     help="reproducibility re-measurement directory (same stage layout); the "
                          "deterministic fields must match the original sweep on every shared "
                          "cell, or the artifact fails")
+    ap.add_argument("--barbarik", nargs="*", default=[],
+                    help="the CM_test campaign's jsonl files (Table 4b) — one parameter "
+                         "setting, a negative control that Accepts, every arm over the "
+                         "eligible set")
     args = ap.parse_args()
     if not (args.cmsgen_dir or args.rivals):
         ap.error("nothing to verify: pass --rivals (the campaign) and/or a `gpap bench` directory")
@@ -460,6 +465,23 @@ def main():
             uns = [r.get("name", "?") for r in meas if sound_failed(r.get("gpap") or {})]
             for n in uns:
                 fail.append(f"UNSOUND cell {stem}/{n}")
+            # AN UN-RUN CHECK IS NOT A PASSING ONE. This gate only ever FAILED on "UNSOUND" and
+            # printed nothing on "ok" — so a campaign run without --verify-sound produced a
+            # byte-identical "Publishable" verdict (referee round 4, 2026-09-06). Every row
+            # that emitted a model must carry an "ok" verdict; rows that emitted nothing are
+            # counted as "off", never as passing (the sound_check tri-state doctrine).
+            emitted = [r for r in meas if ((r.get("gpap") or {}).get("n_models") or 0) > 0]
+            nok = sum(1 for r in emitted if sound_verdict(r.get("gpap") or {}) == "ok")
+            missing = [r.get("name", "?") for r in emitted
+                       if sound_verdict(r.get("gpap") or {}) != "ok"]
+            if missing:
+                fail.append(f"{stem}: {len(missing)} row(s) emitted models with NO soundness "
+                            f"verdict ({', '.join(missing[:6])}{'…' if len(missing) > 6 else ''}) "
+                            f"— the arm ran without --verify-sound; re-run before publishing")
+            elif emitted:
+                ok.append(f"{stem}: device soundness re-check ok on {nok}/{len(emitted)} rows "
+                          f"that emitted a model ({len(meas) - len(emitted)} emitted nothing: "
+                          f"counted as 'off', not as passing)")
             # ...and the ENCODER-INDEPENDENT check: the kept output rows simulated through the
             # original circuit must reproduce the pinned outputs (`sim_check`, run by the arm on
             # every row with a wire map). BAD is a hard failure; "off" is counted, not required.
@@ -483,6 +505,92 @@ def main():
                             + " — a resumed stage was topped up under a different libgpap; the "
                               "table geomeans them together. Re-run the stage, or say so.")
         ok.append("rivals: error rows counted, never treated as zero")
+
+        # ---- Table 3 under the converged protocol. The propagation identity is ALGEBRA
+        # (work := (a/s)/(b/t) makes impl/work == s/t by construction), so the only thing it can
+        # catch is a ROW-SET mismatch between the propagation table and Table 1 — and until
+        # 2026-09-05 this file re-derived it only for the `gpap bench` schema, so under
+        # --rivals the block never ran and Table 3 shipped with no gate at all (a 5000x
+        # sabotage of one row's impl/s moved the headline and left this report byte-identical).
+        # Check the row sets AGAINST THE GENERATOR'S OWN OUTPUT (the number that is printed),
+        # not against a second private recomputation, and add what an identity cannot see: a
+        # plausibility band on the counters themselves.
+        from eval.artifact.paper_tables import (RIVAL_CMS_SETS, _RIVAL_KEY,  # noqa: E402
+                                                rival_cms_family, rival_prop_rates)
+        for stem, _label, _tgt in RIVAL_CMS_SETS:
+            key = _RIVAL_KEY[stem]
+            t1 = rival_cms_family(args.rivals, stem, key)
+            t3 = rival_prop_rates(args.rivals, stem, key)
+            if not t1 or not t3:
+                continue
+            if t3["n"] != t1["n_gm"]:
+                fail.append(f"rivals_{stem}: Table 3 is over {t3['n']} cells and Table 1 over "
+                            f"{t1['n_gm']} — the propagation columns and the sample-rate column "
+                            f"are not the same rows (a screen applied to one table and not the "
+                            f"other)")
+            elif t1["gm"] and t3["work"] and not (0.99 <= (t3["ratio"] / t3["work"]) / t1["gm"] <= 1.01):
+                fail.append(f"rivals_{stem}: propagation identity BROKEN "
+                            f"({t3['ratio'] / t3['work']:,.1f}x vs Table 1's {t1['gm']:,.1f}x)")
+            else:
+                ok.append(f"rivals_{stem}: Table 3 is over the same {t3['n']} cells as Table 1 "
+                          f"and the identity closes on the printed numbers")
+        # counters outside a physical band: GPAP's packed-word kernel holds ~1e9 impl/s on
+        # every family (1e6..5e10 leaves room for any card); CMSGen's own counters read
+        # 1e6-1e7 (1e3..1e9). An identity cancels a wrong counter; a range does not.
+        odd = []
+        for p in sorted(globmod.glob(os.path.join(args.rivals, "rivals_*.json"))):
+            d = load(p)
+            if not isinstance(d, (list, dict)) or (isinstance(d, dict) and "rows" not in d):
+                continue
+            for r in ((d.get("rows") if isinstance(d, dict) else d) or []):
+                g = r.get("gpap") or {}
+                a, b = g.get("implications_per_s"), r.get("cms_implications_per_s")
+                if a and not (1e6 <= a <= 5e10):
+                    odd.append(f"{os.path.basename(p)[:-5]}/{r.get('name')} GPAP {a:.3g}")
+                if b and not (1e3 <= b <= 1e9):
+                    odd.append(f"{os.path.basename(p)[:-5]}/{r.get('name')} CMSGen {b:.3g}")
+        if odd:
+            fail.append("implication counters outside the physical band on "
+                        + ", ".join(odd[:6]) + (", …" if len(odd) > 6 else "")
+                        + " — a corrupt counter cancels out of the identity; it does not "
+                          "cancel out of Table 3")
+        else:
+            ok.append("rivals: every implication counter inside its physical band")
+
+    # ---------------------------------------------------------------- Barbarik (Table 4b)
+    bpaths = []
+    for g in args.barbarik:
+        bpaths += sorted(globmod.glob(g))
+    if bpaths:
+        sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                                        "..", "uniformity"))
+        from barbarik_table import CONTROL, arm_summary, buckets, check_one_setting  # noqa: E402
+        from barbarik_table import load as bload  # noqa: E402
+        brows = bload(bpaths)
+        if not brows:
+            fail.append("barbarik: no rows in " + ", ".join(bpaths))
+        else:
+            try:
+                eps, eta, delta = check_one_setting(brows)
+                eligible, rejected, errored = buckets(brows)
+            except (ValueError, AssertionError) as e:
+                fail.append(f"barbarik: {e}")
+            else:
+                summ = arm_summary(brows, eligible)
+                if CONTROL not in summ or summ[CONTROL]["accept"] != summ[CONTROL]["n"]:
+                    fail.append("barbarik: the negative control does not Accept every eligible "
+                                "instance — the eligibility rule is broken")
+                for arm, a in summ.items():
+                    if a["n"] != len(eligible):
+                        warn.append(f"barbarik: `{arm}` has verdicts on {a['n']}/{len(eligible)} "
+                                    f"eligible instances — the arms are not over one set")
+                    if a["reject"]:
+                        warn.append(f"barbarik: `{arm}` REJECTED on {a['reject']} instance(s) "
+                                    f"({', '.join(a['bad'][:5])}) — a Reject is unconditional; "
+                                    f"state it")
+                ok.append(f"barbarik: one setting (eps={eps} eta={eta} delta={delta}), "
+                          f"{len(eligible)} eligible / {len(rejected)} control-rejected / "
+                          f"{len(errored)} control-errored, {len(summ)} arms")
 
     # ---------------------------------------------------------------- uniformity oracle
     upaths = []

@@ -13,31 +13,49 @@ on a rented GPU), and every published table is read off its rows:
    ISCAS-85 combinational circuits, T=1. Recurrent-CircuitSAT (MLCAD'25): the ITC'99 `b*` and
    ISCAS-89 `s*` sequential circuits it evaluates — every one we can process (all of
    `benchmarks/circuits/bench/seq/`, b17-b22 fetched by `scripts/fetch_benchmarks.sh itc99`),
-   unrolled at **T=25 and T=50**, with its paper's 16 (`rival_common.PAPER_INSTANCES`) scored
-   beside the whole set. Their Table II's 8th ISCAS-89 row prints "s35844", which is no ISCAS-89
+   unrolled at **T=25** (the T=50 stages are implemented and were deliberately NOT run in this
+   campaign — the tables print them "not run"), with its paper's 16
+   (`rival_common.PAPER_INSTANCES`) scored beside the whole set. Their Table II's 8th ISCAS-89 row prints "s35844", which is no ISCAS-89
    circuit; its figures (12 PI / 278 PO / 1,452 DFF) identify **`s38584`**, and that is what the
    paper set holds — `s35932`, substituted for it until 2026-09-04, stays as a circuit WE add.
    T=50 is theirs too (`--num_clock_cycles 50` in their run script, η=50 in their paper), and a
-   shallower unroll gives them a smaller depth pool, so both are run and neither is pooled.
+   shallower unroll gives them a smaller depth pool, so the T=25 figures may understate them; the
+   T=50 stages exist and were not run, which is stated, not pooled.
    Nothing of ours is added: no EPFL, no HWMCC, no `sk_` CNFs, no `random` targets.
 2. **Each rival runs on its own set, under two tasks: the pins its own table names, and our
    rare pin** (the rarest output pattern observed in a 262k-sequence simulation, all outputs,
    as a miter) on the same circuits — so across a pair of rows only the task changes. One
-   configuration per rival, and it is theirs: its own script's `num_steps` (1 for both) and
-   `lr` (15 for both; where a tool ships two values — Recurrent's paper says 50 — the tie-break
-   goes to whichever is better FOR THE RIVAL, re-derived on the campaign's card by
-   `steps_calibration.py --axis lr`), and the **largest batch rung it can run to completion**,
+   configuration per rival, and it is theirs: its own run script's `num_steps` (1 for both) and
+   `lr` (15 for both). Their papers state other values (DEMOTIC 10 iterations; Recurrent 5 at
+   `lr` 50) — the campaign runs the SHIPPED script configuration, one per tool (2026-09-05, the
+   user's call: one configuration, no tie-break, no sweep), which is also the better of the two
+   for each tool on this card at T=25; the paper values, singly and paired, are measured beside
+   it by `steps_calibration.py` (T=25 and T=50) as evidence for the text, never as
+   configuration. Then the **largest batch rung it can run to completion**,
    found by walking the ladder DOWN from the top (a rung is rejected only when the tool cannot
    finish on it — OOM, driver refusal, or past the wall — never on how fast it was, so exactly
    one configuration is measured), at its own default seed (`rival_common.RIVAL_SEED = 0`,
    passed explicitly and recorded in the row) and run ONCE at it — one configuration, one
    measurement, with the asymmetry against our median-of-3 stated rather than hidden. Plus a
-   300 s wall per run and another 300 s for Recurrent's `start_point`; that budget is OURS, so
-   a cell that exhausted it at every batch rung is flagged `budget_bound` and counted apart from
-   a capability failure. The first run of every process is DISCARDED (a cold CUDA context costs
-   the session's first instance ~3.3x). Each rival is also handed an ABC-simplified copy of the circuit as well as the raw
-   one, and the table scores whichever variant is better for it. What a tool cannot process is
-   an error row, omitted with the count stated — never a zero.
+   1,200 s wall per run and a separate 1,200 s initialization budget for Recurrent's
+   `start_point` search (2026-09-05; it was 300 s, and every one of the 2026-09-04 campaign's 20
+   Recurrent failures was that budget expiring — §11 had measured `b14` initializing at ~743 s).
+   The initialization wall BOUNDS the search; it is not added to the rival's published e2e
+   figure (the harness records no `init_s`), an omission that only lowers the rival's e2e and
+   raises our ratio — §16e. Its steady-state metric is untouched either way. That budget is OURS, so a cell that exhausted it at
+   every batch rung is flagged `budget_bound` and one that did not initialize inside it is
+   reported with the budget named (the reason is phrased at the search level — the search had the
+   whole budget; a single timing-out probe got only what its predecessors left) — both counted
+   apart from a capability failure. The first
+   run of every process is DISCARDED (a cold CUDA context costs the session's first instance
+   ~3.3x). **One circuit variant, everywhere**: every tool is handed the SAME
+   sequential-ABC-simplified netlist GPAP encodes from (2026-09-05, the user's call). Measured,
+   that choice is nobody's friend — it cost GPAP `b12` outright and cost Recurrent `b09` 58x under
+   one pin while helping it 1.6x under another (§16c) — and the residual (GPAP's post-unroll
+   ABC pass, which has no sequential equivalent a rival could consume) is stated, not
+   corrected. The raw-vs-abc axis stays implemented and is not part of the protocol. What a
+   tool did not produce a measurement for is an error row, omitted with the count and the
+   reason stated — never a zero.
 3. **Every one of those cells is then run by GPAP and by CMSGen on the same constraint**: GPAP
    on the `abc:fast` CNF of that circuit and those pins (the default `circuit` portfolio, 60 s,
    the **median-rate seed's run** of seeds 5/6/7 — one execution's numbers, never a field-wise
@@ -89,7 +107,7 @@ Measured end to end on an RTX 4080 laptop (2026-07-28; 357 rows, 13 stages, 0 er
 | `epfl` | ~45 m | 20 × 2 encoders × 2 targets |
 | `comb` | ~15 m | 10 × 2 encoders × 2 targets |
 | `sk` | ~15 m | 29 CNFs |
-| `rivals` / `campaign` | ~6 h on a Colab L4 (measured 2026-09-03: 5 h 50 m wall across 6 VM lifetimes, ~25 min of it VM rebuilds) | four protocols (§6) × 80 rows; the large ITC'99 circuits cost ~10 min each (the rival's 300 s init budget + 3 GPAP seeds + CMSGen's 60 s), the rest ~3 min |
+| `rivals` / `campaign` | ~6 h on a Colab L4 (measured 2026-09-03: 5 h 50 m wall across 6 VM lifetimes, ~25 min of it VM rebuilds) | four protocols (§6) × 82 rows; T=25 completed 2026-09-06 across two concurrent sessions (§16e); the large ITC'99 circuits cost ~10–20 min each (the rival's 1,200 s init budget + 3 GPAP seeds + CMSGen's 60 s), the rest ~3 min |
 | `plots` | < 1 m | |
 
 The wall is **budget-bound, not GPU-bound**: most of it is instances sitting at the 60 s
@@ -229,9 +247,10 @@ Recurrent's rare-pin geomean is **62.1x over their 16 and 97.7x over all b*/s***
 table: 3.0x vs 4.5x). Both are printed; quote one and say which.
 
 **HTS is off by default.** Its paper (arXiv 2502.08673) evaluates 60 instances and not one is a
-circuit — random q-family, OR-configuration, `prod-*` and `s15850a_*` CNFs — so in a
-circuits-only evaluation it is the only rival that can never be run on its own published ground,
-and every cell would be our task on instances we chose. The harness is unchanged and `RIVAL_HTS=1`
+netlist — random q-family, OR-configuration, `prod-*` and `s15850a_*` CNFs (the last two are
+circuit-DERIVED, but arrive pre-encoded with a declared independent support, which the two-pin
+protocol cannot re-pin) — so in a circuits-only evaluation it is the only rival that can never be
+run on its own published ground two ways, and every cell would be our task on instances we chose. The harness is unchanged and `RIVAL_HTS=1`
 restores the stage; restore the row in `paper_tables.RIVALS` too.
 
 Both remaining rivals are PyTorch programs run as subprocesses on the same GPU and scored with **their own**
@@ -267,19 +286,27 @@ each was a wrong number once; the measurements are in
   `.bench`, and each compiles it its own way — `abc:fast` is function-preserving over the same
   projected solution space. Rows before that date used Tseitin, **1.04-4.8x slower** for us
   (b12 1.04x, b04 1.25x, b13 2.19x, b14 4.80x), and are superseded. The arm also runs NO
-  coverage pass any more: `unique_per_s_est`'s distinct fraction is measured on the timed run's
-  own 1,000 kept output rows (`rivals_recurrent.UNIQUE_ROWS`), projection wall subtracted.
+  coverage pass any more: `unique_per_s_est`'s distinct fraction is measured on EVERY delivered
+  row (`rivals_recurrent.UNIQUE_ROWS = 4,000,000`, one projected support-bit row per sample up to
+  the cap), the projection wall subtracted from the steady-state rate and charged in Table 2's
+  e2e.
 - **Recurrent-CircuitSAT is scored on a depth-POOLED superset** — its loop applies the target at
   every depth `start_point..T` and pools unique solutions, an easier task than the fixed-depth
   CNF every other row measures. Generous, kept, stated; `unique_at_T` is recorded per row.
-- **Recurrent gets ONE configuration** (§11 there, settled 2026-09-03): the `start_point` search
-  is its INITIALIZATION and gets one 300 s budget (= `--timeout`, each probe on what is left),
-  then one measured run at the granted batch with its own script's `num_steps=1`. No up-probe of
-  the batch, no retry of a timeout at a smaller batch. The failures are named (`no gradient path`
-  / `did not initialize: ... 300s initialization budget`), excluded from the geomean, never
-  zeros; `paper_tables` prints the count. ⚠️ Measured: b14 at T=25 needs 1,025 s at its granted
-  batch (probe alone 743 s) and b17 1,134 s of model build per probe — both are error rows under
-  the rule, and the cap is OURS: state it and how many rows it excludes.
+- **Recurrent gets ONE configuration** (§11 there, settled 2026-09-03; budgets raised
+  2026-09-05, §16d): the `start_point` search is its INITIALIZATION and gets one 1,200 s
+  budget (`--init-budget`, separate from the 1,200 s per-run `--timeout`; each probe on what is
+  left), which bounds the search (its wall is NOT added to the published e2e; §16e), then one
+  measured run at the granted batch with its own script's
+  `num_steps=1`. No up-probe of the batch, no retry of a timeout at a smaller batch. The
+  failures are named (`no gradient path` / `did not initialize: ... 1200s initialization
+  budget`), excluded from the geomean, never zeros; `paper_tables` prints the count AND the
+  budget it reads off the rows. ⚠️ Measured at T=25: under 300 s ten instances did not
+  initialize; under 1,200 s six of them do (b14, b15, b20, b21, s35932, s38584 — b14's probe
+  alone is ~743 s) and b17, b18, b19, b22 still do not (b17 is ~1,134 s of model build per
+  probe). The cap is OURS: state it and how many rows it excludes. An error row whose reason
+  names the CURRENT budget is a settled measurement and is kept on `--resume --retry-errors`
+  (`rivals_recurrent.settled_error`); only rows from another budget are re-run.
 - **Constraint alignment is verified on every row of both harnesses** (`pin_check_ok`): under
   their pins, bit-identical acceptance words between their index table on the original file
   and our reordered prefix (`rival_common.native_pin_check`); under the rare pin, the miter's
@@ -287,8 +314,9 @@ each was a wrong number once; the measurements are in
   `rivals_recurrent.miter_self_check`). A failed row is the `misaligned` bucket and fails
   `verify_artifact`. The GPAP arm also simulates its kept output rows through the ORIGINAL
   circuit (`sim_check`, the encoder-independent check), beside the on-device clause check.
-- **The same circuit on both sides** (`--circuit-variants raw abc`; the campaign runs `raw` ONLY,
-  because `paper_tables` pools every variant in a stage into one geomean): GPAP's ABC arm
+- **The same circuit on both sides** (`--circuit-variants raw abc`; the campaign runs `abc` ONLY,
+  the user's converged decision — `paper_tables.rival_cells` takes the ONE variant better for the
+  rival where a stage holds two, it does not pool them): GPAP's ABC arm
   must not face a rival holding the raw circuit, so `rival_common` ABC-optimizes the sequential
   AIG and writes it back as a primitive-gate `.bench`, gated by a bit-exact simulation check.
   Only the sequential pass has a rival-side equivalent — GPAP's post-unroll pass does not, and

@@ -35,7 +35,7 @@ import time
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
 
-from eval.rivals.rival_common import RIVAL_LR, RIVAL_STEPS         # noqa: E402
+from eval.rivals.rival_common import RIVAL_LR, RIVAL_PAPER_CONFIG, RIVAL_STEPS  # noqa: E402
 
 REPO = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 # One instance per tool: the same ones the 4080 tie-break was measured on, so the two
@@ -65,22 +65,43 @@ def _rate(rows, key):
     return max(out) if out else 0.0
 
 
-def probe(tool, value, tmp, hts_cnfs, timeout, axis="steps"):
+def candidates(tool, axis):
+    """Every value the tool's own artifacts give this knob: its run script (pinned), its argparse
+    default (`other`), and its PAPER. The tie-break used to compare only the first two — so the
+    paper's `num_steps` (Recurrent 5, DEMOTIC 10) was cited in the text and never run."""
+    table = RIVAL_STEPS if axis == "steps" else RIVAL_LR
+    if tool not in table:
+        return None, None, set()
+    pinned, src, other = table[tool]
+    vals = {pinned} | ({other} if other is not None else set())
+    paper = (RIVAL_PAPER_CONFIG.get(tool) or {}).get(axis)
+    if paper is not None:
+        vals.add(paper)
+    return pinned, src, vals
+
+
+def probe(tool, value, tmp, hts_cnfs, timeout, axis="steps", extra=(), cycles=None):
     """Run one driver once at a fixed value of the axis under test.
 
     Returns (unique_per_s, wall, error-or-None). `axis` is `steps` (their gradient-step count)
     or `lr` (their learning rate) — the two knobs each rival ships more than one value for.
+    `extra` are further driver flags (the paired paper configuration passes both knobs);
+    `cycles` overrides the Recurrent probe's unroll depth (the T=50 stage calibrates at 50).
     """
     flag = f"--{axis}"
-    out = os.path.join(tmp, f"{tool}_{axis}_{value}.json")
+    tag = f"{tool}_{axis}_{value}" + ("_" + "_".join(str(x) for x in extra) if extra else "")
+    out = os.path.join(tmp, tag.replace("-", "") + ".json")
     py = sys.executable
     if tool == "demotic":
         cmd = [py, "eval/rivals/rivals_demotic.py", *PROBES[tool]["args"],
-               flag, str(value), "--circuit-variants", "raw", "--output", out]
+               flag, str(value), *extra, "--circuit-variants", "abc", "--output", out]
         key = "demotic"
     elif tool == "recurrent":
-        cmd = [py, "eval/rivals/rivals_recurrent.py", *PROBES[tool]["args"],
-               flag, str(value), "--circuit-variants", "raw", "--output", out]
+        rargs = list(PROBES[tool]["args"])
+        if cycles is not None:
+            rargs[rargs.index("-T") + 1] = str(cycles)
+        cmd = [py, "eval/rivals/rivals_recurrent.py", *rargs,
+               flag, str(value), *extra, "--circuit-variants", "abc", "--output", out]
         key = "rcs"
     else:
         cmd = [py, "eval/rivals/rivals_hts.py", hts_cnfs, flag, str(value), "--output", out]
@@ -110,6 +131,9 @@ def main():
                          "$OUT/hts_cnf; without this the HTS tool is skipped rather than "
                          "silently probed on some other formula")
     ap.add_argument("--timeout", type=float, default=300.0)
+    ap.add_argument("--cycles", type=int, default=None,
+                    help="unroll depth for the Recurrent probe (default: the PROBES entry, 25); "
+                         "the T=50 stage passes 50 so the tie-break is re-derived at ITS depth")
     args = ap.parse_args()
 
     hts_cnfs = args.hts_cnfs
@@ -121,26 +145,42 @@ def main():
     res = {}
     print(f"{'tool':<11}{'steps':>7}{'unique/s':>15}{'wall':>8}   note")
     print("-" * 62)
-    table = RIVAL_STEPS if args.axis == "steps" else RIVAL_LR
     for tool in tools:
-        if tool not in table:
+        pinned, src, vals = candidates(tool, args.axis)
+        if pinned is None:
             print(f"{tool:<11}  no {args.axis} candidates recorded — skipped")
             continue
-        pinned, src, other = table[tool]
         arms = {}
-        # `other` is None where the tool ships only ONE value for this knob: there is no
-        # tie-break to re-derive, and probing a value the authors never use would be us tuning
-        # their tool. DEMOTIC is that case for `lr`.
-        for val in sorted({pinned} | ({other} if other is not None else set())):
-            rate, wall, err = probe(tool, val, tmp, hts_cnfs, args.timeout, axis=args.axis)
+        # Every value the tool's own artifacts give the knob — script, argparse default, PAPER.
+        # Probing a value the authors never use would be us tuning their tool; these three are
+        # all theirs.
+        for val in sorted(vals):
+            rate, wall, err = probe(tool, val, tmp, hts_cnfs, args.timeout, axis=args.axis,
+                                    cycles=args.cycles)
             arms[val] = {"unique_per_s": rate, "wall_s": wall, "error": err}
             mark = "  <- pinned" if val == pinned else ""
+            paper = (RIVAL_PAPER_CONFIG.get(tool) or {}).get(args.axis)
+            mark += "  (paper)" if val == paper and val != pinned else ""
             print(f"{tool:<11}{val:>7}{rate:>15,.0f}{wall:>7.0f}s{mark}"
                   f"{'   ' + err if err else ''}")
+        # ...and the paper's PAIRED configuration (both knobs at once), which no single-axis
+        # probe measures: Recurrent's paper pairs lr 50 with 5 iterations.
+        pc = RIVAL_PAPER_CONFIG.get(tool)
+        if args.axis == "steps" and pc:
+            other_axis = "lr"
+            rate, wall, err = probe(tool, pc["steps"], tmp, hts_cnfs, args.timeout, axis="steps",
+                                    extra=(f"--{other_axis}", str(pc[other_axis])),
+                                    cycles=args.cycles)
+            arms[f"paper({pc['steps']},{pc['lr']:g})"] = {"unique_per_s": rate, "wall_s": wall,
+                                                          "error": err, "steps": pc["steps"],
+                                                          "lr": pc["lr"], "source": pc["source"]}
+            print(f"{tool:<11}{'paper':>7}{rate:>15,.0f}{wall:>7.0f}s   steps={pc['steps']} "
+                  f"lr={pc['lr']:g} ({pc['source']}){'   ' + err if err else ''}")
         if len(arms) < 2:
             print(f"{tool:<11}  only one value in their artifacts ({pinned}, {src}) — nothing "
                   f"to tie-break")
         best = max(arms, key=lambda k: arms[k]["unique_per_s"])
+        best = best if not isinstance(best, str) or not best.startswith("paper(") else best
         # INCONCLUSIVE is not agreement. If every arm errored or scored nothing, max() just
         # returns the first key and would have printed a clean "tie-break holds" over two failed
         # runs — which is how a broken probe reports success.
@@ -151,7 +191,8 @@ def main():
         else:
             agrees = best == pinned or arms[best]["unique_per_s"] == arms[pinned]["unique_per_s"]
         res[tool] = {"pinned": pinned, "pinned_source": src, "measured_best": best,
-                     "agrees": agrees, "arms": arms}
+                     "agrees": agrees, "cycles": args.cycles,
+                     "arms": {str(k): v for k, v in arms.items()}}
         if agrees is False:
             print(f"  ** FLIP: {tool} is faster at steps={best} "
                   f"({arms[best]['unique_per_s']:,.0f} vs {arms[pinned]['unique_per_s']:,.0f} "

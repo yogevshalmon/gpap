@@ -460,19 +460,47 @@ def test_both_rival_harnesses_share_the_pin():
 def test_the_portfolio_is_part_of_the_arm_cache_key():
     """Two runs that differ only in `--portfolio` are different measurements. The GPAP-arm cache
     keys on the task dict, so the portfolio has to be IN it — otherwise a `--portfolio b1` run
-    silently serves the `b8` result that is already on disk."""
+    silently serves the `b8` result that is already on disk.
+
+    Gated on the harnesses' REAL task dicts (source-inspected, like the encoder test below).
+    The first version built its own dict with a `portfolio` key and hashed that — a test that
+    exercised nothing: deleting `portfolio` from the harness would have left it green."""
+    import inspect
     import tempfile
 
     from eval.rivals import rival_common as rc
+    from eval.rivals import rivals_demotic, rivals_recurrent
 
+    for mod in (rivals_recurrent, rivals_demotic):
+        m = re.search(r"task = \{(.*?)\}\n", inspect.getsource(mod), re.S)
+        assert m, f"{mod.__name__}: no task dict"
+        assert '"portfolio": args.portfolio' in m.group(1), \
+            f"{mod.__name__}: the portfolio is not in the cache key"
     with tempfile.TemporaryDirectory() as d:
         f = os.path.join(d, "x.cnf")
         open(f, "w").write("p cnf 1 1\n1 0\n")
         base = {"harness": "recurrent", "cycles": 25}
         k8 = rc.gpap_cache_key(f, {**base, "portfolio": "b8"})
         k1 = rc.gpap_cache_key(f, {**base, "portfolio": "b1"})
-    assert k8 != k1, "the portfolio does not reach the cache key — a re-run would serve a " \
-                     "result produced by a different sampler"
+    assert k8 != k1, "two task dicts differing only in the portfolio must hash apart"
+
+
+def test_the_results_csv_cleanup_strips_the_dot_like_the_readback_does():
+    """Their `export_results` writes `sat_{dataset_str}_…` with the dot STRIPPED from the
+    instance name. The read-back glob learned that in the 2026-09-03 post-mortem; the clean-up
+    glob one function above it did not, so for `s208.1` / `s15850.1` no stale file was ever
+    removed and the read-back's `hits[0]` was an arbitrary pick among whatever rungs had run.
+    Both globs must strip the dot, and a multi-hit read-back must pick THIS call's rung."""
+    import inspect
+
+    from eval.rivals import rivals_recurrent
+
+    src = inspect.getsource(rivals_recurrent.run_recurrent)
+    globs = re.findall(r"glob\.glob\(os\.path\.join\(rival, \"src\", \"results\", (f\"[^\"]+\")", src)
+    assert len(globs) >= 2, "expected a clean-up glob and a read-back glob"
+    for g in globs:
+        assert "key.replace('.', '')" in g, f"a results glob keeps the dot: {g}"
+    assert 'h.endswith(f"_{batch}.csv")' in src, "a multi-hit read-back must select by batch"
 
 
 # ---------------------------------------------------------------- the GPAP arm: encoder + unique estimate
@@ -915,3 +943,125 @@ def test_the_rival_is_run_at_a_recorded_seed():
         assert '"--seed", str(RIVAL_SEED)' in src, \
             f"{mod.__name__} does not pass the rival its seed explicitly"
         assert '"seed_source"' in src, f"{mod.__name__} does not record which seed it measured"
+
+
+# ---------------------------------------------------------------- the 2026-09-05 completion run
+
+def test_a_failed_initialization_probe_is_cached_at_its_budget_and_retried_at_a_larger_one(tmp_path, monkeypatch):
+    """The start_point probe is pin-independent, so the table stage re-paying a 1200 s failure
+    the rare stage just measured is 20 minutes for the same answer — cache it WITH the budget.
+    But a stuck instance may pass on a longer clock (that is what a budget means), so a larger
+    budget must re-ask, and a settled start_point must still be honoured as before."""
+    import json
+
+    from eval.rivals import rivals_recurrent as rr
+
+    bench = tmp_path / "x.bench"
+    bench.write_text("INPUT(a)\nOUTPUT(y)\ny = DFF(a)\n")
+    cache = str(tmp_path / "cache")
+    calls = []
+
+    def fake_run(rival, bench_file, key, T, steps, batch, start_point, timeout=None, **kw):
+        calls.append((start_point, timeout))
+        return {"error": "timeout 1s"}
+
+    monkeypatch.setattr(rr, "run_recurrent", fake_run)
+    sp, why = rr.probe_start_point("rival", str(bench), "x", 25, budget=300.0, cache_dir=cache)
+    assert sp is None and "300s initialization budget" in why
+    assert len(calls) == 1
+    stored = [json.load(open(p)) for p in (tmp_path / "cache").glob("*.json")]
+    assert stored and stored[0]["value"]["failed_at_budget"] == 300.0
+    # same budget: served from the cache, no subprocess
+    sp2, why2 = rr.probe_start_point("rival", str(bench), "x", 25, budget=300.0, cache_dir=cache)
+    assert sp2 is None and why2.endswith("(cached)") and len(calls) == 1
+    # a larger budget re-asks
+    sp3, _ = rr.probe_start_point("rival", str(bench), "x", 25, budget=1200.0, cache_dir=cache)
+    assert sp3 is None and len(calls) == 2
+    # the same budget again is served the cached failure even if the tool would now pass
+    monkeypatch.setattr(rr, "run_recurrent", lambda *a, **k: {"unique": 1})
+    sp_same, why_same = rr.probe_start_point("rival", str(bench), "x", 25, budget=1200.0,
+                                             cache_dir=cache)
+    assert sp_same is None and why_same.endswith("(cached)") and len(calls) == 2
+    # a larger budget re-asks; a settled start_point is stored as an int and honoured
+    sp4, _ = rr.probe_start_point("rival", str(bench), "x", 25, budget=2400.0, cache_dir=cache)
+    assert sp4 == 0
+    sp5, _ = rr.probe_start_point("rival", str(bench), "x", 25, budget=10.0, cache_dir=cache)
+    assert sp5 == 0, "a settled probe is the answer at any budget"
+
+
+def test_the_calibration_measures_the_papers_configuration_too():
+    """Three review rounds each found a knob the text cited and nobody ran: the tie-break
+    compared each script's `num_steps` against the argparse default only, so Recurrent's paper
+    (5 iterations, lr 50) and DEMOTIC's (10 iterations) were never in the candidate set. The
+    calibration now probes every value the tool's own artifacts give the knob — script, argparse,
+    PAPER — and the paper's paired setting; the campaign still RUNS the script configuration."""
+    from eval.rivals.rival_common import RIVAL_PAPER_CONFIG, RIVAL_STEPS, resolve_lr, resolve_steps
+    from eval.rivals.steps_calibration import candidates
+
+    assert RIVAL_PAPER_CONFIG["recurrent"]["steps"] == 5 and RIVAL_PAPER_CONFIG["recurrent"]["lr"] == 50.0
+    assert RIVAL_PAPER_CONFIG["demotic"]["steps"] == 10 and RIVAL_PAPER_CONFIG["demotic"]["lr"] == 15.0
+    pinned, _src, vals = candidates("recurrent", "steps")
+    assert pinned == 1 and vals == {1, 5, 10}
+    pinned, _src, vals = candidates("demotic", "steps")
+    assert pinned == 1 and vals == {1, 10}
+    _p, _s, vals = candidates("recurrent", "lr")
+    assert vals == {15.0, 50.0}
+    # the protocol runs the SHIPPED configuration, unchanged
+    assert resolve_steps("recurrent")[0] == RIVAL_STEPS["recurrent"][0] == 1
+    assert resolve_lr("recurrent")[0] == 15.0 and resolve_steps("demotic")[0] == 1
+
+
+def test_the_init_budget_is_its_own_number_and_the_driver_passes_it():
+    """1200 s, separate from the run timeout, on every Recurrent stage of the Colab driver."""
+    from tests.conftest import REPO_ROOT
+    from eval.rivals import rivals_recurrent as rr
+
+    assert rr.INIT_BUDGET_S == 1200.0
+    drv = open(os.path.join(REPO_ROOT, "eval", "colab", "colab_rivals_l4.sh")).read()
+    assert drv.count('--init-budget "$INIT_BUDGET"') == 4, "every Recurrent stage must pass it"
+    assert 'INIT_BUDGET="${INIT_BUDGET:-1200}"' in drv
+    assert 'VARIANTS_RCS="${VARIANTS_RCS:-abc}"' in drv and 'VARIANTS_DEM="${VARIANTS_DEM:-abc}"' in drv
+
+
+def test_retry_errors_re_runs_only_rows_not_measured_under_the_current_budget():
+    """`--retry-errors` used to drop EVERY error row at process start and re-probe it. With the
+    probe cache packed only at stage end and a ~1 h VM, each fresh VM re-paid the previous VM's
+    1,200 s failures and was reclaimed before reaching a new instance — the 2026-09-05 completion
+    run stalled on b17/b18/b19. A row whose reason names the CURRENT budget is a finished
+    measurement; only rows from another budget or an environmental failure are re-run."""
+    from eval.rivals.rivals_recurrent import settled_error
+
+    cur = "did not initialize: a 1-step start_point probe (sp=2) did not complete within the 1200s initialization budget"
+    old = "did not initialize: a 1-step start_point probe (sp=1) did not complete within the 300s initialization budget"
+    assert settled_error(cur, 1200.0, 1200.0), "measured under this budget: keep"
+    assert settled_error(cur + " (cached)", 1200, 1200)
+    assert not settled_error(old, 1200.0, 1200.0), "measured under the OLD budget: re-run"
+    assert settled_error("no gradient path at any start_point<=10", 1200.0, 1200.0)
+    assert settled_error("timeout 1200.0s", 1200.0, 1200.0), "a run timeout at the current cap"
+    assert not settled_error("timeout 300.0s", 1200.0, 1200.0)
+    assert not settled_error("no results csv", 1200.0, 1200.0), "environmental: re-run"
+    assert not settled_error("", 1200.0, 1200.0) and not settled_error(None, 1200.0, 1200.0)
+
+
+def test_a_known_oom_rung_is_not_walked_twice(tmp_path):
+    """A rung that OOM'd is deterministic for the circuit, depth and card, and on a 20M-node
+    circuit each doomed rung above the grant costs a full model build: the 2026-09-05 completion
+    run spent whole VM lifetimes re-walking seven of them after every reclaim and never reached
+    the run. The ceiling is cached; the next walk starts below it; the grant is unchanged."""
+    from eval.rivals.rivals_recurrent import known_ladder, remember_oom_ceiling
+
+    bench = tmp_path / "x.bench"; bench.write_text("INPUT(a)\nOUTPUT(y)\ny = DFF(a)\n")
+    cache = str(tmp_path / "cache")
+    ladder, prior = known_ladder(cache, str(bench), 25, (1_000, 3_000, 10_000, 30_000))
+    assert ladder == (1_000, 3_000, 10_000, 30_000) and prior is None, "no ceiling known yet"
+    sweep = [{"batch": 30_000, "error": "torch.OutOfMemoryError: CUDA out of memory"},
+             {"batch": 10_000, "error": "timeout 1200.0s"},          # a timeout is NOT a ceiling
+             {"batch": 3_000, "error": None, "unique_per_s": 5.0}]
+    assert remember_oom_ceiling(cache, str(bench), 25, sweep) == 30_000
+    ladder, prior = known_ladder(cache, str(bench), 25, (1_000, 3_000, 10_000, 30_000))
+    assert ladder == (1_000, 3_000, 10_000) and prior == 30_000, "the OOM rung is skipped, the timeout rung is not"
+    # a later walk can only TIGHTEN the ceiling
+    assert remember_oom_ceiling(cache, str(bench), 25, [{"batch": 10_000, "error": "OutOfMemoryError"}], prior=30_000) == 10_000
+    assert known_ladder(cache, str(bench), 25, (1_000, 3_000, 10_000, 30_000))[0] == (1_000, 3_000)
+    # a different depth is a different circuit
+    assert known_ladder(cache, str(bench), 50, (1_000, 3_000, 10_000, 30_000))[1] is None

@@ -1037,8 +1037,40 @@ it needed is deleted), and a published row was a field-wise median — a composi
 produced, on 138 field/cell combinations. THE LESSON, which is the one this file keeps relearning
 from a new direction: **an error that flatters you is an error you will not go looking for.** The
 protocol choices that were ours rather than the rivals' (unroll depth 25 vs their script's 50;
-our ABC-optimized CNF against their raw netlist) are now run both ways with the tie-break to the
-rival.
+our ABC-optimized CNF against their raw netlist) are IMPLEMENTED both ways with the tie-break to
+the rival — and, as of the 2026-09-04 campaign, deliberately run ONE way each (T=25 only; the
+sequential-ABC-simplified netlist handed to every tool), which the campaign README and the
+generated methods paragraph state (RIVAL_FAIRNESS_FINDINGS.md §16c).
+
+**The T=25 campaign is COMPLETE under three converged decisions, and finishing it moved the
+Recurrent-table headline UP while its largest cell collapsed** (2026-09-06, §16d). The
+decisions, the user's: Recurrent's `start_point` initialization gets 1,200 s per instance
+(bounding the search; its wall is NOT added to the published e2e — §16e — the omission only
+raises our ratio; all 20 of the 300 s campaign's "cannot process" cells were that budget);
+each rival at its SHIPPED script configuration (`num_steps` 1, `lr` 15), with the papers'
+values MEASURED and now PRINTED beside it (DEMOTIC's paper setting 0.16x, Recurrent's paired
+paper setting 0.26x of what they ran at — the tables used to name the calibration file and
+never read it); one circuit variant, `abc`, for every tool. Measured: six big instances that
+had "failed" initialize at 1,200 s and enter as 22–371x wins at the rival's 3,000–10,000 grant
+on a 24 GB L4 (the next rung OOMs; one gradient step is 5–11 min there) — so the table headline
+is 21.5x over 20 cells, 10.6x without its top four, and must be quoted with that structure and
+with "on an L4". Meanwhile `s208.1`'s 1,158x became 1.7x: the old row was the dotted-name CSV
+read-back bug, and its two protocols are ONE task (their single-output pin is the rare
+pattern). Two rules got their disclosure: the batch grant is the largest rung that completes,
+which is not the rival's fastest rung (`b06`: 0.73–0.77x of its 1M rung), stated as a
+share-of-the-machine rule; and an emission audit that globbed the campaign's history
+directories as rows reported a 208% bound off a superseded row. Rival failures at 1,200 s:
+`b17` `b18` `b22` (+`b19` under their pin). Mechanics that made the tail finishable across
+~1 h VM reclaims, none touching a measurement: settled error rows, a cached OOM ceiling per
+(file, T), a 4-min cache packer, and two concurrent Colab sessions with disjoint instance lists
+merged under assertions. T=50 deferred.
+
+> ⚠️ **SUPERSEDED 2026-09-04** — the paragraph below records the FIRST protocol campaign
+> (`l4_protocol_20260903`), whose numbers two review rounds found to rest on four defects that
+> each moved a number in our favour (RIVAL_FAIRNESS_FINDINGS.md §16). Do not quote them; the
+> corrected campaign is `l4_protocol_20260904` and its numbers live in its generated `RESULTS.md`
+> — and a third review round (§16c) then corrected that campaign's Table 2 e2e column and
+> screened one more cell out of Table 1.
 
 **The protocol campaign ran (2026-09-03/04, Colab L4, `$GPAP_RESULTS/l4_protocol_20260903`;
 docs/findings/RIVAL_FAIRNESS_FINDINGS.md §15).** 80 cells, 0 errors, 0 unsound, verify 0

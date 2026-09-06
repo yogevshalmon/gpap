@@ -50,7 +50,17 @@ RSEEDS="${RSEEDS:-5 6 7}"
 # Pinning one value for all three taxed two of them: the 2026-08-23 campaign ran 10 everywhere,
 # which costs DEMOTIC 2.6x and Recurrent 8.5x (both saturate their batch on the first step).
 STEPS="${STEPS:-auto}"
-TIMEOUT="${TIMEOUT:-300}"
+# Per-run wall for the rival subprocess, and Recurrent's SEPARATE initialization budget
+# (2026-09-05): every one of the 2026-09-04 campaign's 20 Recurrent failures was the 300 s
+# initialization budget expiring, and §11 had measured b14 initializing at ~743 s. 1200 s for
+# both — the cap that same measurement used to show b17 does NOT initialize — and the
+# initialization wall is counted in the rival's e2e, as our preparation is in ours.
+TIMEOUT="${TIMEOUT:-1200}"
+INIT_BUDGET="${INIT_BUDGET:-1200}"
+# RETRY_ERRORS=1 re-runs rows that errored (the budget-bound cells of a resumed campaign);
+# off by default because a rival timeout costs the full budget to rediscover on every restart.
+RETRY_ARGS=()
+[ "${RETRY_ERRORS:-0}" = "1" ] && RETRY_ARGS=(--retry-errors)
 T="${T:-25}"
 
 # Default OFF (24 h). MEASURED: a Colab L4 assignment is reclaimed after ~1 h, so an in-VM
@@ -66,13 +76,14 @@ T="${T:-25}"
 # the recorded protocol (DEMOTIC raw+abc, Recurrent raw-only for cost). Override to converge a
 # campaign on one encoding — e.g. VARIANTS_DEM=abc VARIANTS_RCS=abc HTS_ENCS=abc for an
 # abc:fast-only sweep (2026-09-02: no tseitin arm anywhere in the tables).
-# BOTH circuit variants (2026-09-04). GPAP samples an ABC-optimized CNF, so the rival must be
-# able to have the ABC-optimized CIRCUIT; `paper_tables.rival_cells` now scores, per instance,
-# whichever variant is BETTER FOR THE RIVAL — the same tie-break `num_steps` uses — instead of
-# pooling both (which counted every instance twice, the reason this used to be raw-only).
-# Measured: the ABC-simplified sequential netlist is worth geomean 1.34x to DEMOTIC.
-VARIANTS_DEM="${VARIANTS_DEM:-raw abc}"
-VARIANTS_RCS="${VARIANTS_RCS:-raw abc}"
+# ONE circuit variant, `abc`, for every tool and every stage (2026-09-05, the user's call):
+# every tool receives the SAME sequential-ABC-simplified netlist GPAP encodes from. Measured,
+# the choice is nobody's friend — it cost GPAP `b12` (a 16x win became a 0.69x loss) and cost
+# Recurrent `b09` 58x under one pin while helping it 1.6x under another (§16c). The raw-vs-abc
+# axis remains implemented (`VARIANTS_*="raw abc"`, scored per instance for the rival by
+# `paper_tables.rival_cells`) and is not part of the protocol.
+VARIANTS_DEM="${VARIANTS_DEM:-abc}"
+VARIANTS_RCS="${VARIANTS_RCS:-abc}"
 HTS_ENCS="${HTS_ENCS:-tseitin abc}"
 # HTS dropped 2026-09-02: its paper evaluates no circuit at all (see run_full_eval.sh).
 # `demotic-miter` is NOT in the default set: it is measured-but-unpublished (see
@@ -134,6 +145,13 @@ CACHE_TGZ="$OUT/gpap_cache.tgz"
     echo "[cache] restored $(ls "$OUT/.gpap_cache" 2>/dev/null | wc -l) GPAP arm(s)"
 save_cache() { tar czf "$CACHE_TGZ.tmp" -C "$OUT" .gpap_cache 2>/dev/null \
                    && mv "$CACHE_TGZ.tmp" "$CACHE_TGZ"; }
+# ...and keep packing it in the background (2026-09-05): a start_point probe or an OOM ceiling
+# settled mid-stage used to live only in this VM's directory until the STAGE ended, and on the
+# big-circuit tail the VM is reclaimed first — so every fresh VM re-paid them. The supervisor
+# mirrors the tarball every 3 min; 4 min here keeps the two from thrashing.
+( while true; do sleep 240; save_cache; done ) &
+CACHE_PACKER=$!
+trap 'kill $CACHE_PACKER 2>/dev/null' EXIT
 
 # ---------------------------------------------------------------------------- 1. DEMOTIC
 # Cheap (median 3.7-15.3 s per run), so it gets BOTH circuit variants.
@@ -196,7 +214,8 @@ fi
 if want recurrent-rare && have 60 "recurrent-rare"; then
     banner "Recurrent-CircuitSAT — OUR rare pins (raw)"
     $PY eval/rivals/rivals_recurrent.py $SEQ_INSTS -T "$T" --rare --seeds $RSEEDS --steps "$STEPS" \
-        --timeout "$TIMEOUT" --circuit-variants $VARIANTS_RCS ${CMS_ARGS[@]+"${CMS_ARGS[@]}"} \
+        --timeout "$TIMEOUT" --init-budget "$INIT_BUDGET" --circuit-variants $VARIANTS_RCS \
+        ${CMS_ARGS[@]+"${CMS_ARGS[@]}"} ${RETRY_ARGS[@]+"${RETRY_ARGS[@]}"} \
         --resume --output "$OUT/rivals_recurrent_rare.json" 2>&1 | tee -a "$LOGS/rivals.log"
     save_cache
 fi
@@ -204,7 +223,8 @@ fi
 if want recurrent-table && have 30 "recurrent-table"; then
     banner "Recurrent-CircuitSAT — THEIR target table (raw)"
     $PY eval/rivals/rivals_recurrent.py $SEQ_INSTS -T "$T" --seeds $RSEEDS --steps "$STEPS" \
-        --timeout "$TIMEOUT" --circuit-variants $VARIANTS_RCS ${CMS_ARGS[@]+"${CMS_ARGS[@]}"} \
+        --timeout "$TIMEOUT" --init-budget "$INIT_BUDGET" --circuit-variants $VARIANTS_RCS \
+        ${CMS_ARGS[@]+"${CMS_ARGS[@]}"} ${RETRY_ARGS[@]+"${RETRY_ARGS[@]}"} \
         --resume --output "$OUT/rivals_recurrent_table.json" 2>&1 | tee -a "$LOGS/rivals.log"
     save_cache
 fi
@@ -212,7 +232,8 @@ fi
 if want recurrent-rare-t50 && have 90 "recurrent-rare-t50"; then
     banner "Recurrent-CircuitSAT — OUR rare pins, T=50 (their own depth limit)"
     $PY eval/rivals/rivals_recurrent.py $SEQ_INSTS -T 50 --rare --seeds $RSEEDS --steps "$STEPS" \
-        --timeout "$TIMEOUT" --circuit-variants $VARIANTS_RCS ${CMS_ARGS[@]+"${CMS_ARGS[@]}"} \
+        --timeout "$TIMEOUT" --init-budget "$INIT_BUDGET" --circuit-variants $VARIANTS_RCS \
+        ${CMS_ARGS[@]+"${CMS_ARGS[@]}"} ${RETRY_ARGS[@]+"${RETRY_ARGS[@]}"} \
         --resume --output "$OUT/rivals_recurrent_rare_t50.json" 2>&1 | tee -a "$LOGS/rivals.log"
     save_cache
 fi
@@ -220,7 +241,8 @@ fi
 if want recurrent-table-t50 && have 45 "recurrent-table-t50"; then
     banner "Recurrent-CircuitSAT — THEIR target table, T=50 (their own depth limit)"
     $PY eval/rivals/rivals_recurrent.py $SEQ_INSTS -T 50 --seeds $RSEEDS --steps "$STEPS" \
-        --timeout "$TIMEOUT" --circuit-variants $VARIANTS_RCS ${CMS_ARGS[@]+"${CMS_ARGS[@]}"} \
+        --timeout "$TIMEOUT" --init-budget "$INIT_BUDGET" --circuit-variants $VARIANTS_RCS \
+        ${CMS_ARGS[@]+"${CMS_ARGS[@]}"} ${RETRY_ARGS[@]+"${RETRY_ARGS[@]}"} \
         --resume --output "$OUT/rivals_recurrent_table_t50.json" 2>&1 | tee -a "$LOGS/rivals.log"
     save_cache
 fi
@@ -231,11 +253,18 @@ fi
 # re-derives it here so the campaign carries its own proof instead of importing one. A FLIP is
 # printed and recorded, never acted on automatically. Last, because it needs the HTS CNFs and
 # because nothing else depends on it.
-if want steps-calib && have 15 "steps-calib"; then
-    banner "num_steps tie-break (each tool's own two values)"
-    $PY eval/rivals/steps_calibration.py --timeout "$TIMEOUT" \
-        --hts-cnfs "$OUT/hts_cnf/*.cnf" \
-        --out "$OUT/rivals_steps_calibration.json" 2>&1 | tee -a "$LOGS/rivals.log"
+if want steps-calib && have 30 "steps-calib"; then
+    banner "num_steps: script vs argparse vs PAPER (and the paper's paired config), T=$T"
+    $PY eval/rivals/steps_calibration.py --timeout "$TIMEOUT" --tools demotic recurrent \
+        --cycles "$T" --out "$OUT/rivals_steps_calibration.json" 2>&1 | tee -a "$LOGS/rivals.log"
+    save_cache
+fi
+# The same evidence at the rival's own depth: their Figure 5 shows unique count rising over 5
+# iterations at eta=50, so "saturates on the first step" (measured at T=25) is re-derived at 50.
+if want steps-calib-t50 && have 45 "steps-calib-t50"; then
+    banner "num_steps: script vs argparse vs PAPER (and the paired config), T=50"
+    $PY eval/rivals/steps_calibration.py --timeout "$TIMEOUT" --tools recurrent \
+        --cycles 50 --out "$OUT/rivals_steps_calibration_t50.json" 2>&1 | tee -a "$LOGS/rivals.log"
     save_cache
 fi
 
