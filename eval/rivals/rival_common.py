@@ -471,7 +471,82 @@ def expand_names(names, key):
     return out
 
 
-BATCH_LADDER = (1_000, 3_000, 10_000, 30_000, 100_000, 300_000, 1_000_000, 3_000_000)
+# The ladder's TOP must sit above what the card can run on any scored cell: the walk starts
+# there, and a top rung that completes first try means the LADDER bound the grant, not the
+# card — a fourth rejection reason the "feasibility only" rule does not state. That happened
+# on six cells of the 2026-09-04 campaign at a 3,000,000 top (c1355 c1908 c432 c499 c880 under
+# DEMOTIC's pins, b06 under Recurrent's; RIVAL_FAIRNESS_FINDINGS.md §16e). The top is
+# 30,000,000 since 2026-09-06 (protocol v1.0, §17): on the campaign's 24 GB L4 no scored cell
+# completes it (c17 would, and is screened as a tiny space). `paper_tables` still names any
+# cell whose top rung completed first try, so a larger card cannot silently re-open the hole.
+# The two extra rungs cost a big circuit two more doomed model builds on a FRESH card only: a
+# known OOM ceiling is cached (rivals_recurrent.known_ladder) and a RECORDED grant skips the
+# walk entirely (`pinned_ladder` / `load_grants`, below).
+BATCH_LADDER = (1_000, 3_000, 10_000, 30_000, 100_000, 300_000, 1_000_000, 3_000_000,
+                10_000_000, 30_000_000)
+
+
+# ------------------------------------------------------------------ recorded grants
+# THE GRANT IS PART OF THE RECORD (protocol v1.0, 2026-09-06). A campaign's rows say which rung
+# each rival was granted and, for Recurrent, which `start_point` its initialization settled on;
+# `eval/rivals/extract_grants.py` writes them to one JSON per campaign (committed under
+# eval/rivals/grants/), and a harness run with `--grants FILE` PINS them: no ladder walk, no
+# start_point probe, one run at the recorded rung. That is what makes a re-run reproducible and
+# cheap (the walk and the probe are hours of a campaign, and neither is a measurement). The
+# RULE does not change — the pinned rung is the largest that completed, and a card that cannot
+# finish on it descends exactly as the walk would — and a cell the campaign recorded as a
+# rival FAILURE is never pinned: a failure is re-measured, not copied.
+
+def grant_key(name, mode, cycles, variant="abc"):
+    """One cell: circuit | task | unroll depth | circuit variant."""
+    return f"{name}|{mode}|{int(cycles)}|{variant}"
+
+
+def pinned_ladder(ladder, pinned):
+    """The ladder a RECORDED grant turns the walk into: the pinned rung on top, the rungs below
+    it kept. `run_at_batch` then measures the pinned rung first and descends only if THIS card
+    cannot finish on it (a smaller card than the one that recorded the grant) — the rule is
+    unchanged, only the search is skipped. A pinned value off the ladder is its own top rung."""
+    pinned = int(pinned)
+    return tuple(sorted({b for b in ladder if b < pinned} | {pinned}))
+
+
+def load_grants(path):
+    """The grants file, or {} when no path is given. A malformed file is an error, never a
+    silent empty pin — a campaign that believes it is reproducing one and is walking instead
+    would look right in every row and cost hours."""
+    import json
+    if not path:
+        return {}
+    with open(path) as f:
+        g = json.load(f)
+    if not isinstance(g, dict) or not any(k in g for k in ("demotic", "recurrent")):
+        raise ValueError(f"{path}: not a grants file (no 'demotic'/'recurrent' table)")
+    g["_path"] = path
+    return g
+
+
+def lookup_grant(grants, tool, name, mode, cycles, variant="abc"):
+    """The recorded grant for one cell, or None (unrecorded, or recorded as a rival failure).
+    Returns {"batch", "start_point", "source"}; `start_point` is None for DEMOTIC."""
+    if not grants:
+        return None
+    e = (grants.get(tool) or {}).get(grant_key(name, mode, cycles, variant))
+    if not e or not e.get("batch"):
+        return None
+    return {"batch": int(e["batch"]), "start_point": e.get("start_point"),
+            "source": f"pinned from {os.path.basename(grants.get('_path') or 'grants')}"}
+
+
+def grant_source(pinned, result, source):
+    """What the row says about HOW the rung was reached — a pin honoured, a pin this card could
+    not finish on (walked down from it), or the plain walk from the ladder top."""
+    if not pinned:
+        return "walked down from the ladder top"
+    got = (result or {}).get("batch")
+    if got == pinned:
+        return source
+    return f"{source}; rung {pinned:,} did not complete on this card, walked down"
 
 # Bytes of real peak VRAM per unit of "work", MEASURED on an RTX 4080 (2026-08-25) rather than
 # modelled — the naive `n_gates * T * batch * 4` undercounts by 2-6x and the factor is

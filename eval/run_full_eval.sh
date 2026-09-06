@@ -212,20 +212,22 @@ stage_rivals() {
     # noise on a low-success instance could move a cell. The rival runs once (its own rule).
     local rseeds="${RIVAL_SEEDS:-5 6 7}"
     local T="${RIVAL_T:-25}"
-    # BOTH unroll depths on the sequential set (2026-09-04): 25, and the 50 their own run script
-    # and paper use. A shallower unroll gives them a smaller depth pool, so publishing only 25
-    # would understate them. RIVAL_T2=none runs the shallow depth alone.
-    local T2="${RIVAL_T2:-50}"
-    # Circuit VARIANT: `raw` only — both sides get the committed .bench, untouched; the rival
-    # unrolls it itself and GPAP encodes it abc:fast (RIVAL_FAIRNESS_FINDINGS.md §13). `abc`
-    # (both sides handed an ABC-optimized sequential circuit, equivalence-checked) is still
-    # available, but `paper_tables` pools every variant in one geomean, so run ONE per campaign.
-    # ...and BOTH circuit variants: the committed .bench and an ABC-simplified copy,
-    # equivalence-checked. `paper_tables.rival_cells` scores, per instance, whichever is better
-    # FOR THE RIVAL (it used to pool them, which counted every instance twice — hence the old
-    # raw-only default). This closes the "we optimize our CNF, they get the raw netlist"
-    # asymmetry for the price of running the axis.
-    local cvars="${RIVAL_VARIANTS:-raw abc}"
+    # PROTOCOL v1.0 (frozen 2026-09-06, docs/EVAL_RUNBOOK.md §0): T=25 is the paper's depth.
+    # The T=50 stages are an ADDITIVE appendix run — the same protocol at the rival's own
+    # script depth, reported beside the T=25 rows and never in place of them — opted into with
+    # RIVAL_T2=50.
+    local T2="${RIVAL_T2:-none}"
+    # ONE circuit variant, `abc`, for every tool and every cell (protocol v1.0): every rival is
+    # handed the same sequential-ABC-simplified netlist GPAP encodes from, equivalence-checked
+    # (RIVAL_FAIRNESS_FINDINGS.md §16d). The raw axis stays implemented (RIVAL_VARIANTS="raw abc",
+    # scored per instance for the rival by paper_tables.rival_cells) and is not the protocol.
+    local cvars="${RIVAL_VARIANTS:-abc}"
+    # GRANTS: pin every recorded cell's batch rung (and Recurrent's start_point) to a previous
+    # campaign's measurement — no ladder walk, no probe (eval/rivals/extract_grants.py;
+    # eval/rivals/grants/). RIVAL_GRANTS=none walks and probes from scratch.
+    local grants="${RIVAL_GRANTS:-eval/rivals/grants/l4_protocol_20260904.json}"
+    GRANT_ARGS=()
+    [ "$grants" != "none" ] && [ -f "$grants" ] && GRANT_ARGS=(--grants "$grants")
     # THE CMSGEN ARM rides on every rival row (`--cmsgen`: the patched binary on the very CNF
     # the GPAP arm sampled, same n / budget). Without a binary the rows carry no CMSGen columns
     # and paper_tables prints no Table 1 — a warning was printed above; it is not a campaign.
@@ -233,15 +235,17 @@ stage_rivals() {
     # 'auto' = each rival at the num_steps its own artifacts specify; see
     # eval/rivals/rival_common.py::RIVAL_STEPS for the values and the measurement behind them.
     local rsteps="${RIVAL_STEPS:-auto}"
-    # Rival subprocess cap: 300 s = 5x the 60 s sampling budget GPAP gets, because the rival's
-    # wall includes the PyTorch model build that its OWN metric excludes. NOT 60 s: measured on
-    # this suite, 18/18 Recurrent-CircuitSAT runs exceed 60 s (median 165 s), so that cap would
-    # have produced zero valid measurements for the strongest rival. Timed out -> error row.
-    local rto="${RIVAL_TIMEOUT:-300}"
+    # Rival subprocess cap 1,200 s per run, and a SEPARATE 1,200 s initialization budget for
+    # Recurrent's start_point search (protocol v1.0; §11/§16d of RIVAL_FAIRNESS_FINDINGS.md:
+    # every one of the 300 s campaign's 20 Recurrent failures was that budget expiring). The
+    # rival's wall includes the PyTorch model build its OWN metric excludes, which is why it is
+    # not GPAP's 60 s. Timed out / did not initialize -> error row naming the budget, never a zero.
+    local rto="${RIVAL_TIMEOUT:-1200}"
+    local rib="${RIVAL_INIT_BUDGET:-1200}"
     if [ -d "$GPAP_HOME/src/Demotic/src" ]; then
         banner "rivals: DEMOTIC (their ISCAS-85 pins)"
         "$PY" eval/rivals/rivals_demotic.py --mode native $comb_insts --seeds $rseeds --steps "$rsteps" --timeout "$rto" \
-            --circuit-variants $cvars ${CMS_ARGS[@]+"${CMS_ARGS[@]}"} \
+            --circuit-variants $cvars ${GRANT_ARGS[@]+"${GRANT_ARGS[@]}"} ${CMS_ARGS[@]+"${CMS_ARGS[@]}"} \
             --resume --output "$OUT/rivals_demotic_native.json" 2>&1 | tee -a "$LOGS/rivals.log"
         # THE CONTROLLED CONTRAST: their own ISCAS-85 circuits, our rare pin. The native arm
         # above pins the 1-5 bits their table names (rejection-easy, p_acc 0.03-0.5); this one
@@ -252,7 +256,7 @@ stage_rivals() {
         banner "rivals: DEMOTIC (their ISCAS-85 circuits, OUR rare pin)"
         "$PY" eval/rivals/rivals_demotic.py --mode miter $comb_insts -T 1 --target rare \
             --bench-dir benchmarks/circuits/bench/comb \
-            --seeds $rseeds --steps "$rsteps" --timeout "$rto" --circuit-variants $cvars \
+            --seeds $rseeds --steps "$rsteps" --timeout "$rto" --circuit-variants $cvars ${GRANT_ARGS[@]+"${GRANT_ARGS[@]}"} \
             ${CMS_ARGS[@]+"${CMS_ARGS[@]}"} \
             --resume --output "$OUT/rivals_demotic_comb_rare.json" 2>&1 | tee -a "$LOGS/rivals.log"
         # `demotic-miter` (DEMOTIC on OUR unrolled b*/s* instances as single-output miters) is
@@ -261,7 +265,7 @@ stage_rivals() {
         if [ "${RIVAL_DEMOTIC_MITER:-0}" = "1" ]; then
             banner "rivals: DEMOTIC (our rare fixed-T instances, as miters)"
             "$PY" eval/rivals/rivals_demotic.py --mode miter $seq_insts -T "$T" --target rare \
-                --seeds $rseeds --steps "$rsteps" --timeout "$rto" --circuit-variants $cvars \
+                --seeds $rseeds --steps "$rsteps" --timeout "$rto" --circuit-variants $cvars ${GRANT_ARGS[@]+"${GRANT_ARGS[@]}"} \
                 ${CMS_ARGS[@]+"${CMS_ARGS[@]}"} \
                 --resume --output "$OUT/rivals_demotic_miter.json" 2>&1 | tee -a "$LOGS/rivals.log"
         fi
@@ -270,23 +274,23 @@ stage_rivals() {
     fi
     if [ -d "$GPAP_HOME/src/Recurrent-CircuitSAT-Sampler/src" ]; then
         banner "rivals: Recurrent-CircuitSAT (their target table, then our rare pins)"
-        "$PY" eval/rivals/rivals_recurrent.py $seq_insts -T "$T" --seeds $rseeds --steps "$rsteps" \
+        "$PY" eval/rivals/rivals_recurrent.py $seq_insts -T "$T" --seeds $rseeds --steps "$rsteps" --init-budget "$rib" \
             --timeout "$rto" \
-            --circuit-variants $cvars ${CMS_ARGS[@]+"${CMS_ARGS[@]}"} \
+            --circuit-variants $cvars ${GRANT_ARGS[@]+"${GRANT_ARGS[@]}"} ${CMS_ARGS[@]+"${CMS_ARGS[@]}"} \
             --resume --output "$OUT/rivals_recurrent_table.json" 2>&1 | tee -a "$LOGS/rivals.log"
-        "$PY" eval/rivals/rivals_recurrent.py $seq_insts -T "$T" --rare --seeds $rseeds --steps "$rsteps" \
+        "$PY" eval/rivals/rivals_recurrent.py $seq_insts -T "$T" --rare --seeds $rseeds --steps "$rsteps" --init-budget "$rib" \
             --timeout "$rto" \
-            --circuit-variants $cvars ${CMS_ARGS[@]+"${CMS_ARGS[@]}"} \
+            --circuit-variants $cvars ${GRANT_ARGS[@]+"${GRANT_ARGS[@]}"} ${CMS_ARGS[@]+"${CMS_ARGS[@]}"} \
             --resume --output "$OUT/rivals_recurrent_rare.json" 2>&1 | tee -a "$LOGS/rivals.log"
         if [ "$T2" != "none" ] && [ "$T2" != "$T" ]; then
             banner "rivals: Recurrent-CircuitSAT at T=$T2 (their own depth limit)"
-            "$PY" eval/rivals/rivals_recurrent.py $seq_insts -T "$T2" --seeds $rseeds --steps "$rsteps" \
+            "$PY" eval/rivals/rivals_recurrent.py $seq_insts -T "$T2" --seeds $rseeds --steps "$rsteps" --init-budget "$rib" \
                 --timeout "$rto" \
-                --circuit-variants $cvars ${CMS_ARGS[@]+"${CMS_ARGS[@]}"} \
+                --circuit-variants $cvars ${GRANT_ARGS[@]+"${GRANT_ARGS[@]}"} ${CMS_ARGS[@]+"${CMS_ARGS[@]}"} \
                 --resume --output "$OUT/rivals_recurrent_table_t${T2}.json" 2>&1 | tee -a "$LOGS/rivals.log"
-            "$PY" eval/rivals/rivals_recurrent.py $seq_insts -T "$T2" --rare --seeds $rseeds --steps "$rsteps" \
+            "$PY" eval/rivals/rivals_recurrent.py $seq_insts -T "$T2" --rare --seeds $rseeds --steps "$rsteps" --init-budget "$rib" \
                 --timeout "$rto" \
-                --circuit-variants $cvars ${CMS_ARGS[@]+"${CMS_ARGS[@]}"} \
+                --circuit-variants $cvars ${GRANT_ARGS[@]+"${GRANT_ARGS[@]}"} ${CMS_ARGS[@]+"${CMS_ARGS[@]}"} \
                 --resume --output "$OUT/rivals_recurrent_rare_t${T2}.json" 2>&1 | tee -a "$LOGS/rivals.log"
         fi
     else

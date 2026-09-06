@@ -648,13 +648,24 @@ gpap bench 'benchmarks/circuits/bench/seq/*.bench' --encoders tseitin abc:fast -
 eval/rivals/rivals_setup.sh                  # abc + patched cmsgen + DEMOTIC/Recurrent/HTS checkouts
 eval/run_full_eval.sh campaign        # THE PAPER RUN; or rivals | plots | seq | comb | sk | epfl | hwmcc | all
 ```
-**THE PROTOCOL (converged 2026-09-03, EVAL_RUNBOOK §0)**: the rivals' own published benchmark
-sets (DEMOTIC's 11 ISCAS-85; every ITC'99 `b*` / ISCAS-89 `s*` Recurrent-CircuitSAT evaluates),
-each under the rival's own pins AND our rare pin, one config per rival — and on every one of
-those cells GPAP (abc:fast CNF of the same circuit + pins) and CMSGen on that very CNF file
-(`rivals_*.py --cmsgen`, `rival_common.cmsgen_arm`). Three tools, one constraint, one row;
-`paper_tables --rivals` reads Tables 1/2/3 off those rows. The family stages (seq/comb/sk/epfl/
-hwmcc × targets × depths, `gpap bench` on instances pinned OUR way) are SUPPLEMENTARY now.
+**THE PROTOCOL — v1.0, FROZEN 2026-09-06 (EVAL_RUNBOOK §0; the record and the
+considered-not-adopted list are RIVAL_FAIRNESS_FINDINGS §17)**: the rivals' own published
+benchmark sets (DEMOTIC's 11 ISCAS-85; every ITC'99 `b*` / ISCAS-89 `s*` Recurrent-CircuitSAT
+evaluates — the FULL set is the headline, the rival paper's subset printed beside it), each
+under the rival's own pins AND our rare pin, T=25 (T=50 = an additive appendix run), one config
+per rival (its SHIPPED script setting; paper values measured beside it), the batch = the largest
+rung of the ladder it completes walked down from a 30,000,000 top, one circuit variant (`abc`)
+everywhere, 1,200 s wall + 1,200 s init budget (bounds the search, in no rate) — and on every
+one of those cells GPAP (abc:fast CNF of the same circuit + pins, the shipped `circuit`
+portfolio) and CMSGen on that very CNF file (`rivals_*.py --cmsgen`, `rival_common.cmsgen_arm`).
+Three tools, one constraint, one row; `paper_tables --rivals` reads Tables 1/2/3 off those rows.
+**Table 2 has ONE clock — the rivals' own metric — and no e2e column, by rule** (four
+definitions in three rounds; Table 1 keeps both clocks). **THE GRANT IS PART OF THE RECORD**:
+`eval/rivals/extract_grants.py` → `eval/rivals/grants/<campaign>.json`; `--grants` / `GRANTS=`
+pins each cell's rung + Recurrent's `start_point` on a re-run (no walk, no probe). ⚠️ **A review
+after the freeze fixes bugs and prose only** — never a metric, config, screen, budget or cell
+set; log the proposal in §17 instead. The family stages (seq/comb/sk/epfl/hwmcc × targets ×
+depths, `gpap bench` on instances pinned OUR way) are SUPPLEMENTARY.
 `eval/eval_plots.py` turns a directory into the vs-CMSGen, work-rate, amplification and rival
 figures + `summary.md` (which lists every skipped/errored instance — read it before quoting a
 geomean).
@@ -662,7 +673,9 @@ Rival harnesses: `eval/rivals/rivals_demotic.py` (`--mode native` = their ISCAS-
 = our rare-target instance as a single-output miter; sanitizes wire names + BUFF→BUF because
 DEMOTIC exec's generated Python), `eval/rivals/rivals_recurrent.py`, `eval/rivals/rivals_hts.py`.
 ⚠️ **Rival knobs come from the RIVAL, or from a stated rule — never from us.** The batch is
-granted (0.80 of free VRAM, `fit_batch`); `--num_steps` is taken from the tool's own artifacts
+granted (the largest rung of the batch ladder the tool completes, walked down from its
+30,000,000 top — `run_at_batch`; a re-run pins the recorded rung via `--grants`); `--num_steps`
+is taken from the tool's own artifacts
 (`RIVAL_STEPS`: DEMOTIC 1, Recurrent 1 — their run scripts; HTS 10 — its argparse default, since
 its script's 5 is far worse for it), and where a tool ships two values the tie-break goes to the
 one better FOR THE RIVAL. Pinning 10 for all three, as the drivers did until 2026-08-26, taxed

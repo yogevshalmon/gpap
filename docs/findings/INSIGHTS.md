@@ -1008,6 +1008,35 @@ Sketch/service family), n=10k, SAME per-instance wall cap both sides (cmsgen_sam
 
 ## Measurement methodology (the traps that actually bit)
 
+**PROTOCOL v1.0 — FROZEN (2026-09-06; `docs/EVAL_RUNBOOK.md` §0, RIVAL_FAIRNESS_FINDINGS.md
+§17).** Four review rounds each found real defects and each moved a published column: Table 2's
+end-to-end ratio had four definitions in three rounds (0.8x, 7.6x, 20.9x/132x, 11.8x/68.8x on
+the same rows), the init budget went 60 → 1,200 → 300 → 1,200 s, the circuit variant raw →
+both → abc, the depth 25 → 25+50 → 25. The user called a halt and the protocol is now frozen
+under one principle — publish only quantities each tool defines for itself, under one stated
+rule for what we hand it, every tool at its authors' shipped default — and one governance rule:
+a review may fix a bug in a number or fix prose, and may NOT change a metric definition, a
+configuration, a screen, a budget or the cell set (such proposals go to §17's
+considered-not-adopted list). Decided: the full 30-circuit set is the headline (the paper set
+beside it); T=50 is an additive appendix run after the freeze; GPAP keeps its shipped `circuit`
+portfolio; Table 2's `e2e` column is REMOVED by rule (the rivals define one clock — unique/s of
+their `model_runtime` — and on DEMOTIC's cells both tools finish their real work in under a
+second, so every e2e definition measured process start-up; Table 1 keeps both clocks, where the
+two walls are the same kind of thing). Two harness pieces came with it, neither a protocol
+change: the batch ladder's top is 30,000,000 (§16e had found six cells whose 3M top completed
+first try, so the ladder and not the card set the grant; the generator names any such cell, the
+mechanical check that a larger card cannot re-open it), and THE GRANT IS PART OF THE RECORD —
+`eval/rivals/extract_grants.py` writes each cell's granted rung and Recurrent's settled
+`start_point` to `eval/rivals/grants/<campaign>.json`, which `--grants` / `GRANTS=` pins on a
+re-run (no walk, no probe; a rung this card cannot finish on is walked down from; a recorded
+failure is re-measured, never copied). One cleanup run under the taller ladder preceded the
+freeze (§17): it moved exactly one cell — `c432` under DEMOTIC's pins completes a 10,000,000
+rung and its 1.21x win became a 1.11x tie inside GPAP's seed band — and confirmed `b22`-rare's
+zero on a clean device; after it, only the T=50 appendix rows and bug fixes may move a number. LESSON:
+a metric that compares things two tools define differently has no stable definition — remove
+it, do not refine it; and a fairness rule needs a mechanical check in the generator, not a
+sentence in the prose.
+
 **The CMSGen table and the rival table described two different instance sets; the protocol is
 now three tools on one constraint, and Table 1 is read off Table 2's rows (2026-09-03,
 `docs/findings/RIVAL_FAIRNESS_FINDINGS.md` §14).** Table 1 was a separate `gpap bench` sweep
