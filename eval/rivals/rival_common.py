@@ -542,6 +542,20 @@ RIVAL_STEPS = {
     "hts":       (10, "their src/pytorch/flags.py default", 5),
 }
 
+# THE PAPERS' OWN CONFIGURATIONS — a third source, and the one a referee cites. DEMOTIC
+# (arXiv 2502.08086 §IV): "we set the learning rate to 15, the batch size to 500,000, and the
+# number of iterations to 10". Recurrent-CircuitSAT (arXiv 2502.21226 §IV): "GD was used as the
+# optimizer during training, with a learning rate of 50 and a total of 5 iterations". Neither
+# is what their run scripts ship (steps 1, lr 15 for both), and the campaign runs the SCRIPT
+# configuration (2026-09-05, the user's call: one configuration, the tool's own shipped one,
+# which is also the better of the two for each tool on this card at T=25 — §6). The paper
+# values are MEASURED beside it by steps_calibration.py, singly and as the paired setting, so
+# the text can state what they would have given the tool instead of asserting it.
+RIVAL_PAPER_CONFIG = {
+    "demotic":   {"steps": 10, "lr": 15.0, "source": "arXiv 2502.08086 §IV"},
+    "recurrent": {"steps": 5,  "lr": 50.0, "source": "arXiv 2502.21226 §IV"},
+}
+
 # THE LEARNING RATE, by the same rule — and it is the knob that matters most to a method whose
 # whole search IS gradient descent, so leaving it undocumented was the `num_steps` hole one knob
 # along. Both rivals' own run scripts say `--lr 15e0` (DEMOTIC script/run_sampler_comb.sh:6,

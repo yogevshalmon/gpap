@@ -3,16 +3,14 @@
 % recorded in docs/findings/RIVAL_FAIRNESS_FINDINGS.md §14. Drop-in for \subsection{Benchmarks
 % and protocol}. Citation keys for the rivals/tools are placeholders (\cite{demotic},
 % \cite{recurrent}, \cite{cmsgen}, \cite{barbarik}). The numbers in the text (GPU, host CPU,
-% acceptance ranges, distinct fractions, the Recurrent egress bound, the failure counts) are
-% those of campaign $GPAP_RESULTS/l4_protocol_20260903 (2026-09-03/04, Colab L4) and are
-% re-derivable from its rows; re-fill them if the campaign changes.
-%
-% ⚠️ 2026-09-04: that campaign is SUPERSEDED and the numeric placeholders in this file must be
-% re-filled from its replacement. The protocol text here is already the corrected one (s38584
-% for s35932, both unroll depths, the largest-rung-that-completes grant, the discarded warm-up,
-% exact whole-run deduplication, the rivals' ABC variant, the proved-UNSAT screen). What is NOT
-% yet re-derived: every acceptance range, the distinct-fraction sentence, the egress bound, and
-% the failure counts. See docs/findings/RIVAL_FAIRNESS_FINDINGS.md §16.
+% acceptance ranges, distinct fractions, the Recurrent egress bound, the failure counts, the
+% calibration factors, the tautology-cell moves, the b06 grant factor) are those of campaign
+% $GPAP_RESULTS/l4_protocol_20260904 as COMPLETED for T=25 on 2026-09-06 (Colab L4; the three
+% converged decisions of docs/findings/RIVAL_FAIRNESS_FINDINGS.md §16d: 1,200 s initialization
+% budget counted in e2e, the rivals' SHIPPED script configuration with their paper values
+% measured beside it, one circuit variant everywhere) and were re-derived from its rows on
+% 2026-09-06. Re-fill them if the campaign changes; every one is re-derivable from the rows
+% (the campaign README names the script for each). T=50 is implemented and NOT run.
 
 \subsection{Benchmarks and protocol}
 \label{sec:protocol}
@@ -38,28 +36,32 @@ plus the 8 ISCAS-89 circuits its paper names. Its table lists an \texttt{s35844}
 ISCAS-89 circuit; the row's own figures (12 inputs, 278 outputs, 1{,}452 flip-flops) identify it
 as \texttt{s38584}, and that is the circuit we run. \texttt{s35932}, the only \texttt{s359xx}
 branch in its released code, is kept as a circuit \emph{we} add and is scored outside its set.
-That is 30 circuits, each unrolled from reset at \emph{both} depths we can justify: 25 cycles,
-and the 50 its own run script and paper use ($\eta = 50$, over which its sampler pools every
-depth). The two are never pooled; a shallower unroll gives the rival a smaller pool to find
-solutions in, so reporting only the shallower one would understate it. The primary inputs across
-cycles are $\support$ (Section~\ref{sec:prelim}). \recurrent{}'s paper reports 16 of the 29; we score all 29 and
+That is 30 circuits, each unrolled from reset for 25 cycles. Its own run script and paper use
+50 ($\eta = 50$, over which its sampler pools every depth); a shallower unroll gives the rival a
+smaller pool to find solutions in, so the 25-cycle figures may understate it, and the 50-cycle
+stages of the harness are implemented and deliberately not run in this campaign --- stated, not
+hidden. The primary inputs across cycles are $\support$ (Section~\ref{sec:prelim}). \recurrent{}'s paper reports 16 of the 29; we score all 29 and
 print the geometric mean over its own 16 beside every sequential number, because the two
 differ and a reader should see by how much. Nothing else is added: no benchmark family of our
 own, no second unroll depth, no second encoder. A third GPU sampler of the same
-gradient-descent family, HTS, is not compared: its paper evaluates no circuit at all, so
-every cell would be our task on instances we chose.
+gradient-descent family, HTS, is not compared: its paper evaluates 60 pre-encoded CNFs (random
+$q$-family, OR-configuration, \texttt{prod-*} and \texttt{s15850a\_*} files with a declared
+independent support) and no netlist, so it cannot be pinned two ways on its own published
+ground and every cell would be our task on instances we chose.
 
 \paragraph{Two tasks per circuit.}
 Each circuit is pinned in two ways, and the two are never pooled. Under \emph{their pins}, the
 one to five output bits the rival's own run script names for that circuit are fixed to the
 values it names, verbatim. Under \emph{our rare pin}, every last-cycle output is fixed to the
 least frequent pattern observed in a $262{,}144$-sequence simulation batch (pattern-selection
-seed fixed): reachable, hence satisfiable, but adversarial for rejection by construction. The
-acceptance probability of every cell is measured by simulation and printed beside its row:
-under their pins $0.02$ to $0.97$, with two cells (\texttt{b01} and \texttt{b19} under
+seed fixed): reachable, hence satisfiable, but adversarial for rejection by construction. On
+one single-output circuit, \texttt{s208.1}, the two pins coincide (the rarer value of its one
+output is the value its table names), so its two rows are one measurement, counted once per
+protocol. The acceptance probability of every cell is measured by simulation and printed beside
+its row: under their pins $0.02$ to $0.97$, with two cells (\texttt{b01} and \texttt{b19} under
 \recurrent{}'s table) where no hit was observed in the batch, bounded below $10^{-7}$ and
-$2\times10^{-5}$; under the rare pin from $0.5$ (\texttt{b01}, whose outputs take only two
-patterns) down to $2\times10^{-8}$, twelve cells being an upper bound where no hit was
+$2.3\times10^{-5}$; under the rare pin from $0.5$ (\texttt{b01}, whose outputs take only two
+patterns) down to $4\times10^{-8}$, twelve cells being an upper bound where no hit was
 observed. A pin whose measured probability is $1$ is a tautology and is screened (below); there are five
 such cells on the sequential set under each task. On a handful of circuits the \emph{rarest}
 observed pattern is not rare at all --- some circuits produce only a few distinct output patterns
@@ -74,10 +76,10 @@ single-output miter over the same netlist; \gpap{} and \cmsgen{} sample the pinn
 projected solution set by construction. Identical solution sets do not make identical
 \emph{tasks} for a gradient method, and we measure that rather than assume it: on the cells
 where both pins are provably tautologies --- so the two forms have the same solutions, the whole
-input space --- collapsing the pins into one output moves \recurrent{}'s rate by up to two
-orders of magnitude in either direction. \gpap{}'s moves by under $1.5\%$ on three of those four
-cells and by $4.3\times$ on the fourth, where its adaptive portfolio switches configuration on a
-formula propagation has already solved. Part of what
+input space --- collapsing the pins into one output moves \recurrent{}'s rate by $59\times$ on one of them
+(\texttt{b05}) and by under $7\%$ on the other three. \gpap{}'s moves by under $7\%$ on the
+same three and by $4.0\times$ on \texttt{b05}, where its adaptive portfolio switches
+configuration on a formula propagation has already solved. Part of what
 the miter rows measure is therefore how a gradient sampler handles a deep comparator cone, and
 the text says so. Constraint alignment is verified on every row of
 every table, and a row that fails is excluded and counted: under their pins, pinning their
@@ -87,42 +89,68 @@ equal the instance's, within simulation tolerance.
 
 \paragraph{Three tools, one constraint.}
 Every (circuit, task) cell is run by three samplers on the same constraint. The rival takes
-the circuit itself, raw, and unrolls it its own way, in one configuration that is its
-author's: the step count and learning rate its own run script specifies (\texttt{num\_steps}$=1$ and
-\texttt{lr}$=15$ for both; where a tool ships two values for a knob --- \recurrent{}'s paper
-text names $50$ for the learning rate --- the tie-break goes to whichever is better for the
-rival, re-derived on this card), the largest rung of a $\times 3$ batch ladder that it can
+the circuit itself and unrolls it its own way, in one configuration that is its
+author's: the step count and learning rate its own run script ships (\texttt{num\_steps}$=1$ and
+\texttt{lr}$=15$ for both). Their papers state other values --- \demotic{} 10 iterations,
+\recurrent{} 5 iterations at a learning rate of 50 --- and we run the shipped script
+configuration, one per tool, which is also the better of the two for each tool on this card at
+the depth measured (both saturate their batch on the first step; the paper values, singly and
+as the paired setting, are measured beside it and reported, so the reader can see what they
+would have given the tool instead of taking our word for it: on this card their paper settings
+deliver $0.16\times$ (\demotic{}) and $0.26\times$ (\recurrent{}, the paired setting) of the
+shipped ones). Then the largest rung of a decade batch ladder (1{,}000, 3{,}000, 10{,}000\,\dots, powers of ten and their triples) that it can
 actually run to completion (the rivals' throughput is near-proportional to their batch, so the
 grant is the score: the ladder is walked \emph{down} from the top and a rung is rejected only
 when the tool cannot finish on it --- out of memory, refused by the driver, or past the wall
-budget --- never on how fast it was, so exactly one configuration is measured), and its own
+budget --- never on how fast it was, so exactly one configuration is measured; on six cells the
+ladder's own top rung ($3{,}000{,}000$) completed on the first try, so nothing larger was offered
+and the grant is bounded by the ladder rather than the card, which for a batch-proportional
+sampler may under-grant it (\texttt{c432}/\texttt{c499} under \demotic{}'s pins and
+\texttt{b06} under \recurrent{}'s are the cells where this could move a near-unit ratio; a
+taller ladder is the re-run that would settle it)), and its own
 default random seed, passed explicitly and recorded, at which it is run \emph{once}: the rival
 is measured in one configuration, and the asymmetry against \gpap{}'s median of three seeds is
-stated here rather than hidden. Each run is given a 300\,s wall, and \recurrent{} a further
-300\,s for the \texttt{start\_point} initialization its loss requires. That budget is ours, not
-theirs, so a cell where the tool exhausted it at every batch rung is recorded as bounded by our
-wall rather than by its capability, and counted apart from a failure. The first run of every process is discarded before anything is measured: a
+stated here rather than hidden. The grant is a share-of-the-machine rule, not a search for the
+rival's fastest rung: a rival's rate stops tracking its batch once the model saturates the
+card, so a smaller rung can score higher, and on one circuit (\texttt{b06}) the rung granted
+under the 1{,}200\,s wall scores $0.73$--$0.77\times$ of the rung a shorter wall had granted it;
+the rule is kept and the cell is reported with that factor. Each run is given a 1{,}200\,s wall, and \recurrent{} a separate
+1{,}200\,s budget for the \texttt{start\_point} initialization its loss requires. That budget
+BOUNDS the search; its wall is not added to the rival's published end-to-end figure (the harness
+does not record it), an omission that can only lower the rival's e2e rate and so raise our ratio. That budget is ours, not theirs, so a cell
+where the tool exhausted it at every batch rung is recorded as bounded by our wall rather than
+by its capability, and a cell that did not initialize inside it is reported with the budget
+named; both are counted apart from a capability failure and never scored as a zero. The first run of every process is discarded before anything is measured: a
 cold \textsc{cuda} context costs the first instance of a session roughly a factor of three, and
 without that warm-up the cost lands on whichever circuit is measured first. Nothing is swept, and a
 run that times out, finds no gradient path, or does not initialize is recorded as such and
-omitted from the geometric mean with the count stated, never scored as a zero; those are the
-largest circuits, so the geometric mean is over the rival's easier half, and the tables say so.
+omitted from the geometric mean with the count stated, never scored as a zero. Under the
+1{,}200\,s budget four circuits do not initialize (\texttt{b17}, \texttt{b18}, \texttt{b22}
+under both tasks and \texttt{b19} under its own pin; six others that had failed a 300\,s budget
+do), and the remaining large circuits are measured at the batch a 24\,GB card admits ---
+3{,}000 or 10{,}000, the next rung out of memory --- where one gradient step over a 6--20M-node
+unrolled circuit takes five to eleven minutes. Those cells are reported as measured on this
+card: the tool's authors report an 8$\times$V100 machine, and its rate is near-proportional to
+the batch it is granted.
 \gpap{} takes the same circuit and pins, optimized by \abctool{}~\cite{brayton_abc_2010} (its
 fast script, after unrolling) and Tseitin-encoded~\cite{tseitin_complexity_1983} over the
-optimized netlist. The rivals are not left holding the raw netlist for that reason: each is run
-on both the committed circuit and an \abctool{}-simplified copy of it (equivalence-checked
-against the original under identical stimuli), and the table scores, per instance, whichever of
-the two is better for the rival. The post-unroll pass still has no sequential equivalent, which
-is stated rather than hidden. It samples with
+optimized netlist. The rivals are not left holding the raw netlist for that reason: every tool,
+in every cell, is handed the same sequential \abctool{}-simplified copy of the circuit
+(equivalence-checked against the original under identical stimuli) that \gpap{} encodes from
+--- one circuit variant, everywhere. That choice is nobody's friend: measured against the raw
+netlist it cost \gpap{} one instance outright (\texttt{b12}, a 16$\times$ win became a loss) and
+cost \recurrent{} 58$\times$ on \texttt{b09} under one pin while helping it 1.6$\times$ under the
+other. The post-unroll pass still has no sequential equivalent a rival could consume, which is
+stated rather than hidden. It samples with
 the shipped defaults: a 60\,s sampling budget and a $50{,}000$-sample target, the median of
 three seeds, and the adaptive two-configuration portfolio (random variable order, with 8
 decisions per round or with 1; both uniformity-safe). That portfolio is the one
 asymmetry in \gpap{}'s favour: the rivals and \cmsgen{} each run one fixed configuration,
 while \gpap{} measures its two against each other inside the timed wall and reports the
-winner's rate. We report the adaptive default because it is what ships, and state the asymmetry; the price of
-pinning it to one configuration is measured on the campaign's own rows and reported with them
-(the figure previously quoted here came from a smaller sweep under a different encoder and
-budget, and does not transfer).
+winner's rate. We report the adaptive default because it is what ships, and state the asymmetry; each row
+records which portfolio ran (\texttt{portfolio}, \texttt{adaptive}) so the price of pinning it
+to one configuration can be measured from the rows, and a figure from a smaller sweep under a
+different encoder and budget does not transfer.
 \cmsgen{}~\cite{cmsgen} receives that very \cnf{} file, with the same target count and a
 60\,s sampling budget of its own, in one run at its default seed. Everything after encoding,
 mining, simplification and the engine, is inside \gpap{}'s end-to-end clock; encoding is
@@ -140,7 +168,9 @@ ours is likewise outside both of ours. The deduplication runs after the sampler 
 wall of the projection that gathers the rows is subtracted from the steady-state \emph{and} the
 end-to-end rate, so the measurement of distinctness cannot pay for itself out of the number it
 is measuring; both walls are recorded per row. The same table prints, beside the steady-state ratio, the
-end-to-end one, \gpap{} charged its whole wall against the rival's unchanged timer.
+end-to-end one, each side charged its whole wall: \gpap{} from parsing to the end of the timed
+run, the rival its whole process including model build and, for \recurrent{}, its
+initialization search.
 \recurrent{} is further credited with solutions at any unroll depth
 up to 25, a superset of the fixed-depth task every other row measures. Against \cmsgen{} we
 compare raw samples per second, the deliverable both produce, on two clocks that each charge
@@ -150,19 +180,24 @@ parsing through mining, warm-up and the timed run against \cmsgen{}'s whole subp
 Neither side is deduplicated in that comparison: both tools emit repeats where the solution
 space is small relative to the request, so cells whose estimated solution count is below
 $1{,}000$ are screened from both tables (below), and \gpap{}'s measured distinct fraction is
-recorded per row: $1.000$ to three decimals on 65 of the 73 cells that kept rows; the eight
-below it are the tiny-space cells screened above (4 to 829 solutions) and two single repeats
-among the $1{,}000$ rows (\texttt{c1908} under its pins and \texttt{c432} under the rare
-pin, $0.999$). No tool is timed while
+recorded per row over every delivered row: $1.000$ to three decimals on 57 of the 74 cells
+that kept rows. The 17 below it are all screened cells: seven tiny spaces (4 to 6{,}302
+solutions, fraction $0.000$--$0.008$: \texttt{c17} both ways, \texttt{c6288} and \texttt{c1908}
+and \texttt{c1355} and \texttt{c499} under the rare pin), and ten cells where $0.13$--$1.05$
+million delivered rows sample a space of $2\times10^{6}$ to $1.3\times10^{8}$ solutions
+($0.80$ on \texttt{c432} under the rare pin, the free cell screened below; $0.97$--$0.999$ on
+the rest, the vacuous and near-vacuous sequential cells plus \texttt{c1908} and \texttt{c6288}
+under \demotic{}'s pins) --- the birthday repeats a correct sampler must show. No tool is timed while
 delivering solutions: stock \cmsgen{} formats and writes every sample as a full
 $\nvars$-variable assignment as it goes, so we patch it to generate without writing and to
 stop itself at the budget with an exact count (a killed run reports a floored one);
 \demotic{} counts its solutions after its timer stops; \gpap{}'s timed run gathers no model to
 the host. The one exception is \recurrent{}, which copies candidate assignments to the host
-inside its loop, bounded on this campaign's rows at 0.1--15\% of its \texttt{model\_runtime}
-(30\% on one cell under a pessimistic transfer-rate assumption; the audit script prints the
-bound per row) and left uncorrected in its favour.
-Soundness is checked twice on every row: every model \gpap{} emits is re-checked on the
+inside its loop, bounded on this campaign's rows at 0.04--18\% of its \texttt{model\_runtime}
+(37\% on one cell, \texttt{s208.1}, under a pessimistic transfer-rate assumption; the audit
+script prints the bound per row) and left uncorrected in its favour.
+Soundness is checked twice on every row that emits a model (the six all-zero cells emit
+nothing to check): every model \gpap{} emits is re-checked on the
 device against every clause of the formula, and the kept output rows are simulated through
 the pinned netlist itself (the original circuit, or its miter form on the sequential rare
 task) and must reproduce the pinned outputs, a check no encoding or preprocessing step can
@@ -177,7 +212,8 @@ its own column, detected mechanically per row and before any zero is counted: a
 \emph{vacuous} pin (the pinned pattern is a tautology, measured acceptance probability $1$), a
 \emph{free} cell (propagation alone fixes the support, so sampling is a random-bit readout: no
 decisions and no implications, or fewer than two implications per solution delivered --- on our
-rows that separates one degenerate cell from a nearest neighbour forty times above it), a
+rows that separates two degenerate cells, at $0.8$ and $1.1$, from a nearest neighbour at $6.3$
+that is itself a tiny space; the first genuinely sampled cell is at $42$), a
 \emph{tiny} space (an estimated solution count below $1{,}000$, the smallest of the input
 hypercube $2^{|\support|}$, the measured acceptance probability times it, and the count implied
 by the repeat rate over the delivered rows; both tools enumerate such a space rather than sample
@@ -188,8 +224,12 @@ are then handled the same way on both sides: no cell where either sampler produc
 enters a geometric mean, and every table reports the baseline-zero, \gpap{}-zero and
 both-zero counts, which sum with the screened cells and the geomean's instances to the cell
 count, so the ledger can be checked by addition. Excluding the baseline's zeros is
-conservative: those cells are outright wins. A refusal on our side, a formula outside the
-engine's packed envelope, is a reach limit and is counted apart from a zero. Uniformity is a
+conservative: those cells are outright wins. A refusal on our side --- a formula outside the
+engine's packed envelope, or the one cell (\texttt{b19} under its own pin) where the
+\abctool{} pass fails an assertion and no \cnf{} is produced --- is a reach limit and is
+counted apart from a zero. Uniformity is a
 separate claim, made in Section~\ref{sec:uniformity} with Barbarik~\cite{barbarik} on circuits
-from the same families under our pins, with an exactly uniform reference put through the same
-hook as the negative control and a known-biased configuration as the positive one.
+from the same families under our pins, with an exactly uniform reference (SPUR) put through the same
+hook as the negative control; the positive control --- a known-biased configuration that must be
+Rejected --- is established on the same families in
+docs/findings/UNIFORMITY\_FINDINGS.md, not in the table printed here.

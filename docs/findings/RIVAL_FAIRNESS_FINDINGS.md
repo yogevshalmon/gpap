@@ -869,3 +869,270 @@ a rule stated in one place and not carried through to another.
   the solver, its version and the conflict budget per row, so the pin and the evidence agree.
 
 The uniformity question from §16 is unchanged and remains deferred.
+
+## 16c. Third review round, against the corrected rows (2026-09-05)
+
+Five reviewers again, this time against `l4_protocol_20260904` with the §16/§16b fixes in
+place. Every number-changing claim was re-derived from the raw rows before it was acted on; two
+reviewer diagnoses were rejected (below). What was found, what moved, what is left.
+
+**Fixed in this round (code, all gated):**
+
+1. **The methods paragraph asserted a fairness procedure that did not run.** "Each rival is
+   handed an ABC-simplified copy of the circuit as well as the raw one and is scored on
+   whichever suits it" — a fixed string, over a campaign whose 82 rows are all `variant: abc`.
+   The sentence is now read off the rows (one variant names it and says the axis was not run;
+   two variants states the tie-break); `test_the_circuit_variant_sentence_is_read_off_the_rows`.
+2. **Table 2's `e2e` was not end-to-end.** Table 1 divides GPAP's whole wall by CMSGen's whole
+   subprocess wall; Table 2 divided GPAP's whole wall by the rival's UNCHANGED steady-state
+   timer — one side charged for getting ready. It printed DEMOTIC on its own pins as a **0.8x
+   loss**; symmetric (rival `unique / wall_s`) it reads **7.6x**; Recurrent 6.3x → 23.4x (table)
+   and 28.5x → 128.3x (rare). The rival's wall holds interpreter and CUDA start-up that GPAP's
+   in-process wall does not, so the symmetric column is the conservative one for us.
+   `test_table_2_e2e_charges_the_rival_its_whole_wall_too`.
+3. **Table 3 had no gate under the protocol.** `verify_artifact.py`'s identity loop read only the
+   `gpap bench` schema; under `--rivals` it never ran, and a 5000x sabotage of one row's impl/s
+   moved the headline 527x → 897x while the report stayed byte-identical. The identity is
+   algebra — `(a/b) / ((a/s)/(b/t)) ≡ s/t` — so all it can catch is a ROW-SET mismatch, and that
+   is now checked against the generator's printed numbers (Table 3's `n` and closure vs Table
+   1's `gm`), plus a physical band on the counters (1e6–5e10 GPAP, 1e3–1e9 CMSGen), which is what
+   the sabotage actually violates. `rival_prop_rates` also gained the two Table 1 screens it
+   lacked (proved-UNSAT, CMSGen<30), so the row sets agree by construction.
+4. **One thin-denominator floor for both sides of both tables.** `RIVAL_MIN_SOLUTIONS = 30` was
+   enforced on the rival in Table 2 and only narrated on the CMSGen side of Table 1, where `b14`
+   (13 CMSGen samples in 60 s) sat in the rare-pin geomean at 212x. `MIN_SOLUTIONS` screens both;
+   seq-rare **77.4x → 72.9x** (conservative — it removes a win). New column `CMSGen<30`, in both
+   ledgers and both prose formulas (the Markdown one had also lost `+ unsat` — the third
+   Markdown/LaTeX drift).
+5. **The dotted-name glob, fourth recurrence.** `rivals_recurrent.py`'s pre-run clean-up globbed
+   `sat_{key}_*` with the dot intact, one function above the read-back that strips it (with the
+   comment explaining why). For `s208.1`/`s15850.1` no stale file was ever removed and `hits[0]`
+   was an arbitrary pick among rungs. Both strip now; a multi-hit read-back selects this call's
+   batch or errors. Latent this campaign (one rung completed per instance).
+6. **"Instances the rival cannot process" → a budget statement.** All 20 Recurrent failures (10
+   per task) are one cause — the 300 s initialization budget expiring on the start_point probe —
+   no crash among them, and §11 had already measured `b14` initializing at 900 s and delivering
+   55,458 unique at 84.7 u/s. Five of the ten are inside their own 16 (`b15`, `b17`, `b19`, `b22`,
+   `s38584`). The caveat now says what it is.
+7. **Seed-band ties.** A caveat lists cells whose ratio at our slowest and fastest seed straddles
+   1.0 against a rival run once: `c1355` (0.85x, 0.69–1.03), `s386`-table (1.20x, 0.67–1.29),
+   `s832`-table (1.15x, 0.61–1.16). Ties, not wins.
+8. **Barbarik provenance and gate.** Table 4b comes from `l4_abc_20260902/barbarik_abc` — a
+   separate campaign, run locally on the RTX 4080, on our pins over the circuit families — under a
+   header naming the L4. The table now states its source; `verify_artifact --barbarik` checks one
+   parameter setting, a control that Accepts every eligible instance, and one arm set.
+9. **Stale prose.** `docs/paper/README.md` still named `l4_protocol_20260903` as the source of
+   the checked-in tables (five places, including a regenerate recipe that would have rebuilt the
+   retracted numbers over the corrected ones), "80 rows / 29 circuits", and the old loss set
+   (`b11`/`b18` — `b12` is a loss now). `INSIGHTS.md` quoted the superseded headline as settled
+   and claimed T=50 and raw-vs-abc "are now run both ways". The campaign README said "9 ok / 3
+   warnings" and "no row lost" beside a `b19` encoder error. All corrected; the HTS exclusion
+   sentence in `protocol.tex` ("evaluates no circuit at all") now says what is true (pre-encoded
+   CNFs, two of them circuit-derived). `check_emission_symmetry` widened a field that fused
+   `3.46104.23%` on the one row that most needed reading; a vacuous cache-key test now inspects
+   the harness's real task dict.
+
+**Found and NOT fixed — protocol decisions, with the evidence:**
+
+* **The 16.3x Recurrent-table headline is four cells.** `s208.1` 1,158x, `b09` 634.8x, `s1196`
+  172.8x, `s15850.1` 75.4x; over the other ten it is **5.6x**, below the superseded 6.2x. `b09`'s
+  own rate fell **57.8x** under the ABC-simplified netlist (169,265 → 2,930 u/s at identical batch
+  and steps, `equiv_ok` True) while the same netlist HELPED it 1.6x under the rare pin — the
+  variant we chose without running the alternative is the largest lever in both Recurrent rows.
+* **`s208.1`'s rival timer is inconsistent by 5.65x for identical work.** Same circuit (52 ANDs,
+  10/1/8), batch 1e6, steps 1, walls 150.1 vs 153.2 s — `model_runtime` 3.32 s under their pins
+  vs 18.77 s under ours; every other dual-mode instance is 0.93–1.08. Their `timer` wraps
+  `run_back_prop_seq` with `time.time()` and no `cuda.synchronize`. Direction unknown: if 3.32 s is
+  wrong the table cell is understated; if 18.77 s is, the rare cell is overstated.
+* **The rivals' PAPER configurations were never run.** Recurrent's paper: `lr=50`, **5
+  iterations** (η=50; their Fig. 5 shows unique count rising over 5 iterations at that depth).
+  DEMOTIC's paper: `lr=15`, batch 500,000, **10 iterations**. `RIVAL_STEPS` only ever compared
+  each script's value against the argparse default (1 vs 10); the paired paper configs were never
+  measured. Our T=25 evidence (§6) says steps=1 is better for them at this depth (8.5x at 10);
+  steps=5 was not run and the paper's Figure 5 is at η=50.
+* **`b06`'s top rung (3,000,000) was refused by our 300 s timeout**, the only non-OOM rejection
+  in 60 Recurrent rows; it is one of their 16 and counts as a win in both protocols.
+* **The raw→abc netlist change on OUR arm** (campaign 20260903 → 20260904, Recurrent stages,
+  everything else equal): rare pin — `b12` **0.042x** (success 0.087 → 0.0041, three seeds within
+  2.6%; a 16.1x win became a 0.69x loss), `b18` 2.13x, `s832` 2.20x, all else within 2x; their
+  table — nothing beyond 2x. The fairness fix cost us one cell outright, deterministically.
+
+**Reviewer claims rejected on re-derivation.** "The loss boundary moved 30x between runs, so it
+measures noise" — `b12`'s move is the variant change, not noise (seeds agree to 2.6%). "Table 4b
+is from a different GPU than stated" — true (RTX 4080, per that campaign's README), but a CM_test
+verdict is hardware-independent; the defect was the missing provenance line, now printed.
+
+## 16d. The three converged decisions, and finishing T=25 under them (2026-09-05)
+
+The user closed the three protocol questions §16c left open ("we spent way too much time";
+"ONE config ... for all the circuits everywhere for everyone"). Decisions, each with why it is the
+defensible one and what it cost:
+
+1. **Recurrent's `start_point` initialization gets 1,200 s per instance (bounding the search; its wall is NOT added to the published e2e — §16e corrects the earlier "counted in e2e" wording; the omission only raises our ratio).**
+   All 20 of the 300 s campaign's "cannot process" cells were that budget expiring, and §11 had
+   measured `b14` initializing at ~743 s. The steady-state metric is untouched (it never
+   included initialization); the initialization budget bounds the search but its wall is not
+   added to the rival's published e2e (§16e — the harness records no `init_s`; the omission only
+   raises our ratio). Measured under it: `b14` initializes and delivers 2 unique (thin,
+   screened), `b15`/`b20`/`b21`/`s35932`/`s38584` initialize and deliver 0 (both=0 with GPAP 0
+   or a GPAP-only win, per row), `b17`/`b18`/`b19`/`b22` still do not initialize at 1,200 s and
+   are reported with that budget named. Four of the ten "cannot process" cells were budget
+   artifacts. The per-run timeout is 1,200 s too.
+2. **Each rival at its SHIPPED run-script configuration** (`num_steps` 1, `lr` 15, both tools,
+   both depths) — the artifact they ship to reproduce their results, measured BETTER for them
+   than their papers' values at T=25 (§6: Recurrent 8.5x at 10 steps, DEMOTIC 2.6x), so it cannot
+   be called a handicap, and it keeps every completed cell. The papers' values (Recurrent 5 @
+   `lr` 50, DEMOTIC 10 @ `lr` 15 — `rival_common.RIVAL_PAPER_CONFIG`) are MEASURED, singly and
+   paired, by `steps_calibration.py` and now PRINTED by `paper_tables.rival_calibration` (the
+   generator used to name the file and never read it, so RESULTS.md could not say whether the
+   setting we used was the better one for the rival). Not run as configuration, not swept.
+3. **One circuit variant, `abc`, everywhere**: every tool receives the sequential-ABC-simplified
+   netlist GPAP encodes from. It is nobody's friend (§16c: it turned `b12` from a 16x win into a
+   0.69x loss for us; cost Recurrent 57.8x on `b09` under one pin and helped it 1.6x under the
+   other), and the alternative was never run under the final protocol, so the methods sentence is
+   read off the rows (`variant_sentence`) rather than asserted.
+
+**Finishing the campaign under them cost three harness fixes, none of which touches a
+measurement.** (a) `--retry-errors` re-ran EVERY error row on every resume, and the probe cache
+was packed only at stage end — so each ~1 h Colab VM re-paid the previous VM's 1,200 s
+initialization failures and was reclaimed before reaching a new instance; `settled_error` keeps
+an error row whose reason names the CURRENT budget (the JSON row is the durable record).
+(b) `b21`'s walk — a 1,200 s probe, seven doomed OOM rungs each a model build on a 20M-node
+circuit, then the run — exceeded a VM lifetime; `known_ladder`/`remember_oom_ceiling` cache the
+smallest OOM rung per (file, T) and the driver packs the cache every 4 min. The grant rule is
+unchanged (largest rung that completes); only known failures are not re-measured, and timeouts
+are never cached. (c) The last 12 table cells were split across TWO concurrent Colab sessions
+(disjoint `SEQ_INSTS`, separate mirror dirs, `merge_splits.py` asserting the 18 measured rows are
+byte-identical in both before unioning). The probe cache is keyed on the rival FILE's bytes, so
+nothing carries from the rare (miter) file to the table (plain) file — the table stage re-pays
+its probes, ~4–5 h serial, by design.
+
+**Disclosure the grant rule owes: the largest completing rung is not always the rival's fastest
+rung.** `b06` rare, identical circuit, steps and seeds: the 300 s campaign refused the 3,000,000
+rung on timeout and measured the 1,000,000 rung at **746,560 u/s**; the 1,200 s campaign
+completes the 3,000,000 rung (346 s wall) at **543,768 u/s** — 0.73x. Unique/s stops tracking the
+batch once the model saturates the card, and the walk stops at the first rung that completes, so
+the smaller rung is never measured in the same run. It is a share-of-the-machine rule, stated as
+such in the methods paragraph, not a search for the rival's optimum; on `b06` it under-states
+Recurrent by ~1.4x relative to its best observed rung, and GPAP's b06 rare margin is 1.68M vs 0.54M
+unique/s (Table 2's quantity; ~3.1x, or ~2.3x against the 1M rung). The table-stage `b06` row, re-measured in the
+same completion run, is compared the same way in the campaign README.
+
+**The completion, measured (2026-09-06 01:35, two concurrent L4 sessions, 5 h 15 min wall).**
+All 30 table cells are final under the decisions above; the campaign is 82 rows (81 measured +
+`b19`'s GPAP encoder error under their pin, as before).
+
+* **`s208.1`'s "inconsistent timer" (§16c) was the dotted-name CSV read-back bug, and the two
+  protocols are ONE task on this circuit.** Re-measured, the table row reads 23,114,436 unique
+  in 18.8 s — identical to its rare row, because for this single-output circuit their `[-1]=1`
+  pin IS the rare pattern (p_accept 0.375). The superseded row (6,309 unique, 3.32 s, 1,158x)
+  had read back a stale CSV through the `sat_s208.1_*` glob that the fix in §16c closed. The
+  cell is **1.7x** in both protocols, and the two rows are the same measurement counted once per
+  protocol — a reader summing "30 + 30 cells" should know one pair coincides.
+* **The Recurrent-table headline is 21.5x over 20 cells (was 16.3x over 14), and it moved UP
+  while its largest cell collapsed**: six big instances that did not initialize at 300 s now
+  score, all as GPAP wins at the rival's granted batch — `s38584` 371x, `b20` 339x, `b21` 216x,
+  `s35932` 70x, `b14` 58x, `b15` 22x (geomean 116x over the six; 10.4x over the other 14).
+  Structure: without `b09` 18.0x, without the top four (`b09`, `s38584`, `b20`, `b21`) 10.6x
+  over 16, without the top six 7.5x over 14; the bottom five (`s386`, `b10`, `s832`, `b06`,
+  `s208.1`) are 1.1–1.7x, three of them inside GPAP's seed band. Quote the structure, not the
+  geomean alone.
+* **Why the six are large: the rival's grant on a 24 GB L4 is 3,000 (`b20`, `b21`, `s35932`,
+  `s38584`; the 10,000 rung OOMs) or 10,000 (`b14`, `b15`; 30,000 OOMs), and one gradient step
+  over that batch of a 6–20M-node unrolled circuit takes 5–11 minutes** (`runtime_s` 328–682 s
+  for 8,831–213,722 unique ⇒ 13–552 u/s). That is the tool at the largest batch this card runs
+  — the rule the paper states — but the authors' 8×V100 would grant more, and unique/s is
+  near-proportional to batch (§8), so read these cells as "on a 24 GB L4", not as a constant.
+  GPAP's side on the same cells is 4,412–32,047 u/s at its own VRAM-bound K.
+* **`b06`'s grant rule disclosure, table row**: the 3,000,000 rung completes (331 s wall) at
+  1,117,488 u/s; the superseded 300 s row had measured the 1,000,000 rung at 1,447,059 u/s —
+  0.77x, the same shape as the rare row (0.73x). Both `b06` cells are 1.7x/3.1x for GPAP;
+  against the rival's best observed rung they would be 1.3x/2.3x — still wins, smaller.
+* **Rare headline 93.8x over 12 (was 91.0x)**: `s38584` initializes and delivers 0 (both=0
+  column, with `b15` `b20` `b21` `s35932`); `b14` delivers 2 (rival<30, screened). Rival
+  failures under the 1,200 s budget: `b17` `b18` `b22` in both protocols, `b19` in the table
+  protocol (its rare row is screened as vacuous first). Table 1 (vs CMSGen) barely moves:
+  818.3x / 73.1x on the Recurrent set (was 806.6x / 77.4x), ISCAS-85 unchanged.
+* **Calibration (`rivals_steps_calibration.json`, T=25, printed in RESULTS.md now)**: DEMOTIC
+  8,247,863 u/s at its script's 1 step vs 1,294,723 at its paper's 10 @ `lr` 15 (0.16x);
+  Recurrent 631,373 at 1 step vs 163,503 at 5, 85,121 at 10, and 162,875 at the paper's paired
+  5 @ `lr` 50 (0.26x). The shipped script setting the campaign ran is the better one for both
+  tools by 3.9–6.4x; `lr` 15 vs 50 at 1 step is 1.02x (unchanged).
+* **The emission audit read the campaign's HISTORY as rows**: its worst-case bound (208%) came
+  from `rerun_20260905/…table.before.json`, the superseded `s208.1` row. `campaign_jsons` now
+  reads the top level only when it holds result files; the live worst case is `s208.1` at 36.9%
+  of its 18.8 s `runtime_s` (a bound on the per-depth host snapshot, left uncorrected — it can
+  only under-report GPAP).
+
+## 16e. Fourth review round — five reviewers against the completed T=25 tables (2026-09-06)
+
+Five adversarial reviewers re-derived every published number from the rows; **all four tables
+regenerate byte-identically and no headline number was wrong.** The defects were in the
+accounting the numbers rest on, and in the prose around them. Fixed:
+
+* **Table 2's `e2e` was asymmetric a third way, and the generator's own comment called the
+  asymmetry "conservative".** It divided GPAP's whole in-process wall by the rival's whole
+  *subprocess* wall — which carries ~4.4–4.9 s of interpreter + CUDA-context start-up per
+  DEMOTIC cell that GPAP's already-warm process never pays, on cells whose entire wall is under
+  a second — while GPAP's side had its delivery subtracted and carried no encoding. Charging the
+  rival a fixed cost we exclude is the *generous* direction. Now ONE definition
+  (`rival_family`): each side's whole wall on the instance with the tool's fixed process
+  start-up excluded on both — GPAP charged encoding + preparation + timed run + delivery, the
+  rival charged its timed loop plus its non-timed wall *above* its smallest non-timed wall on
+  the row set (a floor that still holds the smallest model build, so it takes too much off the
+  rival, never too little). The no-subtraction figure is kept as `gm_e2e_nosub` and printed as
+  the upper bound in the caveat. Effect on the printed e2e: DEMOTIC 7.6x → **0.8x** (its whole
+  wall is start-up), Recurrent-table 20.9x → **11.8x**, Recurrent-rare 132.0x → **68.8x**. The
+  steady-state headlines (2.2x / 21.5x / 93.8x) are untouched.
+* **"Recurrent's initialization is counted in its e2e" (five documents) is not what the code
+  does.** `probe_start_point` runs before the measured subprocess and its wall is recorded in no
+  field, so the published e2e does NOT include it. That is conservative — adding it would lower
+  the rival's e2e rate and raise our ratio — so the fix is to the CLAIM, not the number: every
+  document now says the 1,200 s budget BOUNDS the search and its wall is not added to the
+  published e2e. Recording `init_s` and including it is deferred (it needs the harness
+  instrumented and a re-run); it can only move the rivals' e2e down.
+* **The batch ladder tops at 3,000,000, and on cells where the top rung completes first try
+  nothing above it was offered** — a fourth grant-rejection reason ("the ladder ran out") the
+  "rejected only on feasibility" rule does not state. It fires on 5 DEMOTIC cells (`c1355`,
+  `c1908`, `c432`, `c499`, `c880`) and `b06`. The rival's rate is near-proportional to its batch
+  (§8), and its own earlier campaigns show `c432` at 1.39M u/s @1M → 8.16M @3M, with `fit_batch`
+  at the recorded VRAM budget admitting 5.86M rows — so a taller ladder could move `c432` from a
+  published 1.21x GPAP win toward a loss. The generator now emits a per-stage caveat naming
+  these cells and the risk; a taller ladder is the re-run that would settle it, out of this
+  round's scope. The rule as coded and as stated coincided on every OTHER cell (no row carries
+  `probe_truncated`, `budget_bound`, or a throughput-based rejection).
+* **`b01` is proved UNSAT at T=25 and screened, yet Recurrent scores 306,882 u/s on it** — its
+  depth-POOLED count admits solutions at shallower unroll depths the fixed-depth task has none
+  of; GPAP delivers 0. It is the one cell in 82 where the pooled superset yields a rival-only
+  result, and it sat silently in the `unsat` count column while both tables printed `GPAP=0 = 0`
+  and "instances GPAP could not sample: none". The generator now names it with the rival's rate.
+* **`verify_artifact`'s soundness gate was vacuous under `--rivals`**: it only ever FAILED on an
+  explicit `UNSOUND` and printed nothing on `ok`, so a campaign run without `--verify-sound`
+  produced a byte-identical "Publishable" verdict. It now FAILS a stage whose emitting rows
+  carry no soundness verdict and prints the checked-row count (the data is clean: 57 ok / 6 off,
+  every "off" a zero-model row).
+* **The rivals' failure reason named a budget one probe did not get**: `b17`/`b19`/`b22` failed
+  at `sp≥1`, so the timing-out probe got only what its predecessors left, while the string said
+  "did not complete within the 1200s budget". The search as a whole did have the budget, so the
+  conclusion stands, but the phrasing now states it at the search level with the time that
+  remained. (Rows already written carry the old phrasing; the conclusion is unaffected.)
+* **The steps/lr calibration is now PRINTED in RESULTS.md** (`rival_calibration`), not just
+  named — DEMOTIC's paper config 0.16x, Recurrent's paired paper config 0.26x of the shipped
+  settings — with the depth the probe ran at, not the CLI's `-T` (DEMOTIC's combinational probe
+  ignores it, which had mislabelled it "T=25").
+* **The 21.5x / 93.8x structure is now in the paper-facing caveats**: median, the geomean's own
+  seed band, the tie count, the top cells, the geomean without them, and the six cells measured
+  at the card's 3,000/10,000 grant (116x, against 10x over the rest) with "quote it as on an
+  L4". The DEMOTIC-rare row (no measured ratio, `wins 5/5` over five rival-zeros) is named as a
+  capability contrast, not a rate.
+* **Prose re-derived from the rows**: the acceptance ranges (their pins 0.020–0.97 with two
+  bounded cells; rare 0.5 down to 3.9e-8 with 12 bounded), the tautology-cell moves (b05 59x
+  for the rival, others under 7%), the distinct-fraction sentence (57 of 74 at 1.000, the rest
+  tiny or near-vacuous), the `pre%` share, and the ledger. The emission audit's stale "fixed
+  1,000 rows" (it is `UNIQUE_ROWS = 4,000,000`, one row per delivered sample) was corrected in
+  both its docstring and its printed verdict.
+
+**Deferred (a re-run, out of this round's scope, each conservative for us):** the rival's e2e
+with `init_s` and the rejected rungs' walls added; a taller batch ladder for the six ladder-topped
+cells; `b22`-rare re-measured on a clean device (its GPAP arm ran at 7.3 of 23.7 GB free). None
+can lower a published GPAP ratio.

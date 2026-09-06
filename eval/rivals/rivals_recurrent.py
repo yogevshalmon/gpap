@@ -62,7 +62,7 @@ import time
 REPO_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))  # eval/<sub>/ -> repo
 sys.path.insert(0, REPO_ROOT)
 
-from eval.rivals.rival_common import (CACHE_MISS, VARIANTS, cache_peek,  # noqa: E402
+from eval.rivals.rival_common import (BATCH_LADDER, CACHE_MISS, VARIANTS, cache_peek,  # noqa: E402
                                       cache_store, cached_gpap, cmsgen_arm, fit_batch,
                                       _available_bytes, expand_names, host_provenance,
                                       native_pin_check, oversize_reason, prepare_variant,
@@ -86,18 +86,28 @@ RIVAL_DEFAULT = str(paths.src_dir() / "Recurrent-CircuitSAT-Sampler")
 # a geomean as if the rival had genuinely produced nothing.
 DEFAULT_TIMEOUT = 300.0
 # INITIALIZATION budget: the whole start_point search — every probe's model build included —
-# must settle inside ONE run timeout (300 s by default), else the instance is an error row for
-# the rival ("did not initialize"). The probe is a 1-step run whose wall is the model build, the
-# same work the measured run does, so a per-probe cap smaller than the run's is not a faster
-# probe, only a failing one: it read 60 s against the run's 300 s for one release, and on b14/b17
-# at T=25 every start_point >= 1 hit it — reported as "no gradient path", a claim about the
-# rival made from our stopwatch. Now each probe gets what is LEFT of the budget, and a probe
-# that runs out of it ends the search with the budget named in the reason.
+# must settle inside it, else the instance is an error row for the rival ("did not initialize").
+# The probe is a 1-step run whose wall is the model build, the same work the measured run does,
+# so a per-probe cap smaller than the run's is not a faster probe, only a failing one: it read
+# 60 s against the run's 300 s for one release, and on b14/b17 at T=25 every start_point >= 1
+# hit it — reported as "no gradient path", a claim about the rival made from our stopwatch.
+# Each probe gets what is LEFT of the budget, and a probe that runs out of it ends the search
+# with the budget named in the reason.
+#
+# ITS OWN NUMBER, 1200 s (2026-09-05), no longer tied to the run timeout. On the 2026-09-04
+# campaign every one of Recurrent's 20 failures was this budget (then 300 s) expiring — none a
+# crash — and RIVAL_FAIRNESS_FINDINGS.md §11 had measured b14 initializing at ~743 s and then
+# delivering 55,458 unique solutions. 1200 s is the cap that same measurement used to show b17
+# does NOT initialize at any start_point, so one number separates the two. The initialization
+# wall is counted in the rival's e2e figure the way ours and CMSGen's preparation are; its
+# steady-state metric (unique / model_runtime) is untouched.
+INIT_BUDGET_S = 1200.0
 PROBE_BUDGET_FRACTION = 1.0
 
 
 def probe_budget(run_timeout=DEFAULT_TIMEOUT):
-    """Total initialization wall per instance, over all start_point probes."""
+    """Legacy: the initialization budget as a fraction of the run timeout. The campaign passes
+    an explicit `--init-budget` (INIT_BUDGET_S); this remains for callers that do not."""
     return float(run_timeout) * PROBE_BUDGET_FRACTION
 
 
@@ -244,7 +254,11 @@ def run_recurrent(rival, bench_file, key, T, steps, batch, start_point,
     data_dir = os.path.join(rival, "data", "rival_tmp")
     os.makedirs(data_dir, exist_ok=True)
     shutil.copy(bench_file, os.path.join(data_dir, f"{key}.bench"))
-    for f in glob.glob(os.path.join(rival, "src", "results", f"sat_{key}_*")):
+    # THE DOT IS STRIPPED in their filename (see the read-back below) — so the clean-up must
+    # strip it too. It did not for one release: `sat_s208.1_*` matched nothing, every stale
+    # `sat_s2081_*` survived, and the read-back's `hits[0]` was an arbitrary pick among rungs.
+    # Fourth recurrence of the same bug shape, one function above where it was last fixed.
+    for f in glob.glob(os.path.join(rival, "src", "results", f"sat_{key.replace('.', '')}_*")):
         os.unlink(f)
     cmd = [sys.executable, os.path.join(rival, "src", "pytorch", "run.py"),
            "-d", f"../data/rival_tmp/{key}.bench", "-l", "--optimizer", "mse",
@@ -281,6 +295,13 @@ def run_recurrent(rival, bench_file, key, T, steps, batch, start_point,
     hits = glob.glob(os.path.join(rival, "src", "results", f"sat_{key.replace('.', '')}_*"))
     if not hits:
         return {"error": "no results csv", "wall_s": wall}
+    # Their filename ends `_{batch_size}.csv`; with the clean-up above there is one file, and
+    # if there is not, the ONLY acceptable pick is the rung this call ran — never `hits[0]`.
+    if len(hits) > 1:
+        hits = [h for h in hits if h.endswith(f"_{batch}.csv")]
+        if len(hits) != 1:
+            return {"error": f"ambiguous results csv ({len(hits)} candidates for batch {batch})",
+                    "wall_s": wall}
     import csv
     with open(hits[0]) as f:
         r = list(csv.DictReader(f, delimiter="\t"))[0]
@@ -298,6 +319,23 @@ def run_recurrent(rival, bench_file, key, T, steps, batch, start_point,
     return {"unique": uniq, "unique_at_T": uniq_at_t, "runtime_s": rt,
             "unique_per_s": uniq / rt if rt else 0.0, "wall_s": wall,
             "batch": batch, "steps": steps, "start_point": start_point}
+
+
+def settled_error(err, init_budget, run_timeout):
+    """Is this rival error row a FINISHED measurement under the current protocol?
+
+    True for a failure to initialize inside the CURRENT init budget, a timeout at the CURRENT
+    run timeout, and "no gradient path" (deterministic — their backward() refuses the circuit).
+    False for an error naming another budget (re-run: the protocol changed) or an environmental
+    one (a missing csv, a crash) — those are what `--retry-errors` exists for."""
+    err = str(err or "")
+    if err.startswith("no gradient path"):
+        return True
+    if f"{float(init_budget):.0f}s initialization budget" in err:
+        return True
+    if err.startswith("timeout ") and err.rstrip("s").split()[-1] in (f"{float(run_timeout):g}", f"{float(run_timeout)}"):
+        return True
+    return False
 
 
 def _sp_task(T, max_sp):
@@ -323,50 +361,110 @@ def probe_start_point(rival, bench_file, key, T, max_sp=10, budget=None,
 
     CACHED, because it is pure: the answer depends only on the circuit and the unroll depth, yet
     every probe pays a full process launch and model build (~30 s of a Recurrent run's wall is
-    build, even at --num_steps 1). A timeout is NOT cached — it may pass on a faster box."""
+    build, even at --num_steps 1). A settled start_point is stored as an int. A FAILURE to settle
+    is stored too, WITH the budget it failed at, and is honoured only at that budget or a
+    smaller one: the probe is pin-independent, so the table stage re-paying a 1200 s failure the
+    rare stage just measured is 20 min for the same answer, while a larger budget must re-ask
+    (a stuck instance may pass on a longer clock — that is the whole point of a budget)."""
     budget = probe_budget(run_timeout) if budget is None else float(budget)
     hit = cache_peek(cache_dir, bench_file, _sp_task(T, max_sp))
-    if hit is not CACHE_MISS:
+    if isinstance(hit, dict) and "failed_at_budget" in hit:
+        if float(hit["failed_at_budget"]) >= budget:
+            return None, hit.get("reason", "did not initialize") + " (cached)"
+    elif hit is not CACHE_MISS:
         return hit, None
     t0 = time.perf_counter()
     for sp in range(max_sp + 1):
         left = budget - (time.perf_counter() - t0)
         if left <= 0:
-            return None, (f"did not initialize: start_point probes 0..{sp - 1} used up the "
-                          f"{budget:.0f}s initialization budget")
+            return None, _remember_failure(
+                cache_dir, bench_file, T, max_sp, budget,
+                f"did not initialize: start_point probes 0..{sp - 1} used up the "
+                f"{budget:.0f}s initialization budget")
         r = run_recurrent(rival, bench_file, key, T, steps=1, batch=256, start_point=sp,
                           timeout=left)
         if "error" not in r:
             return _remember_sp(cache_dir, bench_file, T, max_sp, sp), None
         if "does not require grad" not in r["error"]:
             if "timeout" in r["error"]:
-                return None, (f"did not initialize: a 1-step start_point probe (sp={sp}) did not "
-                              f"complete within the {budget:.0f}s initialization budget")
+                # PHRASE IT AT THE SEARCH LEVEL, not the probe. The search (probes 0..sp) had the
+                # whole budget; probe sp got only what its predecessors left (`left`), so
+                # "a probe did not complete within the 1200s budget" over-claimed the time that
+                # one probe was given. The conclusion — this instance does not initialize inside
+                # the budget — is unchanged, and the substring `{budget}s initialization budget`
+                # is kept so `settled_error` still recognises the row on resume.
+                return None, _remember_failure(
+                    cache_dir, bench_file, T, max_sp, budget,
+                    f"did not initialize: the start_point search reached sp={sp} and exhausted "
+                    f"its {budget:.0f}s initialization budget ({left:.0f}s remained for that probe)")
             return _remember_sp(cache_dir, bench_file, T, max_sp, sp), None
     return None, f"no gradient path at any start_point<={max_sp}"
 
 
 def _remember_sp(cache_dir, bench_file, T, max_sp, sp):
-    """Store a SETTLED probe result. Failures to settle are deliberately not stored: a timeout
-    or a reclaimed VM is about the machine, not the circuit."""
+    """Store a SETTLED probe result (an int)."""
     if sp is not None:
         cache_store(cache_dir, bench_file, _sp_task(T, max_sp), sp)
     return sp
 
 
+def _remember_failure(cache_dir, bench_file, T, max_sp, budget, reason):
+    """Store a failure to settle, tagged with the budget it exhausted (see probe_start_point)."""
+    cache_store(cache_dir, bench_file, _sp_task(T, max_sp),
+                {"failed_at_budget": float(budget), "reason": reason})
+    return reason
+
+
+
+def _oom_task(T):
+    return {"probe": "oom_ceiling", "cycles": T}
+
+
+def known_ladder(cache_dir, bench_file, T, ladder=BATCH_LADDER):
+    """The batch ladder minus the rungs a previous walk on THIS card already saw OOM.
+
+    An out-of-memory rung is deterministic for a given circuit, depth and card, and on a
+    20M-node ITC'99 circuit each of the seven doomed rungs above the grant costs a full model
+    build — the 2026-09-05 completion run spent whole ~1 h VM lifetimes re-walking them after
+    every reclaim and never reached the run. Skipping a rung that is KNOWN to OOM changes
+    nothing about the grant (the largest rung that completes is still measured); it only stops
+    re-measuring a failure. Timeouts are NOT cached — they depend on the clock, not the card."""
+    hit = cache_peek(cache_dir, bench_file, _oom_task(T))
+    if isinstance(hit, dict) and hit.get("oom_min"):
+        trimmed = tuple(b for b in ladder if b < hit["oom_min"])
+        return trimmed or ladder[:1], hit["oom_min"]
+    return tuple(ladder), None
+
+
+def remember_oom_ceiling(cache_dir, bench_file, T, sweep, prior=None):
+    """Store the smallest rung the walk saw OOM (tightening a prior ceiling, never loosening)."""
+    ooms = [x["batch"] for x in (sweep or []) if "outofmemory" in str(x.get("error") or "").lower()]
+    if not ooms:
+        return prior
+    ceiling = min(ooms + ([prior] if prior else []))
+    cache_store(cache_dir, bench_file, _oom_task(T), {"oom_min": ceiling})
+    return ceiling
+
 
 def run_recurrent_once(rival, bench_file, key, T, steps, batch, start_point,
-                       timeout=DEFAULT_TIMEOUT, lr=None):
+                       timeout=DEFAULT_TIMEOUT, lr=None, cache_dir=None):
     """ONE measured run at the rival's granted batch — the LARGEST ladder rung that completes
     (rival_common.run_at_batch, which also fires this process's one discarded warmup run). The
     rungs tried are attached as `batch_sweep`: their unique/s is near-proportional to the batch
     (s386 T=25: 10k -> 300k is 18.6x, with model_runtime almost flat), so what the rival was
-    granted belongs in the row next to its score."""
+    granted belongs in the row next to its score. Rungs a previous walk saw OOM are skipped
+    (`known_ladder`) and the row says so in `oom_ceiling_cached`."""
+    ladder, prior = known_ladder(cache_dir, bench_file, T)
     r, sweep = run_at_batch(
         lambda b: run_recurrent(rival, bench_file, key, T, steps, b, start_point,
                                 timeout=timeout, lr=lr),
-        batch, tool="recurrent")
-    return dict(r, batch_sweep=sweep) if isinstance(r, dict) else r
+        batch, ladder=ladder, tool="recurrent")
+    remember_oom_ceiling(cache_dir, bench_file, T, sweep, prior)
+    if isinstance(r, dict):
+        r = dict(r, batch_sweep=sweep)
+        if prior:
+            r["oom_ceiling_cached"] = prior
+    return r
 
 
 def pick_batch(bench_file, T, budget_bytes=None):
@@ -667,6 +765,10 @@ def main():
     ap.add_argument("--timeout", type=float, default=DEFAULT_TIMEOUT,
                     help="per-run wall cap for the RIVAL subprocess (s); a run that exceeds it "
                          "is an error row, not a zero")
+    ap.add_argument("--init-budget", type=float, default=INIT_BUDGET_S,
+                    help="total wall for the start_point initialization search per instance "
+                         "(s), counted in the rival's e2e figure; a cell that does not "
+                         "initialize inside it is an error row naming the budget")
     ap.add_argument("--gpap-time-limit", type=float, default=60.0,
                     help="per-seed sampling wall cap for the GPAP side (s)")
     ap.add_argument("--cmsgen", default=None,
@@ -716,7 +818,25 @@ def main():
         try:
             out = json.load(open(args.output)) or []
             if args.retry_errors:      # drop them so the retry REPLACES rather than appends
-                out = [r for r in out if "error" not in (r.get("rcs") or {})]
+                # ...but ONLY the rows this protocol has not measured yet. An error row whose
+                # reason names the CURRENT budget (or is the deterministic "no gradient path")
+                # is a finished measurement, and re-paying it on every resume is what stalled
+                # the 2026-09-05 completion run: each ~1 h VM re-probed the previous VM's 1,200 s
+                # failures (the probe cache is only packed at stage end) and was reclaimed before
+                # it reached a new instance. The JSON row is the durable record; use it.
+                keep, retry = [], []
+                for r in out:
+                    err = (r.get("rcs") or {}).get("error")
+                    if not err:
+                        keep.append(r)
+                    elif settled_error(err, args.init_budget, args.timeout):
+                        keep.append(r)
+                    else:
+                        retry.append(r["name"])
+                out = keep
+                if retry:
+                    print(f"[resume] retrying {len(retry)} error row(s) not measured under this "
+                          f"budget: {', '.join(sorted(retry))}")
             done = {(r["name"], r.get("variant", "-")) for r in out}
             print(f"[resume] {len(out)} rows already in {args.output}")
         except Exception as e:      # noqa: BLE001 — a truncated checkpoint must not kill the run
@@ -796,8 +916,8 @@ def main():
         sim = sim_baseline(gpap_file, args.cycles, args.target_seed, pin_outputs=pin_n,
                            target=gpap_target)
         sp, why = probe_start_point(args.rival, rival_file, key, args.cycles,
-                                    cache_dir=cache_dir,                   # bounded, see above
-                                    run_timeout=args.timeout)
+                                    budget=args.init_budget,               # bounded, see above
+                                    cache_dir=cache_dir, run_timeout=args.timeout)
         if sp is None:
             # `why` is one of two rival outcomes under a stated rule (no gradient path, or did
             # not initialize within the budget); it is recorded verbatim, never as a zero.
@@ -805,7 +925,8 @@ def main():
         else:
             batch = pick_batch(rival_file, args.cycles)
             rcs = run_recurrent_once(args.rival, rival_file, key, args.cycles, steps,
-                                     batch, sp, timeout=args.timeout, lr=lr)
+                                     batch, sp, timeout=args.timeout, lr=lr,
+                                     cache_dir=cache_dir)
             rcs["steps_source"] = steps_src
             rcs["lr"], rcs["lr_source"] = lr, lr_src
             rcs["seed"], rcs["seed_source"] = RIVAL_SEED, "their flags.py default; one run"

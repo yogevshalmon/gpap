@@ -109,9 +109,10 @@ def test_encoders_are_separate_rows_and_neither_selects_the_other(tmp_path):
 
 
 def test_every_instance_is_counted_exactly_once(tmp_path):
-    """`inst` = n_gm + CMSGen=0 + GPAP=0 + both=0 + no-search + tiny-space + vacuous, under Table 1.
-    It was FALSE on 6 of 7 families: the degenerate cells were dropped from the geomean but left
-    inside `inst` and inside `wins`, so a reader adding the columns up came out short."""
+    """`inst` = n_gm + CMSGen=0 + GPAP=0 + both=0 + no-search + tiny-space + vacuous + CMSGen<30,
+    under Table 1. It was FALSE on 6 of 7 families: the degenerate cells were dropped from the
+    geomean but left inside `inst` and inside `wins`, so a reader adding the columns up came out
+    short."""
     d = stage(tmp_path, "seq-c25-rare", [
         row("a.bench"), row("b.bench"),                       # 2 in the geomean
         row("c.bench", cms=0, cms_sps=0),                     # CMSGen=0
@@ -120,14 +121,180 @@ def test_every_instance_is_counted_exactly_once(tmp_path):
         row("f.bench", dec=0, impl=0),                        # no-search
         row("b02.bench", sps=1e8),                            # vacuous pin
         row("g.bench", support=5),                            # tiny space: 2**5 < 1000
+        row("h.bench", cms=13, cms_sps=0.2),                  # CMSGen<30: a thin denominator
     ])
     v = cms_family(d, "seq-c25-rare", "tseitin")
-    assert v["inst"] == 8
+    assert v["inst"] == 9
     assert (v["n_gm"] + v["inf"] + v["gpap0"] + v["both0"] + v["free"] + v["vac"]
-            + v["tiny"]) == v["inst"]
+            + v["tiny"] + v["cms_thin"]) == v["inst"]
+    assert v["cms_thin_names"] == ["h"]
     # and the win count is over the same rows, not over the pre-screen set
     assert v["n"] == v["n_gm"] + v["inf"] + v["gpap0"] == 4
     assert v["wins"] == 3                                     # a, b, and the CMSGen-zero
+
+
+def test_the_thin_denominator_floor_is_the_same_on_both_sides_of_both_tables(tmp_path):
+    """Table 2 screens a rival that found fewer than MIN_SOLUTIONS solutions (`rival<30`);
+    Table 1 must hold CMSGen to the SAME floor, in its own column that sums with the rest.
+    Until 2026-09-05 the CMSGen side was only narrated in a caveat: `b14` (13 CMSGen samples in
+    60 s) sat inside the rare-pin geomean at 212x and full weight. The screen is conservative —
+    every cell it removes is a win of ours."""
+    import json as _json
+
+    from eval.artifact.paper_tables import MIN_SOLUTIONS, RIVAL_MIN_SOLUTIONS, rival_cms_family
+
+    assert RIVAL_MIN_SOLUTIONS == MIN_SOLUTIONS == 30
+    rows = [rrow("a"), rrow("b"), rrow("b14", cms=13, cms_sps=0.2, sps=45.0)]
+    (tmp_path / "rivals_recurrent_rare.json").write_text(_json.dumps(rows))
+    v = rival_cms_family(str(tmp_path), "recurrent_rare", "rcs")
+    assert v["cms_thin"] == 1 and v["cms_thin_names"] == ["b14"]
+    assert v["n_gm"] == 2, "the thin cell must not enter the geomean"
+    assert (v["n_gm"] + v["inf"] + v["gpap0"] + v["both0"] + v["free"] + v["vac"] + v["tiny"]
+            + v["unsat"] + v["cms_thin"]) == v["inst"] == 3
+    # and Table 3 is over the SAME rows — the one thing the identity can catch
+    from eval.artifact.paper_tables import rival_prop_rates
+    p = rival_prop_rates(str(tmp_path), "recurrent_rare", "rcs")
+    assert p["n"] == v["n_gm"] == 2
+
+
+def test_table_2_e2e_is_one_definition_charged_the_same_way_on_both_sides(tmp_path):
+    """Table 2's `e2e` has been wrong three ways in three rounds: dividing GPAP's wall by the
+    rival's UNCHANGED timer (0.8x); then by the rival's whole SUBPROCESS wall, which charged it
+    ~4.5 s of interpreter + CUDA start-up per cell that GPAP's in-process wall never pays, while
+    our side subtracted its delivery and carried no encoding (7.6x on cells whose whole wall is
+    under a second). ONE definition now: each side's whole wall on the instance, process
+    start-up excluded on both — GPAP charged encoding and delivery; the rival its timed loop plus
+    its non-timed wall above the tool's start-up floor, the smallest non-timed wall it showed."""
+    import json as _json
+
+    from eval.artifact.paper_tables import rival_family
+
+    def cell(name, unique, runtime, wall, encode_s, n_models, rate_with_delivery):
+        r = rrow(name, sps=1000.0)
+        r["gpap"].update({"sps_e2e": 500.0, "unique_per_s_est": 1000.0, "n_models": n_models,
+                          "median_seed": 5,
+                          "seeds": [{"seed": 5, "sps_e2e": 500.0,
+                                     "sps_e2e_with_delivery": rate_with_delivery}]})
+        r["cnf"] = {"encode_s": encode_s}
+        r["demotic"] = {"unique": unique, "runtime_s": runtime, "wall_s": wall,
+                        "unique_per_s": unique / runtime, "num_inputs": 40}
+        return r
+
+    # A: the tool's smallest non-timed wall (4 s) — pure start-up, so its e2e is its steady state.
+    # B: 7 s non-timed, of which 3 s exceed the floor (a real model build) and are charged.
+    a = cell("c1", unique=100, runtime=1.0, wall=5.0, encode_s=0.0, n_models=1000,
+             rate_with_delivery=500.0)
+    b = cell("c2", unique=200, runtime=2.0, wall=9.0, encode_s=1.0, n_models=1000,
+             rate_with_delivery=400.0)
+    (tmp_path / "rivals_demotic_native.json").write_text(_json.dumps([a, b]))
+    v = rival_family(str(tmp_path), "demotic_native", "demotic")
+    assert abs(v["startup_s"] - 4.0) < 1e-9, "the floor is the smallest non-timed wall"
+    # GPAP A: 1000 models / (1000/500 + 0) = 500/s; rival A: 100 / (1.0 + 0) = 100/s -> 5x
+    # GPAP B: 1000 / (1000/400 + 1.0) = 285.7/s; rival B: 200 / (2.0 + 3.0) = 40/s -> 7.14x
+    ga, gb = 500.0, 1000.0 / (1000.0 / 400.0 + 1.0)
+    ea, eb = ga / 100.0, gb / 40.0
+    assert abs(v["gm_e2e"] - (ea * eb) ** 0.5) < 1e-9, "e2e: start-up excluded on both sides"
+    # the printed upper bound charges the rival its WHOLE subprocess wall
+    na, nb = ga / (100.0 / 5.0), gb / (200.0 / 9.0)
+    assert abs(v["gm_e2e_nosub"] - (na * nb) ** 0.5) < 1e-9
+    assert v["e2e_nodelivery"] == 0
+    # a row without the delivery split is counted, not silently accepted
+    b["gpap"]["seeds"][0].pop("sps_e2e_with_delivery")
+    (tmp_path / "rivals_demotic_native.json").write_text(_json.dumps([a, b]))
+    assert rival_family(str(tmp_path), "demotic_native", "demotic")["e2e_nodelivery"] == 1
+
+
+def test_a_cell_whose_sign_is_inside_gpap_seed_band_is_a_tie_not_a_win(tmp_path):
+    """`wins 20/20` beside a caveat calling two of those cells ties contradicted itself. A cell
+    whose ratio at our slowest and fastest seed straddles 1.0 is counted in `ties`, and `wins`
+    excludes it; a clear loss stays a loss."""
+    import json as _json
+
+    from eval.artifact.paper_tables import rival_family, seed_band, straddles
+
+    def cell(name, sps, lo, hi, rate):
+        r = rrow(name, sps=sps)
+        r["gpap"].update({"unique_per_s_est": sps, "sps_min": lo, "sps_max": hi})
+        r["demotic"] = {"unique": 1000, "runtime_s": 1.0, "wall_s": 3.0, "unique_per_s": rate,
+                        "num_inputs": 40}
+        return r
+    tie = cell("t", sps=120.0, lo=80.0, hi=130.0, rate=100.0)     # 1.2x, band 0.8–1.3x
+    win = cell("w", sps=300.0, lo=280.0, hi=320.0, rate=100.0)    # 3.0x, band 2.8–3.2x
+    loss = cell("l", sps=84.0, lo=68.0, hi=90.0, rate=100.0)      # 0.84x, band 0.68–0.90x
+    assert straddles(seed_band(tie["gpap"], 120.0, 100.0))
+    assert not straddles(seed_band(loss["gpap"], 84.0, 100.0))
+    (tmp_path / "rivals_demotic_native.json").write_text(_json.dumps([tie, win, loss]))
+    v = rival_family(str(tmp_path), "demotic_native", "demotic")
+    assert v["ties"] == 1 and v["wins"] == 1 and v["n"] == 3, (v["ties"], v["wins"], v["n"])
+    assert v["gm_lo"] < v["gm"] < v["gm_hi"]
+
+
+def test_the_circuit_variant_sentence_is_read_off_the_rows(tmp_path):
+    """The methods paragraph said every rival was handed the ABC-simplified netlist AS WELL AS
+    the raw one and scored on whichever suited it — over a campaign whose 82 rows were all
+    `variant: abc`. A fairness procedure asserted and not performed. The sentence must come
+    from the rows: one variant on every row names that variant and says the axis was not run;
+    two variants says the tie-break was applied."""
+    import json as _json
+    import types
+
+    from eval.artifact import paper_tables
+
+    def render(rows):
+        (tmp_path / "rivals_demotic_native.json").write_text(_json.dumps(rows))
+        out = tmp_path / "r.md"
+        args = types.SimpleNamespace(cmsgen=None, cmsgen_ref=None, rivals=str(tmp_path),
+                                     uniformity=[], barbarik=[], recheck=None, soft=None,
+                                     out_md=str(out), out_tex=None)
+        paper_tables.build(args)
+        return out.read_text()
+
+    one = render([dict(rrow("c432"), variant="abc")])
+    assert "whichever suits it" not in one
+    assert "`variant: abc` on every row" in one and "raw-netlist axis was not run" in one
+    two = render([dict(rrow("c432"), variant="abc"), dict(rrow("c432"), variant="raw")])
+    assert "whichever suits it" in two
+
+
+def test_a_rival_failure_is_described_as_a_budget_statement(tmp_path):
+    """Every Recurrent 'failure' of the 2026-09-04 campaign was one thing — the initialization
+    budget expiring — and the caveat called them 'instances the rival cannot process', which our
+    own §11 measurement contradicts (`b14` initializes at a longer cap and delivers). A cell
+    that did not finish inside OUR budget is a statement about the budget."""
+    import json as _json
+    import types
+
+    from eval.artifact import paper_tables
+
+    r = rrow("b14")
+    r["rcs"] = {"error": "did not initialize: a 1-step start_point probe (sp=1) did not "
+                         "complete within the 300s initialization budget"}
+    (tmp_path / "rivals_recurrent_table.json").write_text(_json.dumps([r]))
+    out = tmp_path / "r.md"
+    args = types.SimpleNamespace(cmsgen=None, cmsgen_ref=None, rivals=str(tmp_path),
+                                 uniformity=[], barbarik=[], recheck=None, soft=None,
+                                 out_md=str(out), out_tex=None)
+    paper_tables.build(args)
+    md = out.read_text()
+    assert "cannot process" not in md
+    assert "statement about OUR budget" in md and "re-runnable at a longer one" in md
+
+
+def test_the_markdown_and_latex_ledger_prose_state_the_same_sum():
+    """The LaTeX caption gained `+ unsat` and the Markdown paragraph did not — the third time a
+    rule fixed in one emitter was not carried to its twin. Every bucket the tables print must
+    appear in BOTH prose formulas."""
+    import inspect
+
+    from eval.artifact import paper_tables
+
+    src = inspect.getsource(paper_tables)
+    assert "+ vacuous + unsat + CMSGen<30" in src.replace("\"\n         \"", ""), \
+        "the Markdown ledger formula is short of the printed columns"
+    assert r"\text{vac.} + \text{unsat} + \text{C}{<}30$" in src, \
+        "the LaTeX ledger formula is short of the printed columns"
+    # and the algebraic-identity caveat lives in both Table 3 texts
+    assert src.count("ALGEBRAIC") >= 2, "the Table 3 caveat is in one emitter only"
 
 
 def test_tiny_solution_space_is_screened_in_BOTH_tables(tmp_path):
@@ -967,14 +1134,17 @@ def test_the_generator_survives_a_stage_whose_every_cell_is_degenerate(tmp_path)
 def test_table_2_prints_the_end_to_end_ratio_beside_the_steady_state_one(tmp_path):
     """The rival-facing ratio is GPAP's STEADY-STATE unique/s over the rival's metric — it
     excludes construction, mining and warm-up, as the rival's model_runtime excludes its model
-    build. Table 2 prints the e2e ratio (GPAP's whole wall) beside it, computed over the same
-    `ok` cells with the same distinct fraction; a paragraph once claimed the first column
-    'includes construction'. Here every seed's e2e rate is half its steady state."""
+    build. Table 2 prints the e2e ratio beside it — GPAP's whole wall over the RIVAL'S whole
+    wall (2026-09-05; it used to be over the rival's unchanged timer; since 2026-09-06 with the
+    fixed process start-up excluded on both sides) — computed over the same `ok` cells with the
+    same distinct fraction; a paragraph once claimed the first column 'includes construction'.
+    Here every seed's e2e rate is half its steady state and the rival's non-timed wall is zero,
+    so its whole-wall rate equals its timed rate and e2e must read exactly gm / 2."""
     from eval.artifact.paper_tables import rival_family
 
     rows = [rrow("s386", sps=1e6), rrow("b12", sps=2e5), rrow("b19", p_acc=1.0)]
     for r in rows:
-        r["rcs"]["unique_per_s"] = 1e3
+        r["rcs"].update({"unique_per_s": 1e3, "unique": 1e3, "runtime_s": 1.0, "wall_s": 1.0})
     (tmp_path / "rivals_recurrent_rare.json").write_text(json.dumps(rows))
     v = rival_family(str(tmp_path), "recurrent_rare", "rcs")
     assert v["n"] == 2 and v["gm"] == pytest.approx((1e3 * 2e2) ** 0.5)
@@ -1145,11 +1315,11 @@ def test_the_emitted_latex_ledger_sums_to_the_cell_count(tmp_path):
         if not line.startswith("    ") or "&" not in line or "multicolumn" in line:
             continue
         col = [c.strip() for c in line.strip().rstrip("\\\\").split("&")]
-        if col[0].startswith(("ISCAS", "ITC")) and len(col) == 15:       # Table 1
-            total, parts = int(col[4]), [int(col[5])] + [int(c) for c in col[8:]
+        if col[0].startswith(("ISCAS", "ITC")) and len(col) == 20:       # Table 1 (+C<30, paper set, e2e, pre%, refused)
+            total, parts = int(col[4]), [int(col[5])] + [int(c) for c in col[11:19]
                                                          if re.fullmatch(r"\d+", c)]
-        elif col[0] in ("DEMOTIC", "Recurrent-CircuitSAT") and len(col) == 17:   # Table 2
-            total, parts = int(col[2]), [int(col[3])] + [int(c) for c in col[7:]
+        elif col[0] in ("DEMOTIC", "Recurrent-CircuitSAT") and len(col) == 20:   # Table 2 (+paper set, ties)
+            total, parts = int(col[2]), [int(col[3])] + [int(c) for c in col[9:]
                                                          if re.fullmatch(r"\d+", c)]
         else:
             continue
@@ -1179,8 +1349,48 @@ def test_the_generated_methodology_text_describes_the_harness_that_exists():
         assert phrase not in src, f"the methods paragraph still describes the old harness: {phrase!r}"
     # phrases short enough not to straddle a string-literal break in the source
     for phrase in ["LARGEST rung of that ladder it can run to completion",
-                   "deduplicates", "discarded before anything is", "`lr`"]:
+                   "deduplicates", "discarded before anything is", "`lr`",
+                   "SHIPPED script configuration", "1,200 s budget per instance",
+                   "not a search for the rival's fastest rung"]:
         assert phrase in src, f"the methods paragraph does not state the current rule: {phrase!r}"
+
+
+def test_the_rival_calibration_evidence_is_printed_not_just_pointed_at(tmp_path):
+    """The methods prose says the papers' values are "measured beside" the shipped setting. For
+    one release that measurement lived only in `rivals_steps_calibration.json`, a file the tables
+    named and never read — so RESULTS.md could not say whether the setting the campaign used was
+    the better one FOR THE RIVAL. The generator now prints every arm, its ratio to the pinned arm
+    and the verdict, from the same run that prints the tables."""
+    import inspect
+    import json as _json
+
+    from eval.artifact import paper_tables
+    from eval.artifact.paper_tables import rival_calibration
+
+    assert rival_calibration(str(tmp_path)) == [], "no file -> nothing printed, no crash"
+    (tmp_path / "rivals_steps_calibration.json").write_text(_json.dumps({
+        "generated": "x", "tools": {
+            "recurrent": {"pinned": 1, "pinned_source": "their script", "measured_best": 1,
+                          "agrees": True, "cycles": 25,
+                          "arms": {"1": {"unique_per_s": 1000.0, "wall_s": 10.0, "error": None},
+                                   "5": {"unique_per_s": 400.0, "wall_s": 20.0, "error": None},
+                                   "10": {"unique_per_s": 120.0, "wall_s": 30.0, "error": None},
+                                   "paper(5,50)": {"unique_per_s": 300.0, "wall_s": 25.0,
+                                                   "error": None, "steps": 5, "lr": 50.0}}},
+            "demotic": {"pinned": 1, "pinned_source": "their script", "measured_best": 10,
+                        "agrees": False, "cycles": 25,
+                        "arms": {"1": {"unique_per_s": 100.0, "wall_s": 1.0, "error": None},
+                                 "10": {"unique_per_s": 150.0, "wall_s": 2.0, "error": None}}}}}))
+    md = "\n".join(rival_calibration(str(tmp_path)))
+    for needle in ["| 1 | 1,000 | 10 | 1.00x | **pinned** |",     # the pinned arm, ratio 1
+                   "| 5 | 400 | 20 | 0.40x |",                    # the paper's steps, singly
+                   "| paper(5,50) | 300 | 25 | 0.30x | paper (paired) |",
+                   "tie-break HOLDS",                             # recurrent's verdict
+                   "**FLIP**: 10 measured faster than the pinned 1",  # demotic's, printed not acted on
+                   "EVIDENCE, not configuration"]:
+        assert needle in md, f"calibration section lacks {needle!r}:\n{md}"
+    # ...and build() actually emits it under --rivals (source-inspected: build has no return)
+    assert "rival_calibration(args.rivals)" in inspect.getsource(paper_tables.build)
 
 
 def test_the_e2e_column_belongs_to_the_same_run_as_the_rate_it_is_paired_with():
