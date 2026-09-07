@@ -1,5 +1,5 @@
 {
- "generated": "2026-09-06 12:55",
+ "generated": "2026-09-07 04:53",
  "campaign": "l4_protocol_20260904",
  "rule": "batch = the largest rung of the ladder the rival ran to completion, walked down from the top and rejected only on feasibility; start_point = where Recurrent's initialization settled. Read off the campaign rows, never recomputed. An entry without a batch is a recorded rival failure and is re-measured, not pinned.",
  "ladder": [
@@ -611,6 +611,351 @@
    "stage": "recurrent_rare",
    "start_point": 0
   },
+  "b01|rare|50|abc": {
+   "batch": 1000000,
+   "rungs_tried": [
+    30000000,
+    10000000,
+    3000000,
+    1000000
+   ],
+   "oom_min": 3000000,
+   "unique_per_s": 187674.48590480085,
+   "stage": "recurrent_rare_t50",
+   "start_point": 1
+  },
+  "b02|rare|50|abc": {
+   "batch": 1000000,
+   "rungs_tried": [
+    30000000,
+    10000000,
+    3000000,
+    1000000
+   ],
+   "oom_min": 3000000,
+   "unique_per_s": 1017091.5038017015,
+   "stage": "recurrent_rare_t50",
+   "start_point": 2
+  },
+  "b03|rare|50|abc": {
+   "batch": 300000,
+   "rungs_tried": [
+    30000000,
+    10000000,
+    3000000,
+    1000000,
+    300000
+   ],
+   "oom_min": 1000000,
+   "unique_per_s": 271380.04360891366,
+   "stage": "recurrent_rare_t50",
+   "start_point": 4
+  },
+  "b04|rare|50|abc": {
+   "batch": 30000,
+   "rungs_tried": [
+    30000000,
+    10000000,
+    3000000,
+    1000000,
+    300000,
+    100000,
+    30000
+   ],
+   "oom_min": 100000,
+   "unique_per_s": 391.61732554688354,
+   "stage": "recurrent_rare_t50",
+   "start_point": 1
+  },
+  "b05|rare|50|abc": {
+   "batch": 100000,
+   "rungs_tried": [
+    30000000,
+    10000000,
+    3000000,
+    1000000,
+    300000,
+    100000
+   ],
+   "oom_min": 300000,
+   "unique_per_s": 24578.592739926105,
+   "stage": "recurrent_rare_t50",
+   "start_point": 1
+  },
+  "b06|rare|50|abc": {
+   "batch": 1000000,
+   "rungs_tried": [
+    30000000,
+    10000000,
+    3000000,
+    1000000
+   ],
+   "oom_min": 3000000,
+   "unique_per_s": 1.672472403843641,
+   "stage": "recurrent_rare_t50",
+   "start_point": 1
+  },
+  "b07|rare|50|abc": {
+   "batch": 100000,
+   "rungs_tried": [
+    30000000,
+    10000000,
+    3000000,
+    1000000,
+    300000,
+    100000
+   ],
+   "oom_min": 300000,
+   "unique_per_s": 3457.5302121072295,
+   "stage": "recurrent_rare_t50",
+   "start_point": 1
+  },
+  "b08|rare|50|abc": {
+   "batch": 100000,
+   "rungs_tried": [
+    30000000,
+    10000000,
+    3000000,
+    1000000,
+    300000,
+    100000
+   ],
+   "oom_min": 300000,
+   "unique_per_s": 468.3634450326026,
+   "stage": "recurrent_rare_t50",
+   "start_point": 1
+  },
+  "b09|rare|50|abc": {
+   "batch": 300000,
+   "rungs_tried": [
+    30000000,
+    10000000,
+    3000000,
+    1000000,
+    300000
+   ],
+   "oom_min": 1000000,
+   "unique_per_s": 2960.0243361208504,
+   "stage": "recurrent_rare_t50",
+   "start_point": 2
+  },
+  "b10|rare|50|abc": {
+   "batch": 100000,
+   "rungs_tried": [
+    30000000,
+    10000000,
+    3000000,
+    1000000,
+    300000,
+    100000
+   ],
+   "oom_min": 300000,
+   "unique_per_s": 816.1083957408414,
+   "stage": "recurrent_rare_t50",
+   "start_point": 1
+  },
+  "b11|rare|50|abc": {
+   "batch": 30000,
+   "rungs_tried": [
+    30000000,
+    10000000,
+    3000000,
+    1000000,
+    300000,
+    100000,
+    30000
+   ],
+   "oom_min": 100000,
+   "unique_per_s": 0.0,
+   "stage": "recurrent_rare_t50",
+   "start_point": 2
+  },
+  "b12|rare|50|abc": {
+   "batch": 30000,
+   "rungs_tried": [
+    30000000,
+    10000000,
+    3000000,
+    1000000,
+    300000,
+    100000,
+    30000
+   ],
+   "oom_min": 100000,
+   "unique_per_s": 0.4184976843824621,
+   "stage": "recurrent_rare_t50",
+   "start_point": 1
+  },
+  "b13|rare|50|abc": {
+   "batch": 100000,
+   "rungs_tried": [
+    30000000,
+    10000000,
+    3000000,
+    1000000,
+    300000,
+    100000
+   ],
+   "oom_min": 300000,
+   "unique_per_s": 3267.761713009396,
+   "stage": "recurrent_rare_t50",
+   "start_point": 1
+  },
+  "b14|rare|50|abc": {
+   "batch": null,
+   "error": "did not initialize: the start_point search reached sp=1 and exhausted its 1200s initialization budget (1190s remained for that probe)",
+   "stage": "recurrent_rare_t50"
+  },
+  "b15|rare|50|abc": {
+   "batch": null,
+   "error": "did not initialize: the start_point search reached sp=2 and exhausted its 1200s initialization budget (1190s remained for that probe)",
+   "stage": "recurrent_rare_t50"
+  },
+  "b17|rare|50|abc": {
+   "batch": null,
+   "error": "did not initialize: the start_point search reached sp=2 and exhausted its 1200s initialization budget (1178s remained for that probe)",
+   "stage": "recurrent_rare_t50"
+  },
+  "b18|rare|50|abc": {
+   "batch": null,
+   "error": "did not initialize: the start_point search reached sp=0 and exhausted its 1200s initialization budget (1200s remained for that probe)",
+   "stage": "recurrent_rare_t50"
+  },
+  "b19|rare|50|abc": {
+   "batch": null,
+   "error": "did not initialize: the start_point search reached sp=2 and exhausted its 1200s initialization budget (1124s remained for that probe)",
+   "stage": "recurrent_rare_t50"
+  },
+  "b20|rare|50|abc": {
+   "batch": null,
+   "error": "did not initialize: the start_point search reached sp=1 and exhausted its 1200s initialization budget (1189s remained for that probe)",
+   "stage": "recurrent_rare_t50"
+  },
+  "b21|rare|50|abc": {
+   "batch": null,
+   "error": "did not initialize: the start_point search reached sp=1 and exhausted its 1200s initialization budget (1195s remained for that probe)",
+   "stage": "recurrent_rare_t50"
+  },
+  "b22|rare|50|abc": {
+   "batch": null,
+   "error": "did not initialize: the start_point search reached sp=1 and exhausted its 1200s initialization budget (1189s remained for that probe)",
+   "stage": "recurrent_rare_t50"
+  },
+  "s1196|rare|50|abc": {
+   "batch": 300000,
+   "rungs_tried": [
+    30000000,
+    10000000,
+    3000000,
+    1000000,
+    300000
+   ],
+   "oom_min": 3000000,
+   "unique_per_s": 1.7123177920584514,
+   "stage": "recurrent_rare_t50",
+   "start_point": 0
+  },
+  "s15850.1|rare|50|abc": {
+   "batch": 10000,
+   "rungs_tried": [
+    30000000,
+    10000000,
+    3000000,
+    1000000,
+    300000,
+    100000,
+    30000,
+    10000
+   ],
+   "oom_min": 30000,
+   "unique_per_s": 0.0,
+   "stage": "recurrent_rare_t50",
+   "start_point": 0
+  },
+  "s208.1|rare|50|abc": {
+   "batch": 300000,
+   "rungs_tried": [
+    30000000,
+    10000000,
+    3000000,
+    1000000,
+    300000
+   ],
+   "oom_min": 3000000,
+   "unique_per_s": 537560.0922230987,
+   "stage": "recurrent_rare_t50",
+   "start_point": 0
+  },
+  "s35932|rare|50|abc": {
+   "batch": null,
+   "error": "did not initialize: the start_point search reached sp=0 and exhausted its 1200s initialization budget (1200s remained for that probe)",
+   "stage": "recurrent_rare_t50"
+  },
+  "s38584|rare|50|abc": {
+   "batch": null,
+   "error": "did not initialize: the start_point search reached sp=0 and exhausted its 1200s initialization budget (1200s remained for that probe)",
+   "stage": "recurrent_rare_t50"
+  },
+  "s386|rare|50|abc": {
+   "batch": 300000,
+   "rungs_tried": [
+    30000000,
+    10000000,
+    3000000,
+    1000000,
+    300000
+   ],
+   "oom_min": 1000000,
+   "unique_per_s": 131.14278888143429,
+   "stage": "recurrent_rare_t50",
+   "start_point": 0
+  },
+  "s4863|rare|50|abc": {
+   "batch": 10000,
+   "rungs_tried": [
+    30000000,
+    10000000,
+    3000000,
+    1000000,
+    300000,
+    100000,
+    30000,
+    10000
+   ],
+   "oom_min": 30000,
+   "unique_per_s": 0.015872400487802907,
+   "stage": "recurrent_rare_t50",
+   "start_point": 0
+  },
+  "s526|rare|50|abc": {
+   "batch": 300000,
+   "rungs_tried": [
+    30000000,
+    10000000,
+    3000000,
+    1000000,
+    300000
+   ],
+   "oom_min": 1000000,
+   "unique_per_s": 282552.32279819174,
+   "stage": "recurrent_rare_t50",
+   "start_point": 2
+  },
+  "s832|rare|50|abc": {
+   "batch": 100000,
+   "rungs_tried": [
+    30000000,
+    10000000,
+    3000000,
+    1000000,
+    300000,
+    100000
+   ],
+   "oom_min": 300000,
+   "unique_per_s": 0.0,
+   "stage": "recurrent_rare_t50",
+   "start_point": 0
+  },
   "b01|table|25|abc": {
    "batch": 1000000,
    "rungs_tried": [
@@ -971,6 +1316,351 @@
    "oom_min": 1000000,
    "unique_per_s": 302434.47649686306,
    "stage": "recurrent_table",
+   "start_point": 0
+  },
+  "b01|table|50|abc": {
+   "batch": 1000000,
+   "rungs_tried": [
+    30000000,
+    10000000,
+    3000000,
+    1000000
+   ],
+   "oom_min": 3000000,
+   "unique_per_s": 256092.40497933415,
+   "stage": "recurrent_table_t50",
+   "start_point": 1
+  },
+  "b02|table|50|abc": {
+   "batch": 1000000,
+   "rungs_tried": [
+    30000000,
+    10000000,
+    3000000,
+    1000000
+   ],
+   "oom_min": 3000000,
+   "unique_per_s": 1025969.3663500982,
+   "stage": "recurrent_table_t50",
+   "start_point": 2
+  },
+  "b03|table|50|abc": {
+   "batch": 300000,
+   "rungs_tried": [
+    30000000,
+    10000000,
+    3000000,
+    1000000,
+    300000
+   ],
+   "oom_min": 1000000,
+   "unique_per_s": 271153.4704334493,
+   "stage": "recurrent_table_t50",
+   "start_point": 4
+  },
+  "b04|table|50|abc": {
+   "batch": 30000,
+   "rungs_tried": [
+    30000000,
+    10000000,
+    3000000,
+    1000000,
+    300000,
+    100000,
+    30000
+   ],
+   "oom_min": 100000,
+   "unique_per_s": 5330.463133246983,
+   "stage": "recurrent_table_t50",
+   "start_point": 1
+  },
+  "b05|table|50|abc": {
+   "batch": 100000,
+   "rungs_tried": [
+    30000000,
+    10000000,
+    3000000,
+    1000000,
+    300000,
+    100000
+   ],
+   "oom_min": 300000,
+   "unique_per_s": 10922.953366440497,
+   "stage": "recurrent_table_t50",
+   "start_point": 1
+  },
+  "b06|table|50|abc": {
+   "batch": 1000000,
+   "rungs_tried": [
+    30000000,
+    10000000,
+    3000000,
+    1000000
+   ],
+   "oom_min": 3000000,
+   "unique_per_s": 1159429.4854885358,
+   "stage": "recurrent_table_t50",
+   "start_point": 1
+  },
+  "b07|table|50|abc": {
+   "batch": 100000,
+   "rungs_tried": [
+    30000000,
+    10000000,
+    3000000,
+    1000000,
+    300000,
+    100000
+   ],
+   "oom_min": 300000,
+   "unique_per_s": 34327.193168138845,
+   "stage": "recurrent_table_t50",
+   "start_point": 1
+  },
+  "b08|table|50|abc": {
+   "batch": 100000,
+   "rungs_tried": [
+    30000000,
+    10000000,
+    3000000,
+    1000000,
+    300000,
+    100000
+   ],
+   "oom_min": 300000,
+   "unique_per_s": 1565.9794719464276,
+   "stage": "recurrent_table_t50",
+   "start_point": 1
+  },
+  "b09|table|50|abc": {
+   "batch": 300000,
+   "rungs_tried": [
+    30000000,
+    10000000,
+    3000000,
+    1000000,
+    300000
+   ],
+   "oom_min": 1000000,
+   "unique_per_s": 136521.07484040805,
+   "stage": "recurrent_table_t50",
+   "start_point": 2
+  },
+  "b10|table|50|abc": {
+   "batch": 100000,
+   "rungs_tried": [
+    30000000,
+    10000000,
+    3000000,
+    1000000,
+    300000,
+    100000
+   ],
+   "oom_min": 300000,
+   "unique_per_s": 82130.79863848144,
+   "stage": "recurrent_table_t50",
+   "start_point": 1
+  },
+  "b11|table|50|abc": {
+   "batch": 30000,
+   "rungs_tried": [
+    30000000,
+    10000000,
+    3000000,
+    1000000,
+    300000,
+    100000,
+    30000
+   ],
+   "oom_min": 100000,
+   "unique_per_s": 3720.7592666863675,
+   "stage": "recurrent_table_t50",
+   "start_point": 2
+  },
+  "b12|table|50|abc": {
+   "batch": 30000,
+   "rungs_tried": [
+    30000000,
+    10000000,
+    3000000,
+    1000000,
+    300000,
+    100000,
+    30000
+   ],
+   "oom_min": 100000,
+   "unique_per_s": 4426.7860925788345,
+   "stage": "recurrent_table_t50",
+   "start_point": 1
+  },
+  "b13|table|50|abc": {
+   "batch": 100000,
+   "rungs_tried": [
+    30000000,
+    10000000,
+    3000000,
+    1000000,
+    300000,
+    100000
+   ],
+   "oom_min": 300000,
+   "unique_per_s": 62248.395779468934,
+   "stage": "recurrent_table_t50",
+   "start_point": 1
+  },
+  "b14|table|50|abc": {
+   "batch": null,
+   "error": "did not initialize: the start_point search reached sp=1 and exhausted its 1200s initialization budget (1190s remained for that probe)",
+   "stage": "recurrent_table_t50"
+  },
+  "b15|table|50|abc": {
+   "batch": null,
+   "error": "did not initialize: the start_point search reached sp=2 and exhausted its 1200s initialization budget (1190s remained for that probe)",
+   "stage": "recurrent_table_t50"
+  },
+  "b17|table|50|abc": {
+   "batch": null,
+   "error": "did not initialize: the start_point search reached sp=2 and exhausted its 1200s initialization budget (1180s remained for that probe)",
+   "stage": "recurrent_table_t50"
+  },
+  "b18|table|50|abc": {
+   "batch": null,
+   "error": "did not initialize: the start_point search reached sp=0 and exhausted its 1200s initialization budget (1200s remained for that probe)",
+   "stage": "recurrent_table_t50"
+  },
+  "b19|table|50|abc": {
+   "batch": null,
+   "error": "did not initialize: the start_point search reached sp=2 and exhausted its 1200s initialization budget (1121s remained for that probe)",
+   "stage": "recurrent_table_t50"
+  },
+  "b20|table|50|abc": {
+   "batch": null,
+   "error": "did not initialize: the start_point search reached sp=1 and exhausted its 1200s initialization budget (1194s remained for that probe)",
+   "stage": "recurrent_table_t50"
+  },
+  "b21|table|50|abc": {
+   "batch": null,
+   "error": "did not initialize: the start_point search reached sp=1 and exhausted its 1200s initialization budget (1189s remained for that probe)",
+   "stage": "recurrent_table_t50"
+  },
+  "b22|table|50|abc": {
+   "batch": null,
+   "error": "did not initialize: the start_point search reached sp=1 and exhausted its 1200s initialization budget (1194s remained for that probe)",
+   "stage": "recurrent_table_t50"
+  },
+  "s1196|table|50|abc": {
+   "batch": 300000,
+   "rungs_tried": [
+    30000000,
+    10000000,
+    3000000,
+    1000000,
+    300000
+   ],
+   "oom_min": 3000000,
+   "unique_per_s": 490.83154986041376,
+   "stage": "recurrent_table_t50",
+   "start_point": 0
+  },
+  "s15850.1|table|50|abc": {
+   "batch": 10000,
+   "rungs_tried": [
+    30000000,
+    10000000,
+    3000000,
+    1000000,
+    300000,
+    100000,
+    30000,
+    10000
+   ],
+   "oom_min": 30000,
+   "unique_per_s": 574.601049602845,
+   "stage": "recurrent_table_t50",
+   "start_point": 0
+  },
+  "s208.1|table|50|abc": {
+   "batch": 300000,
+   "rungs_tried": [
+    30000000,
+    10000000,
+    3000000,
+    1000000,
+    300000
+   ],
+   "oom_min": 3000000,
+   "unique_per_s": 525961.9012093123,
+   "stage": "recurrent_table_t50",
+   "start_point": 0
+  },
+  "s35932|table|50|abc": {
+   "batch": null,
+   "error": "did not initialize: the start_point search reached sp=0 and exhausted its 1200s initialization budget (1200s remained for that probe)",
+   "stage": "recurrent_table_t50"
+  },
+  "s38584|table|50|abc": {
+   "batch": null,
+   "error": "did not initialize: the start_point search reached sp=0 and exhausted its 1200s initialization budget (1200s remained for that probe)",
+   "stage": "recurrent_table_t50"
+  },
+  "s386|table|50|abc": {
+   "batch": 300000,
+   "rungs_tried": [
+    30000000,
+    10000000,
+    3000000,
+    1000000,
+    300000
+   ],
+   "oom_min": 1000000,
+   "unique_per_s": 327401.23941442947,
+   "stage": "recurrent_table_t50",
+   "start_point": 0
+  },
+  "s4863|table|50|abc": {
+   "batch": 10000,
+   "rungs_tried": [
+    30000000,
+    10000000,
+    3000000,
+    1000000,
+    300000,
+    100000,
+    30000,
+    10000
+   ],
+   "oom_min": 30000,
+   "unique_per_s": 1267.2615296022893,
+   "stage": "recurrent_table_t50",
+   "start_point": 0
+  },
+  "s526|table|50|abc": {
+   "batch": 300000,
+   "rungs_tried": [
+    30000000,
+    10000000,
+    3000000,
+    1000000,
+    300000
+   ],
+   "oom_min": 1000000,
+   "unique_per_s": 284032.66742582776,
+   "stage": "recurrent_table_t50",
+   "start_point": 2
+  },
+  "s832|table|50|abc": {
+   "batch": 100000,
+   "rungs_tried": [
+    30000000,
+    10000000,
+    3000000,
+    1000000,
+    300000,
+    100000
+   ],
+   "oom_min": 300000,
+   "unique_per_s": 63798.89438529366,
+   "stage": "recurrent_table_t50",
    "start_point": 0
   }
  }

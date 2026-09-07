@@ -1258,3 +1258,40 @@ CMSGen 1,243.7x / 230.4x / 820.4x / 73.2x; vs DEMOTIC 2.2x (7/10, 1 tie); vs Rec
 on its table (paper set 10.2x) and 93.9x under our rare pin (49.0x) — `verify_artifact` 19 ok /
 2 warnings / 0 failures, emission audit PASS. The grants file was regenerated off the merged
 rows (74 pinned cells, 8 recorded failures). **The protocol is frozen from here.**
+
+**The T=50 appendix, measured (2026-09-06/07, two concurrent Colab L4 sessions).** The additive
+appendix of item 2 — the rival's own script depth (`--num_clock_cycles 50`), the identical
+protocol otherwise — run after the freeze on the user's go, printed beside the T=25 rows and
+replacing none. Both Recurrent stages 30/30 (`recurrent-{rare,table}-t50`), 20 measured / 10
+init-budget failures. **Headlines beside T=25:** vs CMSGen 1,031.7x their pins / 34.5x rare
+(steady state; 338.6x / 15.9x e2e); vs Recurrent 8.5x their table (paper set 7.1x) and 77.8x our
+rare pins (paper set 439.1x); engine advantage 512x / 590x. The `steps-calib-t50` tie-break holds
+at the deeper unroll — steps 1 best for the rival (312,421 vs 75,546 at 5, 39,402 at 10),
+`agrees: true`. **The finding the depth carries:** Recurrent's init-budget failures rise from 4
+at T=25 (`b17 b18 b19 b22`) to 10 at T=50 (adds `b14 b15 b20 b21 s35932 s38584`) — six more large
+ITC'99/ISCAS-89 circuits cannot initialise their gradient in 1,200 s at 50 cycles, `s35932` among
+them though it measured at T=25 — so the T=50 geomeans stand on fewer, harder cells (which is why
+the table-set ratio is 8.5x against T=25's 21.5x while the rare-set stays large). Every failure
+carries both arms and is recorded as a rival failure, never a zero. `verify_artifact` 27 ok / 4
+warnings / 0 failures (the warnings are the failure counts, stated); emission audit PASS. The
+grants file was regenerated to 120 Recurrent cells (60 @ T=25 + 60 @ T=50) + 22 DEMOTIC, 28
+recorded failures, so a re-run pins T=50 too.
+
+**Four harness bugs, fixed during the T=50 run — bug-not-protocol, per item 5's governance**
+(uncommitted, cumulative diff in the campaign dir; tests + VM bootstrap checks added, host suite
+562 + rival/paper 116 green). None changed a metric, config, screen, budget or cell set; each was
+a defect that only appears at T=50 scale (a run minutes long, outlasting a ~1 h Colab VM):
+1. **A rival killed with empty stdout+stderr crashed the stage** (`[-1]` of an empty list) — now
+   a recorded `exit SIGKILL with no output` refusal the ladder walks past (`rivals_recurrent`).
+2. **The OOM ladder re-walked from the top on every VM reclaim** because the ceiling was cached
+   only when the walk ENDED, and on `s15850.1` the walk outlasts the VM — now each refused rung
+   is cached AS SEEN (OOM/kill at any clock, a timeout at its clock) and the search budget carries
+   across VMs (`remember_refusal`, `known_spent`, `run_at_batch(spent=)`).
+3+4. **The discarded per-process warmup ran a full O(circuit x T) graph build** — ~1,030 s on
+   `s15850.1` at T=50, re-paid every reclaim, which kept the heavy cells from ever landing. The
+   rival's per-run cost is its unroll+graph-build (gates x cycles), not its batch, so shrinking
+   the warmup batch (10,000 -> 256) did nothing; the fix is to KILL the discarded run after
+   `WARMUP_TIMEOUT_S = 60`, which is all the cold-start (CUDA context, clocks, torch import) needs.
+   A warmup measures nothing, so neither the batch nor the cap moves a number. LESSON: any per-cell
+   rival work longer than a VM lifetime must checkpoint per step, and a warmup must be time-capped,
+   never sized by the input.

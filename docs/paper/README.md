@@ -57,6 +57,8 @@ our favour (`docs/findings/RIVAL_FAIRNESS_FINDINGS.md` §16, §16b, §16c).
   Recurrent's `start_point`, and a re-run with `--grants` / `GRANTS=` pins them — no ladder
   walk, no probe.
 * No family matrix, no tseitin arm, no HTS, no soft table, no recheck arm.
+  T=50 was run 2026-09-06/07 (beside T=25): vs CMSGen 1,031.7x/34.5x, vs Recurrent
+  8.5x table / 77.8x rare; the deeper unroll lifts Recurrent's init-budget failures 4 -> 10.
 
 **The protocol is FROZEN as v1.0 (2026-09-06; [../EVAL_RUNBOOK.md](../EVAL_RUNBOOK.md) §0, the
 record and the considered-not-adopted list in `docs/findings/RIVAL_FAIRNESS_FINDINGS.md` §17).**

@@ -1092,7 +1092,7 @@ directories as rows reported a 208% bound off a superseded row. Rival failures a
 `b17` `b18` `b22` (+`b19` under their pin). Mechanics that made the tail finishable across
 ~1 h VM reclaims, none touching a measurement: settled error rows, a cached OOM ceiling per
 (file, T), a 4-min cache packer, and two concurrent Colab sessions with disjoint instance lists
-merged under assertions. T=50 deferred.
+merged under assertions. **T=50 appendix run 2026-09-06/07** (additive, beside T=25): vs CMSGen 1,031.7x/34.5x, vs Recurrent 8.5x table / 77.8x rare; the deeper unroll pushes Recurrent's init-budget failures 4 -> 10 (six more large ITC'99/ISCAS-89 circuits, `s35932` included, cannot initialise in 1,200 s at 50 cycles). Four harness bugs fixed during it (empty-output refusal, refused-rung-cached-as-seen, time-capped warmup) — all bug-not-protocol, RIVAL_FAIRNESS_FINDINGS §17.
 
 > ⚠️ **SUPERSEDED 2026-09-04** — the paragraph below records the FIRST protocol campaign
 > (`l4_protocol_20260903`), whose numbers two review rounds found to rest on four defects that
