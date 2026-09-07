@@ -651,7 +651,8 @@ eval/run_full_eval.sh campaign        # THE PAPER RUN; or rivals | plots | seq |
 **THE PROTOCOL — v1.0, FROZEN 2026-09-06 (EVAL_RUNBOOK §0; the record and the
 considered-not-adopted list are RIVAL_FAIRNESS_FINDINGS §17)**: the rivals' own published
 benchmark sets (DEMOTIC's 11 ISCAS-85; every ITC'99 `b*` / ISCAS-89 `s*` Recurrent-CircuitSAT
-evaluates — the FULL set is the headline, the rival paper's subset printed beside it), each
+evaluates — the FULL set is the headline and the only population printed; the paper-subset
+column was dropped 2026-09-07), each
 under the rival's own pins AND our rare pin, T=25 (T=50 = an additive appendix run), one config
 per rival (its SHIPPED script setting; paper values measured beside it), the batch = the largest
 rung of the ladder it completes walked down from a 30,000,000 top, one circuit variant (`abc`)
@@ -757,12 +758,20 @@ Cross-GPU K-scaling: `eval/colab/colab_sampling_benchmark.py` + `notebooks/gpap_
   both-zero → `ratio=None`. The last two are FALSY, so branching on `ratio` alone counts their
   zeros as our wins and drops ours entirely (38 of theirs shown as wins, 14 of ours invisible).
   Report
-  `CMSGen=0 / GPAP=0 / both=0` as columns that SUM with the geomean's instances to the instance
-  count — a reader must be able to add them up. ⚠️ **And they must actually sum**: the degeneracy
-  screens (vacuous pins, zero-search) used to be applied only to the geomean, leaving those cells
-  inside `inst` and inside `wins`, so the printed invariant was FALSE on 6 of 7 families. Screen
-  FIRST, then bucket; the invariant is `inst = n_gm + CMSGen=0 + GPAP=0 + both=0 + no-search +
-  vacuous`, pinned by `test_every_instance_is_counted_exactly_once`. A zero-search cell can also
+  `CMSGen=0 / GPAP=0` as columns that SUM with the geomean's instances and ONE `excluded`
+  column to the instance count — a reader must be able to add them up. ⚠️ **And they must
+  actually sum**: the degeneracy screens (vacuous pins, zero-search) used to be applied only to
+  the geomean, leaving those cells inside `inst` and inside `wins`, so the printed invariant was
+  FALSE on 6 of 7 families. Screen FIRST, then bucket; the invariant is `inst = n + CMSGen=0 +
+  GPAP=0 + excluded` (Table 1) / `cells = n + rival=0 + GPAP=0 + failed + excluded` (Table 2),
+  pinned by `test_every_instance_is_counted_exactly_once` and the emitted-LaTeX ledger test.
+  **Since 2026-09-07 (the user's presentation revision, RIVAL_FAIRNESS_FINDINGS §17b) every
+  reason a cell carries no ratio — the screens, both=0, refused, misaligned, unmeasured — is
+  that ONE printed column, itemised BY NAME under the table (`excl_names`); there is NO
+  thin-denominator floor (a tool that scored anything is scored, as the rival papers print
+  0.1 u/s rows; cells under `THIN_DENOMINATOR = 30` events are named in the caveats, never
+  screened); and no `paper set` column.** Table 1 and Table 3 read one classifier
+  (`rival_cms_cells`), Table 2 another (`rival_cells`), and every figure imports them. A zero-search cell can also
   be a CMSGen-zero cell (EPFL `ctrl` under ABC), so screening after bucketing published it as an
   outright win. ⚠️ **And ABSENT is not zero**: a row that never RAN the CMSGen arm (a campaign
   resumed on a VM whose cmsgen failed to restore) and a row whose cms subprocess ERRORED

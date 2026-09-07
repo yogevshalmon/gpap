@@ -20,12 +20,13 @@ on a rented GPU), and every published table is read off its rows:
    ISCAS-85 combinational circuits, T=1. Recurrent-CircuitSAT (MLCAD'25): the ITC'99 `b*` and
    ISCAS-89 `s*` sequential circuits it evaluates — every one we can process (all of
    `benchmarks/circuits/bench/seq/`, b17-b22 fetched by `scripts/fetch_benchmarks.sh itc99`;
-   30 circuits), unrolled at **T=25**, with its paper's 16 (`rival_common.PAPER_INSTANCES`)
-   scored beside the whole set. Their Table II's 8th ISCAS-89 row prints "s35844", which is no
-   ISCAS-89 circuit; its figures (12 PI / 278 PO / 1,452 DFF) identify **`s38584`**, and that is
-   what the paper set holds — `s35932` is a circuit WE add. **The headline is the full set**
-   (the user's rule: a partial set is not a headline); the paper-set geomean is printed beside
-   it on every row. T=50 is the rival's own script depth; it is an ADDITIVE appendix run under
+   30 circuits), unrolled at **T=25**. Their Table II's 8th ISCAS-89 row prints "s35844", which
+   is no ISCAS-89 circuit; its figures (12 PI / 278 PO / 1,452 DFF) identify **`s38584`**, and
+   that is what their paper's 16 (`rival_common.PAPER_INSTANCES`, the harnesses' `paper`
+   keyword) hold — `s35932` is a circuit WE add. **The headline is the full set** (the user's
+   rule: a partial set is not a headline), and since 2026-09-07 it is the ONLY set the tables
+   print — one population per row, no paper-subset column (RIVAL_FAIRNESS_FINDINGS.md §17b).
+   T=50 is the rival's own script depth; it is an ADDITIVE appendix run under
    the identical protocol (`RIVAL_T2=50`, the `*-t50` stages), reported beside the T=25 rows
    and never in place of them. Nothing of ours is added: no EPFL, no HWMCC, no `sk_` CNFs, no
    `random` targets, no second encoder.
@@ -260,14 +261,18 @@ derived by listing that directory, so both drivers sweep the same set and there 
 list to drift (it used to be 9, of which 6 appear in NEITHER paper). `scripts/fetch_benchmarks.sh`
 installs ITC'99 b17-b22 into that same directory; without that step they are silently absent.
 
-Table 2 *scores* every cell that ran, and prints beside it the geomean over the subset each
-rival's OWN paper evaluates (`paper set`, from `paper_tables.PAPER_INSTANCES` — one home, shared
-with the harnesses' `paper` keyword): DEMOTIC (arXiv 2502.08086 Table II) on all 11 ISCAS-85
-circuits, Recurrent-CircuitSAT (arXiv 2502.21226 Table II) on its 8 ISCAS-89 + 8 ITC'99. ⚠️ The
-two sets give different headlines and the wider one flatters us: on the 2026-09-02 rows,
-Recurrent's rare-pin geomean is **62.1x over their 16 and 97.7x over all b*/s*** (their target
-table: 3.0x vs 4.5x). Both are printed; **the FULL set is the headline** (protocol v1.0 — a
-partial set is not a headline) and the paper set is quoted beside it, always.
+Table 2 *scores* every cell that ran, and that is the ONE population it prints (2026-09-07, the
+user's rule: "we take the rival benchmarks, that's it, we test on the whole set"). Each rival's
+own paper evaluates a subset — DEMOTIC (arXiv 2502.08086 Table II) all 11 ISCAS-85,
+Recurrent-CircuitSAT (arXiv 2502.21226 Table II) 8 ISCAS-89 + 8 ITC'99 — which the harnesses
+still expand from the `paper` keyword (`rival_common.PAPER_INSTANCES`) and the tables no longer
+print beside the whole set (they did until 2026-09-07, and the two differed: on the 2026-09-02
+rows Recurrent's rare-pin geomean read 62.1x over their 16 and 97.7x over all b*/s*). **The
+FULL set is the headline** (protocol v1.0 — a partial set is not a headline). The table's
+shape — the two one-sided zero columns and `rival failed` kept, every other reason a cell has
+no ratio in ONE `excluded` column itemised by name under the table, no thin-denominator floor
+(a tool that scored anything is scored; cells under 30 events named in the caveats) — is
+presentation revision v1.1, RIVAL_FAIRNESS_FINDINGS.md §17b.
 
 **HTS is off by default.** Its paper (arXiv 2502.08673) evaluates 60 instances and not one is a
 netlist — random q-family, OR-configuration, `prod-*` and `s15850a_*` CNFs (the last two are
@@ -334,8 +339,8 @@ each was a wrong number once; the measurements are in
   their pins, bit-identical acceptance words between their index table on the original file
   and our reordered prefix (`rival_common.native_pin_check`); under the rare pin, the miter's
   p(MITER=1) equals the instance's `p_accept` (`unroll_to_bench.write_unrolled_miter`,
-  `rivals_recurrent.miter_self_check`). A failed row is the `misaligned` bucket and fails
-  `verify_artifact`. The GPAP arm also simulates its kept output rows through the ORIGINAL
+  `rivals_recurrent.miter_self_check`). A failed row is the `misaligned` bucket (inside
+  Table 2's `excluded` column, named under the table) and fails `verify_artifact`. The GPAP arm also simulates its kept output rows through the ORIGINAL
   circuit (`sim_check`, the encoder-independent check), beside the on-device clause check.
 - **The same circuit on both sides** (`--circuit-variants raw abc`; the campaign runs `abc` ONLY,
   the user's converged decision — `paper_tables.rival_cells` takes the ONE variant better for the

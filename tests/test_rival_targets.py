@@ -378,13 +378,13 @@ def test_the_ladder_measures_the_largest_rung_that_completes():
     assert [s["batch"] for s in sweep] == [3000, 1000], "the rungs tried belong in the row"
 
 
-def test_each_rival_scores_on_its_own_papers_instances_from_one_home():
-    """`paper` expands to the rival's published set, and the tables score from the SAME dict:
-    a set edited in one place cannot drift from the other."""
-    from eval.artifact import paper_tables
+def test_each_rival_expands_paper_to_its_own_published_instances():
+    """`paper` expands to the rival's published set, defined ONCE in rival_common. (The tables
+    stopped scoring that subset beside the whole set on 2026-09-07 — the user's rule: the whole
+    set is the population, one number per row — so `paper_tables` no longer imports it; the
+    harnesses still expand the keyword.)"""
     from eval.rivals.rival_common import PAPER_INSTANCES, expand_names
 
-    assert paper_tables.PAPER_INSTANCES is PAPER_INSTANCES
     assert len(PAPER_INSTANCES["demotic"]) == 11 and len(PAPER_INSTANCES["rcs"]) == 16
     assert expand_names(["paper"], "rcs") == sorted(PAPER_INSTANCES["rcs"])
     assert expand_names(["b03", "paper"], "demotic") == ["b03"] + sorted(PAPER_INSTANCES["demotic"])
