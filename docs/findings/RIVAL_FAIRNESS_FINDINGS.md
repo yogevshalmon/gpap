@@ -1231,9 +1231,9 @@ gets pointed here, not a re-run.
 | more rival seeds | decided 2026-09-04 (§16b): one run at its own default, the asymmetry stated |
 | HTS | its paper evaluates no circuit (§0 of the runbook) |
 | a TV / exact-oracle uniformity number in the paper tables | uniformity is Barbarik CM_test with both controls, only (the user's rule, 2026-09-01) |
-| widening the free / tiny / vacuous / thin screens | mechanical, per row, applied before the ledger in every table; a threshold moved after seeing the rows is a fitted screen |
+| widening the free / tiny / vacuous screens | mechanical, per row, applied before the ledger in every table; a threshold moved after seeing the rows is a fitted screen (the THIN floor was removed by the user's presentation revision, §17b — its disclosure kept) |
 | a taller ladder still, or a per-rung optimum for the rival | the 30M top is above the card's reach on every scored cell and the generator checks it; the grant is a share-of-the-machine rule, not a search for the rival's fastest rung (§16d) |
-| the paper set as the headline | the user's rule: the full set is the headline, the paper set beside it |
+| the paper set as the headline | the user's rule: the full set is the headline — and since §17b the ONLY set printed (no paper-set column) |
 
 **What still changes numbers after the freeze, legitimately:** the cleanup run's rows (item 3,
 recorded below when merged), the T=50 appendix rows (additive), and a bug in a number — fixed,
@@ -1295,3 +1295,102 @@ a defect that only appears at T=50 scale (a run minutes long, outlasting a ~1 h 
    A warmup measures nothing, so neither the batch nor the cap moves a number. LESSON: any per-cell
    rival work longer than a VM lifetime must checkpoint per step, and a warmup must be time-capped,
    never sized by the input.
+
+### 17b. Presentation revision v1.1 — the tables, not the protocol (2026-09-07, the user's direction)
+
+With T=50 complete the user turned to the tables: "everything we are doing now is only to
+modify a bit and polish how the tables are produced — only how we analyze and present the
+data, nothing about how we ran; that's frozen." Item 5's governance says a *review* may not
+change a screen; this is not a review, it is the owner revising the presentation, and it is
+recorded here with every number it moved so that nothing can look like a silent re-cut.
+**Nothing was re-run.** Every row is the frozen campaign's (the paper folder's
+`data/MANIFEST.sha256` pins them); only `eval/artifact/paper_tables.py`, `eval/eval_plots.py`
+and their tests changed.
+
+**What changed, and why (the user's four points, in order):**
+
+1. **One `excluded` column instead of seven.** Table 1 printed `both=0 | no-search |
+   tiny-space | vacuous | unsat | CMSGen<30 | refused`, Table 2 `both=0 | u/s unmeasured |
+   rival<30 | no-search | tiny-space | vacuous | unsat | misaligned | out-of-envelope` — "too
+   much data" for a main table. Every cell that carries no ratio for a reason other than one
+   tool scoring zero is now ONE column, `excluded`, and the reasons are itemised **by name**
+   under each table in RESULTS.md and as `%` comments beside each table in `tables.tex`. The
+   two one-sided zero columns (`CMSGen=0`/`GPAP=0`, `rival=0`/`GPAP=0`) stay, as the user
+   asked, and Table 2 keeps `rival failed` as its own column: a rival that produced no
+   measurement inside the budget is a one-sided outcome (GPAP measured those cells) and the
+   T=50 finding lives in it. The per-reason counts and name lists remain in the aggregates
+   (`excl_names`), so the caveats, the gate and the tests still see each reason apart, and the
+   identities a reader adds up are now `inst = n + CMSGen=0 + GPAP=0 + excluded` (Table 1) and
+   `cells = n + rival=0 + GPAP=0 + failed + excluded` (Table 2). `inst` in Table 1 now counts
+   every instance of the set (the refused `b19` is inside `excluded`, no longer outside the
+   identity), so the four Recurrent rows read 30 alike.
+2. **`paper set` is gone.** "Drop the paper set column, it's redundant, no need to even
+   mention it; we take the rival benchmarks, that's it, we test on the whole set." One
+   population per row; `PAPER_INSTANCES` stays in `rival_common` for the harnesses' `paper`
+   keyword and nothing in the tables reads it. The considered-not-adopted row "the paper set
+   as the headline" is closed by this: neither as headline nor beside it.
+3. **No thin-denominator floor.** "I don't like the rival<30 column; we should include that in
+   the result — the rival paper includes rows with 0.1 u/s, so we should consider something
+   > 0." The 30-event floor (§16c item 4, one floor for both sides) is removed on BOTH sides —
+   removing it on the rival side alone would have left the asymmetric ledger the floor was
+   introduced to close — and what survives is the disclosure: `THIN_DENOMINATOR = 30` names
+   every geomean cell whose CMSGen count or rival solution count is under it, with the count
+   and the ratio, in the caveats; a row whose geomean stands on one or two cells is flagged
+   ‡ and its caveat says to report the win count, not the ratio. The floor was conservative
+   by construction (every cell it removed was a large win of ours), so dropping it moves
+   numbers UP — listed below, every one.
+4. **The encoder column is dropped where every row shares one** (every row samples the
+   `abc:fast` CNF; the preamble and caption say so). It reappears by itself if a campaign ever
+   mixes encoders.
+
+**Figures, brought in line with the tables.** The rival dumbbells (`rivals_<stage>.png`) used
+to draw every row without a rival error — vacuous pins included — so their subtitle geomean
+disagreed with Table 2's; they now classify through `rival_cells` (Table 2's row, drawn), name
+what they do not draw, and carry the task in the title. Two figures were missing: GPAP vs
+CMSGen on the converged protocol's cells (`vs_cmsgen_<stage>.png`, six of them — Table 1's
+rows, drawn) and every Table 1 cell at once (`sps_scatter_cmsgen.png`), both through the new
+`rival_cms_cells` classifier that Table 1 and Table 3 now share (Table 3 used to restate the
+screens and could drift; it cannot now). T=50 cells are hollow on both scatters. One figure bug:
+the rival scatter chose its marker by `proto.startswith("their")`, so "their ISCAS-85, our
+rare pin" — our task — was drawn as the rival's own task; the marker is now the task's.
+
+**One folder.** `../gpap-results/paper/` holds copies of the nine stage/calibration JSONs and
+the four Barbarik JSONL files with a sha256 manifest, `regenerate.sh` (tables, gate, audit,
+figures, then the copy into `docs/paper/`), the generated outputs and `plots/`. The campaign
+directory stays the protocol record.
+
+**What moved** (before → after; every move is a thin cell entering a geomean, and each is named
+in the caveats):
+
+| table, row | before | after | cause |
+|---|---|---|---|
+| T1 Recurrent's set, T=25, rare | 73.2x (n 17), e2e 26.1x, wins 15/18 | **78.0x** (n 18), e2e 29.2x, wins 16/19 | `b14` enters: 12 CMSGen samples in 60 s |
+| T1 Recurrent's set, T=50, their pins | 1,031.7x (n 13), e2e 338.6x, wins 23/23 | **1,616.3x** (n 14), e2e 552.8x, wins 24/24 | `b04` enters: 9 CMSGen samples |
+| T1 Recurrent's set, T=50, rare | 34.5x (n 13), e2e 15.9x, wins 16/18 | **71.7x** (n 14), e2e 32.7x, wins 17/19 | `b04` enters: 8 CMSGen samples |
+| T2 DEMOTIC, our rare pin | — (n 0; 5 rival=0, 2 rival<30), wins 5/5 | **782,616.8x‡** (n 2), wins 7/7 | `c880` (1 solution, 7.1M x) and `c3540` (4, 86k x) enter; flagged ‡, caveat: quote 7/7 |
+| T2 Recurrent, our rare pins, T=25 | 93.9x (n 12), wins 15/15 | **173.2x** (n 15), wins 18/18 | `b11` (2 solutions, 40x), `b14` (2, 7,395x), `s4863` (2, 27,722x) enter |
+| T2 Recurrent, our rare pins, T=50 | 77.8x (n 12), wins 14/15 | **119.3x** (n 13), wins 15/16 | `s4863` (6 solutions, 20,099x) enters |
+| T3 (same rows as T1) | 534x / 512x / 590x engine advantage on those three rows | 513x / 508x / 585x | the same cells entering |
+
+**What did not move:** Table 1's ISCAS-85 rows (1,243.7x / 230.4x) and Recurrent's-set T=25
+their-pins row (820.4x); Table 2's DEMOTIC-native 2.2x (7/10, 1 tie) and both Recurrent-table
+rows (21.5x at T=25, 8.5x at T=50); the failure counts (4 → 10 at T=50); the gate (27 ok /
+4 warnings / 0 failures, the propagation identity closing on every row's new `n`); the
+emission audit (PASS, worst case `s208.1` 36.9%).
+
+**How to read the rows that moved.** The T=50 their-pins 1,616x is 1,031x plus ONE cell —
+`b04`, where CMSGen delivered 9 samples in 60 s against GPAP's ~80,000/s — and the caveat
+under Table 1 names it; the T=25 and T=50 rare rows likewise carry one thin cell each. The
+DEMOTIC rare-pin 782,617x stands on two cells with one and four rival solutions and is printed
+with the ‡ and a caveat that says to report 7/7 and the five rival zeros, not the ratio. The
+rival papers publish exactly such cells (0.1 unique/s rows), which is the user's ground for
+scoring them; the ratios on them are orders of magnitude, and the text must say so where it
+quotes them.
+
+**Governance note.** This revision is the owner's, not a reviewer's, and the protocol (what ran,
+at what configuration, on which cells, with which budgets) is untouched. The considered-
+not-adopted rows "widening the free / tiny / vacuous / thin screens" and "the paper set as the
+headline" are amended by it: the thin floor and the paper-set column are gone by the user's
+direction; the free / tiny / vacuous / unsat screens, and their mechanical, per-row, before-the-
+ledger application, are unchanged. Any further proposal to move a screen goes to that table, as
+before.

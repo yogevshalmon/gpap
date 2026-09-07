@@ -109,52 +109,56 @@ def test_encoders_are_separate_rows_and_neither_selects_the_other(tmp_path):
 
 
 def test_every_instance_is_counted_exactly_once(tmp_path):
-    """`inst` = n_gm + CMSGen=0 + GPAP=0 + both=0 + no-search + tiny-space + vacuous + CMSGen<30,
-    under Table 1. It was FALSE on 6 of 7 families: the degenerate cells were dropped from the
-    geomean but left inside `inst` and inside `wins`, so a reader adding the columns up came out
-    short."""
+    """`inst` = n + CMSGen=0 + GPAP=0 + excluded, under Table 1. It was FALSE on 6 of 7 families:
+    the degenerate cells were dropped from the geomean but left inside `inst` and inside `wins`,
+    so a reader adding the columns up came out short. Since 2026-09-07 every reason a cell
+    carries no ratio — a screen, a both-zero, a refusal — is ONE printed column, itemised by
+    name in the text (the user's rule: the main table is too wide with a column per reason);
+    the per-reason counts stay in the dict and must still sum to it."""
     d = stage(tmp_path, "seq-c25-rare", [
         row("a.bench"), row("b.bench"),                       # 2 in the geomean
         row("c.bench", cms=0, cms_sps=0),                     # CMSGen=0
         row("d.bench", models=0, sps=0),                      # GPAP=0
-        row("e.bench", models=0, sps=0, cms=0, cms_sps=0),    # both=0
-        row("f.bench", dec=0, impl=0),                        # no-search
-        row("b02.bench", sps=1e8),                            # vacuous pin
-        row("g.bench", support=5),                            # tiny space: 2**5 < 1000
-        row("h.bench", cms=13, cms_sps=0.2),                  # CMSGen<30: a thin denominator
+        row("e.bench", models=0, sps=0, cms=0, cms_sps=0),    # both=0      -> excluded
+        row("f.bench", dec=0, impl=0),                        # no-search   -> excluded
+        row("b02.bench", sps=1e8),                            # vacuous pin -> excluded
+        row("g.bench", support=5),                            # tiny space  -> excluded
+        row("h.bench", cms=13, cms_sps=0.2),                  # 13 CMSGen samples: SCORED, named
     ])
     v = cms_family(d, "seq-c25-rare", "tseitin")
     assert v["inst"] == 9
-    assert (v["n_gm"] + v["inf"] + v["gpap0"] + v["both0"] + v["free"] + v["vac"]
-            + v["tiny"] + v["cms_thin"]) == v["inst"]
-    assert v["cms_thin_names"] == ["h"]
+    assert v["n_gm"] + v["inf"] + v["gpap0"] + v["excl"] == v["inst"]
+    assert v["excl"] == v["both0"] + v["free"] + v["vac"] + v["tiny"] == 4
+    assert v["excl_names"] == {"vac": ["b02"], "free": ["f"], "tiny": ["g"], "both0": ["e"]}
+    assert v["thin_names"] == ["h"] and v["thin_cells"] == [("h", 13)]
     # and the win count is over the same rows, not over the pre-screen set
-    assert v["n"] == v["n_gm"] + v["inf"] + v["gpap0"] == 4
-    assert v["wins"] == 3                                     # a, b, and the CMSGen-zero
+    assert v["n"] == v["n_gm"] + v["inf"] + v["gpap0"] == 5
+    assert v["wins"] == 4                                     # a, b, h and the CMSGen-zero
 
 
-def test_the_thin_denominator_floor_is_the_same_on_both_sides_of_both_tables(tmp_path):
-    """Table 2 screens a rival that found fewer than MIN_SOLUTIONS solutions (`rival<30`);
-    Table 1 must hold CMSGen to the SAME floor, in its own column that sums with the rest.
-    Until 2026-09-05 the CMSGen side was only narrated in a caveat: `b14` (13 CMSGen samples in
-    60 s) sat inside the rare-pin geomean at 212x and full weight. The screen is conservative —
-    every cell it removes is a win of ours."""
+def test_a_thin_denominator_is_scored_and_disclosed_not_screened(tmp_path):
+    """Until 2026-09-07 a CMSGen count under 30 left Table 1 through a `CMSGen<30` column and a
+    rival count under 30 left Table 2 through `rival<30` — one floor, both sides, conservative
+    (every cell it removed was a large win of ours). The user's rule replaced the floor: a tool
+    that scored ANYTHING is scored, as the rival papers' own tables print rates of 0.1 unique/s.
+    What survives is the DISCLOSURE — the cell is named with its count in the aggregate the
+    caveats print — and Table 3 stays over exactly the rows Table 1 scores."""
     import json as _json
 
-    from eval.artifact.paper_tables import MIN_SOLUTIONS, RIVAL_MIN_SOLUTIONS, rival_cms_family
+    from eval.artifact.paper_tables import (THIN_DENOMINATOR, rival_cms_family,
+                                            rival_prop_rates)
 
-    assert RIVAL_MIN_SOLUTIONS == MIN_SOLUTIONS == 30
+    assert THIN_DENOMINATOR == 30
     rows = [rrow("a"), rrow("b"), rrow("b14", cms=13, cms_sps=0.2, sps=45.0)]
     (tmp_path / "rivals_recurrent_rare.json").write_text(_json.dumps(rows))
     v = rival_cms_family(str(tmp_path), "recurrent_rare", "rcs")
-    assert v["cms_thin"] == 1 and v["cms_thin_names"] == ["b14"]
-    assert v["n_gm"] == 2, "the thin cell must not enter the geomean"
-    assert (v["n_gm"] + v["inf"] + v["gpap0"] + v["both0"] + v["free"] + v["vac"] + v["tiny"]
-            + v["unsat"] + v["cms_thin"]) == v["inst"] == 3
+    assert v["n_gm"] == 3, "the thin cell must enter the geomean"
+    assert v["thin_cells"] == [("b14", 13)] and v["thin_names"] == ["b14"]
+    assert "cms_thin" not in v and "excl" in v
+    assert v["n_gm"] + v["inf"] + v["gpap0"] + v["excl"] == v["inst"] == 3
     # and Table 3 is over the SAME rows — the one thing the identity can catch
-    from eval.artifact.paper_tables import rival_prop_rates
     p = rival_prop_rates(str(tmp_path), "recurrent_rare", "rcs")
-    assert p["n"] == v["n_gm"] == 2
+    assert p["n"] == v["n_gm"] == 3
 
 
 
@@ -243,10 +247,14 @@ def test_the_markdown_and_latex_ledger_prose_state_the_same_sum():
     from eval.artifact import paper_tables
 
     src = inspect.getsource(paper_tables)
-    assert "+ vacuous + unsat + CMSGen<30" in src.replace("\"\n         \"", ""), \
+    # Table 1: inst = n + CMSGen=0 + GPAP=0 + excluded, in both emitters
+    assert "`inst` = `n` + CMSGen=0 + GPAP=0 + excluded" in src, \
         "the Markdown ledger formula is short of the printed columns"
-    assert r"\text{vac.} + \text{unsat} + \text{C}{<}30$" in src, \
+    assert r"\text{C}{=}0 + \text{G}{=}0 + \text{excl.}$" in src, \
         "the LaTeX ledger formula is short of the printed columns"
+    # Table 2: cells = n + rival=0 + GPAP=0 + rival failed + excluded, in both emitters
+    assert "`cells` = `n` + rival=0 + GPAP=0 + rival failed + excluded" in src
+    assert r"\text{R}{=}0 + \text{G}{=}0 + \text{failed} + \text{excl.}$" in src
     # and the algebraic-identity caveat lives in both Table 3 texts
     assert src.count("ALGEBRAIC") >= 2, "the Table 3 caveat is in one emitter only"
 
@@ -279,15 +287,18 @@ def test_tiny_solution_space_is_screened_in_BOTH_tables(tmp_path):
     assert v["gm"] == pytest.approx(10.0), "the 45,520x enumeration cell entered the geomean"
     assert (v["n"] + v["both0"] + v["nomeas"] + v["errors"] + v["free"] + v["misaligned"]
             + v["vacuous"] + v["tiny"]) == v["cells"]
+    # the printed ledger: cells = n + rival=0 + GPAP=0 + failed + excluded (n holds the zeros)
+    assert v["excl"] == 1 and v["excl_names"] == {"tiny": ["c17"]}
+    assert v["cells"] == v["n"] + v["errors"] + v["excl"]
 
 
-def test_rival_table_scores_every_measured_instance_and_shows_the_paper_subset_beside_it(tmp_path):
+def test_rival_table_scores_every_measured_instance_and_has_no_paper_subset_column(tmp_path):
     """Table 2 runs every b*/s* circuit the campaign can process (user's rule, 2026-09-03) and
-    scores every cell that ran. The subset the rival's OWN paper evaluates is not neutral —
-    b03/b04/b11/b13 are in Recurrent's run.py target table but NOT in its Table II, and with
-    them 'their target table' reads 4.1x where the paper's own set reads 3.0x — so that geomean
-    is printed BESIDE the whole one (`gm_paper`, `n_paper`), never instead of it, and never
-    used to drop a measured cell."""
+    scores every cell that ran — ONE population per row. The geomean over the subset the
+    rival's own paper evaluates used to be printed beside it (`paper set`) and was dropped on
+    2026-09-07 (the user's rule: "we take the rival benchmarks, that's it, we test on the whole
+    set"): no second number a reader could mistake for the headline, and no measured cell is
+    ever dropped for being outside a paper's table."""
     rows = [
         {"name": "s386", "variant": "raw", "rcs": {"unique_per_s": 10.0},
          "gpap": {"unique_per_s_est": 100.0, "n_models": 5}},          # in their Table II
@@ -297,10 +308,8 @@ def test_rival_table_scores_every_measured_instance_and_shows_the_paper_subset_b
     (tmp_path / "rivals_r.json").write_text(json.dumps({"rows": rows}))
     v = rival_family(str(tmp_path), "r", "rcs")
     assert v["n"] == 2 and v["gm"] == pytest.approx(100.0), "a measured cell was dropped"
-    assert v["n_paper"] == 1 and v["gm_paper"] == pytest.approx(10.0)
-    assert v["offpaper"] == 1
-    assert (v["n"] + v["both0"] + v["nomeas"] + v["errors"] + v["free"] + v["misaligned"]
-            + v["vacuous"] + v["tiny"]) == v["cells"]
+    assert not any(k in v for k in ("gm_paper", "n_paper", "offpaper")), sorted(v)
+    assert v["cells"] == v["n"] + v["errors"] + v["excl"] == 2
 
 
 def test_vacuous_pin_is_detected_per_row_not_by_a_name_list(tmp_path):
@@ -446,6 +455,8 @@ def test_rival_misaligned_row_is_excluded_and_counted(tmp_path):
     assert v["misaligned"] == 1
     assert v["gm"] == pytest.approx(10.0) and v["n"] == 1, \
         "a row that failed the alignment check entered the ledger"
+    # it leaves through the one printed exclusion column, and the text names it
+    assert v["excl"] == 1 and v["excl_names"] == {"misaligned": ["c880"]}
 
 
 def test_rival_retry_row_replaces_rather_than_appends(tmp_path):
@@ -545,6 +556,31 @@ def test_rival_scatter_only_plots_cells_the_table_scores(tmp_path):
 
     p.write_text(json.dumps({"rows": [ok("c432"), ok("c499")] + screened}))
     assert fig_rivals_sps_scatter(plt, [str(p)], str(tmp_path)) is None, \
+        "screened cells were counted as plottable points"
+
+
+def test_the_cmsgen_figures_classify_through_table_1s_rule(tmp_path):
+    """The GPAP-vs-CMSGen figures over the rival rows (Table 1's row, drawn; every Table 1 cell
+    at once) classify through `rival_cms_cells`, imported — so a vacuous pin or a refused
+    instance never becomes a dot, and the dumbbell's subtitle geomean is Table 1's. Same probe
+    as the rival scatter: the all-cells figure's 3-comparable-cell floor must count only what
+    the table scores."""
+    matplotlib = pytest.importorskip("matplotlib")
+    matplotlib.use("Agg")
+    import matplotlib.pyplot as plt
+    from eval.eval_plots import fig_cmsgen_sps_scatter, fig_vs_cmsgen_rival
+
+    screened = [rrow("b19", p_acc=1.0),                                      # vacuous pin
+                {"name": "b21", "variant": "raw", "rcs": {},
+                 "gpap": {"error": "oversize"}}]                              # refused
+    p = tmp_path / "rivals_recurrent_rare.json"
+    p.write_text(json.dumps([rrow("s386"), rrow("b12"), rrow("b04")] + screened))
+    assert fig_cmsgen_sps_scatter(plt, [str(p)], str(tmp_path)) is not None
+    assert (tmp_path / "sps_scatter_cmsgen.png").exists()
+    out = fig_vs_cmsgen_rival(plt, str(p), str(tmp_path))
+    assert out is not None and (tmp_path / "vs_cmsgen_recurrent_rare.png").exists()
+    p.write_text(json.dumps([rrow("s386"), rrow("b12")] + screened))
+    assert fig_cmsgen_sps_scatter(plt, [str(p)], str(tmp_path)) is None, \
         "screened cells were counted as plottable points"
 
 
@@ -1014,14 +1050,19 @@ def test_table_1_is_read_off_the_rival_rows_with_table_2s_screens_and_table_1s_l
             {"name": "b21", "variant": "raw", "rcs": {}, "gpap": {"error": "oversize"}}]
     (tmp_path / "rivals_recurrent_rare.json").write_text(json.dumps(rows))
     v = rival_cms_family(str(tmp_path), "recurrent_rare", "rcs")
-    assert v["inst"] == 10 and v["errors"] == 1 and v["cells"] == 10
+    # `inst` is every instance of the set, `cells` the ones GPAP measured: b21 is refused
+    assert v["inst"] == 11 and v["cells"] == 10 and v["errors"] == 1
+    assert v["refused_names"] == ["b21"]
     assert v["n_gm"] == 3 and v["gm"] == pytest.approx((100 * 20 * 5) ** (1 / 3))
-    assert v["gm_paper"] == pytest.approx((100 * 20) ** 0.5) and v["n_paper"] == 2
+    assert "gm_paper" not in v, "one population per row (2026-09-07)"
     assert v["inf"] == 1 and v["gpap0"] == 1 and v["both0"] == 1
     assert v["vac"] == 1 and v["free"] == 1 and v["tiny"] == 0
     assert v["noarm"] == 1 and v["cms_err"] == 1
-    assert v["inst"] == (v["n_gm"] + v["inf"] + v["gpap0"] + v["both0"] + v["free"] + v["tiny"]
-                         + v["vac"] + v["noarm"] + v["cms_err"])
+    # the one printed exclusion column, itemised by reason, and the identity a reader adds up
+    assert v["excl"] == 6 and v["excl_names"] == {
+        "vac": ["b19"], "free": ["b10"], "both0": ["b13"], "noarm": ["b01"],
+        "cms_err": ["b09"], "refused": ["b21"]}
+    assert v["inst"] == v["n_gm"] + v["inf"] + v["gpap0"] + v["excl"]
     assert v["wins"] == 4 and v["n"] == 5
     assert v["gpap0_names"] == ["b03"] and v["both0_names"] == ["b13"]
     assert v["cms_err_names"] == ["b09"] and v["noarm_names"] == ["b01"]
@@ -1047,7 +1088,9 @@ def test_a_rivals_only_sweep_has_no_table_1_and_a_refusal_is_not_a_zero(tmp_path
         {"rows": [rrow("c432"), {"name": "c7552", "variant": "raw", "demotic": {},
                                  "gpap": {"error": "encode failed: no abc"}}]}))
     v = rival_cms_family(str(tmp_path), "demotic_native", "demotic")
-    assert v["inst"] == 1 and v["errors"] == 1 and v["gpap0"] == 0 and v["both0"] == 0
+    assert v["inst"] == 2 and v["cells"] == 1 and v["errors"] == 1
+    assert v["gpap0"] == 0 and v["both0"] == 0
+    assert v["excl"] == 1 and v["excl_names"] == {"refused": ["c7552"]}
 
 
 def test_verify_artifact_gates_the_cmsgen_arm_on_rival_rows(tmp_path):
@@ -1133,11 +1176,12 @@ def test_table_2_has_one_clock_the_rivals_own_and_no_end_to_end_column(tmp_path)
                     "--rivals", str(tmp_path), "--out-md", str(md), "--out-tex", str(tex)],
                    check=True, capture_output=True, cwd=REPO_ROOT)
     t2 = md.read_text().split("## Table 2")[1].split("## Table 3")[0].split("\n## ")[0]
-    header = next(ln for ln in t2.splitlines() if ln.startswith("| rival | protocol"))
-    assert "| e2e |" not in header and "| GPAP/rival | paper set | wins |" in header
+    header = next(ln for ln in t2.splitlines() if ln.startswith("| rival | task"))
+    assert "| e2e |" not in header and "| GPAP/rival | wins |" in header
+    assert "paper set" not in header, "one population per row (2026-09-07)"
     assert "NO end-to-end column" in t2, "the table must say why the column is absent"
     tex_hdr = next(ln for ln in tex.read_text().splitlines()
-                   if ln.strip().startswith("rival & protocol & cells"))
+                   if ln.strip().startswith("rival & task & cells"))
     assert "e2e" not in tex_hdr
     t1 = md.read_text().split("## Table 1")[1].split("## Table 2")[0]
     assert "| e2e |" in next(ln for ln in t1.splitlines() if ln.startswith("| instance set")), \
@@ -1307,11 +1351,15 @@ def test_the_emitted_latex_ledger_sums_to_the_cell_count(tmp_path):
         if not line.startswith("    ") or "&" not in line or "multicolumn" in line:
             continue
         col = [c.strip() for c in line.strip().rstrip("\\\\").split("&")]
-        if col[0].startswith(("ISCAS", "ITC")) and len(col) == 20:       # Table 1 (+C<30, paper set, e2e, pre%, refused)
-            total, parts = int(col[4]), [int(col[5])] + [int(c) for c in col[11:19]
+        # Table 1 (2026-09-07 shape, no encoder column when every row shares one):
+        #   family depth targets inst n ratio e2e pre% wins C=0 G=0 excl.  ->  inst = n+C0+G0+excl
+        # Table 3's rows have 12 cells too; their 4th is the encoder, Table 1's is `inst`.
+        if col[0].startswith(("ISCAS", "ITC")) and len(col) == 12 and re.fullmatch(r"\d+", col[3]):
+            total, parts = int(col[3]), [int(col[4])] + [int(c) for c in col[9:12]
                                                          if re.fullmatch(r"\d+", c)]
-        elif col[0] in ("DEMOTIC", "Recurrent-CircuitSAT") and len(col) == 19:   # Table 2 (+paper set, ties; no e2e)
-            total, parts = int(col[2]), [int(col[3])] + [int(c) for c in col[8:]
+        # Table 2: rival task cells n ratio wins ties R=0 G=0 failed excl. -> cells = n+R0+G0+f+x
+        elif col[0] in ("DEMOTIC", "Recurrent-CircuitSAT") and len(col) == 11:
+            total, parts = int(col[2]), [int(col[3])] + [int(c) for c in col[7:11]
                                                          if re.fullmatch(r"\d+", c)]
         else:
             continue
@@ -1401,31 +1449,35 @@ def test_the_e2e_column_belongs_to_the_same_run_as_the_rate_it_is_paired_with():
     assert _gpap_e2e(legacy) == 111.0, "a pre-fix row must still read as it always did"
 
 
-def test_a_rival_that_found_a_handful_of_solutions_is_not_a_denominator():
-    """A ratio is only as good as its denominator, and this one bites on the RIVAL side an order
-    of magnitude harder than on CMSGen's. Measured 2026-09-04, rare pin: DEMOTIC found ONE
-    solution on `c880` (ratio 7,209,624x) and FOUR on `c3540` (86,202x); those two cells alone
-    would have carried the row at a geomean of 788,345x.
+def test_a_rival_that_found_a_handful_of_solutions_is_scored_and_disclosed(tmp_path):
+    """Until 2026-09-07 a rival count under 30 left Table 2 through `rival<30`: DEMOTIC found ONE
+    solution on `c880` under the rare pin (ratio 7,209,624x) and FOUR on `c3540` (86,202x), and
+    the floor kept both out — conservative, every cell it removed a huge win of ours. The
+    user's rule replaced the floor: the rival papers' own tables print rates of 0.1 unique/s,
+    so a rival that scored anything is scored. The cell enters the geomean; what survives is the
+    DISCLOSURE — `rival_family` names it with its count and ratio, the caveats print it, and a
+    row standing on one or two such cells is flagged as an illustration."""
+    from eval.artifact.paper_tables import THIN_DENOMINATOR, rival_cells, rival_family
 
-    Handing the rival the ABC-simplified circuit is what created them — it let it scrape hits
-    where it previously found none, converting honest `rival=0` cells (excluded from the geomean
-    and counted as outright WINS) into finite ratios in the millions. Below the floor the cell is
-    a capability statement and gets its own column, which is conservative by construction: every
-    cell removed is a huge win of ours."""
-    from eval.artifact.paper_tables import RIVAL_MIN_SOLUTIONS, rival_cells
-
-    def cell(n_unique, ups):
-        r = rrow("c880", sps=8.45e6)
+    def cell(name, n_unique, ups):
+        r = rrow(name, sps=8.45e6)
         r["rcs"] = {"unique": n_unique, "unique_per_s": ups, "num_inputs": 40}
         r["gpap"]["unique_per_s_est"] = 8.45e6
         return r
 
-    (_, _, bucket, ours, rate), = rival_cells([cell(1, 1.2)], "rcs")
-    assert bucket == "rival_thin", "a one-solution denominator was published as a 7-million-fold win"
-    assert (ours, rate) == (0.0, 0.0), "a screened cell must carry no rates into the geomean"
-
-    (_, _, ok_bucket, o2, r2), = rival_cells([cell(RIVAL_MIN_SOLUTIONS * 10, 500.0)], "rcs")
-    assert ok_bucket == "ok" and o2 / r2 > 0, "a real measurement must still be scored"
+    (_, _, bucket, ours, rate), = rival_cells([cell("c880", 1, 1.2)], "rcs")
+    assert bucket == "ok" and ours / rate == pytest.approx(8.45e6 / 1.2), \
+        "a rival that scored anything is scored (2026-09-07)"
+    (_, _, ok_bucket, o2, r2), = rival_cells([cell("c2670", THIN_DENOMINATOR * 10, 500.0)], "rcs")
+    assert ok_bucket == "ok" and o2 / r2 > 0
     # a rival that found NOTHING is a different thing — an outright win, not a thin denominator
-    (_, _, zero_bucket, _, _), = rival_cells([cell(0, 0.0)], "rcs")
-    assert zero_bucket == "rival0", "a rival zero must stay an outright win, not be screened away"
+    (_, _, zero_bucket, _, _), = rival_cells([cell("c499", 0, 0.0)], "rcs")
+    assert zero_bucket == "rival0", "a rival zero must stay an outright win"
+    # ...and the aggregate discloses the thin cell by name, count and ratio
+    rows = [cell("c880", 1, 1.2), cell("c2670", THIN_DENOMINATOR * 10, 500.0)]
+    (tmp_path / "rivals_demotic_comb_rare.json").write_text(json.dumps(rows))
+    v = rival_family(str(tmp_path), "demotic_comb_rare", "rcs")
+    assert v["n"] == 2 and v["thin"] == 1 and v["thin_names"] == ["c880"]
+    (nm, n_uniq, x), = v["thin_cells"]
+    assert (nm, n_uniq) == ("c880", 1) and x == pytest.approx(8.45e6 / 1.2)
+    assert "rival_thin" not in v and "thin" in v
