@@ -1205,3 +1205,101 @@ def test_the_committed_grants_file_is_the_campaigns_and_every_pinned_rung_is_on_
         assert all(e["batch"] in BATCH_LADDER for e in pinned)
         assert all(e.get("start_point") is not None for e in g["recurrent"].values()
                    if e.get("batch")), "a pinned Recurrent cell must carry its start_point"
+
+
+def test_a_rival_that_dies_with_nothing_on_either_stream_is_a_refusal_not_a_crash(tmp_path, monkeypatch):
+    """Session B of the T=50 appendix run (2026-09-06) lost its last nine cells to an IndexError:
+    the Recurrent subprocess exited non-zero with EMPTY stdout and stderr (a SIGKILL leaves no
+    traceback) and the error line took `[-1]` of an empty list. A rung that does not complete is
+    a refusal — the row must say how it died, and the ladder must step down past it."""
+    import subprocess
+    from eval.rivals import rivals_recurrent as rr
+    from eval.rivals.rival_common import run_at_batch
+
+    rival = tmp_path / "rival"
+    for d in ("data", "src/results", "script"):
+        (rival / d).mkdir(parents=True)
+    bench = tmp_path / "s.bench"
+    bench.write_text("INPUT(a)\nOUTPUT(a)\n")
+
+    def fake_run(cmd, **kw):
+        return subprocess.CompletedProcess(cmd, returncode=-9, stdout="", stderr="")
+
+    monkeypatch.setattr(rr.subprocess, "run", fake_run)
+    r = rr.run_recurrent(str(rival), str(bench), "s", 50, 1, 1_000_000, 0, timeout=5, lr=15)
+    assert "error" in r and "no output" in r["error"] and "SIGKILL" in r["error"]
+    res, sweep = run_at_batch(
+        lambda b: rr.run_recurrent(str(rival), str(bench), "s", 50, 1, b, 0, timeout=5, lr=15),
+        1_000, ladder=(1_000, 10_000), log=lambda *_: None)
+    assert [e["batch"] for e in sweep] == [10_000, 1_000]      # walked, never raised
+    assert "no output" in res["error"]
+    # a plain non-zero exit with no signal reads as its code
+    monkeypatch.setattr(rr.subprocess, "run",
+                        lambda cmd, **kw: subprocess.CompletedProcess(cmd, returncode=3, stdout="", stderr=""))
+    assert "exit code 3 with no output" in rr.run_recurrent(
+        str(rival), str(bench), "s", 50, 1, 1_000, 0, timeout=5, lr=15)["error"]
+
+
+def test_an_interrupted_walk_resumes_below_the_rungs_it_already_saw_refused(tmp_path):
+    """s15850.1 at T=50 (2026-09-06): each rung pays minutes of model build before it fails, the
+    walk outlasts a Colab VM, and with the ceiling written only at the END of the walk every
+    reclaim restarted it from the top — two sessions burned an hour per cycle on one cell and
+    never landed it. Refusals are remembered as they are seen; a timeout only at its clock; the
+    search time is carried so the walk's probe budget is charged as one uninterrupted walk."""
+    from eval.rivals.rival_common import run_at_batch
+    from eval.rivals.rivals_recurrent import (known_ladder, known_spent, remember_oom_ceiling,
+                                              remember_refusal)
+
+    bench = tmp_path / "x.bench"; bench.write_text("INPUT(a)\nOUTPUT(y)\ny = DFF(a)\n")
+    cache = str(tmp_path / "cache"); L = (1_000, 3_000, 10_000, 30_000, 100_000)
+    remember_refusal(cache, str(bench), 50, 100_000, "torch.OutOfMemoryError: CUDA out of memory", 300.0, 1200.0)
+    remember_refusal(cache, str(bench), 50, 30_000,
+                     "exit SIGKILL with no output (killed by the host, or a crash that wrote nothing)", 400.0, 1200.0)
+    # ...the VM is reclaimed here; the next walk starts below both, with their cost remembered
+    assert known_ladder(cache, str(bench), 50, L, run_timeout=1200.0) == ((1_000, 3_000, 10_000), 30_000)
+    assert known_spent(cache, str(bench), 50) == 700.0
+    remember_refusal(cache, str(bench), 50, 10_000, "timeout 1200.0s", 1200.0, 1200.0)
+    assert known_ladder(cache, str(bench), 50, L, run_timeout=1200.0) == ((1_000, 3_000), 10_000), "a timeout holds at its clock"
+    assert known_ladder(cache, str(bench), 50, L, run_timeout=2400.0) == ((1_000, 3_000, 10_000), 30_000), "...not at a longer one"
+    assert known_spent(cache, str(bench), 50) == 1900.0
+    remember_refusal(cache, str(bench), 50, 3_000, "no results csv", 5.0, 1200.0)      # unclassified: no ceiling
+    assert known_ladder(cache, str(bench), 50, L, run_timeout=1200.0)[1] == 10_000
+    assert known_ladder(cache, str(bench), 25, L, run_timeout=1200.0)[1] is None, "a different depth is a different circuit"
+    # the walk completes: the search time is dropped, the ceilings kept, a kill ceiling never becomes an OOM one
+    remember_oom_ceiling(cache, str(bench), 50, [{"batch": 3_000, "error": None}], prior=10_000)
+    assert known_spent(cache, str(bench), 50) == 0.0
+    assert known_ladder(cache, str(bench), 50, L, run_timeout=1200.0) == ((1_000, 3_000), 10_000)
+    assert known_ladder(cache, str(bench), 50, L, run_timeout=None) == ((1_000, 3_000, 10_000), 30_000)
+    # the carried search time charges run_at_batch's probe budget as one walk would have been
+    calls = []
+
+    def run(b):
+        calls.append(b)
+        return {"error": "timeout 1200.0s"} if b > 1_000 else {"unique_per_s": 1.0}
+
+    r, _sweep = run_at_batch(run, 1_000, ladder=(1_000, 3_000, 10_000), log=lambda *_: None, spent=1500.0)
+    assert calls == [10_000, 1_000] and r.get("probe_truncated"), "budget already spent: one failure, then the modelled rung"
+
+
+def test_the_recurrent_warmup_run_is_capped_far_below_the_measurement_timeout(tmp_path, monkeypatch):
+    """s15850.1 at T=50: even a discarded batch-256 warmup cost ~1,030 s (the rival's graph build
+    is O(circuit x T), not batch), re-paid on every VM reclaim. The warmup is now killed after
+    WARMUP_TIMEOUT_S while the measured rungs keep the full 1,200 s — proven by the timeouts each
+    call is handed."""
+    from eval.rivals import rivals_recurrent as rr
+
+    seen = []
+
+    def fake_run(rival, bench, key, T, steps, batch, start_point, timeout, retry=True, lr=None):
+        seen.append((batch, timeout))
+        return {"unique_per_s": 1.0, "unique": 1} if batch <= 256 else {"error": "torch.OutOfMemoryError"}
+
+    import eval.rivals.rival_common as rc
+    monkeypatch.setattr(rr, "run_recurrent", fake_run)
+    rc._WARMED.discard("recurrent")
+    bench = tmp_path / "s.bench"; bench.write_text("INPUT(a)\nOUTPUT(a)\n")
+    rr.run_recurrent_once("R", str(bench), "s", 50, 1, 256, 0, timeout=1200.0,
+                          cache_dir=str(tmp_path / "c"))
+    warm = [t for b, t in seen if b == 256][0]
+    assert warm == rr.WARMUP_TIMEOUT_S <= 60.0, f"warmup not capped: {warm}"
+    assert all(t == 1200.0 for b, t in seen if b != 256), "a measured rung lost its full timeout"

@@ -695,13 +695,24 @@ def _one_line(err):
 _WARMED = set()
 
 
-def warmup_rival(tool, run, batch=10_000, log=print):
-    """Discard one run before this process measures anything for `tool`. Returns True if it fired.
+def warmup_rival(tool, run, batch=256, log=print):
+    """Discard one SMALL run before this process measures anything for `tool`. Returns True if fired.
 
     Called by run_at_batch, so both circuit harnesses get it without remembering to. It must be
     per PROCESS, not per campaign: the Colab supervisor rebuilds the VM on reclaim and the driver
     resumes in a fresh interpreter, so the first cell measured after every resume would otherwise
     pay the cold start again.
+
+    THE WARMUP MUST BE BOUNDED, and the caller does it with a short-timeout `warmup_run`
+    (run_at_batch), not with the batch. The cold start this absorbs — CUDA context, clocks
+    ramping, the torch import paged in — is a fixed few seconds and batch-INDEPENDENT; it is
+    worth a lot on a sub-second cell (c432: 1.60 s vs 0.48 s, 3.3x) and nothing on a cell whose
+    one run is minutes. But the rival's per-run cost is O(circuit x T) in GRAPH BUILD, not in
+    batch: on s15850.1 at T=50 even a discarded batch-256 run took ~1,030 s (measured, T=50
+    appendix run 2026-09-07) — and, re-paid on every ~1 h VM reclaim, it kept the heavy
+    ITC'99/ISCAS-89 cells from ever landing. So the warmup runs at a small batch AND is killed
+    after WARMUP_TIMEOUT_S: the cold start is long absorbed by then, and the run is discarded, so
+    neither the batch nor the cap moves any number. (batch 256, was 10,000 before 2026-09-07.)
     """
     if tool in _WARMED:
         return False
@@ -715,7 +726,8 @@ def warmup_rival(tool, run, batch=10_000, log=print):
     return True
 
 
-def run_at_batch(run, batch, ladder=BATCH_LADDER, log=print, tool=None, probe_budget_s=1200.0):
+def run_at_batch(run, batch, ladder=BATCH_LADDER, log=print, tool=None, probe_budget_s=1200.0,
+                 spent=0.0, warmup_run=None):
     """ONE measured run per instance: the LARGEST ladder rung that COMPLETES.
 
     THE RULE (2026-09-04). Walk DOWN from the top of the ladder; the first rung that runs to
@@ -738,14 +750,20 @@ def run_at_batch(run, batch, ladder=BATCH_LADDER, log=print, tool=None, probe_bu
 
     `probe_budget_s` bounds the search: a ladder of timeouts could otherwise cost 8 x the wall
     budget on one instance. When probing has spent that much, the walk jumps straight to the
-    modelled rung and the sweep records `probe_truncated`.
+    modelled rung and the sweep records `probe_truncated`. `spent` is what an INTERRUPTED walk
+    on this cell already paid (rivals_recurrent.known_spent), so a walk resumed on a fresh VM
+    is charged exactly as one uninterrupted walk would be.
+
+    `warmup_run`, if given, is the closure the discarded warmup fires instead of `run` — used
+    to warm at a SHORT timeout so the cold-start absorption never pays a full O(circuit) run
+    (see warmup_rival).
 
     Returns (result, sweep) — every rung tried, so the row records what the rival was granted.
     """
     if tool:
-        warmup_rival(tool, run, log=log)
+        warmup_rival(tool, warmup_run or run, log=log)
     rungs = list(ladder)
-    sweep, spent, truncated = [], 0.0, False
+    sweep, spent, truncated = [], float(spent or 0.0), False
     grant = {}                       # what the row must say about HOW the grant was reached
     i = len(rungs) - 1
     while i >= 0:

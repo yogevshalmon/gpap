@@ -830,17 +830,33 @@ def test_the_first_run_of_a_process_is_discarded():
     """The first GPU run of a session is ~3.3x slow (CUDA context, autotuning, clocks), and
     whichever instance goes first eats all of it: `c1355` was published at 0.25x of its warm rate
     on 2026-09-03 for exactly this reason. One discarded run per (tool, process) — per PROCESS,
-    because the supervisor resumes in a fresh interpreter after every VM reclaim."""
+    because the supervisor resumes in a fresh interpreter after every VM reclaim. The warmup
+    batch is TINY (256): the cold start is batch-independent, and a big warmup batch paid an
+    O(circuit) model build that on s15850.1 at T=50 was 1,073 s of discarded work per VM."""
     import eval.rivals.rival_common as rc
     rc._WARMED.discard("toolX")
     calls = []
     rc.run_at_batch(lambda b: (calls.append(b), {"unique_per_s": 1.0})[1],
                     1_000, log=lambda *_: None, tool="toolX")
-    assert calls[0] == 10_000, "no warmup run fired before the measurement"
+    assert calls[0] == 256, "no small warmup run fired before the measurement"
     n_first = len(calls)
     rc.run_at_batch(lambda b: (calls.append(b), {"unique_per_s": 1.0})[1],
                     1_000, log=lambda *_: None, tool="toolX")
     assert len(calls) == n_first + 1, "the warmup fired twice in one process"
+
+
+def test_the_warmup_uses_the_short_timeout_closure_when_one_is_given():
+    """The discarded warmup fires `warmup_run`, not the measured `run`, so the caller can warm at
+    a short timeout — a big circuit's graph build makes even a discarded run cost ~1,000 s, and
+    re-paying that on every VM reclaim starved the T=50 heavy cells (2026-09-07)."""
+    import eval.rivals.rival_common as rc
+    rc._WARMED.discard("toolW")
+    warmed, measured = [], []
+    rc.run_at_batch(lambda b: (measured.append(b), {"unique_per_s": 1.0})[1], 1_000,
+                    log=lambda *_: None, tool="toolW",
+                    warmup_run=lambda b: (warmed.append(b), {"unique_per_s": 0.0})[1])
+    assert warmed == [256], "the warmup did not fire through warmup_run"
+    assert 256 not in measured, "the warmup closure leaked into the measurement"
 
 
 # ------------------------------------------------- mirroring: results only exist once local

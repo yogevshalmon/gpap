@@ -54,6 +54,7 @@ import json
 import os
 import re
 import shutil
+import signal
 import subprocess
 import sys
 import tempfile
@@ -103,6 +104,10 @@ DEFAULT_TIMEOUT = 300.0
 # wall is counted in the rival's e2e figure the way ours and CMSGen's preparation are; its
 # steady-state metric (unique / model_runtime) is untouched.
 INIT_BUDGET_S = 1200.0
+# The cold-start warmup (rival_common.warmup_rival) is discarded and only needs to warm the
+# GPU context/clocks, so it is killed after this many seconds — a big circuit's graph build
+# would otherwise make the throwaway run cost ~1,000 s (T=50 appendix run, 2026-09-07).
+WARMUP_TIMEOUT_S = 60.0
 PROBE_BUDGET_FRACTION = 1.0
 
 
@@ -280,7 +285,21 @@ def run_recurrent(rival, bench_file, key, T, steps, batch, start_point,
         return {"error": f"timeout {timeout}s"}
     wall = time.perf_counter() - t0
     if p.returncode != 0:
-        err = (p.stderr or p.stdout).strip().splitlines()[-1][:200]
+        # A rival that dies with NOTHING on either stream (the host OOM killer's SIGKILL, a
+        # driver crash) used to raise IndexError here — `[-1]` of an empty list — and take the
+        # whole stage down with it: session B of the T=50 run lost its last nine cells that way
+        # (s1196, their pins, the 1,000,000 rung; RIVAL_FAIRNESS_FINDINGS.md §17). The ladder's
+        # rule is that a rung which does not COMPLETE is a refusal, so the row records the exit
+        # status and the walk steps down, exactly as it does for a printed OutOfMemoryError.
+        lines = (p.stderr or p.stdout or "").strip().splitlines()
+        if lines:
+            err = lines[-1][:200]
+        else:
+            try:
+                how = signal.Signals(-p.returncode).name if p.returncode < 0 else f"code {p.returncode}"
+            except ValueError:
+                how = f"code {p.returncode}"
+            err = f"exit {how} with no output (killed by the host, or a crash that wrote nothing)"
         # transient WSL2 driver hiccup between back-to-back CUDA processes — settle and retry
         if "device not ready" in err and retry:
             time.sleep(10)
@@ -421,30 +440,92 @@ def _oom_task(T):
     return {"probe": "oom_ceiling", "cycles": T}
 
 
-def known_ladder(cache_dir, bench_file, T, ladder=BATCH_LADDER):
-    """The batch ladder minus the rungs a previous walk on THIS card already saw OOM.
+def _refusal_ceiling(hit, run_timeout=None):
+    """The rung below which a previous walk's cached refusals say this walk must start. An OOM
+    or a silent kill (the host OOM killer's SIGKILL, recorded as `exit SIGKILL with no output`)
+    holds on this card at any clock; a timeout holds only at the clock it was seen at — the
+    same tagging the start_point probe uses for `failed_at_budget`."""
+    if not isinstance(hit, dict):
+        return None
+    cands = [hit.get("oom_min"), hit.get("killed_min")]
+    if run_timeout is not None and hit.get("timeout_s") == float(run_timeout):
+        cands.append(hit.get("timeout_min"))
+    cands = [c for c in cands if c]
+    return min(cands) if cands else None
+
+
+def known_ladder(cache_dir, bench_file, T, ladder=BATCH_LADDER, run_timeout=None):
+    """The batch ladder minus the rungs a previous walk on THIS card already saw refused.
 
     An out-of-memory rung is deterministic for a given circuit, depth and card, and on a
     20M-node ITC'99 circuit each of the seven doomed rungs above the grant costs a full model
     build — the 2026-09-05 completion run spent whole ~1 h VM lifetimes re-walking them after
-    every reclaim and never reached the run. Skipping a rung that is KNOWN to OOM changes
+    every reclaim and never reached the run. Skipping a rung that is KNOWN to fail changes
     nothing about the grant (the largest rung that completes is still measured); it only stops
-    re-measuring a failure. Timeouts are NOT cached — they depend on the clock, not the card."""
-    hit = cache_peek(cache_dir, bench_file, _oom_task(T))
-    if isinstance(hit, dict) and hit.get("oom_min"):
-        trimmed = tuple(b for b in ladder if b < hit["oom_min"])
-        return trimmed or ladder[:1], hit["oom_min"]
+    re-measuring a failure. A timeout is honoured only at the clock it was recorded at
+    (`run_timeout`): a stuck rung may pass on a longer clock, which is the point of a budget."""
+    ceiling = _refusal_ceiling(cache_peek(cache_dir, bench_file, _oom_task(T)), run_timeout)
+    if ceiling:
+        trimmed = tuple(b for b in ladder if b < ceiling)
+        return trimmed or ladder[:1], ceiling
     return tuple(ladder), None
 
 
+def known_spent(cache_dir, bench_file, T):
+    """Search time an interrupted walk on this cell already spent on refused rungs, so the
+    walk's probe budget (rival_common.run_at_batch) is charged across VM lifetimes the way one
+    uninterrupted walk is charged."""
+    hit = cache_peek(cache_dir, bench_file, _oom_task(T))
+    return float(hit.get("spent_s") or 0.0) if isinstance(hit, dict) else 0.0
+
+
+def remember_refusal(cache_dir, bench_file, T, batch, error, wall_s, run_timeout):
+    """Store one refused rung THE MOMENT IT IS SEEN (2026-09-06, the T=50 appendix run).
+
+    `remember_oom_ceiling` below writes the ceiling when the walk ENDS — and on s15850.1 at
+    T=50 the walk never ended: each rung pays minutes of model build before it fails, the whole
+    walk outlasts a ~1 h Colab VM, and every reclaim restarted it from 30,000,000 with nothing
+    remembered (two sessions burned an hour per cycle on the one cell). The RULE is unchanged —
+    the largest rung that completes is still the one measured — only the bookkeeping moved from
+    the end of the walk to each step of it. Tightens, never loosens; an error the walk cannot
+    classify (no results csv, a driver hiccup) is not a ceiling."""
+    if not cache_dir:
+        return None
+    hit = cache_peek(cache_dir, bench_file, _oom_task(T))
+    rec = dict(hit) if isinstance(hit, dict) else {}
+    e = str(error or "").lower()
+    if "outofmemory" in e:
+        rec["oom_min"] = min(batch, rec.get("oom_min") or batch)
+    elif "with no output" in e and "sigkill" in e:
+        rec["killed_min"] = min(batch, rec.get("killed_min") or batch)
+    elif e.startswith("timeout"):
+        if rec.get("timeout_s") == float(run_timeout) and rec.get("timeout_min"):
+            rec["timeout_min"] = min(batch, rec["timeout_min"])
+        else:
+            rec["timeout_min"], rec["timeout_s"] = batch, float(run_timeout)
+    else:
+        return None
+    rec["spent_s"] = float(rec.get("spent_s") or 0.0) + float(wall_s or 0.0)
+    cache_store(cache_dir, bench_file, _oom_task(T), rec)
+    return rec
+
+
 def remember_oom_ceiling(cache_dir, bench_file, T, sweep, prior=None):
-    """Store the smallest rung the walk saw OOM (tightening a prior ceiling, never loosening)."""
+    """Store the smallest rung the walk saw OOM (tightening a prior ceiling, never loosening)
+    and — the walk being over — drop the search time `remember_refusal` accumulated for it."""
     ooms = [x["batch"] for x in (sweep or []) if "outofmemory" in str(x.get("error") or "").lower()]
+    hit = cache_peek(cache_dir, bench_file, _oom_task(T))
+    rec = dict(hit) if isinstance(hit, dict) else {}
+    had_spent = rec.pop("spent_s", None) is not None
     if not ooms:
+        if had_spent:
+            cache_store(cache_dir, bench_file, _oom_task(T), rec)
         return prior
-    ceiling = min(ooms + ([prior] if prior else []))
-    cache_store(cache_dir, bench_file, _oom_task(T), {"oom_min": ceiling})
-    return ceiling
+    # `prior` may be a timeout or kill ceiling (known_ladder); only an OOM tightens oom_min
+    known = rec.get("oom_min") or (prior if not rec else None)
+    rec["oom_min"] = min(ooms + ([known] if known else []))
+    cache_store(cache_dir, bench_file, _oom_task(T), rec)
+    return rec["oom_min"]
 
 
 def run_recurrent_once(rival, bench_file, key, T, steps, batch, start_point,
@@ -457,19 +538,36 @@ def run_recurrent_once(rival, bench_file, key, T, steps, batch, start_point,
     (`known_ladder`) and the row says so in `oom_ceiling_cached`. A RECORDED grant (`grant`,
     from a grants file) pins the walk to its rung — measured first, descended from only if this
     card cannot finish on it — and the row says so in `grant_source`."""
-    ladder, prior = known_ladder(cache_dir, bench_file, T)
+    ladder, prior = known_ladder(cache_dir, bench_file, T, run_timeout=timeout)
+    spent0 = known_spent(cache_dir, bench_file, T)
     pinned = grant["batch"] if grant else None
     if pinned:
         ladder = pinned_ladder(ladder, pinned)
-    r, sweep = run_at_batch(
-        lambda b: run_recurrent(rival, bench_file, key, T, steps, b, start_point,
-                                timeout=timeout, lr=lr),
-        batch, ladder=ladder, tool="recurrent")
+
+    def rung(b):
+        t0 = time.perf_counter()
+        r = run_recurrent(rival, bench_file, key, T, steps, b, start_point, timeout=timeout, lr=lr)
+        if "error" in r:            # remembered NOW, not when the walk ends (remember_refusal)
+            remember_refusal(cache_dir, bench_file, T, b, r["error"], time.perf_counter() - t0, timeout)
+        return r
+
+    def warm(b):
+        # a DISCARDED cold-start run, killed after WARMUP_TIMEOUT_S: on a big circuit at a deep
+        # unroll the rival's graph build alone is ~1,000 s at any batch, and paying that on every
+        # VM reclaim starved the heavy cells (T=50 appendix run, 2026-09-07). The cold start is
+        # absorbed long before the cap, and the run is thrown away, so the cap moves no number.
+        return run_recurrent(rival, bench_file, key, T, steps, b, start_point,
+                             timeout=min(WARMUP_TIMEOUT_S, timeout), lr=lr)
+
+    r, sweep = run_at_batch(rung, batch, ladder=ladder, tool="recurrent", spent=spent0,
+                            warmup_run=warm)
     remember_oom_ceiling(cache_dir, bench_file, T, sweep, prior)
     if isinstance(r, dict):
         r = dict(r, batch_sweep=sweep)
         if prior:
             r["oom_ceiling_cached"] = prior
+        if spent0:
+            r["ladder_spent_cached_s"] = round(spent0, 1)
         r["grant_source"] = grant_source(pinned, r, grant["source"] if grant else None)
     return r
 
