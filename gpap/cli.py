@@ -536,6 +536,18 @@ def _cmd_info(args):
     free, total = torch.cuda.mem_get_info(dev)
     print(f"device: {props.name}  {total/1e9:.1f} GB ({free/1e9:.1f} GB free)  "
           f"SM {props.major}.{props.minor} x{props.multi_processor_count}")
+    # A capped budget changes K on memory-bound formulas, so it belongs beside the device, not
+    # in a log line somebody has to go looking for.
+    try:
+        from gpap.engine.calibrate import gpu_mem_available, vram_budget_cap
+        cap = vram_budget_cap()
+        if cap:
+            got = gpu_mem_available(dev)
+            print(f"VRAM budget: capped at {cap/(1<<20):,.0f} MiB by GPAP_VRAM_BUDGET_MIB "
+                  f"(engine sizes K against {got/1e9:.1f} GB; "
+                  f"{'the cap binds' if got >= cap else 'the CARD binds — the cap is inert here'})")
+    except Exception as e:  # noqa: BLE001 — provenance, never fatal
+        print(f"VRAM budget: unavailable ({e})")
     try:
         from gpap.engine import _core
         if _core.available():

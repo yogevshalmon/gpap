@@ -42,10 +42,23 @@ def gpu_mem_available(device: torch.device, fraction: float = 0.80) -> int:
     """Bytes available for new allocations on `device` (free VRAM minus a driver reserve).
 
     `fraction` is the only headroom in the sizing path, covering readout transients and whatever
-    else shares the card."""
+    else shares the card. `GPAP_VRAM_BUDGET_MIB` caps the answer (see `vram_budget_cap`); the
+    clamp lives in the core, so every consumer of the model sees it, C++ callers included."""
     if device.type != "cuda":
         return int(8e9)                      # conservative fallback for a CPU device
     return _core.mem_available(device.index or 0, fraction)
+
+
+def vram_budget_cap() -> int:
+    """The `GPAP_VRAM_BUDGET_MIB` ceiling in bytes, or 0 when unset — read here only to REPORT
+    it (`gpap info`, a result row's provenance). The clamp itself is applied once, in
+    `gpap_mem_available`; do not re-apply it in a caller."""
+    import os
+    try:
+        mib = int(os.environ.get("GPAP_VRAM_BUDGET_MIB") or 0)
+    except ValueError:
+        return 0
+    return mib << 20 if mib > 0 else 0
 
 
 def compute_k_safe(num_long: int, N: int, gpu_mem_bytes: float,

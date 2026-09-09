@@ -328,17 +328,26 @@ RIVAL_VRAM_FRACTION = 0.80
 def rival_vram_budget(fraction: float = None) -> int:
     """Bytes of GPU memory a rival's autograd graph may occupy: the same share of the same card
     GPAP grants itself. Falls back to the historical 5 GiB when no CUDA device is visible, so a
-    CPU-only smoke run still picks a sane batch."""
+    CPU-only smoke run still picks a sane batch.
+
+    `GPAP_VRAM_BUDGET_MIB` caps it, the same ceiling the core applies to GPAP's own budget
+    (`gpap.engine.calibrate.vram_budget_cap`): a reproduction on a larger card must hand BOTH
+    sides the recorded card's allowance, or it compares a grown K against a pinned batch."""
     if fraction is None:
         fraction = float(os.environ.get("GPAP_RIVAL_VRAM_FRACTION", RIVAL_VRAM_FRACTION))
+    budget = 5 << 30
     try:
         import torch
         if torch.cuda.is_available():
             free, _total = torch.cuda.mem_get_info()
-            return int(free * fraction)
+            budget = int(free * fraction)
     except Exception:                                   # noqa: BLE001 — sizing must never be fatal
         pass
-    return 5 << 30
+    try:
+        cap = int(os.environ.get("GPAP_VRAM_BUDGET_MIB") or 0) << 20
+    except ValueError:
+        cap = 0
+    return min(budget, cap) if cap > 0 else budget
 
 
 # ---------------------------------------------------------------- the instance sets
@@ -654,13 +663,21 @@ def cmsgen_arm(cnf_path, cmsgen_bin, n, timeout, scratch, seed=None):
 def host_provenance(device):
     """`cpu` + `gpu` on every rival row, the bench driver's own dicts. A GPAP/CMSGen ratio is not
     interpretable without the CPU — CMSGen is single-core and hosts differ by more than a factor
-    of two on it alone (docs/BENCHMARKING.md)."""
+    of two on it alone (docs/BENCHMARKING.md). `vram_cap_mib` joins them because it changes what
+    BOTH sides were granted, so a row measured under a cap is not comparable to one without."""
     from gpap.benchmark import _cpu_info, _gpu_info
     try:
         gpu = _gpu_info(device)
     except Exception:                       # noqa: BLE001 — provenance must never break a sweep
         gpu = {"name": str(device)}
-    return {"cpu": _cpu_info(), "gpu": gpu}
+    out = {"cpu": _cpu_info(), "gpu": gpu}
+    try:
+        cap = int(os.environ.get("GPAP_VRAM_BUDGET_MIB") or 0)
+    except ValueError:
+        cap = 0
+    if cap > 0:
+        out["vram_cap_mib"] = cap
+    return out
 
 
 # ---------------------------------------------------------------- how big is the solution space?
