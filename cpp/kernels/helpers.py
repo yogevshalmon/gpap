@@ -1,20 +1,17 @@
 """Helper Triton kernels the C core needs around the two BCP kernels.
 
-These exist so the whole toolchain stays **nvcc-free**: everything that runs on the GPU —
-including the state broadcast, the completion test and the readout gathers — is Triton, AOT
-compiled into the library by cpp/tools/build_kernels.py. They replace what the retired Python
-engine expressed as torch ops (`copy_(expand(...))`, `any_free`, `var_true_bits`,
-`_bits_to_bytes`, `sat_rows(...) > 0`, `_nops.sum()`).
+These exist so the toolchain stays nvcc-free: everything that runs on the GPU, including the
+state broadcast, the completion test and the readout gathers, is Triton, AOT-compiled into the
+library by cpp/tools/build_kernels.py.
 
 Conventions shared with cpp/kernels/bcp.py:
-  * assignment BITMAP: bit l of (K, NW) int32 words = literal l TRUE; l and l^1 share a word.
+  * assignment bitmap: bit l of (K, NW) int32 words = literal l TRUE; l and l^1 share a word.
   * packed clause word: low SHIFT bits = sat_count, high bits = modular literal sum.
   * one program owns one row wherever a row is the unit of work.
 
-NO SCALAR ATOMICS anywhere in here. Triton executes scalar code redundantly on every thread of
-the program (the documented num_warps gotcha — see docs/findings/INSIGHTS.md), which is benign
-for a scalar store of a uniform value but would multiply an atomic counter by the thread count.
-Counts are therefore produced by a separate single-program reduction over a per-row flag array.
+Do not use a scalar atomic here: Triton executes scalar code redundantly on every thread of the
+program, which is benign for a store of a uniform value but multiplies an atomic counter by the
+thread count. Counts come from a separate single-program reduction over a per-row flag array.
 """
 import triton
 import triton.language as tl

@@ -1,6 +1,6 @@
 cff-version: 1.2.0
 message: "If you use GPAP, please cite it as below."
-title: "GPAP: GPU-Parallel Assumption Propagation and CircuitSAT Sampling"
+title: "GPAP: GPU-Parallel (partial) Assignment Propagation and CircuitSAT Sampling"
 authors:
   - family-names: Shalmon
     given-names: Yogev

@@ -1,11 +1,9 @@
 """Uniformity statistics for the evaluation layer — the goodness-of-fit machinery the
 certification harnesses in this directory share.
 
-Deliberately NOT part of the library. A uniformity number is a CLAIM about a distribution, and
-the honest ones need either the whole solution set (enumeration) or conditional sampling
-(Barbarik) — neither is something `gpap sample` can do on the way past, and shipping a cheap
-proxy beside the sampler invited reading it as a certificate. So the library samples and the
-tools in `eval/uniformity/` make the claims:
+Deliberately not part of the library: a uniformity number is a claim about a distribution, and
+the honest ones need the whole solution set or conditional sampling, neither of which
+`gpap sample` can do on the way past. The library samples; these tools make the claims.
 
     fuzz_uniformity.py   exact oracle: enumerate small formulas, chi2 + TV against uniform
     barbarik_gpap.py     the standard certificate (Chakraborty & Meel, AAAI'19), SPUR reference
@@ -14,18 +12,16 @@ tools in `eval/uniformity/` make the claims:
 
 Two statistics live here:
 
-  `uniformity_stats(counts, n, S=...)` — with the EXACT projected-solution count `S` in hand
-  (enumeration completed) this is a real goodness-of-fit test: chi-square p-value over all S
-  cells plus the total-variation distance to uniform.
+  `uniformity_stats(counts, n, S=...)` — with the exact projected-solution count in hand, a real
+  goodness-of-fit test: chi-square p-value over all S cells plus total variation from uniform.
 
-  `uniformity_stats(counts, n)` — without S, no black-box statistic can CERTIFY uniformity (that
-  is precisely why Barbarik needs conditional sampling), but skew is still DETECTABLE
-  distribution-free: the collision estimator p2 = sum c_i(c_i-1)/(n(n-1)) is unbiased for
-  ||p||_2^2, and under ANY uniform distribution ||p||_2^2 = 1/|S| <= 1/d (d = distinct seen <=
-  |S|), so l2_ratio = p2*d substantially above 1 certifies non-uniformity with NO knowledge of
-  |S|. Below 1 it is CONSISTENT with uniform and nothing more.
+  `uniformity_stats(counts, n)` — without S no black-box statistic can certify uniformity, but
+  skew is still detectable distribution-free: the collision estimator
+  p2 = sum c_i(c_i-1)/(n(n-1)) is unbiased for ||p||_2^2, and under any uniform distribution
+  ||p||_2^2 = 1/|S| <= 1/d for d distinct values seen, so l2_ratio = p2*d well above 1 certifies
+  non-uniformity with no knowledge of |S|. Below 1 it is consistent with uniform, nothing more.
 
-Measured results and what they mean: docs/findings/UNIFORMITY_FINDINGS.md.
+Measured results: docs/findings/UNIFORMITY_FINDINGS.md.
 """
 import math
 import time

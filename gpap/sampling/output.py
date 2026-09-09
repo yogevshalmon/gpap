@@ -1,20 +1,16 @@
 """Compact sample-output writers.
 
 A sample is a support projection: one bit per output column (for circuits, one primary-input wire
-per cycle). The matrix is a numpy uint8 `(n, S)` array of 0/1 produced by
-`GPUSampler.sample_bits` (GPU-side projection — only the bits cross to host RAM, so a large output
-is cheap). Three formats:
+per cycle), as a numpy uint8 `(n, S)` array from `GPUSampler.sample_bits`. Three formats:
 
-  bits    — one 0/1 line per sample, `c`-comment header naming each column (default; compact + human
-            readable + trivial to parse).
-  npy     — `numpy.save` of the (n, S) uint8 array (zero-overhead round-trip: `numpy.load`).
-  dimacs  — one line per sample as signed vars ending in 0 (CMSGen/UniGen convention; tool-compatible
-            but the largest format).
+  bits    one 0/1 line per sample with a `c`-comment header naming each column (default).
+  npy     `numpy.save` of the array, for a zero-overhead round-trip.
+  dimacs  signed vars ending in 0 (CMSGen/UniGen convention): tool-compatible, largest.
 """
 import numpy as np
 
-#: Peak host bytes one `write_dimacs` block may materialise. Blocking by bytes rather than by a
-#: fixed row count is what keeps the peak independent of the support width.
+#: Peak host bytes one `write_dimacs` block may materialise. Blocking by bytes rather than rows
+#: keeps the peak independent of the support width.
 _BLOCK_BYTES = 32 << 20
 
 
@@ -27,10 +23,9 @@ def col_labels(cols_1based, wire_map=None):
 
 
 def write_bits(path, matrix, cols_1based, *, wire_map=None, meta=None):
-    """Text 0/1: a `c`-comment header (meta + column labels) then one S-char 0/1 line per sample.
+    """Text 0/1: a `c`-comment header (meta + column labels) then one S-char line per sample.
 
-    The body is written as one bulk byte buffer (0/1 -> '0'/'1' via a uint8 lookup, plus newlines)
-    — no per-cell Python formatting, so writing 100k rows is a single memcpy-speed write."""
+    The body is one bulk byte buffer via a uint8 lookup, so there is no per-cell formatting."""
     labels = col_labels(cols_1based, wire_map)
     n, S = matrix.shape
     header = [f"c gpap samples: {n} rows x {S} cols (support projection; one 0/1 per column)"]

@@ -1,39 +1,13 @@
 """GPU-parallel SAT solution sampler via exact BCP-completion.
 
-`GPUSampler` draws satisfying assignments by running K independent randomized
-DPLL-completions in parallel on the GPU. Each "trajectory" repeatedly:
+`GPUSampler` runs K independent randomized DPLL-completions per chunk: each trajectory picks the
+next B free variables, gives each a random per-sample polarity and propagates to fixpoint, all
+in one fused kernel launch (`engine.run_trajectory`, the C++ core `libgpap`; CUDA only). A
+conflicted trajectory is discarded; a fully-assigned conflict-free one is a guaranteed-valid
+model (every clause keeps a non-falsified literal), so no rounding or repair is needed.
 
-  1. picks the next B free (unassigned) variables per sample,
-  2. assigns each a *random per-sample polarity* (a decision),
-  3. runs BCP to fixpoint,
-
-all inside ONE fused kernel launch per chunk (engine.run_trajectory — the engine is the C++
-core `libgpap`, which requires CUDA; its kernels are Triton, compiled ahead of time).
-
-A trajectory that reaches a conflict is a dead-end (discarded); a trajectory whose
-variables all become assigned with no conflict is a **guaranteed-valid model** — every
-clause keeps a non-falsified literal, so the assignment satisfies the formula exactly
-(no rounding / repair, unlike gradient-relaxation GPU samplers).
-
-This is the "uniform-like, speed-over-uniformity" regime (cf. QuickSampler / CMSGen):
-samples are biased by the propagation order, but produced by the millions and every one
-is valid. The sampler is a *throughput* primitive — its fit depends on how shallow the
-decision depth is (heavily-propagating structured formulas → few decisions → few rounds).
-
-Design knobs (the throughput vs. success-rate tradeoff):
-  decisions_per_round : assign B free vars at once. B=1 = textbook DPLL (most rounds,
-                        highest success rate); B>1 = a random restriction (fewer rounds,
-                        more dead-ends). DEFAULT 8 — the same number every other entry point
-                        already used (`gpap::SampleOptions::batch`, `sample_bits`,
-                        `pipeline.sample_clauses(b=)`, `gpap bench --b`, and the first entry of
-                        DEFAULT_PORTFOLIO). It was 1 here and only here, so a direct
-                        GPUSampler user got a different sampler from every other face.
-  random_var          : pick a random free var per sample (diverse) vs. the first free
-                        one (cheap, low-index-biased).
-
-K is auto-sized to the GPU (capped by default to stay off the host-RAM spill cliff).
-`PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True` is what makes that K reachable; it is set in
-`gpap/__init__.py`, which always runs before this module (see there for the measurement).
+K is auto-sized to the GPU; `PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True`, set in
+`gpap/__init__.py`, is what makes that K reachable.
 """
 import contextlib
 
@@ -46,15 +20,12 @@ from gpap.engine.bcp_engine import BCPEngine
 from gpap.engine.calibrate import resolve_k_cap
 
 
-# The core spells "no limit" as 0, so `max_chunks or 0` / `max_seconds or 0.0` turned a SPENT
-# budget into an UNBOUNDED run -- the exact inversion of what the caller asked for, and silent.
-# `None` is the only spelling of "no limit" here; a 0 is a real, exhausted budget.
+# The core spells "no limit" as 0; here `None` does — a caller's 0 is a spent budget.
 _NO_LIMIT = 0
 
 
 def _chunk_budget(v):
-    """`None` = unbounded. The core cannot express "run zero chunks", so a non-positive budget
-    is refused rather than silently promoted to unbounded."""
+    """`None` = unbounded. A non-positive budget is refused (the core cannot run zero chunks)."""
     if v is None:
         return _NO_LIMIT
     if int(v) < 1:
@@ -63,10 +34,8 @@ def _chunk_budget(v):
 
 
 def _time_budget(v):
-    """`None` = unbounded. A SPENT budget (0.0, the natural value of `limit - elapsed`) clamps to
-    a tiny positive number so the core's `time_limit_s > 0` valve still fires at all, instead of
-    reading as no limit. The valve is checked BEFORE each chunk, so a spent budget buys ZERO
-    further chunks — which is what a caller who has already used its time asked for."""
+    """`None` = unbounded. A spent budget (0.0) clamps to a tiny positive value so the core's
+    `time_limit_s > 0` valve still fires (checked before each chunk, so it buys zero chunks)."""
     if v is None:
         return _NO_LIMIT
     return float(v) if float(v) > 0 else 1e-9
@@ -83,63 +52,43 @@ class GPUSampler:
         k_cap: "int | str | None" = "auto",
         seed: int | None = None,
     ):
-        """`k_cap` bounds the per-chunk batch. THREE values, and the default is the useful one:
-
-            "auto"  (default) the library's batch cap (calibrate.default_k_cap) — what a
-                    user who never wants to think about K should get, and what the pipeline and
-                    the CLI have always passed. Exactly the historical 49,152 at or below the
-                    reference card, larger on a bigger one.
-            int     that cap, verbatim — what a cross-GPU A/B needs, since "auto" differs per card.
-            None    no cap: the analytic memory model alone decides.
-
-        The default used to be a hardcoded 16,384, which is neither of the three: it pinned a
-        direct GPUSampler user to ~1/3 of the batch the same formula gets through the pipeline,
-        on every GPU. No in-repo caller relied on it (all of them pass k_cap explicitly)."""
+        """`k_cap` bounds the per-chunk batch: "auto" (default) is the library's batch cap
+        `calibrate.default_k_cap`, an int is that cap verbatim (what a cross-GPU A/B needs), and
+        None means no cap, leaving it to the analytic memory model."""
         self.formula = formula
         self.device = device
-        self.k_cap = k_cap = resolve_k_cap(k_cap, device)   # resolved once; None = uncapped
+        self.k_cap = k_cap = resolve_k_cap(k_cap, device)
         self.N = formula.num_vars
         self.M = formula.num_clauses
-        # The engine core (the ONLY execution path — raises off-CUDA / without libgpap;
-        # field split 16|16 or 8|24 picked per formula, see gpap.engine).
         self.engine = BCPEngine(formula)
         # K is charged per STATE clause (length >= 3): binaries are occ implication edges and
         # units live in the flush bitmap — neither costs per-row bytes (see gpap_row_bytes).
         self.M_state = self.engine.num_long
-        # Shape comes from the engine core (free) — never a reduction over a (M,) tensor.
         self._max_cls = formula.max_clause_len or 1
         self._total_lits = formula.total_lits
-        # TWO streams, deliberately. SAMPLING (the per-chunk shuffle and trajectory seed) is
-        # the CORE sampler's own deterministic RNG, seeded below and shared with the C++ face.
-        # `_proj_gen` drives DELIVERY (the don't-care bits the projection fill draws). They must
-        # not share a stream: delivery draws would otherwise shift every later chunk's
-        # permutation, making `--out` change which models a run finds at the same --seed. The
-        # core enforces its half by construction (its kept-row gathers draw nothing); this
-        # generator keeps the host half honest.
+        # Two streams: SAMPLING is the core's own RNG (shared with the C++ face), `_proj_gen`
+        # drives DELIVERY (the don't-care bits the projection fill draws). Do not merge them:
+        # delivery draws would shift later chunks' permutations, so `--out` would change which
+        # models a run finds at the same --seed.
         self._proj_gen = torch.Generator(device=device)
         self._proj_gen.manual_seed((seed if seed is not None else 0) ^ 0x5EED_0117)
         self._seed = seed
         import random as _random
         self._pyrng = _random.Random(seed)
         self.support: list[int] | None = None   # 0-based independent-support vars (from `c ind`)
-        self._recon: dict | None = None          # set when built with simplify=True (see _from_simplified)
-        # THE chunk loop lives in the core (cpp/src/sample.cpp, `gpap_sampler_*`), shared
-        # verbatim with the C++ face — this class marshals configs and knobs in, stats and kept
-        # rows out. The handle owns the batch (K = min(analytic bound, cap) over the exact
-        # per-row allocation list, gpap_compute_k_safe), the SAMPLING RNG, and the kernel pin
-        # (the propagate variant is pinned to the chunk batch at create, so a short warmup
-        # reset cannot switch kernels mid-measurement; an explicit $GPAP_KERNEL / mode pin is
-        # never overridden — gpap_engine_auto guards it, in the core).
+        self._recon: dict | None = None
+        # The handle owns the batch (K = min(analytic bound, cap), gpap_compute_k_safe), the
+        # sampling RNG, and the kernel pin (pinned to the chunk batch so a short warmup reset
+        # cannot switch kernels mid-run; an explicit mode pin is never overridden).
         self._smp = _gcore.Sampler(self.engine._core, seed=(seed if seed is not None else 0),
                                    k_cap=(-1 if k_cap is None else int(k_cap)))
         self._sup_pushed = "unset"     # last support handed to the core (see _push_support)
 
-    # ---------------------------------------------------------------- THE batch size
-    # Read `batch_size`; set it with pin_batch() / pinned_batch(). `K` is held by the CORE
-    # sampler — assigning it routes to gpap_sampler_set_k, so a pin binds the actual chunk loop.
+    # Read `batch_size`, set it with pin_batch() / pinned_batch(); assigning `K` routes to
+    # gpap_sampler_set_k, so a pin binds the actual chunk loop.
     @property
     def K(self) -> int:
-        """Rows per chunk — the core sampler's resolved batch."""
+        """Rows per chunk: the core sampler's resolved batch."""
         return self._smp.k
 
     @K.setter
@@ -152,16 +101,10 @@ class GPUSampler:
         return self.K
 
     def pin_batch(self, n: int) -> int:
-        """Force every chunk to EXACTLY `n` rows, and return it.
-
-        Use it whenever a bound is REQUIRED rather than merely intended — above all when rows are
-        reconstructed to host RAM, where an unbounded chunk is tens of GB (that is exactly how
-        tests/test_circuits.py once reached 28 GB asking for 1000 models).
-
-        Pinning ABOVE the calibrated value is allowed and is how the no-change gate fixes K across
-        builds, but it overrides the memory model. On platforms that SPILL to host RAM instead
-        of failing the allocation, an oversized K degrades silently rather than erroring, so size
-        it yourself (docs/BENCHMARKING.md §2, kill-switch)."""
+        """Force every chunk to exactly `n` rows, and return it — whenever a bound is required
+        rather than merely intended, above all when rows are reconstructed to host RAM. Pinning
+        above the calibrated value overrides the memory model, and platforms that spill to host
+        RAM degrade silently instead of erroring (docs/BENCHMARKING.md §2)."""
         self.K = max(1, int(n))
         return self.K
 
@@ -178,14 +121,12 @@ class GPUSampler:
     @classmethod
     def from_cnf_file(cls, path: str, device: torch.device, *, simplify: bool = False,
                       els: bool = False, **kw) -> "GPUSampler":
-        """Build a sampler from a DIMACS file. `simplify=True` first applies unit-propagation
-        simplification (shrinks M -> larger K -> more throughput) and samples the compacted
-        formula, reconstructing full original models at collection time (see simplify_cnf).
-        `els=True` additionally does equivalent-literal substitution (simplify_cnf_els): removes
-        more variables/clauses -> faster propagate + bigger K (implies simplify)."""
+        """Build a sampler from a DIMACS file. `simplify=True` samples the unit-propagation
+        -compacted formula (smaller M -> larger K), reconstructing original models at collection
+        time; `els=True` also does equivalent-literal substitution and implies simplify."""
         if not (simplify or els):
             formula = CnfFormula(device)
-            formula.parse_cnf_file(path)            # ONE parse; support comes off the same core
+            formula.parse_cnf_file(path)
             smp = cls(formula, device, **kw)
             smp.support = formula.support
             return smp
@@ -208,8 +149,7 @@ class GPUSampler:
     @classmethod
     def _from_simplified(cls, nv: int, clauses: list, support: list | None,
                          device: torch.device, *, els: bool = False, **kw) -> "GPUSampler":
-        # `clauses` is treated read-only here and by simplify_cnf/simplify_cnf_els (they copy
-        # before mutating) — no defensive deep copy: it costs ~1s per call on 1M-clause unrolls.
+        # `clauses` is read-only here and downstream: no deep copy (seconds/call on big unrolls).
         if els:
             res = simplify_cnf_els(nv, clauses, support)
             if res is None:
@@ -222,7 +162,7 @@ class GPUSampler:
             smp._recon = {"unsat": False, "els": True, **recon}
             return smp
         res = simplify_cnf(nv, clauses, support)
-        if res is None:                                  # UNSAT after unit propagation
+        if res is None:
             return cls._unsat_sampler(device, nv, support, **kw)
         nv2, cl2, sup2, old_of_new, forced, free_support = res
         formula = CnfFormula(device)
@@ -237,12 +177,9 @@ class GPUSampler:
     @classmethod
     def _unsat_sampler(cls, device: torch.device, orig_nv: int = 1,
                        orig_support: list | None = None, **kw) -> "GPUSampler":
-        """Stand-in sampler for a formula simplify proved UNSAT: emits nothing, forever.
-
-        It still records the ORIGINAL shape (nv + support). No row will ever be projected, but a
-        caller asking for bit output needs the COLUMN LIST to hand back a well-formed (0, S)
-        matrix — without it `_build_projection_plan` had no `orig_nv` to read and `gpap sample
-        unsat.cnf --out f.bits` died with a KeyError instead of writing an empty file."""
+        """Stand-in sampler for a formula simplify proved UNSAT: emits nothing, forever. It still
+        records the original shape (nv + support), because a caller asking for bit output needs
+        the column list to get back a well-formed (0, S) matrix."""
         formula = CnfFormula(device)
         formula.init_formula(1, [[1], [-1]])
         smp = cls(formula, device, **kw)
@@ -255,31 +192,23 @@ class GPUSampler:
         if self.device.type == "cuda":
             torch.cuda.synchronize()
 
-    # ------------------------------------------------------------- the core chunk loop
-    # reset+trajectory+selection, the config bandit, the stop valves and the delivery/verify
-    # accounting ALL live in cpp/src/sample.cpp (`gpap_sampler_*`), shared with the C++ face.
-    # tests/test_sample_core.py pins that loop's own contract at the ABI level; nothing here
-    # re-implements any of it.
+    # reset+trajectory+selection, the bandit, the stop valves and the delivery/verify accounting
+    # all live in cpp/src/sample.cpp (`gpap_sampler_*`), shared with the C++ face.
 
     def _push_support(self, sup) -> None:
-        """Hand the decision phase-1 variable set to the core, skipping an unchanged one.
-
-        Re-setting the SAME support is already a no-op IN THE CORE — that is where the rule
-        lives, because a pair mask lives until the engine dies (see gpap.h) and both faces
-        re-push on every call. This cache only saves the ctypes round-trip, so it is allowed to
-        be COARSER than the core's test (which canonicalises the set) and never finer: a key
-        miss costs one no-op call, and there is no key hit the core would have acted on."""
+        """Hand the decision variable set to the core, skipping an unchanged one. Re-setting the
+        same support is already a no-op in the core; this cache only saves the ctypes round-trip,
+        so it may be coarser than the core's test and never finer."""
         key = tuple(sup) if sup else None
         if self._sup_pushed != key:
             self._smp.set_support(list(sup) if sup else None)
             self._sup_pushed = key
 
     def _reconstruct_els(self, comp_rows: list[list[int]]):
-        """Reconstruct original models when the formula was reduced by ELS (simplify_cnf_els).
-        Every original var resolves to its representative's value via `rep_of`: forced vars take their
-        pinned value, decided/propagated reps take the sampled value, and free (don't-care) reps draw
-        ONE random bit per equivalence class (so equivalent vars stay equal — a hard requirement, else
-        the projection is invalid). Returns (original_models, support_projections)."""
+        """Reconstruct original models when ELS reduced the formula (simplify_cnf_els). Every var
+        resolves through `rep_of`: forced vars take their pinned value, decided reps the sampled
+        value, free reps one random bit per equivalence class so equivalent vars stay equal.
+        Returns (models, support_projections)."""
         r = self._recon
         rep_of = r["rep_of"]                        # rep_of[v-1] = (rep_var, same_polarity)
         new_of_new = r["new_of_new"]                # rep_var -> compacted var (1-based)
@@ -313,11 +242,10 @@ class GPUSampler:
         return out_models, projs
 
     def _reconstruct(self, comp_rows: list[list[int]]):
-        """Map full models of the simplified (compacted) formula back to full ORIGINAL models, and
-        return (original_models, support_projections). Forced vars are pinned to their unit-propagated
-        value; the compacted vars take their sampled value; don't-care support vars (free_support) are
-        sampled uniformly at random (so the support-projection distribution is preserved). Remaining
-        unmapped original vars are true don't-cares set to False (any value gives a valid model)."""
+        """Map compacted models back to original ones; returns (models, support_projections).
+        Forced vars are pinned to their unit-propagated value, compacted vars take their sampled
+        value, don't-care support vars are drawn uniformly (so the projection distribution is
+        preserved), and remaining unmapped vars are set to False."""
         if self._recon.get("els"):
             return self._reconstruct_els(comp_rows)
         r = self._recon
@@ -339,34 +267,26 @@ class GPUSampler:
             projs.append(tuple((v + 1) if (v + 1) in sset else -(v + 1) for v in orig_support))
         return out_models, projs
 
-    # --------------------------------------------------- efficient bit-projection output
 
     def projection_cols(self) -> list[int]:
-        """The 0-based ORIGINAL variables each output column stands for — the SHAPE of this
-        sampler's output, without building the plan that fills it. Split out so a caller that
-        collected nothing can still report a correctly-shaped (0, S) result: the plan itself is a
-        per-column Python pass (~0.2 us/column) and there is no reason to pay it for zero rows."""
+        """The 0-based original variables each output column stands for: the shape of the output
+        without the plan that fills it, so a caller that collected nothing still reports (0, S)."""
         r = self._recon
         if r is not None and r.get("orig_support"):
-            return list(r["orig_support"])                                 # 0-based support vars
+            return list(r["orig_support"])
         if r is not None:
-            return list(range(r["orig_nv"]))                               # full model
+            return list(range(r["orig_nv"]))
         if self.support:
             return list(self.support)
         return list(range(self.N))
 
     def _build_projection_plan(self) -> dict:
-        """Precompute a per-output-column plan so a chunk's support projection is a GPU gather +
-        constant fill + random fill — NO Python per-row reconstruct (the measured delivery
-        bottleneck). One-time per formula; the reconstruction rules (simplify / ELS / plain)
-        become tensors over the S output columns:
-          gcol[i]   = compacted variable column to gather for output column i (-1 if not a gather)
-          flip[i]   = XOR applied to the gathered/random bit (ELS negated-representative polarity)
-          const[i]  = constant 0/1 for a forced (unit-propagated) column
-          rgroup[i] = random-draw group id (-1 if none); ELS columns sharing a representative share
-                      a group so equivalent variables stay EQUAL (a hard validity requirement).
-        Output columns default to the original support (the sampled object); with no support they
-        are all original variables (the full model). Returns/caches the plan dict."""
+        """Per-output-column plan (cached) making a chunk's support projection a GPU gather +
+        constant fill + random fill, with no Python per-row reconstruct: `gcol[i]` is the
+        compacted column to gather (-1 if not), `flip[i]` the XOR on the gathered/random bit,
+        `const[i]` the constant for a unit-forced column, `rgroup[i]` the random-draw group (-1
+        if none) — ELS columns sharing a representative share a group. Columns default to the
+        original support, else all original variables."""
         if getattr(self, "_proj_plan", None) is not None:
             return self._proj_plan
         r = self._recon
@@ -379,8 +299,7 @@ class GPUSampler:
             return groups.setdefault(key, len(groups))
 
         if r is not None and r.get("unsat"):
-            pass                                               # no row will ever be projected;
-            # the plan carries only the SHAPE, so an UNSAT formula yields a (0, S) matrix.
+            pass       # no row is ever projected; the plan carries only the (0, S) shape
         elif r is None:                                        # sampler decided ORIGINAL vars
             for i, v0 in enumerate(cols):
                 gcol[i] = v0                                   # compacted == original
@@ -403,9 +322,9 @@ class GPUSampler:
             fm = {abs(l): (l > 0) for l in r["forced"]}
             for i, v0 in enumerate(cols):
                 v = v0 + 1
-                if v in fm:                                    # unit-forced -> constant
+                if v in fm:
                     const[i] = 1 if fm[v] else 0
-                elif v in new_of_old:                          # survives compacted -> gather
+                elif v in new_of_old:
                     gcol[i] = new_of_old[v]
                 else:                                          # in no surviving clause == free_support
                     rgroup[i] = _group(("free", v0))
@@ -419,43 +338,35 @@ class GPUSampler:
         return self._proj_plan
 
     def _fill_projection(self, raw, plan, n=None):
-        """(n, S) uint8 support projection from `raw` — the (n, |gather|) bit rows the CORE
-        kept (plan["gcol"]'s >= 0 columns, in that order) — via the cached plan: constant
-        columns broadcast, gathered columns XOR their polarity flip, don't-care groups drawn
-        from `_proj_gen` (ELS-equivalent variables share a draw — a hard validity requirement).
-        The gather itself happened in the core, billed to deliver_s; only this fill is host
-        work, and only IT consumes delivery randomness."""
+        """(n, S) uint8 support projection from `raw`, the (n, |gather|) bit rows the core kept
+        (plan["gcol"]'s >= 0 columns, in order): constant columns broadcast, gathered columns XOR
+        their polarity flip, don't-care groups draw from `_proj_gen` (ELS-equivalent variables
+        share a draw). Only this fill consumes delivery randomness."""
         n = raw.shape[0] if n is None else n
         plan_g = plan["gcol"] >= 0
-        proj = np.broadcast_to(plan["const"], (n, plan["S"])).copy()   # (n, S) uint8
+        proj = np.broadcast_to(plan["const"], (n, plan["S"])).copy()
         if plan_g.any() and n:
             proj[:, plan_g] = raw[:n, :int(plan_g.sum())] ^ plan["flip"][plan_g]
         rm = plan["rgroup"] >= 0
         if plan["n_groups"] and rm.any() and n:
-            # torch RNG keeps the don't-care stream on `_proj_gen`, never the sampling one.
             bits = torch.randint(0, 2, (n, plan["n_groups"]), generator=self._proj_gen,
                                  dtype=torch.uint8, device=self.device).cpu().numpy()
             proj[:, rm] = bits[:, plan["rgroup"][rm]] ^ plan["flip"][rm]
         return proj
 
     def _gather_cols(self, plan):
-        """The 0-based compacted columns the core must keep for this plan — the gather set, or
-        ONE dummy column when the plan gathers nothing: set_columns(empty) means EVERY variable
-        in the ABI, which is the opposite of "none", and `_fill_projection` reads a raw matrix
-        only through the gather mask, so a dummy column is never looked at."""
+        """The 0-based compacted columns the core must keep: the gather set, or one dummy column
+        when the plan gathers nothing, since set_columns(empty) means EVERY variable in the ABI
+        (the dummy is never read: raw is indexed only through the gather mask)."""
         g = plan["gcol"][plan["gcol"] >= 0]
         if len(g) or self.N == 0:       # N == 0: "every variable" IS zero columns — no dummy
             return g
         return np.zeros(1, dtype=np.int64)
 
     def reseed(self, seed: int) -> None:
-        """Restore EVERY RNG stream to a known point.
-
-        The warmup calls this so the timed run is deterministic from `seed` alone. It exists as a
-        method because there are THREE streams to restore and they live in three places — the
-        core's sampling stream (`gpap_sampler_reseed`), the delivery fill (`_proj_gen`) and the
-        host reconstruction fills (`_pyrng`) — so a caller that reseeds only the one it knows
-        about silently loses that determinism for the others."""
+        """Restore all three RNG streams — the core's sampling stream, the delivery fill
+        (`_proj_gen`) and the host reconstruction fills (`_pyrng`) — so a run is deterministic
+        from `seed`."""
         self._smp.reseed(seed)
         self._proj_gen.manual_seed(seed ^ 0x5EED_0117)
         import random as _random
@@ -463,23 +374,12 @@ class GPUSampler:
 
     def sample_bits(self, n_target: int, *, config=(True, 8, False),
                     max_chunks: "int | None" = None, max_seconds: "float | None" = None):
-        """Collect up to `n_target` support-projection bit-rows efficiently. Only the small
-        (n, S) bit matrix crosses to host RAM per chunk (not full N-var models), so a big output
-        is cheap. Returns (matrix, cols_1based): matrix is a numpy uint8 (got, S) array of 0/1,
-        cols_1based lists the ORIGINAL variable id of each column. Sound: every row is a valid
-        support projection (forced pinned, compacted vars from a real model, don't-cares free,
-        ELS-equivalent vars kept equal via shared random groups).
-
-        `max_seconds` bounds the wall (checked between chunks), like `sample`'s. It is not
-        optional in spirit: this is a SAMPLING loop, so without it a `--time-limit`ed run keeps
-        sampling here long after its budget was spent. Prefer `sample(out_cap=...)`, which takes
-        these rows off chunks the timed run executes anyway; this entry point remains for topping
-        up a short collection and for callers with no timed run.
-
-        The loop is the core's (`gpap_sampler_run`, keep_cap = n_target): its zero-yield stop is
-        TOTAL-based — it gives up only when NOTHING has been found after the grace window, where
-        the old Python loop abandoned a delivering fill on one late empty chunk.
-        """
+        """Collect up to `n_target` support-projection bit-rows; only the (n, S) bit matrix
+        crosses to host RAM per chunk, never full N-var models. Returns (matrix, cols_1based):
+        a numpy uint8 (got, S) array of 0/1 and the original variable id of each column; every
+        row is a valid support projection. `max_seconds` bounds the sampling wall between
+        chunks. Prefer `sample(out_cap=...)`, which takes these rows off chunks the run runs
+        anyway."""
         rv, B, la = config[0], max(1, config[1]), (config[2] if len(config) > 2 else False)
         plan = self._build_projection_plan()
         self._push_support(self.support)
@@ -493,7 +393,6 @@ class GPUSampler:
                else np.zeros((0, 1), dtype=np.uint8))
         return self._fill_projection(raw, plan, take), plan["cols_1based"]
 
-    # ----------------------------------------------------------------- public
 
     @torch.inference_mode()
     def sample(
@@ -514,68 +413,38 @@ class GPUSampler:
         out_cap: int = 0,
         verify_sound: bool = False,
     ) -> dict:
-        """Draw at least `n_target` valid models.
+        """Draw at least `n_target` valid models. Stops early on any optional valve: `max_chunks`
+        chunks run, `max_seconds` of sampling wall elapsed (checked between chunks), or zero
+        models after every config was measured plus a couple of grace chunks.
 
-        Stops early on any of the safety valves (all optional):
-          - `max_chunks` chunks have run;
-          - `max_seconds` of sampling wall have elapsed (checked between chunks — the intended
-            "produce N samples, but never spin longer than T" contract);
-          - ZERO models after every config has been measured plus a couple of grace chunks —
-            the target is unreachable (e.g. a 0%-success instance would otherwise loop forever
-            once no chunk cap is given).
+        `support`: 0-based variables to restrict decisions to (the rest follow by propagation);
+        "auto" (default) uses the support parsed from the CNF, None decides all variables.
+        `n_models` counts fully-assigned models, every one guaranteed valid;
+        `n_support_complete` counts trajectories that fixed the whole support without conflict
+        (equal to `n_models` for a true independent support). With `verify_clauses` every model
+        is independently checked and `all_valid` is set. `samples_per_s` is n_models over the
+        sampling wall alone. `random_var`: True = random decision order, else index order.
 
-        `support`: 0-based variable indices to restrict decisions to (independent-support
-        sampling — the rest are determined by propagation). "auto" (default) uses the
-        support parsed from the CNF (`self.support`) if any; None decides all variables.
+        `decisions_per_round` (B, default 8, as on every other face) is a throughput AND a
+        uniformity knob: larger B is more uniform, B >= |support| exactly so, while B=1 wins on
+        success rate on tight/deep circuits (docs/findings/UNIFORMITY_FINDINGS.md).
 
-        n_models counts FULLY-assigned models (sound — guaranteed valid). When sampling over
-        an independent support, models are projected onto the support for diversity/collection.
-        n_support_complete counts trajectories that fixed the whole support without conflict
-        (equals n_models when the support is a true independent support). If `verify_clauses`
-        is given, every fully-assigned model is independently checked and `all_valid` is set.
+        `configs`: a portfolio of (random_var, B[, lookahead]) tuples run as a throughput bandit,
+        each chunk running ONE config at full K picked by its measured models/wall so far; a
+        one-entry portfolio pins the algorithm, which is how a measurement is taken
+        (pipeline.SINGLE_PORTFOLIOS). `config_breakdown` reports each config's
+        models/chunks/throughput. Overrides random_var/decisions_per_round.
 
-        `decisions_per_round` (B) defaults to **8**, matching `gpap::SampleOptions::batch`,
-        `sample_bits`, `pipeline.sample_clauses(b=)`, `gpap bench --b` and DEFAULT_PORTFOLIO's
-        first entry — it was 1 on this method alone, so a direct library caller silently got a
-        different sampler from the one every other face runs. B is also a UNIFORMITY knob and
-        the change moves the default the safe way: against the exact oracle, B=8's median TV is
-        0.156 to B=1's 0.315, and B >= |support| is exactly uniform
-        (docs/findings/UNIFORMITY_FINDINGS.md). Pass `decisions_per_round=1` for the old
-        behaviour — B=1 still wins on success rate on tight/deep circuits, which is why the
-        portfolios carry it as an arm.
+        `out_cap` > 0 keeps up to that many support-projection bit-rows as the run goes, in
+        `out_bits` / `out_cols`, gathered off chunks the run executes anyway rather than in a
+        second pass; only the winning config's bucket is returned, so the emitted set is ONE
+        sampler and not a mixture of arms. Its wall is `out_project_s`, excluded from every rate
+        (a pinned single config has no per-config wall, docs/findings/CLI_DELIVERY_FINDINGS.md).
 
-        `random_var`: True = random decision order (diverse), False = structured/index order
-        (follows the gate DAG — completes search-heavy residuals). Per-formula adaptation is the
-        portfolio bandit's job (`configs`), which measures both orders on real full-K chunks.
-
-        `configs`: a PORTFOLIO of (random_var, B) tuples, run as a throughput BANDIT — each chunk
-        runs ONE config at full K, picked by its measured models/wall so far, dynamically switching
-        to the winner and re-checking the rest (decaying-epsilon). Robust like a portfolio yet ~as
-        fast as the best single config; unlike the retired small-K pre-probe it measures at
-        full K, and it can change its mind. A one-entry portfolio leaves it nothing to select, which
-        is how a MEASUREMENT pins the algorithm (see pipeline.SINGLE_PORTFOLIOS).
-        `config_breakdown` reports each config's models/chunks/throughput. Overrides
-        random_var/decisions_per_round when set.
-
-        `out_cap` > 0 also KEEPS up to that many support-projection bit-rows as the run goes, in
-        `out_bits` / `out_cols` — the rows a caller writes to a file. The core keeps the projection's
-        gather columns off chunks this run executes anyway (billed to deliver_s), against the
-        second full sampling pass a post-hoc collection costs; the host fill finishes the rows. Rows are bucketed PER CONFIG and only the winning config's are returned,
-        so the emitted set comes from ONE sampler rather than a mixture of the bandit's arms (a
-        mixture is a uniformity question, not a delivery one). Its wall is accumulated separately
-        as `out_project_s` and excluded from every rate — the per-config stamp alone was not
-        enough, because a pinned single config has no per-config wall at all.
-        Measurements: docs/findings/CLI_DELIVERY_FINDINGS.md.
-
-        `verify_sound` (default OFF) re-checks on the device that EVERY emitted model satisfies
-        EVERY clause, and reports `sound_check` / `unsound_rows`. It is opt-in because it is a
-        self-test, not part of producing samples: a row is only counted when it is active and
-        fully assigned, which already means no clause was emptied. Turn it on in tests, in a
-        campaign whose rows will be published, or when something looks wrong. Its wall is
-        accumulated into `verify_sound_s` and EXCLUDED from every rate, exactly as the output
-        projection is, so enabling it cannot move samples/s. Cost is per completed row and
-        scales with the formula, so a large instance pays more than a small one (measured
-        a fraction of a percent of the chunk it rides on).
+        `verify_sound` (default off) re-checks on the device that every emitted model satisfies
+        every clause, reporting `sound_check` ("ok" / "UNSOUND" / "off" — a tri-state, since
+        "not run" is neither verdict), `sound_rows_checked` and `unsound_rows`. Its wall is
+        `verify_sound_s`, excluded from every rate exactly as `out_project_s` is.
         """
         if isinstance(random_var, str):
             raise ValueError(f"random_var={random_var!r} is not a mode: pass a bool. Per-formula "
@@ -586,10 +455,8 @@ class GPUSampler:
         sup = self.support if (isinstance(support, str) and support == "auto") else support
         sup_idx = list(sup) if sup else None
 
-        # Normalise the portfolio to (random_var, B, lookahead) triples. A config may be a
-        # 2-tuple (rv, B) — lookahead defaults off — or a 3-tuple, lookahead ∈ {False, "soft"}
-        # ("fused"/"fsoft" accepted as aliases from the pre-packed-only era). The retired modes
-        # raise: "full" python lookahead and "orac" needed the deleted PyTorch engine path.
+        # Normalise to (random_var, B, lookahead) triples: a 2-tuple leaves lookahead off, a
+        # 3-tuple takes False or "soft" ("fused"/"fsoft" are aliases). "full"/"orac" raise.
         def _norm(c):
             la = c[2] if len(c) > 2 else False
             if la in ("full", "orac", True):
@@ -601,10 +468,9 @@ class GPUSampler:
         adaptive = configs is not None and len(plan) > 1
         keep_rows = collect or verify_clauses is not None
 
-        # What the core keeps per chunk: full compacted models for collect/verify (host
-        # reconstruction needs every variable), the projection plan's gather set for an
-        # out_cap-only run, NOTHING for a pure timed run — keep_cap=0 means the core never
-        # gathers a row, which is the emission-symmetry property the rival comparison rests on.
+        # What the core keeps per chunk: full compacted models for collect/verify, the plan's
+        # gather set for an out_cap-only run, nothing for a pure timed run. keep_cap=0 means the
+        # core never gathers a row — the emission-symmetry property the rival comparison needs.
         self._push_support(sup)
         pplan = self._build_projection_plan() if out_cap else None
         if keep_rows:
@@ -613,15 +479,12 @@ class GPUSampler:
             self._smp.set_columns(self._gather_cols(pplan))
         keep_cap = -1 if keep_rows else (int(out_cap) if out_cap else 0)
 
-        # Work counters bracket the run (the engine keeps counting; only deltas are ours).
         self._sync()
         bcp_r0 = self.engine.launches
         bcp_o0 = self.engine.ops_total()
         bcp_p0 = self.engine.props_total()
         bcp_d0 = self.engine.decs_total()
 
-        # ONE call: the loop, the bandit, the valves and the accounting are the core's
-        # (cpp/src/sample.cpp) — see the class docstring and tests/test_sample_core.py.
         st = self._smp.run(
             int(n_target), [(rv_c, b_c, la_c == "soft") for rv_c, b_c, la_c in plan],
             max_chunks=_chunk_budget(max_chunks), time_limit_s=_time_budget(max_seconds),
@@ -634,10 +497,8 @@ class GPUSampler:
         proj_s, verify_s = float(st.deliver_s), float(st.verify_s)
         gpu_unsound, sound_rows = int(st.unsound_rows), int(st.sound_rows_checked)
 
-        # ---- host-side collection: reconstruct / verify / dedup off the kept buckets ----
-        # ALL configs' buckets, pooled — collection is a correctness readout, so every model
-        # found belongs in it (delivery via out_cap below stays winner-only, the ONE-sampler
-        # rule; a mixture is a uniformity question and that is a delivery decision).
+        # Host-side collection over ALL configs' buckets, pooled: collection is a correctness
+        # readout, so every model found belongs in it. Delivery via out_cap stays winner-only.
         models: list[list[int]] = []
         distinct: set = set()
         all_valid = True
@@ -650,7 +511,6 @@ class GPUSampler:
                 pos = self._smp.bits(i, rows=kept)          # (kept, N) uint8, compacted vars
                 comp_rows = np.where(pos, vidx, -vidx).tolist()
                 if self._recon is not None and not self._recon.get("unsat"):
-                    # reconstruct full ORIGINAL models (forced pinned, don't-cares randomized)
                     out_rows, projs = self._reconstruct(comp_rows)
                 else:
                     out_rows = comp_rows
@@ -665,12 +525,10 @@ class GPUSampler:
                 if collect:
                     models.extend(out_rows)
 
-        # `elapsed` is the core's SAMPLING wall: kept-row gathers are delivery and the
-        # soundness re-check is a self-test, both billed separately (`out_project_s` /
-        # `verify_sound_s`), so neither asking for rows nor asking for verification can move
-        # samples/s, dec/s or impl/s.
+        # `elapsed` is the core's SAMPLING wall: kept-row gathers (`out_project_s`) and the
+        # soundness re-check (`verify_sound_s`) are billed separately, so neither moves a rate.
         elapsed = float(st.sampling_s)
-        bcp_rounds = self.engine.launches - bcp_r0             # kernel launches (delta)
+        bcp_rounds = self.engine.launches - bcp_r0
         bcp_ops = self.engine.ops_total() - bcp_o0
         bcp_props = self.engine.props_total() - bcp_p0
         bcp_decs = self.engine.decs_total() - bcp_d0
@@ -684,11 +542,10 @@ class GPUSampler:
             "elapsed_s": elapsed,
             "samples_per_s": (n_models / elapsed) if elapsed > 0 else 0.0,
             "attempts_per_s": (attempts / elapsed) if elapsed > 0 else 0.0,
-            # Lightweight BCP-work stats (free counters) — to tell success-bound from BCP-bound.
             "bcp_rounds": bcp_rounds, "bcp_ops": bcp_ops,
             "bcp_rounds_per_chunk": (bcp_rounds / chunk) if chunk else 0.0,
             "bcp_ops_per_attempt": (bcp_ops / attempts) if attempts else 0.0,
-            # CDCL-comparable work rate: literals assigned (decisions + implications) per second.
+            # CDCL-comparable work rate: literals assigned per second.
             "assigns_per_s": (bcp_props / elapsed) if elapsed > 0 else 0.0,
             "decisions_per_s": (bcp_decs / elapsed) if elapsed > 0 else 0.0,
             "implications_per_s": (bcp_impl / elapsed) if elapsed > 0 else 0.0,
@@ -698,12 +555,9 @@ class GPUSampler:
             "mean_decision_rounds": float(st.rounds_mean),
             "max_decision_rounds": int(st.rounds_max),
             "n_distinct": len(distinct) if keep_rows else None,
-            # Why the run ended — the core's stop valve, by name (new with the core loop; the
-            # legacy keys above still carry everything recorded rows compare on).
             "stop": _gcore.SAMPLE_STOP.get(int(st.stop), "?"),
             # Tri-state, never a bool: "off" is not "unsound", and it also covers
-            # REQUESTED-BUT-NEVER-REACHED (verify on, nothing completed, check never ran —
-            # `sound_rows_checked` is the evidence a verdict is a statement about).
+            # requested-but-never-reached, whose evidence is `sound_rows_checked`.
             "sound_check": ("off" if not (verify_sound and sound_rows) else
                             ("ok" if gpu_unsound == 0 else "UNSOUND")),
             "sound_rows_checked": (sound_rows if verify_sound else None),
@@ -716,21 +570,18 @@ class GPUSampler:
             out["all_valid"] = all_valid
         best_cfg = plan[0]
         if configs is not None:
-            dom = plan[int(st.dominant_config)]                   # most models produced
+            dom = plan[int(st.dominant_config)]
             out["random_var"], out["B"], out["lookahead"] = bool(dom[0]), dom[1], dom[2]
             out["dominant_config"] = [bool(dom[0]), dom[1], dom[2]]
-            # Best-THROUGHPUT config — the core's pick (well-measured >= min_measure_chunks
-            # first, then models/wall), the same index whose kept rows out_cap returns below.
+            # Best-throughput config: the core's pick (>= min_measure_chunks first, then
+            # models/wall), the same index whose kept rows out_cap returns below.
             bi = int(st.best_config)
             brc, brs = plan[bi], cbd[bi]
             best_cfg = brc
             out["best_rate_config"] = [bool(brc[0]), brc[1], brc[2]]
             out["best_rate_success"] = (brs.models / brs.attempts) if brs.attempts else 0.0
             out["best_rate_chunks"] = int(brs.chunks)
-            # Per-config walls now exist for every run (the core stamps them cheaply), but the
-            # best_rate_* RATES keep their documented shape: only an ADAPTIVE run publishes a
-            # per-config steady-state rate — a pinned single config's headline stays the
-            # caller-side blend, exactly what every recorded row was produced under.
+            # Only an ADAPTIVE run publishes a per-config steady-state rate.
             bw = float(brs.wall_s) if adaptive else 0.0
             out["best_rate_sps"] = (brs.models / bw) if bw > 0 else None
             out["best_rate_decisions_per_s"] = (brs.decs / bw) if bw > 0 else None
@@ -738,9 +589,8 @@ class GPUSampler:
             out["best_rate_assigns_per_s"] = (brs.props / bw) if bw > 0 else None
 
             def _lab(c):
-                # bool()/str() rather than the raw values: a config may be authored with the
-                # pipeline's VarOrder/Lookahead enums, whose repr would otherwise leak into the
-                # results-JSON KEYS and break comparison against recorded rows.
+                # bool()/str(), not the raw values: a config may be authored with the pipeline's
+                # VarOrder/Lookahead enums, whose repr would leak into results-JSON keys.
                 return f"rv={bool(c[0])},B={c[1]}" + (f",la={str(c[2])}" if c[2] else "")
             out["config_breakdown"] = {
                 _lab(c): {
@@ -757,8 +607,7 @@ class GPUSampler:
                 } for c, sd in zip(plan, cbd)
             }
         if out_cap:
-            # The WINNING config's rows only (see `out_cap` in the docstring). Always
-            # well-shaped — a run that completed nothing returns (0, S) over the same columns.
+            # The winning config's rows only; a run that completed nothing returns (0, S).
             bi = int(st.best_config)
             kept = min(int(cbd[bi].kept_rows), int(out_cap))
             if kept:
@@ -787,39 +636,27 @@ def _satisfies(dimacs_model: list[int], clauses: list) -> bool:
 
 
 def simplify_cnf(nv: int, clauses: list, support: list | None):
-    """Unit-propagation simplification before sampling (what Arjun/preprocessors do). Asserts all
-    unit clauses, propagates, drops satisfied clauses + falsified literals, and COMPACTS the
-    remaining (unassigned) variables to 1..nv'. This shrinks M/N a lot on unit-heavy formulas
-    (e.g. these sk_ benchmarks), so the sampler fits a much larger K → higher throughput.
-
-    Returns (nv2, clauses2, support2, old_of_new, forced, free_support) or None if UNSAT:
-      nv2          : compacted variable count.
-      clauses2     : simplified clauses over compacted vars (1-based).
-      support2     : 0-based support vars surviving in the compacted formula (decide these).
-      old_of_new   : list; old_of_new[i] = original DIMACS var of compacted var i+1.
-      forced       : DIMACS lits fixed by unit propagation (constant in EVERY full model).
-      free_support : 0-based original support vars that are neither forced nor in any remaining
-                     clause — true don't-cares; to preserve the support-projection distribution
-                     they MUST be sampled uniformly at random in reconstruction (not dropped).
-
-    Soundness: unit propagation only asserts already-forced units and removes satisfied clauses /
-    falsified literals — it is strictly MODEL-PRESERVING (it does NOT eliminate variables by
-    resolution like VE/BCE, which CMSGen disables for exactly that reason). So the set of valid
-    support projections is unchanged, provided forced support vars are pinned to their forced value
-    and free_support vars are randomized. Validated by tests/test_sampler.py.
+    """Unit-propagation simplification: assert all units, propagate, drop satisfied clauses and
+    falsified literals, compact the survivors to 1..nv'. Smaller M/N means a larger K. Returns
+    (nv2, clauses2, support2, old_of_new, forced, free_support), or None if UNSAT. `support2` is
+    0-based over the compacted formula, `old_of_new[i]` the original DIMACS var of compacted var
+    i+1, `forced` the DIMACS lits fixed by propagation, `free_support` the 0-based support vars
+    neither forced nor in any remaining clause — true don't-cares reconstruction must randomize
+    uniformly and never drop. Sound because unit propagation is strictly model-preserving (no
+    VE/BCE-style elimination), given that pinning (tests/test_sampler.py).
     """
     from itertools import chain
     from gpap.sampling.preprocess import unit_closure
-    out, assigned, status = unit_closure(clauses, [])   # reads only — no defensive copy needed
+    out, assigned, status = unit_closure(clauses, [])
     if status == "unsat":
         return None
     nonunit = [c for c in out if len(c) > 1]
-    # Vectorised variable compaction (the sorted-set + per-literal remap listcomps cost ~1.5s
-    # of pure Python per call on 1M-clause unrolls; this runs on construct AND rebuild).
+    # Vectorised variable compaction: the listcomp version costs seconds of pure Python per call
+    # on 1M-clause unrolls, and this runs on construct AND rebuild.
     lens = np.fromiter(map(len, nonunit), dtype=np.int64, count=len(nonunit))
     flat = (np.array(list(chain.from_iterable(nonunit)), dtype=np.int64) if lens.sum()
             else np.empty(0, dtype=np.int64))
-    used_np = np.unique(np.abs(flat))                   # sorted unique surviving vars
+    used_np = np.unique(np.abs(flat))
     lut = np.zeros((int(used_np[-1]) + 1) if len(used_np) else 1, dtype=np.int64)
     lut[used_np] = np.arange(1, len(used_np) + 1)       # old var -> compacted var (0 = unused)
     nf = (np.sign(flat) * lut[np.abs(flat)]).tolist()
@@ -838,25 +675,16 @@ def simplify_cnf(nv: int, clauses: list, support: list | None):
 
 
 def simplify_cnf_els(nv: int, clauses: list, support: list | None):
-    """Stronger simplification: unit-closure + EQUIVALENT-LITERAL SUBSTITUTION (ELS) + compaction.
-
-    On top of `simplify_cnf`'s unit propagation, this collapses mutually-implied literals (binary-
-    implication SCCs) to a single representative, REMOVING variables. Since BCP propagation cost
-    scales with M (clauses) and K with per-trajectory memory (~M), shrinking the formula speeds up
-    the dominant propagate AND lets a larger K fit — it hits the profiled bottleneck twice. On the
-    sk_ benchmarks the binary-graph SCCs alone remove 5-38% of variables / 3-30% of clauses.
-
-    ELS is equisatisfiability-preserving and, for PROJECTED sampling, support-projection preserving
-    **iff reconstruction is consistent**: every removed variable equals its representative literal
-    in EVERY model, so a removed var (even a don't-care one) must be reconstructed from its rep, NOT
-    randomized independently — otherwise an equivalent pair could be assigned unequal values, an
-    invalid projection. We therefore reconstruct per equivalence-CLASS (one value per representative,
-    applied to all members with the right polarity). Validated by tests/test_sampler.py.
-
-    Returns (nv_r, clauses_r, support_r, recon) or None if UNSAT, where recon carries the per-original
-    -variable resolver used by GPUSampler._reconstruct:
-      rep_of[v-1]  : (rep_var, same_polarity) — original var v takes rep_var's value (negated if not).
-      new_of_new   : {rep_var: compacted_idx(1-based)} — reps that survive as decided/propagated vars.
+    """Unit-closure + equivalent-literal substitution (ELS) + compaction. On top of
+    `simplify_cnf`, this collapses mutually-implied literals (binary-implication SCCs) to one
+    representative, removing variables; cost scales with M and K with per-trajectory memory (~M),
+    so a smaller formula hits the bottleneck twice. ELS preserves support projections iff
+    reconstruction is consistent: a removed variable equals its representative in every model, so
+    it must be reconstructed from that rep and never randomized independently — hence one draw
+    per equivalence class (tests/test_sampler.py). Returns (nv_r, clauses_r, support_r, recon),
+    or None if UNSAT; recon is the resolver used by GPUSampler._reconstruct:
+      rep_of[v-1]  : (rep_var, same_polarity) — v takes rep_var's value, negated if not.
+      new_of_new   : {rep_var: compacted_idx(1-based)} — reps surviving as decided vars.
       forced_map   : {var: bool} — vars pinned by either unit-closure pass.
     """
     from gpap.engine.formula import ext_lit_to_lit_index
@@ -868,7 +696,7 @@ def simplify_cnf_els(nv: int, clauses: list, support: list | None):
         return None
     nonunit1 = [c for c in out1 if len(c) > 1]
 
-    # Binary-implication edges (2N lit-index scheme) from binary clauses: (l1∨l2) ⇒ ¬l1→l2, ¬l2→l1.
+    # Binary-implication edges (2N lit-index scheme): (l1∨l2) ⇒ ¬l1→l2, ¬l2→l1.
     edges = []
     for c in nonunit1:
         if len(c) == 2:
@@ -888,7 +716,7 @@ def simplify_cnf_els(nv: int, clauses: list, support: list | None):
         return None
     nonunit2 = [c for c in out2 if len(c) > 1]
 
-    used = sorted({abs(l) for c in nonunit2 for l in c})       # surviving representative vars
+    used = sorted({abs(l) for c in nonunit2 for l in c})
     new_of_new = {v: i + 1 for i, v in enumerate(used)}
     clauses_r = [[(new_of_new[abs(l)] if l > 0 else -new_of_new[abs(l)]) for l in c]
                  for c in nonunit2]
@@ -901,7 +729,7 @@ def simplify_cnf_els(nv: int, clauses: list, support: list | None):
             rl = var_map[v]
             rep_of.append((abs(rl), rl > 0))
         else:
-            rep_of.append((v, True))                           # its own rep (forced / model / free)
+            rep_of.append((v, True))
 
     def _rep(v0):                                              # surviving decided var for support v0
         v = v0 + 1
@@ -917,8 +745,8 @@ def simplify_cnf_els(nv: int, clauses: list, support: list | None):
 
 
 def parse_independent_support(path: str) -> list[int] | None:
-    """Read the independent support from `c ind <v1> <v2> ... 0` header lines (UniGen/QuickSampler
-    convention). Returns 0-based variable indices, or None if no `c ind` lines are present."""
+    """Read the independent support from `c ind <v1> ... 0` header lines (UniGen convention);
+    returns 0-based variable indices, or None if no `c ind` line is present."""
     sup: set[int] = set()
     found = False
     with open(path) as f:
@@ -934,7 +762,7 @@ def parse_independent_support(path: str) -> list[int] | None:
                     except ValueError:
                         continue
                     if v != 0:
-                        sup.add(abs(v) - 1)            # DIMACS 1-based → 0-based var
+                        sup.add(abs(v) - 1)
             elif s[0].isdigit() or s[0] == "-":
                 break                                  # past the header into clauses
     return sorted(sup) if found else None

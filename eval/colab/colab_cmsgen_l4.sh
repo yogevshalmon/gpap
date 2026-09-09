@@ -1,15 +1,12 @@
 #!/usr/bin/env bash
 # GPAP vs CMSGen across every benchmark family, on a Colab L4.
 #
-# This is `run_full_eval.sh`'s five benchmark stages (no `rivals` — that is a separate sweep) in
-# ONE resumable command, ordered so the headline lands first. Every stage already writes its JSON
-# after each row and skips finished cells on re-run, which is what makes it safe under
-# eval/colab/colab_supervisor.py: a Colab L4 assignment is reclaimed after ~1 h, so this script will be
-# started several times on several VMs and must pick up where the last one stopped.
-#
-# ORDER MATTERS because the run may be cut short: `rare` targets at T=25 are the headline regime
-# (at `random` pins CPU rejection sampling beats every CNF sampler, ours included), so the stages
-# run rare-first and the cheap families go first within that.
+# `run_full_eval.sh`'s five benchmark stages (not `rivals`, a separate sweep) in one resumable
+# command, ordered so the headline lands first. Every stage writes its JSON after each row and
+# skips finished cells on re-run, which is what makes it safe under colab_supervisor.py: the VM
+# is reclaimed within the hour, so this is started several times and must pick up where it left
+# off. Order matters because the run may be cut short: `rare` at T=25 is the headline regime, so
+# the stages run rare-first and the cheap families first within that.
 #
 #   bash eval/colab/colab_cmsgen_l4.sh              # full matrix
 #   TARGETS=rare CYCLES=25 bash eval/...      # the headline slice only

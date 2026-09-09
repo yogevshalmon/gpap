@@ -1,29 +1,14 @@
 #!/usr/bin/env python3
-"""Re-derive a rival's config tie-break on the card the campaign runs on (`--axis`).
+"""Re-derive a rival's config tie-break on the card the campaign runs on (`--axis steps|lr`).
 
-Each rival ships TWO values for its gradient-step count — an argparse default in
-`src/pytorch/flags.py` and a different one in its own demo script — and
-`eval/rivals/rival_common.py::RIVAL_STEPS` resolves that by taking whichever is better FOR THE
-RIVAL. That resolution is a MEASUREMENT, and it was first made on an RTX 4080. This script runs
-both candidates on one instance per tool, through the ordinary drivers and at the ordinary
-granted batch, so the campaign can show the tie-break holding on its own hardware instead of
-importing it from another box.
-
-It is cheap by construction: our own arm is pinned to a token budget here (`--gpap-n 2000`,
-`--gpap-time-limit 5`) because only the RIVAL side is under test — the GPAP numbers in the output
-JSON are meaningless and are not written into any table.
-
-    eval/rivals/steps_calibration.py --axis steps
-    eval/rivals/steps_calibration.py --axis lr --tools recurrent
-
-The `lr` axis exists for the same reason (2026-09-04): both rivals' own run scripts say
-`--lr 15e0` and Recurrent's PAPER text says 50, so that tool ships two values for the knob a
-gradient method depends on most, and the rule is to run it at whichever is better FOR THE RIVAL.
-DEMOTIC ships one, so its `lr` has no tie-break to re-derive.
-
-Exit status is 0 whether or not the tie-break holds; a FLIP is reported loudly and recorded as
-`agrees: false`, because the response to one is to change RIVAL_STEPS deliberately, not to have a
-sweep silently reconfigure a rival mid-campaign.
+Each rival ships TWO values for its gradient-step count — an argparse default and a different
+one in its own demo script — and `rival_common.RIVAL_STEPS` takes whichever is better FOR THE
+RIVAL. That resolution is a MEASUREMENT, so this runs both candidates on one instance per tool,
+through the ordinary drivers at the ordinary granted batch, with our own arm pinned to a token
+budget (only the RIVAL side is under test). The `lr` axis exists for the same reason: both run
+scripts say `--lr 15e0` while Recurrent's PAPER says 50. Exit status is 0 either way — a FLIP is
+reported loudly and recorded as `agrees: false`, the response being to change RIVAL_STEPS
+deliberately rather than let a sweep reconfigure a rival mid-campaign.
 """
 import argparse
 import json
@@ -38,15 +23,13 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspa
 from eval.rivals.rival_common import RIVAL_LR, RIVAL_PAPER_CONFIG, RIVAL_STEPS  # noqa: E402
 
 REPO = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-# One instance per tool: the same ones the 4080 tie-break was measured on, so the two
-# measurements are directly comparable. They are also cheap — this is a direction check.
+# One instance per tool, the same ones the original tie-break used, so the two are comparable.
 PROBES = {
     "demotic": dict(inst="c432", args=["--mode", "native", "c432"]),
     "recurrent": dict(inst="s386", args=["s386", "-T", "25"]),
     "hts": dict(inst="(first CNF)", args=[]),
 }
-# Our arm, pinned to a token budget: only the RIVAL side is under test here. Per tool, because
-# the CNF harness has no seed axis (it samples one file) and rejects --seeds.
+# Our arm, pinned to a token budget: only the RIVAL side is under test.
 CHEAP = {
     "demotic": ["--gpap-n", "2000", "--gpap-time-limit", "5", "--seeds", "5"],
     "recurrent": ["--gpap-n", "2000", "--gpap-time-limit", "5", "--seeds", "5"],
@@ -66,9 +49,8 @@ def _rate(rows, key):
 
 
 def candidates(tool, axis):
-    """Every value the tool's own artifacts give this knob: its run script (pinned), its argparse
-    default (`other`), and its PAPER. The tie-break used to compare only the first two — so the
-    paper's `num_steps` (Recurrent 5, DEMOTIC 10) was cited in the text and never run."""
+    """Every value the tool's own artifacts give this knob: run script (pinned), argparse
+    default, PAPER — comparing only the first two leaves the paper's value never run."""
     table = RIVAL_STEPS if axis == "steps" else RIVAL_LR
     if tool not in table:
         return None, None, set()
@@ -81,13 +63,8 @@ def candidates(tool, axis):
 
 
 def probe(tool, value, tmp, hts_cnfs, timeout, axis="steps", extra=(), cycles=None):
-    """Run one driver once at a fixed value of the axis under test.
-
-    Returns (unique_per_s, wall, error-or-None). `axis` is `steps` (their gradient-step count)
-    or `lr` (their learning rate) — the two knobs each rival ships more than one value for.
-    `extra` are further driver flags (the paired paper configuration passes both knobs);
-    `cycles` overrides the Recurrent probe's unroll depth (the T=50 stage calibrates at 50).
-    """
+    """Run one driver once at a fixed value of the axis under test; returns (unique_per_s, wall,
+    error-or-None). `axis` is `steps` or `lr`, the knobs each rival ships two values for."""
     flag = f"--{axis}"
     tag = f"{tool}_{axis}_{value}" + ("_" + "_".join(str(x) for x in extra) if extra else "")
     out = os.path.join(tmp, tag.replace("-", "") + ".json")
@@ -151,9 +128,8 @@ def main():
             print(f"{tool:<11}  no {args.axis} candidates recorded — skipped")
             continue
         arms = {}
-        # Every value the tool's own artifacts give the knob — script, argparse default, PAPER.
-        # Probing a value the authors never use would be us tuning their tool; these three are
-        # all theirs.
+        # Every value the tool's own artifacts give the knob; probing one they never use would be
+        # us tuning their tool.
         for val in sorted(vals):
             rate, wall, err = probe(tool, val, tmp, hts_cnfs, args.timeout, axis=args.axis,
                                     cycles=args.cycles)
@@ -163,8 +139,7 @@ def main():
             mark += "  (paper)" if val == paper and val != pinned else ""
             print(f"{tool:<11}{val:>7}{rate:>15,.0f}{wall:>7.0f}s{mark}"
                   f"{'   ' + err if err else ''}")
-        # ...and the paper's PAIRED configuration (both knobs at once), which no single-axis
-        # probe measures: Recurrent's paper pairs lr 50 with 5 iterations.
+        # ...and the paper's PAIRED configuration, which no single-axis probe measures.
         pc = RIVAL_PAPER_CONFIG.get(tool)
         if args.axis == "steps" and pc:
             other_axis = "lr"
@@ -181,9 +156,7 @@ def main():
                   f"to tie-break")
         best = max(arms, key=lambda k: arms[k]["unique_per_s"])
         best = best if not isinstance(best, str) or not best.startswith("paper(") else best
-        # INCONCLUSIVE is not agreement. If every arm errored or scored nothing, max() just
-        # returns the first key and would have printed a clean "tie-break holds" over two failed
-        # runs — which is how a broken probe reports success.
+        # INCONCLUSIVE is not agreement: with every arm errored, max() returns the first key.
         if not any(a["unique_per_s"] for a in arms.values()):
             agrees = None
             print(f"  ** INCONCLUSIVE: {tool} scored nothing at either value "

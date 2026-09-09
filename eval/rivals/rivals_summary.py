@@ -1,21 +1,8 @@
 #!/usr/bin/env python3
-"""Summarise the GPU-rival head-to-heads, for one machine or as a cross-GPU A/B.
-
-`eval/eval_plots.py` draws these rows; this prints them, and — the reason it exists — pairs two
-machines' runs so the question "does our margin depend on the card?" has a number instead of an
-impression.
-
-    eval/rivals/rivals_summary.py .experiments/full_eval/nvidia-geforce-rtx-4080-laptop-gpu
-    eval/rivals/rivals_summary.py <4080-dir> <l4-dir> --variant raw --markdown
-
-Only rows present on BOTH sides at the same (instance, variant) enter a paired geomean, so a
-sub-stage that one machine did not finish cannot tilt the comparison. `--variant raw` is the
-usual flag for that: the expensive stages are often run raw-only on a rented GPU.
-
-The metric is the RIVALS' own: unique solutions / their `model_runtime`, which excludes their
-PyTorch model build while GPAP's includes construction. Rival rows that errored (timeout, no
-gradient path) are counted and printed, never silently folded in as a zero.
-"""
+"""Summarise the GPU-rival head-to-heads, for one machine or as a cross-GPU A/B — the rows
+`eval/eval_plots.py` draws, plus a pairing of two machines so "does our margin depend on the
+card?" has a number. Only cells present on BOTH sides at the same (instance, variant) enter a
+paired geomean; the metric is the RIVALS' own, unique solutions / their `model_runtime`."""
 import argparse
 import json
 import os
@@ -51,8 +38,7 @@ def collect(d, stem, key, variant=None):
         if variant and var != variant:
             continue
         rv, g = r.get(key) or {}, r.get("gpap") or {}
-        # NOT MEASURED is not a zero — one definition, in paper_tables, so this table and the
-        # paper's cannot drift apart about which cells are comparable.
+        # NOT MEASURED is not a zero — one definition, in paper_tables.
         nomeas = unique_unmeasured(g)
         gpap = None if nomeas else (g.get("unique_per_s_est") or 0.0)
         rec = {"gpap": gpap, "p_accept": r.get("p_accept"), "rival": None, "ratio": None,
@@ -60,11 +46,7 @@ def collect(d, stem, key, variant=None):
         if not rec["error"]:
             rec["rival"] = rv.get("unique_per_s") or 0.0
             # Every cell lands in exactly ONE bucket, so the printed columns SUM to the cell
-            # count. They used not to: a both-zero cell had ratio None like a rival-zero cell and
-            # was printed "GPAP only" — the label an outright win carries — while entering
-            # neither count. The buckets and their order are paper_tables.rival_family's, so
-            # this table and Table 2 answer the same question over the same rows:
-            # misaligned -> free (zero-search) -> nomeas -> the zero ledger.
+            # count; the buckets and their order are paper_tables.rival_family's.
             if r.get("pin_check_ok") is False:
                 rec["kind"] = "misaligned"              # the two sides ran DIFFERENT constraints
             elif "decisions_per_s" in g and zero_search(g):
@@ -104,12 +86,8 @@ def report_one(d, variant, markdown):
         errs = kinds.count("error")
         fr = kinds.count("free")
         mis = kinds.count("misaligned")
-        # Count wins the way eval/artifact/paper_tables.py does, or the deck and the paper disagree in
-        # print. A cell the rival scored ZERO on is an outright win and belongs in BOTH sides of
-        # the fraction; a cell WE scored zero on is an outright loss and belongs in the
-        # denominator only. Neither has a finite ratio, so neither enters the geomean. Printing
-        # the stricter "finite ratios only" count here is a different, narrower question, and it
-        # differed from the published table by exactly the zero-scoring cells.
+        # Count wins the way paper_tables does: a rival zero is an outright win and belongs in
+        # BOTH sides of the fraction, one of ours is a loss, in the denominator only.
         wins = sum(1 for x in ratios if x >= 1) + only
         n = len(ratios) + only + gz
         # The columns must ADD UP to the cell count, or a reader cannot check what was dropped.

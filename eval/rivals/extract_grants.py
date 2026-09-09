@@ -1,24 +1,12 @@
 #!/usr/bin/env python3
 """Write a campaign's RECORDED GRANTS to one JSON, so a re-run pins them instead of searching.
 
-    eval/rivals/extract_grants.py $GPAP_RESULTS/l4_protocol_20260904 \
-        --out eval/rivals/grants/l4_protocol_20260904.json
+    eval/rivals/extract_grants.py $GPAP_RESULTS/<campaign> --out eval/rivals/grants/<name>.json
 
-For every rival row of every stage file in the campaign directory (`rivals_demotic_*.json`,
-`rivals_recurrent_*.json`; the calibration files are not measurements and are skipped) the
-grant is: the batch rung the rival was granted — the largest rung of the ladder it completed
-(`rival_common.run_at_batch`) — and, for Recurrent-CircuitSAT, the `start_point` its
-initialization settled on. Both are read off the row, never recomputed. A row the rival failed
-on is recorded WITHOUT a batch, with its reason, so a reader sees the cell and a harness given
-this file re-measures it rather than copying the failure (`rival_common.lookup_grant`).
-
-Why this exists (protocol v1.0, 2026-09-06; RIVAL_FAIRNESS_FINDINGS.md §17): the ladder walk
-and the start_point probe are the bulk of a campaign's wall on the large circuits (whole VM
-lifetimes on b21), and neither is a measurement — the rule is "the largest rung that
-completes", and once that rung is known on a card, walking to it again measures nothing.
-`rivals_{demotic,recurrent}.py --grants FILE` (or `GRANTS=FILE` for the drivers) pins these;
-a rung the current card cannot finish on is walked down from, so the rule holds on any card.
-"""
+Per rival row (calibration files skipped) the grant is the batch rung it was granted — the
+largest ladder rung it completed — plus Recurrent-CircuitSAT's settled `start_point`, read off
+the row. A FAILED row is recorded without a batch, so a harness re-measures rather than copies
+it (RIVAL_FAIRNESS_FINDINGS.md §17)."""
 import argparse
 import glob
 import json
@@ -37,8 +25,7 @@ def _rows(payload):
 
 
 def _demotic_depth(payload, row):
-    """The depth the RIVAL ran at: native mode on a combinational circuit is T=1 whatever the
-    file header's `cycles` says (the harness's own T_rival rule)."""
+    """The depth the RIVAL ran at: native mode is T=1 whatever the header's `cycles` says."""
     mode = row.get("mode") or (payload.get("mode") if isinstance(payload, dict) else None)
     ctype = payload.get("circuit_type", "comb") if isinstance(payload, dict) else "comb"
     cyc = row.get("cycles") or (payload.get("cycles") if isinstance(payload, dict) else None)

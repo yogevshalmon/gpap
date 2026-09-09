@@ -1,67 +1,31 @@
 #!/usr/bin/env python3
-"""Run Barbarik (Chakraborty & Meel, AAAI'19 — meelgroup/barbarik) against GPAP or CMSGen as the
-sampler under test. Barbarik is THE uniformity certifier for CNF samplers: it draws one sample
-from the sampler and one from a trusted uniform reference (SPUR), builds a "kernel" CNF whose
-solutions mix the two with a known ratio, has the SAMPLER UNDER TEST sample the kernel, and checks
-the observed bias — accepting an eps-close-to-uniform sampler / rejecting an eta-far one w.p.
->= 1-delta.
+"""Run Barbarik (Chakraborty & Meel, AAAI'19 — meelgroup/barbarik) with GPAP or CMSGen as the
+sampler under test: it draws one sample from the sampler and one from a trusted uniform reference
+(SPUR), builds a kernel CNF whose solutions mix the two in a known ratio, has the sampler under
+test sample that kernel, and checks the observed bias. The tester is `CM_test` (uniform sampling);
+Barbarik3's `PM_test` targets weighted distributions and needs a dual oracle, so it does not apply.
 
-The tester is `CM_test` (the AAAI'19 uniform test). The repo also carries Barbarik3's `PM_test`
-(NeurIPS'22, Pote & Meel), but that targets arbitrary WEIGHTED distributions and needs a DUAL
-oracle — sampling plus probability queries — on the target. For uniform sampling CM_test is the
-right and cheaper instrument.
+Two parameter settings, never pooled. The default here is the CMSGen paper's (eps 0.3, eta 1.8,
+delta 0.1; FMCAD'21 §V-A), which unrolls to one loop of 36 rounds x (1 + 1 + 50) = 1,872 samples,
+1,836 of them from the sampler under test, rejecting a round whose observed bias leaves
+[0.05, 0.95]. Barbarik's own default (eps 0.1 / eta 0.9 / delta 0.05) is 477 rounds and 70,596
+samples and rejects TV >= 0.45 rather than TV >= 0.90. Say which one produced a table.
+`--explain` prints the derivation at any (eps, eta, delta).
 
-DEFAULT PARAMETERS ARE THE CMSGen PAPER'S (eps 0.3, eta 1.8, delta 0.1 — Golia, Soos,
-Chakraborty & Meel, "Designing Samplers is Easy: The Boon of Testers", FMCAD'21, §V-A + Table I),
-which is what makes a like-for-like comparison possible. Their words: *"we set tolerance parameter
-eps, intolerance parameter eta, and confidence delta to be 0.3, 1.8, and 0.1 respectively. For our
-chosen parameters, the number of samples required to return Accept for a given sampler under test
-is 1.836 x 10^3 ... we employed Barbarik augmented with SPUR as the underlying uniform sampler."*
-Their Table I is 50 benchmarks: QuickSampler 0 Accept / 50 Reject, STS 14/36, UniGen3 50/0,
-**CMSGen 50/0**.
+How to read a verdict:
+  * Reject is unconditional; Accept holds only under the paper's non-adversality assumption with
+    respect to Kernel, and only against eta. Skew inside the band is invisible by design — for a
+    sensitive test on enumerable spaces use eval/uniformity/fuzz_uniformity.py.
+  * CMSGen's own Accept was fitted to this test (their Remark 1 tunes its restarts against
+    Barbarik's rejections), so passing here is parity with a sampler tuned to pass here.
+  * Both controls are required: `--config soft` is deliberately biased and must Reject;
+    `--sampler spur` puts the trusted uniform reference under test through this file's own hook
+    and must Accept, or "GPAP Accepts" cannot be told from "our hook hides bias".
 
-At those values CM_test unrolls to exactly ONE loop of **36 rounds x (1 + 1 + 50) = 1,872 samples**
-— of which **36 x 51 = 1,836 come from the sampler under test**, which is the paper's 1.836x10^3
-exactly, and the arithmetic check that our parameters are theirs. A round rejects when the observed
-bias leaves **[0.05, 0.95]**, i.e. when 50 kernel samples put <= 2 or >= 48 on one side. Read
-`--explain` for the derivation at any (eps, eta, delta).
+GPAP is hooked in-process (their SolutionRetriever monkeypatched) for one CUDA init per test; SPUR
+keeps their stock ./samplers/spur path; CMSGen runs as a subprocess, as it normally is.
 
-THREE THINGS THAT SETTING IS NOT, and each has bitten a reading of these numbers:
-
-  * **It is not Barbarik's own default.** The tool ships eps 0.1 / eta 0.9 / delta 0.05, which is
-    477 rounds and **70,596 samples** with per-round bands [0.288, 0.712] and [0.3125, 0.6875] —
-    a far more discriminating instrument (it rejects TV >= 0.45 rather than TV >= 0.90). Run it
-    with `--epsilon 0.1 --eta 0.9 --delta 0.05` when the budget allows; report which one you used.
-  * **An Accept is not a proof of uniformity**, and not only because of eta. The paper is explicit
-    that the Accept direction is CONDITIONAL: *"if Barbarik Accepts a sampler, the sampler's
-    distribution is close to uniform under the assumption of non-adversality with respect to
-    Kernel ... this allows some samplers to behave in an adversarial manner, i.e., such samplers
-    may not generate uniform distribution over phi, however may generate uniform distributions for
-    phi-hat."* Only the REJECT direction is unconditional. Skew inside the eta band is invisible
-    here BY DESIGN — for a sensitive test on enumerable spaces use
-    eval/uniformity/fuzz_uniformity.py, which measures total variation against the exact solution
-    set.
-  * **CMSGen's own Accept was fitted to this test.** Their Remark 1: *"we arrived at the choice of
-    parameters of CMSGen, such as when to restart via an iterative process where we would run
-    Barbarik for the given choice of parameters and change them based on the number of instances
-    rejected by Barbarik."* That is a legitimate design method and they say so plainly — but it
-    means passing here is parity with a sampler tuned to pass here, which is worth stating exactly
-    once and not leaning on.
-
-**Controls, and why `--sampler spur` exists.** An Accept means nothing unless the harness can also
-produce a Reject and can also Accept a sampler that is uniform BY CONSTRUCTION:
-
-  * positive control — `--config soft` is a deliberately biased GPAP config; it must Reject.
-  * negative control — `--sampler spur` puts the trusted uniform reference UNDER TEST, routed
-    through this file's dispatch hook and the same list-of-signed-ints reformatting GPAP and
-    CMSGen go through. It must Accept. Without it, "GPAP Accepts" cannot be distinguished from
-    "our hook returns something the tester cannot see bias in".
-
-GPAP is hooked IN-PROCESS (their SolutionRetriever monkeypatched): one CUDA init for the whole
-test instead of a subprocess per call; the SPUR reference keeps their stock ./samplers/spur path.
-CMSGen runs as a subprocess, which is how it is normally invoked.
-
-Setup (once) — pinned at the commit the recorded certification runs used:
+Setup (once), pinned at the commit the recorded runs used:
   git clone https://github.com/meelgroup/barbarik <repo>/.gpap/src/barbarik
   cd <repo>/.gpap/src/barbarik \
       && git checkout 2c0a6691b97c796a829408dc4db70d9f59f49382 \
@@ -71,10 +35,8 @@ Usage:
   PYTHONPATH=. .venv/bin/python eval/uniformity/barbarik_gpap.py <cnf> [<cnf> ...] \
       [--sampler gpap|pipe|cmsgen|spur|spur-raw] [--config b8|b1|s1|soft|bsup] [--draw batch|iid] \
       [--eta 1.8] [--epsilon 0.3] [--delta 0.1] [--seed 1] [--max N] [--out results.json]
-Verdict per instance: "Accept:1 ..." (uniform-consistent at the chosen eta/eps/delta) or
-"RejectIteration:..." (non-uniformity detected). No verdict when --max truncates the test.
-An instance that ERRORS (sampler cannot fill an order, SPUR times out) is recorded as such and the
-sweep continues — a crash mid-sweep must not silently shorten the evidence.
+Verdict per instance: "Accept:1 ..." or "RejectIteration:..."; no verdict when `--max` truncates.
+An instance that errors is recorded as such and the sweep continues.
 """
 import argparse
 import io
@@ -91,13 +53,11 @@ from gpap import paths
 REPO_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))  # eval/<sub>/ -> repo
 sys.path.insert(0, REPO_ROOT)
 
-# (random_var, B, lookahead), as gpap.sampling.pipeline defines a config. EVERY config a default
-# portfolio can select must appear here, or the certificate has a hole: the bandit picks one
-# config per instance and emits only that config's rows (pipeline buckets rows per config), so
-# "the pipeline is Accepted" is exactly "every member of its portfolio is Accepted".
-#   CIRCUIT_PORTFOLIO = [b8, b1]        DEFAULT_PORTFOLIO = [b8, b1, s1]
-# "bsup" is special-cased below: B is set to the size of the sampling set, which makes a chunk
-# exact rejection sampling over the projection (see eval/uniformity/fuzz_uniformity.py).
+# (random_var, B, lookahead), as gpap.sampling.pipeline defines a config. Every config a default
+# portfolio can select must appear here or the certificate has a hole: the bandit emits only the
+# winning config's rows, so "the pipeline is Accepted" means "every portfolio member is Accepted".
+# "bsup" is special-cased below: B becomes the sampling set's size, making a chunk exact rejection
+# sampling over the projection (eval/uniformity/fuzz_uniformity.py).
 CONFIGS = {"b8": (True, 8, False), "b1": (True, 1, False), "s1": (False, 1, False),
            "soft": (True, 8, "soft"), "bsup": (True, None, False)}
 
@@ -138,21 +98,14 @@ def _gpap_solutions(input_file, num_solutions, ind_var_list, seed, device, confi
         B = max(1, len(ind_var_list))
     smp = GPUSampler.from_clauses(cnf.nv, cnf.clauses, torch.device(device), support=sup0,
                                   seed=seed, k_cap=k_cap)
-    # `sample_bits` gives up after ONE empty chunk once it is past its cold-start grace, which is
-    # the right rule for "this instance produces nothing" and the wrong one for "this instance
-    # produces rarely". Barbarik's kernel is exactly the second case by construction — it enlarges
-    # the sampling set with chain variables while pinning the original support, so solution density
-    # drops and a rejection sampler's yield with it. Without the retry, low-yield kernels came back
-    # "GPAP produced 22/125" and were recorded as no-verdict, which charges OUR collector's
-    # stopping rule to GPAP's coverage. Retry until the order is filled or the budget is spent;
-    # every call is a fresh set of independent chunks, so concatenating them changes no
-    # distribution.
-    # An `iid` ATTEMPT ends at its first dry call, so it delivers ~1/(1-p_dry) rows where a
-    # `batch` attempt can fill the whole order in one: the same 24 attempts would cap the iid arm
-    # at a few dozen samples on a low-yield kernel for purely structural reasons — the same bias,
-    # from the other end. Budget iid in CALLS instead. What stops a genuinely dry instance is the
-    # give-up rule below, in 3 attempts either way; this bound only exists so a slow-but-alive
-    # instance cannot spin forever.
+    # `sample_bits` gives up after one empty chunk past its cold start: right for "produces
+    # nothing", wrong for "produces rarely", and Barbarik's kernel is the second case by
+    # construction (it enlarges the sampling set while pinning the support, so a rejection
+    # sampler's yield drops). Retry until the order is filled or the budget is spent; every call
+    # is a fresh set of independent chunks, so concatenating them changes no distribution. An
+    # `iid` attempt ends at its first dry call, so budget that arm in CALLS or the same attempt
+    # count would cap it far lower for purely structural reasons. A genuinely dry instance is
+    # stopped by the give-up rule below, in 3 attempts either way.
     rows, cols, empty = [], None, 0
     for _ in range(_FILL_ATTEMPTS * (num_solutions if draw == "iid" else 1)):
         before = len(rows)
@@ -169,13 +122,9 @@ def _gpap_solutions(input_file, num_solutions, ind_var_list, seed, device, confi
                 rows.extend(b)
         if len(rows) >= num_solutions:
             break
-        # "Dry" is an ATTEMPT that produced nothing, never merely the last CALL inside it. Keying
-        # off `b` made the counter monotone in the `iid` branch — the only way to reach this line
-        # there is a dry `sample_bits(1)`, so the fill gave up after 3 dry calls ANYWHERE in the
-        # 24-attempt budget even while the calls between them were delivering rows. That charged
-        # our collector's stopping rule to GPAP on exactly the low-yield kernels the retry exists
-        # for, and it did so only for the arm whose independence premise the guarantee is stated
-        # under. Both draws now obey the rule `_FILL_GIVE_UP` states.
+        # "Dry" is an ATTEMPT that produced nothing, never one call inside it: both draws obey
+        # the rule `_FILL_GIVE_UP` states, so the collector's stopping rule is never charged to
+        # the sampler on a low-yield kernel.
         empty = 0 if len(rows) > before else empty + 1
         if empty >= _FILL_GIVE_UP:              # genuinely producing nothing, not merely rarely
             break

@@ -1,31 +1,27 @@
 #!/usr/bin/env python3
-"""What the uniformity guarantee costs, measured on the comparison we actually publish.
+"""What the uniformity guarantee costs, measured on the comparison we publish.
 
-`soft` (soft global lookahead) is Barbarik-rejected on 64 of 65 circuit instances, so it was removed
-from the default portfolio and is opt-in behind `--allow-soft`. Every number in the
-shipped comparison therefore comes from a sampler that cannot choose it. This tool prices that
-decision by pairing two complete sweeps that differ in exactly one flag:
+`soft` (soft global lookahead) is Barbarik-rejected on nearly every circuit instance, so it is
+out of the default portfolio and opt-in behind `--allow-soft`: every shipped number comes from a
+sampler that cannot choose it. This prices that decision by pairing two complete sweeps differing
+in exactly one flag.
 
     eval/artifact/soft_price_tables.py --safe <no-soft dir> --soft <--allow-soft dir> \\
         --out-md docs/paper/SOFT_PRICE.md --out-tex docs/paper/soft_price.tex
 
-`eval/profile_soft_portfolio.py` already answers a narrower question — GPAP against itself on 19
-sequential circuits, geomean 0.42x. It cannot answer this one. "We gave up 2.4x of our own
-throughput" and "we gave up this much of our lead over CMSGen, and these instances outright" are
-different claims, and only the second is visible to a reader of the comparison table.
+`eval/profile_soft_portfolio.py` answers the narrower question of GPAP against itself. Three
+quantities here, because the first alone is misleading:
 
-Three quantities, because they say different things and the first alone is misleading:
+  * THROUGHPUT price over cells where both arms sampled. Diluted by construction — on most cells
+    the bandit never picks `soft` and both arms run identical configurations — so it is reported
+    over all cells and over the cells `soft` actually won.
+  * CAPABILITY change: instances one arm samples and the other does not. A slowdown and "you now
+    get nothing" are different losses, and only this column shows the second.
+  * HEADLINE effect: the published GPAP/CMSGen geomean recomputed on each arm under the same
+    exclusion rules (`eval.artifact.paper_tables`), the number a reader would see move.
 
-  * THROUGHPUT price, over cells where both arms sampled. Diluted by construction: on most cells
-    the bandit never picks `soft`, so the two arms run identical configurations and contribute
-    1.0x. Reported both over all cells and over the cells where `soft` actually won.
-  * CAPABILITY change: instances one arm samples and the other does not. A 2x slowdown and "you
-    now get nothing" are not the same loss, and only this column shows the second.
-  * HEADLINE effect: the published GPAP/CMSGen geomean recomputed on each arm, under the same
-    exclusion rules (`eval.artifact.paper_tables`), which is the number a reader would actually see move.
-
-Both arms must come from the same GPU and CPU — the check is enforced, not assumed, because a
-CMSGen ratio is a property of the host as much as of the sampler.
+Both arms must come from the same GPU and CPU, enforced rather than assumed: a CMSGen ratio is a
+property of the host as much as of the sampler.
 """
 import argparse
 import json
@@ -97,9 +93,8 @@ def build(args):
         if not shared:
             continue
         # CMSGen saw the same binary, instances and budgets in both arms, so its throughput is a
-        # NEGATIVE CONTROL on the pairing: if it moved, the two arms are not comparable and the
-        # `soft` effect would be confounded with a machine difference. Likewise M and |support|
-        # are deterministic — any mismatch means the encodings differ and nothing else is valid.
+        # negative control on the pairing: if it moved, the arms are not comparable. M and
+        # |support| are deterministic, so a mismatch means the encodings differ.
         for k in shared:
             ca, cb = a[k].get("cms_sps"), b[k].get("cms_sps")
             if ca and cb:
@@ -133,10 +128,9 @@ def build(args):
             "cells": len(shared), "gm_all": gm(both), "n_all": len(both),
             "gm_won": gm(won), "n_won": len(won),
             "cap_loss": cap_loss, "cap_gain": cap_gain,
-            # A headline comparison is only meaningful when BOTH arms ran the whole family: a
-            # partial soft stage aggregates a different instance set, and reporting it next to
-            # the complete safe stage compares 19 instances against 3. Seen live at 6/38 cells,
-            # where it read 183.3x -> 141.8x and looked like `soft` HURTING at random pins.
+            # A headline comparison is meaningful only when both arms ran the whole family: a partial
+            # stage aggregates a different instance set, so reporting it beside a complete one
+            # compares different populations and reads as a `soft` effect.
             "complete": len(a) == len(b),
             "head_safe": headline(args.safe, stem),
             "head_soft": headline(args.soft, stem) if len(a) == len(b) else None})
@@ -177,12 +171,10 @@ def build(args):
          f"* **Capability gained** (only the safe arm sampled): **{len(gain)}** cells"
          + (": " + ", ".join(f"`{i}`/{e} ({s}, succ {c:.1e})" for s, i, e, c in gain)
             if gain else "")]
-    # A capability difference is only evidence when the surviving arm was comfortably above the
-    # sampler's zero-progress valve. Below ~1e-3 the valve makes the outcome BIMODAL: every
-    # config is measured, a grace chunk follows, and if those chunks happen to miss, the run
-    # stops and reports zero. Measured live on EPFL `div` (succ 2.1e-4): the safe arm ran 173
-    # chunks over 60 s and found 441 models; the soft arm stopped at 1.72 s after 5 chunks with
-    # 0 — and its bandit had chosen a NON-soft config, so the difference was a draw, not `soft`.
+    # A capability difference is evidence only when the surviving arm was comfortably above
+    # the zero-progress valve. At very low success the valve makes the outcome bimodal: if the
+    # grace chunks miss, the run stops and reports zero, which is a draw and not a `soft`
+    # effect — and the losing arm's bandit may not even have chosen `soft`.
     FRAGILE = 1e-3
     frag = [x for x in loss + gain if x[3] < FRAGILE]
     if frag:
@@ -192,8 +184,8 @@ def build(args):
               f"— the run halts once every config plus a grace chunk has missed. Treat those as "
               f"draws, not as evidence about `soft`: "
               + ", ".join(f"`{i}`/{e}" for _, i, e, _ in frag) + "."]
-    # The number that answers the question as a reader of the comparison table would ask it:
-    # not "how much throughput", but "how much of the PUBLISHED ratio".
+    # The question as a reader of the comparison table asks it: not how much throughput, but
+    # how much of the published ratio.
     pub = [(s["label"], s["depth"], s["target"], s["head_safe"], s["head_soft"])
            for s in per_stage if s["head_safe"] and s["head_soft"] and s["complete"]]
     if pub:
@@ -224,10 +216,10 @@ def build(args):
               "headline column is withheld: a family geomean over a different instance set is not "
               "comparable to the published one."]
 
-    # WHERE the price is paid — the single most useful cut of this experiment. A geomean over the
-    # whole matrix says "2.4x" and hides that the cost is ~nil on instances the sampler finds easy
-    # and catastrophic on the ones it does not. Bucketing by the SAFE arm's success rate (the
-    # property known before choosing a portfolio) makes it monotone and actionable.
+    # Where the price is paid, the most useful cut of this experiment: a geomean over the whole
+    # matrix hides that the cost is near nil where the sampler finds the instance easy and
+    # catastrophic where it does not. Bucketing by the safe arm's success rate — known before
+    # choosing a portfolio — makes it monotone and actionable.
     BUCKETS = [(0.0, 1e-4, "< 1e-4"), (1e-4, 1e-2, "1e-4 .. 1e-2"),
                (1e-2, 0.5, "1e-2 .. 0.5"), (0.5, 1.01, "> 0.5")]
     M += ["", "## Where the price is paid — by instance difficulty", "",
@@ -258,8 +250,8 @@ def build(args):
               "| stage | instance | encoder | safe samples/s | soft samples/s | safe/soft |",
               "|---|---|---|---:|---:|---:|"]
         def rate(x):
-            # A rate of 0.33 samples/s must not render as "0" next to a genuine zero in the
-            # capability column — those mean different things and the table is about the difference
+            # A small rate must not render as "0" beside a genuine zero in the capability column:
+            # those mean different things and the table is about the difference
             return f"{x:,.0f}" if x >= 10 else f"{x:,.2f}"
         for r in worst:
             M.append(f"| {r['stage']} | `{r['instance']}` | {r['encoder']} | "
@@ -318,8 +310,8 @@ def build(args):
           + f" & {n_won} & {len(loss)} \\\\",
           r"    \bottomrule", r"  \end{tabular}", r"\end{table}", ""]
 
-    # The bucket table is the one worth putting in a paper: the per-family table says the cost
-    # varies, this says WHAT it varies with, monotonically, in a quantity you know in advance.
+    # The bucket table is the one worth publishing: the per-family table says the cost varies,
+    # this says what it varies with, monotonically, in a quantity known in advance.
     T += [r"\begin{table}[t]", r"  \centering", r"  \small",
           r"  \caption{\textbf{The cost of the uniformity guarantee is a function of instance "
           r"difficulty.} Paired cells bucketed by the \emph{uniformity-safe} arm's success rate "

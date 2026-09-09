@@ -1,14 +1,8 @@
-"""`gpap` command-line entry point.
+"""`gpap` command-line entry point — the print layer (library code uses `logging`).
 
-Subcommands:
-  gpap sample <cnf|bench|aig|aag> [-n] [--out FILE] [--stats FILE] [--encoder abc]  — sample one instance
-  gpap bench  <glob> [--cmsgen PATH] [--encoder abc] [--n-cov] ...  — benchmark a suite (CNFs and/or circuits)
-  gpap circuit2cnf <circuit|dir> --cycles T [--encoder abc]         — .bench/.aig/.aag -> projected CNF
-  gpap info                                                         — device / triton / abc / power
-
-Circuit-encoder flags (--encoder tseitin|abc|auto, --abc PATH, --abc-opt full|fast|auto) are shared
-by sample / bench / circuit2cnf; --mine auto|on|off by sample / bench.
-Library code uses `logging`; user-facing output lives here (this is the print layer).
+Subcommands: `sample` one instance, `bench` a suite, `mine` entailed clauses, `circuit2cnf`
+(.bench/.aig/.aag -> projected CNF) and `info`. The circuit-encoder flags (--encoder, --abc,
+--abc-opt) are shared by sample / mine / circuit2cnf; --mine auto|on|off by sample / bench.
 """
 import argparse
 import contextlib
@@ -16,37 +10,27 @@ import math
 import os
 import sys
 
-CIRCUIT_EXTS = (".bench", ".aig", ".aag")   # the single source for "is this a circuit input?"
+CIRCUIT_EXTS = (".bench", ".aig", ".aag")
 
 
 def _k_cap_arg(v):
-    """--k-cap accepts the literal 'auto' or a POSITIVE int; the pipeline resolves 'auto' per
-    device. 0 would mean "uncapped" to the memory model — on the CLI that is a footgun (an
-    uncapped K on a big-VRAM box is the host-RAM-spill hazard), so ask for it explicitly via the
-    Python API (k_cap=None) if that is really what you want.
-    Shared with gpap/benchmark.py (which already imports this module for CIRCUIT_EXTS)."""
+    """--k-cap accepts 'auto' or a POSITIVE int; 0 would mean "uncapped", a host-RAM-spill
+    footgun on the CLI, so ask for it through the Python API (k_cap=None)."""
     if v == "auto":
         return v
     return _bounded(int, 1, "'auto' or a positive integer")(v)
 
 
 def _bounded(kind, lo, what, zero_means=None, exclusive=False):
-    """An argparse `type` that REJECTS a value the command cannot act on.
-
-    Every one of these was reachable and silently produced a nonsense run: `-n 0` and `-n -5` both
-    sampled a full chunk anyway; `--time-limit 0` and `--time-limit -1` printed "0 models" with no
-    hint that the cap was the cause; `--max-tuples -1` meant unbounded while the plan line warned
-    that the ceiling had been exceeded. Refusing at parse time costs nothing and cannot mislead.
-    `zero_means` documents a 0 that is meaningful (usually "unbounded") rather than degenerate."""
+    """An argparse `type` that REJECTS a value the command cannot act on, at parse time rather
+    than as a nonsense run. `zero_means` documents a 0 that is meaningful, not degenerate."""
     def parse(v):
         try:
             n = kind(v)
         except (ValueError, OverflowError):
             raise argparse.ArgumentTypeError(f"expected {what}, got {v!r}") from None
-        # `nan` compares False against EVERY bound, so a plain `n < lo` waves it through — and a
-        # NaN deadline is the one value that silently disables the cap it was passed to set
-        # (`elapsed > nan` is never true). `inf` is refused for the same reason: a flag whose whole
-        # job is to bound something must not accept "never".
+        # `nan` compares False against every bound, so `n < lo` waves it through and a NaN
+        # deadline disables its own cap. `inf` is refused likewise: a bound cannot be "never".
         bad = (not math.isfinite(n)) if kind is float else False
         if bad or n < lo or (exclusive and n == lo):
             extra = f" (0 = {zero_means})" if zero_means and lo == 0 else ""
@@ -56,36 +40,28 @@ def _bounded(kind, lo, what, zero_means=None, exclusive=False):
 
 
 _POS_INT = _bounded(int, 1, "a positive integer")
-#: 0 is always MEANINGFUL for these (unbounded / none / pin nothing) — what it means is
-#: stated at each flag's own help, which is where a reader looks.
+#: 0 is MEANINGFUL for these (unbounded / none / pin nothing); each flag's help says which.
 _NONNEG_INT = _bounded(int, 0, "a non-negative integer")
 _NONNEG_SECS = _bounded(float, 0.0, "a non-negative number of seconds", zero_means="unbounded")
-#: `bench` gets the strict one: its --time-limit ALSO bounds the rival subprocess, where 0 would
-#: mean "kill it immediately" rather than "no cap" — the two readings are not reconcilable, so the
-#: measurement path simply does not accept the ambiguous value.
+#: `bench` gets the strict one: its --time-limit also bounds the rival subprocess, where 0 would
+#: mean "kill it now" rather than "no cap", so the ambiguous value is refused.
 _POS_SECS = _bounded(float, 0.0, "a positive number of seconds", exclusive=True)
 
-# How `sound_check` prints. Three values, not two: "off" is not "unsound" — a run that did not
-# verify has said nothing about its rows, and printing that as a failure (or as a pass) is the
-# bug this tri-state exists to prevent.
+# How `sound_check` prints. Three values, not two: "off" is not "unsound".
 _SOUND_LABEL = {"ok": "OK", "UNSOUND": "*** UNSOUND ***", "off": "not run (--verify-sound)"}
 
 
 def _sound_label(info):
-    """The printed verdict — `sound_verdict` is the ONE rule, shared with the bench table and
-    the paper tables so a console line and a published cell cannot disagree."""
+    """The printed verdict; `sound_verdict` is the ONE rule, shared with the bench and paper
+    tables, so a console line and a published cell cannot disagree."""
     from gpap.sampling.pipeline import sound_verdict
     return _SOUND_LABEL[sound_verdict(info)]
 
 
 def _ensure_cnf(args):
-    """(cnf_path, temp_path_or_None, encode_seconds_or_None) for a CNF **or** circuit input.
-
-    A circuit is unrolled to a temporary CNF first; the conversion embeds the wire map as
-    `c wire ...` and the encoder provenance as `c encoder ...`, so downstream output can name each
-    column by its circuit wire and the pipeline can skip work the encoder already did. Shared by
-    every subcommand that takes an instance, so the circuit flags mean one thing.
-    """
+    """(cnf_path, temp_path_or_None, encode_seconds_or_None) for a CNF or a circuit input, and
+    shared by every subcommand that takes an instance. A circuit is unrolled to a temporary CNF
+    whose `c wire ...` / `c encoder ...` comments let output name each column by its wire."""
     path = args.input
     if not path.endswith(CIRCUIT_EXTS):
         return path, None, None
@@ -115,11 +91,7 @@ def _ensure_cnf(args):
 
 
 def _check_out_dirs(args, *flags):
-    """Fail on an undeliverable destination BEFORE the run, not after minutes of GPU work.
-
-    Every subcommand that writes a file uses this. `mine` and `circuit2cnf` used to skip it and
-    open the path only at the very end, so a typo in --out cost the whole sweep and then raised a
-    FileNotFoundError traceback over results that were already computed and are now gone."""
+    """Fail on an undeliverable destination BEFORE the run, not after minutes of GPU work."""
     for flag in flags:
         dest = getattr(args, flag.lstrip("-").replace("-", "_"), None)
         if dest:
@@ -129,8 +101,8 @@ def _check_out_dirs(args, *flags):
 
 
 def _check_input(args):
-    """The instance has to exist before anything is printed about it. Without this the parse error
-    arrived AFTER the portfolio banner, which reads as though the run had started."""
+    """The instance must exist before anything is printed about it, or the parse error arrives
+    after the banner and reads as though the run had started."""
     if not os.path.exists(args.input):
         raise SystemExit(f"input: {args.input!r} does not exist")
 
@@ -151,7 +123,7 @@ def _require_engine(args):
 
 def _cmd_sample(args):
     # Host checks FIRST: a missing file or an undeliverable --out is a fact about the arguments,
-    # not about the machine, so it must not be reportable only on a box with a GPU.
+    # not the machine, so it must not need a GPU to report.
     _check_input(args)
     _check_out_dirs(args, "--out", "--stats")
     device = _require_engine(args)
@@ -165,8 +137,7 @@ def _cmd_sample(args):
 
 
 def _sample_run(args, device, path, tmp, encode_s):
-    """The body of `gpap sample`, after the environment checks and the circuit conversion —
-    split out so the converted temp CNF is unlinked on every exit path."""
+    """The body of `gpap sample`, split out so the temp CNF is unlinked on every exit path."""
     import json
     from gpap.sampling.pipeline import (describe_config, describe_portfolio,
                                         portfolio as _portfolio, sample_file, soft_warning)
@@ -175,24 +146,23 @@ def _sample_run(args, device, path, tmp, encode_s):
     if args.allow_soft:
         print(soft_warning())
     print(f"  portfolio [{args.portfolio}]: {describe_portfolio(portfolio)}")
-    # Collect sample bits when an output file is requested (up to `-n` solutions, never more
-    # than the --max-samples safety ceiling) — or when --sim-check needs rows to simulate.
+    # Collect sample bits when an output file is requested (up to `-n`, never past the
+    # --max-samples ceiling), or when --sim-check needs rows to simulate.
     out_cap = min(args.n, args.max_samples) if (args.out or args.sim_check) else 0
     mine = {"auto": "auto", "on": True, "off": False}[args.mine]
     info = sample_file(path, device, n_time=args.n, n_cov=args.n_cov, out_cap=out_cap,
                        seed=args.seed, simplify=not args.no_simplify, els=not args.no_els, mine=mine,
                        configs=portfolio, k_cap=args.k_cap,
                        verify_sound=args.verify_sound,
-                       # 0 = no cap (the pipeline reads None that way); as a literal 0 it would
-                       # expire the sampling loop before its first chunk and report "0 models".
+                       # 0 = no cap (the pipeline reads None that way); a literal 0 expires the
+                       # sampling loop before its first chunk.
                        time_limit=args.time_limit or None)
     if encode_s is not None:
-        info["encode_s"] = encode_s          # circuit->CNF encode wall (stats sidecar honesty)
+        info["encode_s"] = encode_s
         info["encoder"] = args.encoder
     capped = "<" if info.get("chunk_capped") else ""
-    # |sup| = the DECLARED support (the width of every printed solution row). `support_size` is
-    # what is left ACTIVE after simplification/ELS; printing only the first made a run look wider
-    # than it searched, and only the second made the output file's column count unexplainable.
+    # |sup| = the DECLARED support (the width of a printed row); `support_size` is what stays
+    # ACTIVE after simplification/ELS. Print both: either alone misleads.
     act = info.get("support_size")
     act_s = "" if act is None or act == len(info["sup1"]) else f" ({act:,} active after simplify)"
     print(f"{os.path.basename(args.input)}: N={info['nv']} M={info['n_clauses']} "
@@ -209,15 +179,12 @@ def _sample_run(args, device, path, tmp, encode_s):
           f"{info.get('sps_e2e_total') or 0:,.0f}/s end-to-end | success {info['success_rate']*100:.0f}% "
           f"| sound-check {_sound_label(info)}")
     if info["n_models"] == 0 and not info.get("unsat") and info["n_clauses"]:
-        # Every trajectory conflicted. Nothing above says why, and the three causes want three
-        # different responses from the user, so name them rather than leaving a bare 0.
+        # Every trajectory conflicted. The three causes want different responses, so name them.
         print("  [warn] no models: every trajectory hit a conflict. GPAP discards conflicted\n"
               "         trajectories rather than backtracking, so a tightly-constrained instance\n"
               "         can yield nothing. Try --portfolio b1 (one decision per round), a longer\n"
               "         --time-limit, or --allow-soft (faster on tight circuits, NOT uniform).")
     if info.get("n_collected"):
-        # --n-cov's whole result used to be invisible without --stats: same printout with and
-        # without the flag, while it silently paid for an extra collection pass.
         nd, nc = info.get("n_distinct"), info["n_collected"]
         cpu = info.get("cpu_sound")
         print(f"  quality [--n-cov]: {nd:,} distinct of {nc:,} collected "
@@ -228,8 +195,8 @@ def _sample_run(args, device, path, tmp, encode_s):
         print(f"  mined {m['n_units']} units / {m['n_binary']} binary / {m['n_ternary']} ternary "
               f"in {m['seconds']:.1f}s")
     if args.sim_baseline:
-        # The rejection-sampling rival: random inputs + bit-parallel circuit simulation, no CNF.
-        # Perfectly uniform by construction — its only weakness is p_accept. See simulate.py.
+        # The rejection-sampling rival (simulate.py): random inputs + bit-parallel simulation,
+        # no CNF. Perfectly uniform by construction; its only weakness is p_accept.
         if tmp is None:
             print("  sim-baseline: skipped (CNF input — no circuit to simulate)")
         else:
@@ -274,9 +241,6 @@ def _sample_run(args, device, path, tmp, encode_s):
         mat, cols = info.get("samples"), info.get("cols")
         want = info.get("out_requested") or 0
         if mat is None or len(mat) == 0:
-            # Two different reasons, and the old message asserted the wrong one unconditionally:
-            # `--max-samples 0` used to print "0 models produced" after a run that produced
-            # plenty of them.
             why = ("--max-samples 0 asked for none" if want == 0 else
                    "the run produced no models")
             print(f"  no samples to write ({why})")
@@ -288,9 +252,8 @@ def _sample_run(args, device, path, tmp, encode_s):
             short = f" of {want:,} requested" if (want and len(mat) < want) else ""
             print(f"  wrote {len(mat):,} samples{short} ({mat.shape[1]} cols) -> {args.out} "
                   f"[{args.out_format}]")
-            # A short file is explained where it happens. It used to be the opposite problem:
-            # the writer went and got the full request with a second, unbounded sampling run, so a
-            # capped run reported one model count and then wrote a larger number of samples.
+            # A short file is explained where it happens: rows come off the timed run, so a
+            # capped run writes what it delivered and says why.
             if short:
                 why = ("the run stopped at {:,} models (--time-limit / no progress)".format(
                     info["n_models"]) if info.get("chunk_capped") else
@@ -298,14 +261,12 @@ def _sample_run(args, device, path, tmp, encode_s):
                 print(f"         short because {why}; emitted rows all come from ONE config "
                       f"({describe_config(info.get('out_config'))}), never a mix of the portfolio's")
     if args.stats:
-        # Drop the bulky arrays from the JSON — it is the stats/info sidecar, not the samples.
         stats = {k: v for k, v in info.items() if k not in ("samples", "models", "cols")}
         json.dump(stats, open(args.stats, "w"), indent=1, default=str)
         print(f"  wrote stats -> {args.stats}")
 
 
 def _write_cnf(path, num_vars, clauses):
-    """Plain DIMACS writer (header + 0-terminated clauses)."""
     with open(path, "w") as f:
         f.write(f"p cnf {num_vars} {len(clauses)}\n")
         for c in clauses:
@@ -313,16 +274,9 @@ def _write_cnf(path, num_vars, clauses):
 
 
 def _parse_pool(spec, cnf_path, num_vars):
-    """Resolve --pool into DIMACS literals, or None for "every free literal".
-
-    Three shapes, because the useful pool depends on what you know about the instance:
-      'all'      -> None: sweep everything propagation left undetermined (the default)
-      'support'  -> the formula's declared independent support (`c ind` lines) — for a circuit
-                    CNF that is the primary inputs, where the interesting joint constraints are
-      explicit  -> "1,-2,7" or "@file" with whitespace/comma-separated literals
-    A variable is expanded to BOTH polarities; a signed literal is taken as given, which is how
-    you ask about one side only.
-    """
+    """Resolve --pool into DIMACS literals, or None for "every free literal": 'all' -> None (the
+    default), 'support' -> the declared independent support (`c ind`), or an explicit "1,-2,7" /
+    "@file". A variable expands to BOTH polarities; a signed literal is taken as given."""
     if spec in (None, "all"):
         return None
     if spec == "support":
@@ -354,18 +308,13 @@ def _parse_pool(spec, cnf_path, num_vars):
 
 
 def total_probed_hint(res) -> int:
-    """Tuples probed across every width — the sweep's own work unit."""
     return sum(res.probed.values())
 
 
 def _cmd_mine(args):
-    """Prove clauses the formula already entails, by propagating every k-subset of a literal set.
-
-    Assuming a set of literals and reaching a conflict PROVES the formula entails the negation of
-    that set — a clause. So this finds every entailed clause of each requested width that BCP
-    alone can see, and adding them leaves the model set EXACTLY unchanged while making later
-    propagation stronger.
-    """
+    """Prove clauses the formula already entails by propagating every k-subset of a literal set:
+    a set that conflicts proves the formula entails its negation. Adding the result leaves the
+    model set exactly unchanged while making later propagation stronger."""
     import json
 
     from gpap.mining import mine_entailed
@@ -384,23 +333,14 @@ def _cmd_mine(args):
               f"pool={args.pool}{'' if pool is None else f' ({len(pool)} literals)'} "
               f"widths={widths}")
 
-        # What each width WOULD cost, before spending the budget on it: the candidate count is
-        # exact and needs no GPU work, and at width 3 over a wide pool it is the difference
-        # between a 2-second sweep and one that cannot be run at all.
-        # These are UPPER BOUNDS. Width 1 runs first and its proven units narrow the formula, so a
-        # later width sees fewer free literals and its real count is smaller than printed here.
-        # Printed from INSIDE the sweep (on_plan) so it reuses that engine — this used to build a
-        # whole second LiteralProbe and drop it, for counts that cost nothing once one exists.
+        # What each width WOULD cost, before spending the budget: the candidate count is exact
+        # and needs no GPU work. These are UPPER BOUNDS, since width 1's units narrow the formula
+        # first. Printed from INSIDE the sweep (on_plan) so it reuses that engine.
         def _plan(w, n, ceiling):
-            # Width 1's count is ONE round of a fixpoint that reprobes the shrinking pool until
-            # nothing new appears, so it is not the total it will probe; saying "up to N" there
-            # invited exactly the comparison that made the totals look impossible.
+            # Width 1's count is ONE round of a fixpoint over a shrinking pool, never a bound.
             per = " per fixpoint round" if w == 1 else ""
-            # ...and for the wider widths the count is an UPPER BOUND, because width 1 runs first
-            # and its proven units shrink the free-literal pool. Saying "> --max-tuples N" flat
-            # asserted a truncation the SAME run then contradicted two lines later with
-            # "[exhaustive]" (measured on 10.sk_1_46: plan 277,512 > 200,000, actually probed
-            # 56,112/56,112). A plan line may warn; it may not state a result.
+            # For wider widths the count is an UPPER BOUND, so a flat "> --max-tuples N" would
+            # assert a truncation the same run can contradict. A plan line may warn, not conclude.
             over = (f"  > --max-tuples {ceiling:,} unless an earlier width shrinks the pool"
                     if (ceiling > 0 and n > ceiling) else "")
             print(f"  width {w}: {n:,} candidates{per}{over}")
@@ -422,23 +362,20 @@ def _cmd_mine(args):
             mark = ("exhaustive — nothing of this width escaped" if res.exhausted.get(w)
                     else res.skipped.get(w, "incomplete"))
             # Width 1's numbers are SUMS over its fixpoint rounds; name the rounds so the total
-            # can be reconciled with the pool it started from instead of dwarfing it unexplained.
+            # reconciles with the pool it started from.
             rnd = res.rounds.get(w, 1)
             over_rounds = f" over {rnd} fixpoint rounds" if rnd > 1 else ""
             print(f"    width {w}: {res.by_width.get(w, 0):,} clause(s)   "
                   f"probed {done:,}/{cand:,} ({cover}){over_rounds}   [{mark}]")
         if not res.clauses:
-            # Per-width, never summed: width 1's counts are a fixpoint SUM and width 2's are a
-            # C(P,2), so a pooled ratio divides two incomparable things (which is why it was
-            # removed from MiningResult.summary()).
+            # Per-width, never summed: width 1 is a fixpoint SUM and width 2 a C(P,2).
             done = sum(res.probed.values())
             partial = [w for w in widths if res.probed.get(w, 0) < res.candidates.get(w, 0)]
             if partial:
                 cov = ", ".join(
                     f"width {w} {100.0 * res.probed.get(w, 0) / res.candidates[w]:.3g}%"
                     for w in partial if res.candidates.get(w))
-                # The distinction that matters and that the old output erased: an empty result
-                # from a partial sweep says nothing about the formula.
+                # An empty result from a PARTIAL sweep says nothing about the formula.
                 print(f"  (nothing found in the {done:,} tuple(s) probed — that is only "
                       f"{cov} of each width's space, so this is NOT evidence that nothing is "
                       f"entailed. Raise --max-tuples/--seconds, or narrow --pool.)")
@@ -446,13 +383,12 @@ def _cmd_mine(args):
                 print("  (nothing entailed was found, and the search WAS exhaustive — the "
                       "formula's propagation is already tight at these widths)")
             else:
-                # No candidates were even generated (a skipped or errored width) — say so
-                # instead of claiming exhaustiveness the sweep never earned.
+                # No candidates generated (a skipped or errored width): never claim exhaustive.
                 print("  (nothing was probed — see the per-width status above)")
 
         if args.out:
-            # The STRENGTHENED formula: original + mined. Sound by construction — every mined
-            # clause is entailed, so the model set is unchanged.
+            # The STRENGTHENED formula: original + mined, sound since every mined clause is
+            # entailed.
             _write_cnf(args.out, nv, clauses + list(res.clauses))
             print(f"  wrote {args.out} ({len(clauses):,} original + {len(res.clauses):,} "
                   f"mined clauses)")
@@ -460,9 +396,8 @@ def _cmd_mine(args):
             _write_cnf(args.out_mined, nv, list(res.clauses))
             print(f"  wrote {args.out_mined} ({len(res.clauses):,} mined clauses only)")
         if args.stats:
-            # Report WHAT WAS DONE, not only what was found. An empty `clauses` with no coverage
-            # numbers is unreadable: it cannot distinguish "this formula entails nothing of this
-            # width" from "we probed 0.0008% of the space and ran out of budget".
+            # Report WHAT WAS DONE, not only what was found: an empty `clauses` without coverage
+            # cannot distinguish "entails nothing" from "barely started".
             total_probed = sum(res.probed.values())
             info = {"input": args.input, "nv": nv, "n_clauses": len(clauses),
                     "pool": args.pool,
@@ -474,23 +409,17 @@ def _cmd_mine(args):
                     "drop": args.drop, "n_dropped_derivable": res.derivable,
                     "n_mined": len(res.clauses),
                     "probed_total": total_probed,
-                    # PER WIDTH. A pooled `coverage` used to be written here — the same
-                    # incomparable ratio the terminal stopped printing, but durable on disk.
                     "coverage": {str(w): (res.probed.get(w, 0) / res.candidates[w])
                                  for w in sorted(res.candidates) if res.candidates.get(w)},
                     "probes_per_s": (total_probed / res.seconds) if res.seconds else None,
-                    # The HARDWARE-work metric. clauses/s and probes/s both depend on the
-                    # instance (how many clauses it entails, how fast a tuple conflicts);
-                    # implications/s is what the engine actually did, so it is the number to
-                    # compare across instances, GPUs and engine changes.
+                    # The HARDWARE-work metric: clauses/s and probes/s depend on the instance,
+                    # implications/s on the engine, so only it compares across instances.
                     "implications": res.implications,
                     "implications_per_s": res.implications_per_s,
                     "complete": all(res.exhausted.get(w, False) for w in widths),
                     "by_width": {str(k): v for k, v in sorted(res.by_width.items())},
                     "candidates": {str(k): v for k, v in sorted(res.candidates.items())},
                     "probed": {str(k): v for k, v in sorted(res.probed.items())},
-                    # width 1's candidates/probed are SUMS over this many fixpoint rounds — without
-                    # it a reader cannot reconcile them with the pool the sweep started from.
                     "rounds": {str(k): v for k, v in sorted(res.rounds.items())},
                     "exhausted": {str(k): bool(v) for k, v in sorted(res.exhausted.items())},
                     "skipped": {str(k): str(v) for k, v in sorted(res.skipped.items())},
@@ -505,8 +434,6 @@ def _cmd_mine(args):
 
 
 def _cmd_bench(args):
-    # Delegate to the benchmark table driver (gpap/benchmark.py — inside the package, so this
-    # works from any directory).
     from gpap import benchmark
     argv = ["--glob", args.glob, "--n-time", str(args.n),
             "--time-limit", str(args.time_limit), "--n-cov", str(args.n_cov),
@@ -520,9 +447,8 @@ def _cmd_bench(args):
     if args.twise:
         argv += ["--twise"]
     if args.allow_soft:
-        # Was DEFINED on this parser and accepted by the driver, but never forwarded: the flag
-        # silently did nothing, and unlike `gpap sample` it printed no warning either, so a bench
-        # run asked for the soft config and quietly got the uniformity-safe portfolio instead.
+        # Must be forwarded, or a bench run that asked for the soft config silently gets the
+        # uniformity-safe portfolio.
         argv += ["--allow-soft"]
     if args.no_els:
         argv += ["--no-els"]
@@ -553,8 +479,7 @@ def _cmd_bench(args):
 
 def _convert_circuit(path, outp, args, quiet=False):
     """Dispatch one circuit file (.bench or .aig/.aag) to its converter. `args` needs the shared
-    conversion attributes: cycles, seed, pin_outputs, encoder, abc, abc_opt, target (see
-    _add_encoder_args) — the bench front-end reuses this for circuit globs."""
+    conversion attributes (cycles, seed, pin_outputs, encoder, abc, abc_opt, target)."""
     tm = getattr(args, "target", "random")
     if path.endswith(".bench"):
         from gpap.circuits.bench import convert_one
@@ -589,7 +514,6 @@ def _cmd_circuit2cnf(args):
 
 
 def _print_abc_status():
-    """Report the OPTIONAL berkeley-abc circuit encoder (--encoder abc)."""
     from gpap.circuits.abc_backend import find_abc
     exe = find_abc()
     if exe:
@@ -612,7 +536,6 @@ def _cmd_info(args):
     free, total = torch.cuda.mem_get_info(dev)
     print(f"device: {props.name}  {total/1e9:.1f} GB ({free/1e9:.1f} GB free)  "
           f"SM {props.major}.{props.minor} x{props.multi_processor_count}")
-    # The engine core (libgpap): the C++ library Python and C++ consumers share.
     try:
         from gpap.engine import _core
         if _core.available():
@@ -631,9 +554,8 @@ def _cmd_info(args):
     except Exception as e:  # noqa: BLE001
         print(f"triton (BUILD only): import failed ({e})")
     _print_abc_status()
-    # Power-limit / clock warning (the measured 40 W-vs-80 W + battery-clock gotchas). Before any
-    # headline benchmark, confirm the card isn't power-capped or downclocked — ratios in one state
-    # are valid but absolute numbers across states are not.
+    # Power-limit / clock warning: before a headline benchmark, confirm the card is not
+    # power-capped. Ratios within one state are valid, absolute numbers across states are not.
     try:
         import subprocess
 
@@ -657,8 +579,7 @@ def _cmd_info(args):
 
 
 def _add_encoder_args(sp):
-    """Circuit-encoder flags, shared by every subcommand that accepts a circuit input
-    (`sample`, `mine`, `circuit2cnf`) so the conversion means one thing everywhere."""
+    """Circuit-encoder flags, shared by every subcommand that accepts a circuit input."""
     sp.add_argument("--encoder", choices=["tseitin", "abc", "auto"], default="tseitin",
                     help="circuit->CNF encoder: 'tseitin' (native, default) | 'abc' (unroll + "
                          "dc2/fraig via berkeley-abc, 2-8x fewer clauses, same solution space; "
@@ -677,11 +598,9 @@ def _add_encoder_args(sp):
 
 
 def _user_error_types():
-    """Exceptions that mean "bad input or bad environment", not "gpap has a bug".
-
-    Only these are collapsed to a one-line message; anything else keeps its traceback, because a
-    traceback for an internal fault is information and a traceback for a mistyped filename is not.
-    `GpapError` is imported lazily — the core may not be built, and that case has its own message."""
+    """Exceptions that mean "bad input or bad environment", not "gpap has a bug"; only these
+    collapse to a one-line message, anything else keeps its traceback. `GpapError` is imported
+    lazily, since the core may not be built."""
     types = [OSError, ValueError]
     try:
         from gpap.engine._core import GpapError
@@ -877,10 +796,8 @@ def main(argv=None):
     c.add_argument("input", help="a .bench/.aig/.aag file or a directory of them")
     c.add_argument("output", help="output .cnf (single) or output directory")
     c.add_argument("--cycles", type=_POS_INT, default=25)
-    # 5 = the same conversion/target seed `gpap sample` and `gpap bench` default to. It was 1
-    # here, so CNFs built via this subcommand pinned a DIFFERENT rare pattern than the sweep's
-    # in-process conversions of the same circuit — the HTS rival arm inherited a degenerate
-    # (zero-search) b13 instance from exactly that mismatch.
+    # 5 = the same conversion/target seed `gpap sample` and `gpap bench` default to; another
+    # value would pin a different rare pattern than an in-process conversion of the same circuit.
     c.add_argument("--seed", type=int, default=5)
     c.add_argument("--pin-outputs", type=_NONNEG_INT, default=None)
     _add_encoder_args(c)
@@ -895,9 +812,8 @@ def main(argv=None):
     except KeyboardInterrupt:
         raise SystemExit("interrupted") from None
     except _user_error_types() as e:
-        # The core already produces excellent diagnostics ("<file> line 3: unexpected character
-        # 'x' — not DIMACS"); what reached the user was a ctypes stack trace with that message
-        # buried at the bottom. Print the message, keep the traceback for $GPAP_TRACEBACK=1.
+        # The core's own diagnostics are good: print the message, keep the traceback behind
+        # $GPAP_TRACEBACK=1.
         if os.environ.get("GPAP_TRACEBACK"):
             raise
         raise SystemExit(f"gpap {args.cmd}: {e}") from None

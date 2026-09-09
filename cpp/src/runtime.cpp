@@ -27,8 +27,6 @@ const char *get_error() { return g_error; }
 
 const PackedSplit kPackedSplits[2] = {{16, 65535, 65535}, {8, 0xFFFFFF, 255}};
 
-/* ------------------------------------------------------------------ kernels */
-
 KernelCache::~KernelCache() {
     for (CUmodule m : modules_) cuModuleUnload(m);
 }
@@ -55,11 +53,8 @@ gpap_status KernelCache::get(const std::string &key, Kernel *out) {
     for (int32_t i = 0; i < gpap_kernel_count; ++i) {
         const gpap_kernel_desc &d = gpap_kernel_table[i];
         if (key != d.key) continue;
-        /* The cubins are architecture-specific and triton emits NO ptx fallback, so a mismatch
-         * has no JIT safety net. Check before loading: cuModuleLoadData's own failure is an
-         * opaque CUDA_ERROR_NO_BINARY_FOR_GPU that says nothing about how to fix it.
-         * Binary compatibility runs forward within a major version only: a cubin built for
-         * sm_X.Y loads on sm_X.Z for Z >= Y, and nowhere else. */
+        /* Architecture-specific cubins, no ptx fallback: check before loading, since
+         * cuModuleLoadData's own failure says nothing about how to fix it. */
         const int cc = current_device_cc();
         if (cc && (cc / 10 != d.arch / 10 || cc < d.arch)) {
             set_error("kernels were compiled for sm_%d but this GPU is sm_%d. Rebuild with:\n"
@@ -91,8 +86,7 @@ gpap_status KernelCache::get(const std::string &key, Kernel *out) {
 
 gpap_status launch(const Kernel &k, unsigned gx, unsigned gy, std::vector<void *> args) {
     if (gx == 0 || gy == 0) return GPAP_OK;             /* empty grid: nothing to do */
-    /* Triton kernels always take a global-scratch and a profile-scratch pointer last; the
-     * AOT build refuses any kernel that actually needs them, so both are null here. */
+    /* Triton kernels take two trailing scratch pointers; the AOT build refuses any that use them. */
     static thread_local CUdeviceptr scratch[2] = {0, 0};
     args.push_back(&scratch[0]);
     args.push_back(&scratch[1]);
@@ -100,8 +94,6 @@ gpap_status launch(const Kernel &k, unsigned gx, unsigned gy, std::vector<void *
                            nullptr));
     return GPAP_OK;
 }
-
-/* ------------------------------------------------------------------ device memory */
 
 gpap_status DevBuf::reserve(size_t n) {
     if (n <= bytes) return GPAP_OK;
@@ -138,18 +130,11 @@ extern "C" const char *gpap_last_error(void) { return gpap::get_error(); }
 #endif
 extern "C" const char *gpap_version(void) { return GPAP_VERSION_STR; }
 
-/* Fingerprint of the loaded library's own file. FNV-1a 64 rather than a cryptographic hash:
- * the question is "is this the same build?", not "can an adversary forge one", and a real hash
- * would mean vendoring an implementation into a library whose only runtime dependency is
- * libcuda. Computed once and cached — a caller keying a results cache on it calls it per row. */
+/* Fingerprint of the loaded library's own file: FNV-1a 64 (the question is "same build?"). */
 extern "C" const char *gpap_build_id(void) {
-    /* Built ONCE into a function-local static, whose initialization the C++11 magic-static rule
-     * makes thread-safe -- and, critically, whose value is published only when it is COMPLETE.
-     * An `if (id.empty())` memo that assigned the version prefix first would hand a concurrent
-     * caller "<version>+" -- a fingerprint identical for every build, i.e. exactly the stale-cache
-     * failure this function exists to prevent -- while `id += digest` reallocated the buffer under
-     * the pointer it had just returned. ctypes drops the GIL across the call, so two Python
-     * threads stamping provenance are enough to reach it. */
+    /* Built once into a function-local static: the magic-static rule makes initialization
+     * thread-safe and publishes the value only when COMPLETE — a hand-rolled memo would hand a
+     * concurrent caller the bare "<version>+" prefix, identical for every build. */
     static const std::string id = [] {
         std::string digest = "unknown";
 #if defined(__linux__) || defined(__APPLE__)
@@ -162,11 +147,8 @@ extern "C" const char *gpap_build_id(void) {
                 size_t n;
                 while ((n = std::fread(buf.data(), 1, buf.size(), fp)) > 0)
                     for (size_t i = 0; i < n; ++i) h = (h ^ buf[i]) * 1099511628211ull;
-                /* ferror, not just "fread stopped": a short read ends the loop the same way EOF
-                 * does, so without this a truncated read hashed a PREFIX and returned it as a
-                 * fingerprint — indistinguishable from the real one, and cached for the life of
-                 * the process. "unknown" is the value this function already uses when it cannot
-                 * fingerprint (no dladdr, no fopen); a partial read is that same situation. */
+                /* ferror: a short read ends the loop as EOF does, so a truncated read would
+                 * hash a PREFIX and return it as a fingerprint. */
                 const bool complete = std::ferror(fp) == 0;
                 std::fclose(fp);
                 if (complete) {

@@ -1,4 +1,4 @@
-"""CLEAN-mode identity gates (gpap_engine_apply_clean — docs/plans/RESET_RESTORE_PLAN.md §9).
+"""CLEAN-mode identity gates (gpap_engine_apply_clean — docs/findings/CLEAN_MODE_FINDINGS.md).
 
 THE invariant: a CLEAN launch answers exactly what the plain launch answers — conflict flags on
 EVERY row (confluence makes them exact), counters row for row on the same kernel — and exits with

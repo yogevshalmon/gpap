@@ -1,19 +1,15 @@
-"""Reader for the AIGER circuit format (http://fmv.jku.at/aiger) — binary `aig` and ASCII `aag`,
+"""Reader for the AIGER circuit format (http://fmv.jku.at/aiger): binary `aig` and ASCII `aag`,
 combinational or sequential (latches, with AIGER 1.9 reset values).
 
-Two consumers:
-  * `gpap.circuits.aig2cnf` — NATIVE .aig/.aag input support: parse, simulate, unroll, Tseitin
-    (no external tool needed).
-  * `gpap.circuits.abc_backend` — reads the framed AIG that berkeley-abc's `write_aiger -s`
-    produces (its variable numbering is fully specified, which is why ABC output is routed
-    through AIGER rather than `write_cnf`, whose CNF-var assignment exposes no input map).
+Read by `gpap.circuits.aig2cnf` for native .aig/.aag input, and by `gpap.circuits.abc_backend`
+for the framed AIG berkeley-abc's `write_aiger -s` produces — ABC output is routed through AIGER
+rather than `write_cnf`, whose CNF-var assignment exposes no input map.
 
 Literal encoding: variable `v` has literals `2v` (positive) and `2v+1` (negated); literal 0 is
 constant FALSE, 1 constant TRUE. Variables `1..I` are inputs, `I+1..I+L` latches, then ANDs.
-Latch reset values: 0 (default and the AIGER-1.0 meaning), 1, or `x` (uninitialized — the reset
-field equals the latch's own literal). Uninitialized latches are REJECTED here: GPAP's circuit
-semantics pin the T=0 state (reset-state-0 convention), and silently treating `x` as free would
-enlarge the sampled solution space.
+Latch reset values 0 (the default) and 1 are honoured; uninitialized (`x`) is rejected, because
+GPAP's circuit semantics pin the T=0 state and treating `x` as free would enlarge the sampled
+solution space.
 """
 from dataclasses import dataclass, field
 

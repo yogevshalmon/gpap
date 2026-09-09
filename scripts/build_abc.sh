@@ -2,19 +2,14 @@
 # Build berkeley-abc for GPAP's OPTIONAL circuit-preprocessing pass (gpap.circuits.abc_backend).
 #
 # ABC is never vendored and never a hard dependency: GPAP falls back to its native Tseitin
-# encoder when no `abc` binary is found. This script fetches a PINNED commit (reproducible),
-# builds it, and installs the single static binary into the GPAP cache dir.
+# encoder when no `abc` binary is found. This fetches a pinned commit, builds it, and installs
+# the static binary into the repo-local GPAP cache (not $HOME, which these artifacts would fill).
 #
 #   scripts/build_abc.sh              # -> <repo>/.gpap/bin/abc
 #   GPAP_HOME=/opt/gpap scripts/build_abc.sh
 #
-# Installs REPO-LOCAL, not under $HOME: these artifacts reach gigabytes once benchmarks are
-# fetched, and a quota'd home directory is the wrong place to put them silently.
-#
-# GPAP finds the binary via, in order:  $GPAP_ABC  ->  `abc` on PATH  ->  $GPAP_HOME/bin/abc
-#
-# ABC is distributed by UC Berkeley under a permissive BSD-style licence; it is fetched from
-# upstream at build time, so GPAP redistributes no ABC code or binaries.
+# GPAP finds the binary via $GPAP_ABC, then `abc` on PATH, then $GPAP_HOME/bin/abc. ABC is
+# fetched from upstream at build time under its BSD-style licence; nothing is redistributed.
 set -euo pipefail
 
 # Pinned upstream commit — the hash IS the pin. Override to track a newer ABC.
@@ -46,8 +41,8 @@ echo "fetching abc @ ${ABC_COMMIT:0:12} ..."
 git fetch -q --depth 1 origin "$ABC_COMMIT"
 git checkout -q FETCH_HEAD
 
-# ABC links GNU readline only for its interactive shell; we drive it with `abc -q "<script>"`,
-# and the readline dev headers are absent on many systems, so disable it.
+# ABC links readline only for its interactive shell, which we never use, and its dev headers
+# are absent on many systems.
 echo "building abc (this takes a few minutes) ..."
 make ABC_USE_NO_READLINE=1 -j"$(nproc 2>/dev/null || echo 4)" abc >"$SRC/build.log" 2>&1 || {
     echo "ERROR: abc build failed; tail of $SRC/build.log:" >&2

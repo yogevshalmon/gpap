@@ -1,30 +1,13 @@
 #!/usr/bin/env python3
 """Figures + summary tables for the GPAP full evaluation (eval/run_full_eval.sh).
 
-Reads every bench results JSON in a directory (one per stage, written by gpap/benchmark.py)
-plus the rival head-to-head JSONs, and writes PNGs + a markdown summary:
+Reads every bench results JSON in a directory (one per stage, from gpap/benchmark.py) plus the
+rival head-to-head JSONs, and writes PNGs + `summary.md`: the encoder A/B, GPAP vs CMSGen per
+stage and per rival stage (Table 1's row, drawn), the CMSGen emission control, work rates,
+propagation_summary, amplification, the rival dumbbells (Table 2's row, drawn) and three log-log
+scatters. Every screen and cell classification is IMPORTED from eval/artifact/paper_tables.py,
+so a figure's geomean is the paper's over the paper's cells.
 
-  encoder_ab_<stage>.png      GPAP throughput, tseitin vs abc:fast, paired per instance (the
-                              headline encoder A/B) — log scale, geomean in the subtitle
-  encoder_size_<stage>.png    what the encoder actually changed: CNF clauses and encode wall
-  vs_cmsgen_<stage>.png       GPAP vs CMSGen, emission-free both sides
-  cmsgen_emission.png         CMSGen with vs without writing its samples (the fairness control)
-  work_rates_<stage>.png      implications/s and decisions/s, GPU vs CPU, log-log
-  propagation_summary.png     the engine across ALL families at once: GPAP's implication rate is
-                              flat (~1e9/s, 1.41x spread) while the sample-rate ratio moves three
-                              orders of magnitude, and the exact factorisation of why
-  amplification_<stage>.png   p_accept vs GPAP's constraint amplification (the rejection rival)
-  sps_scatter_all.png         every CMSGen cell at once: samples/s log-log, colored by family
-  rivals_<name>.png           unique solutions/s vs DEMOTIC / Recurrent-CircuitSAT / HTS —
-                              Table 2's row, drawn (same cells, same geomean)
-  sps_scatter_rivals.png      every rival cell at once: unique/s log-log, colored by rival
-  vs_cmsgen_<rival stage>.png GPAP vs CMSGen on that rival stage's cells — Table 1's row of the
-                              converged protocol, drawn (both samplers on the row's own CNF)
-  sps_scatter_cmsgen.png      every Table 1 cell at once: samples/s log-log, colored by set,
-                              marker = task, hollow = T=50
-  summary.md                  every stage's geomeans, win counts and skips, as a table
-
-Usage:
   PYTHONPATH=. .venv/bin/python eval/eval_plots.py .experiments/full_eval/<gpu> [--out-dir DIR]
 """
 import argparse
@@ -41,15 +24,10 @@ from eval.artifact.paper_tables import (RIVAL_CMS_SETS, RIVALS,  # noqa: E402 �
                                         VACUOUS_PINS, _RIVAL_KEY, cms_arm_ran, rival_cells,
                                         rival_cms_cells, zero_search)
 
-# Categorical palette: fixed slot order, never cycled (blue/orange/aqua/violet). Validated
-# colorblind-safe against the light chart surface (all pairs, OKLab dE>=8) — see the dataviz
-# reference palette. One role per hue, kept identical across every figure so a colour always
-# means the same thing: encoder A / encoder B / CMSGen / rival-or-rejection.
+# Categorical palette: fixed slot order, never cycled, colorblind-safe; one role per hue.
 C_TSEITIN, C_ABC, C_CMS, C_RIVAL = "#2a78d6", "#eb6834", "#1baf7a", "#4a3aa7"
 
-# VACUOUS_PINS and zero_search are IMPORTED, never restated: the figures and summary.md quote
-# geomeans a reader will compare against the paper's, so the exclusion rules must be the paper's
-# by construction (a private copy is a rule that drifts — see tests/test_paper_tables.py).
+# VACUOUS_PINS and zero_search are IMPORTED, never restated: a private copy of a paper rule drifts.
 SURFACE, INK, INK2, GRID = "#fcfcfb", "#0b0b0b", "#52514e", "#d9d8d4"
 ENC_COLOR = {"tseitin": C_TSEITIN, "abc:fast": C_ABC, "abc:full": C_ABC, "abc:auto": C_ABC}
 
@@ -74,15 +52,12 @@ def _fig(plt, w, h):
 
 
 def _title(ax, title, subtitle=None):
-    """Title + subtitle drawn above the axes at a FIXED point offset (not an axes fraction):
-    these figures vary in height with the instance count, and a fractional offset collapses the
-    two lines onto each other on the short ones."""
+    """Title + subtitle at a FIXED point offset, not an axes fraction, which collapses on short figures."""
     import textwrap
     from matplotlib.transforms import offset_copy
     off = lambda pts: offset_copy(ax.transAxes, fig=ax.figure, x=0, y=pts, units="points")  # noqa: E731
     lines = textwrap.wrap(subtitle, 108) if subtitle else []
-    # the title sits ABOVE the whole wrapped subtitle block (va="bottom" anchors the block's
-    # bottom, so it grows upward — a 3-line subtitle used to grow straight through the title)
+    # the title sits ABOVE the wrapped subtitle block, so the offset is measured from the block
     ax.text(0, 1, title, transform=off(8 + 12.5 * len(lines) + (6 if lines else 0)),
             fontsize=12, fontweight="bold", color=INK, va="bottom")
     if lines:
@@ -105,10 +80,9 @@ def _short(n):
 
 def _dumbbell(plt, names, a_vals, b_vals, a_label, b_label, a_color, b_color, *,
               xlabel, title, subtitle=None, path=None, floor=1e-1):
-    """The paired-magnitude form: one row per instance, a thin connector between the two
-    measurements, a dot at each end, log x. Deliberately NOT grouped bars — a bar encodes
-    magnitude by AREA from a zero baseline, which a log axis destroys; a dot encodes position,
-    which a log axis is exactly right for, and the connector length reads as the ratio."""
+    """The paired-magnitude form: one row per instance, a connector between the two measurements,
+    a dot at each end, log x. Not grouped bars: a bar encodes magnitude by AREA from a zero
+    baseline, which a log axis destroys, while the connector length reads as the ratio."""
     import numpy as np
     n = len(names)
     fig, ax = plt.subplots(figsize=(8.2, max(2.6, 0.34 * n + 1.9)))
@@ -136,8 +110,7 @@ def _dumbbell(plt, names, a_vals, b_vals, a_label, b_label, a_color, b_color, *,
     ax.set_xscale("log")
     ax.set_xlabel(xlabel, fontsize=9, color=INK2)
     _title(ax, title, subtitle)
-    # Legend UNDER the plot: these labels are long ("CMSGen --samplefile (stock: writes every
-    # sample)") and any in-axes corner collides with either the dots or the subtitle.
+    # Legend UNDER the plot: these labels are long and any in-axes corner collides with the data.
     fig.legend(frameon=False, fontsize=8.5, labelcolor=INK2, ncols=2, loc="upper center",
                bbox_to_anchor=(0.5, 0.02))
     return _save(fig, path)
@@ -146,11 +119,7 @@ def _dumbbell(plt, names, a_vals, b_vals, a_label, b_label, a_color, b_color, *,
 # --------------------------------------------------------------------------- loading
 
 def load_stages(d):
-    """{stage: payload} for every bench JSON in `d` (rival files are loaded apart).
-
-    Any payload with a `results` list is read, whatever its `schema`: the schema records when a
-    COLUMN appeared or went away, and every consumer here already reads its columns with .get().
-    """
+    """{stage: payload} for every bench JSON in `d`, whatever its `schema` (consumers use .get())."""
     out = {}
     for p in sorted(glob.glob(os.path.join(d, "*.json"))):
         stem = os.path.splitext(os.path.basename(p))[0]
@@ -183,8 +152,7 @@ def paired_by_encoder(rows):
 # --------------------------------------------------------------------------- figures
 
 def fig_encoder_ab(plt, stage, payload, out_dir):
-    """Paired magnitude comparison -> grouped bars, log y (rates span decades), sorted by the
-    per-instance ratio so the win/lose split is the shape of the chart."""
+    """Paired magnitude comparison as grouped bars, log y, sorted by the per-instance ratio."""
     rows = rows_of(payload)
     pairs = paired_by_encoder(rows)
     if not pairs:
@@ -211,8 +179,7 @@ def fig_encoder_ab(plt, stage, payload, out_dir):
 
 
 def fig_encoder_size(plt, stage, payload, out_dir):
-    """What the encoder DID: clause count and encode wall. Two facets, one measure each —
-    never a second y-axis on the throughput chart."""
+    """What the encoder DID: clause count and encode wall, one measure per facet."""
     pairs = paired_by_encoder(rows_of(payload))
     encs = [e for e in (payload.get("encoders") or []) if any(e in v for v in pairs.values())]
     if len(encs) < 2:
@@ -268,16 +235,14 @@ def fig_vs_cmsgen(plt, stage, payload, out_dir):
     rows = [r for r in rows_of(payload) if r.get("cms_sps") is not None]
     if not rows:
         return None
-    # one row per instance: the best encoder (the configuration a user would actually ship)
     best = {}
     for r in rows:
         k = r["name"]
         if k not in best or r["gpap_sps"] > best[k]["gpap_sps"]:
             best[k] = r
     items = sorted(best.values(), key=lambda r: (r.get("ratio") or 0))
-    # The count printed beside the geomean is the geomean's OWN population: a zero-scoring cell
-    # (ratio 0.0 / inf / None) stays on the figure — the dumbbell shows which side was silent —
-    # but cannot enter the geomean, so "over N instances" must not count it (fig_rivals rule).
+    # The count beside the geomean is the geomean's OWN population: a zero-scoring cell is drawn
+    # but not counted.
     ratios = [r.get("ratio") for r in items
               if r.get("ratio") and r["ratio"] > 0 and r["ratio"] != float("inf")]
     gm = _gm(ratios)
@@ -353,22 +318,13 @@ def fig_work_rates(plt, stage, payload, out_dir):
 def fig_prop_summary(plt, stages, out_dir):
     """The engine claim, across every family at once, and what the sampler does with it.
 
-    Left: implication rate per family. GPAP's is nearly FLAT (the propagator is occupancy-bound,
-    so its rate is a property of the GPU, not of the instance) while CMSGen's varies with the
-    formula. Right: the exact factorisation of the headline,
-
-        samples/s ratio  =  (implications/s ratio)  /  (work-per-sample ratio)
-
-    which separates what the engine buys from what rejection sampling spends — GPAP throws away a
-    conflicted trajectory, CMSGen backtracks and keeps the partial work. The sample-rate spread
-    across families is three orders of magnitude on top of a flat engine number, so it belongs to
-    the right-hand factor.
-    """
+    Left: implication rate per family — GPAP's is nearly FLAT (occupancy-bound, a property of the
+    GPU) while CMSGen's varies with the formula. Right: samples/s ratio = (implications/s ratio)
+    / (work-per-sample ratio), separating what the engine buys from what rejection costs."""
     fams = []
     for stage, payload in sorted(stages.items()):
-        # One row per instance, chosen by OUR rate — never by `ratio`: keying the argmax on the
-        # published statistic lets CMSGen's number pick which of our runs enters the figure
-        # (the same rule fig_vs_cmsgen and write_summary already follow).
+        # One row per instance, chosen by OUR rate, never by `ratio`: an argmax on the published
+        # statistic lets CMSGen's number pick which of our runs enters the figure.
         best = {}
         for r in rows_of(payload):
             k = r["name"].split(".")[0]
@@ -439,19 +395,10 @@ def fig_sps_scatter(plt, stages, out_dir):
     """Every measured cell of the campaign on ONE picture: CMSGen samples/s (x) against GPAP
     samples/s (y), log-log, one dot per cell, colored by FAMILY.
 
-    The per-family tables answer "what is the geomean"; this answers the question a geomean
-    hides — on a family we beat 100x, how are the instances actually DISTRIBUTED around that
-    ratio? The constant-ratio guides (1x/10x/100x/1000x diagonals) make the answer readable:
-    a family's spread ALONG a guide is instance difficulty (both samplers slow down together),
-    spread ACROSS guides is where the ratio itself varies. Marker = target (circle rare,
-    triangle random; square where the stage has no target axis, e.g. sk).
-
-    Same screens as the paper's Table 1, imported: vacuous pins and zero-search cells are out
-    (a cell that measures the instance is not a point about the sampler), armless rows are out
-    (absent is not zero), and a cell where either side emitted nothing has no log-log position
-    — those are the tables' zero columns, counted in the subtitle so the plot states what it
-    cannot show.
-    """
+    It answers what a geomean hides: spread ALONG a constant-ratio guide is instance difficulty,
+    spread ACROSS guides is where the ratio itself varies. Same screens as Table 1, imported; a
+    cell where either side emitted nothing has no log-log position and is counted in the
+    subtitle, so the plot states what it cannot show."""
     pts = []                                       # (family, target, cms_sps, gpap_sps)
     n_deg = n_zero = 0
     for stage, payload in sorted(stages.items()):
@@ -475,7 +422,6 @@ def fig_sps_scatter(plt, stages, out_dir):
     ax.grid(True, which="both", color=GRID, lw=0.6, alpha=0.7)
     lo = min(min(p[2] for p in pts), min(p[3] for p in pts)) * 0.4
     hi = max(max(p[2] for p in pts), max(p[3] for p in pts)) * 2.5
-    # constant-ratio guides: the frame the eye reads the cloud against
     for k, lab in ((1, "1x"), (10, "10x"), (100, "100x"), (1000, "1,000x"), (10000, "10,000x")):
         ax.plot([lo, hi], [lo * k, hi * k], "--", color=INK2 if k == 1 else GRID,
                 lw=1.0 if k == 1 else 0.8, zorder=1)
@@ -493,8 +439,7 @@ def fig_sps_scatter(plt, stages, out_dir):
             sub = [p for p in mine if p[1] == tgt]
             if not sub:
                 continue
-            # no per-family geomean in the label: it would POOL rare+random across depths,
-            # which no table does — the distribution on the guides is the figure's number
+            # no per-family geomean in the label: it would POOL rare+random across depths
             ax.scatter([p[2] for p in sub], [p[3] for p in sub], s=44, color=col,
                        marker=mk, edgecolor=SURFACE, linewidth=1.1, zorder=3,
                        label=(f"{fam}  (n={len(mine)})" if first else None))
@@ -543,8 +488,8 @@ def fig_amplification(plt, stage, payload, out_dir):
     return _save(fig, os.path.join(out_dir, f"amplification_{stage}.png"))
 
 
-# What each non-plottable bucket is called on a figure — one dict for every rival figure, the
-# buckets being `paper_tables.rival_cells`' (Table 2) and `rival_cms_cells`' (Table 1).
+# What each non-plottable bucket is called on a figure — the buckets of
+# `paper_tables.rival_cells` (Table 2) and `rival_cms_cells` (Table 1).
 RIVAL_NOTE = {"rival0": "rival=0 (our outright wins)", "gpap0": "GPAP=0 (our outright losses)",
               "both0": "both=0", "nomeas": "no unique/s estimate", "free": "zero-search",
               "tiny": "tiny space", "vacuous": "vacuous pin", "unsat": "proved UNSAT",
@@ -557,13 +502,12 @@ CMS_NOTE = {"cms0": "CMSGen=0 (our outright wins)", "gpap0": "GPAP=0 (our outrig
 
 
 def _plain(proto):
-    """'their target table, $T{=}25$' -> 'their target table, T=25' (the RIVALS labels carry
-    TeX for the paper table; a figure title wants text)."""
+    """'their target table, $T{=}25$' -> 'their target table, T=25': RIVALS labels carry TeX."""
     return (proto or "").replace("$T{=}", "T=").replace("$", "")
 
 
 def _rival_payload(path):
-    """(rows, stem, spec) of a rival stage file, spec = (key, rival, proto) from `RIVALS` or
+    """(rows, stem, spec) of a rival stage file; spec = (key, rival, proto) from `RIVALS`, or
     guessed from the rows for a stage the table does not know."""
     try:
         payload = json.load(open(path))
@@ -583,31 +527,21 @@ def _rival_payload(path):
 
 
 def _ledger_note(drop, note):
-    """'3 vacuous pin (b02, b05, b07), 1 proved UNSAT (b01)' — the cells a figure could not draw,
-    named on the figure itself, never dropped silently."""
+    """The cells a figure could not draw, named on the figure itself, never dropped silently."""
     return ", ".join(f"{len(v)} {note.get(b, b)} ({', '.join(sorted(v))})"
                      for b, v in sorted(drop.items()))
 
 
 def fig_rivals(plt, path, out_dir):
     """GPU gradient-descent rivals, their own metric (unique solutions / their model_runtime),
-    one dumbbell per cell of ONE stage — Table 2's row, drawn.
-
-    Cell classification is `paper_tables.rival_cells`, IMPORTED, so the geomean in the subtitle
-    is Table 2's number over Table 2's cells: a vacuous pin, a tiny space, a proved-UNSAT or
-    misaligned cell, an unmeasured estimate and a failed rival run leave through the subtitle's
-    ledger and never become a dot. (The figure used to draw every row without a rival error,
-    vacuous pins included, and its geomean disagreed with the table's.) A cell where ONE side
-    scored zero stays on the figure at the axis floor — a real outcome, and the dumbbell shows
-    which side was silent — but cannot enter the geomean, so the count beside the geomean is
-    the geomean's own, never the plotted-cell count.
-    """
+    one dumbbell per cell of ONE stage — Table 2's row, drawn. Classification is
+    `paper_tables.rival_cells`, IMPORTED, so the subtitle's geomean is Table 2's over Table 2's
+    cells; a cell where ONE side scored zero stays at the axis floor but not in the geomean."""
     rows, stem, spec = _rival_payload(path)
     if not rows or spec is None:
         return None
     key, label, proto = spec
-    # rows may carry a circuit VARIANT (raw / abc — both sides got the same circuit); when both
-    # are present the label must say which, or the two rows collide on one axis tick.
+    # rows may carry a circuit VARIANT (raw / abc); with both present the label must say which
     multi_var = len({r.get("variant") for r in rows if r.get("variant")}) > 1
     items, drop = [], {}
     for name, variant, bucket, ours, rate in rival_cells(rows, key):
@@ -638,12 +572,7 @@ def fig_rivals(plt, path, out_dir):
 def fig_vs_cmsgen_rival(plt, path, out_dir):
     """GPAP vs CMSGen on ONE rival stage's cells — Table 1's row of the converged protocol,
     drawn: both samplers on the abc:fast CNF of the same circuit and pins, steady-state
-    samples/s (GPAP's winning-config rate; CMSGen's samples per its own sampling wall).
-
-    Classification is `paper_tables.rival_cms_cells`, IMPORTED, so the subtitle's geomean is
-    Table 1's over Table 1's cells; a cell where one side scored zero stays on the figure at the
-    floor, and everything the table excludes is named in the subtitle, never drawn.
-    """
+    samples/s. Classification is `paper_tables.rival_cms_cells`, IMPORTED."""
     rows, stem, spec = _rival_payload(path)
     if not rows or spec is None:
         return None
@@ -693,20 +622,14 @@ def _ratio_guides(ax, lo, hi):
         k *= 10
 
 
-# One colour per benchmark SET on the CMSGen scatter (the set is the rival whose set it is).
 SET_COLOR = {"demotic": C_ABC, "rcs": C_TSEITIN}
 
 
 def fig_cmsgen_sps_scatter(plt, rival_paths, out_dir):
     """Every Table 1 cell of the campaign on ONE picture: CMSGen's samples/s (x) against GPAP's
-    (y), log-log, one dot per cell — the companion to Table 1 that `sps_scatter_rivals.png` is
-    to Table 2. Colour = benchmark set, marker = task (circle: the rival's own pins, triangle:
-    our rare pin), filled = the paper's depth, hollow = the T=50 appendix. The constant-ratio
-    diagonals are the frame the cloud is read against; the tasks are different tasks and are
-    never pooled, so there is no geomean on the figure. Classification is
-    `paper_tables.rival_cms_cells`, IMPORTED: a cell Table 1 excludes, or where one side scored
-    zero, has no log-log position and is counted in the subtitle instead.
-    """
+    (y), log-log — the companion to Table 1 that `sps_scatter_rivals.png` is to Table 2. Colour =
+    benchmark set, marker = task, filled = the paper's depth, hollow = the T=50 appendix; tasks
+    are never pooled, so there is no geomean. Classification is `rival_cms_cells`, IMPORTED."""
     pts, drop = [], {}                             # (key, label, tgt, depth, cms, gpap)
     for path in rival_paths:
         rows, stem, spec = _rival_payload(path)
@@ -753,26 +676,14 @@ def fig_cmsgen_sps_scatter(plt, rival_paths, out_dir):
     return _save(fig, os.path.join(out_dir, "sps_scatter_cmsgen.png"))
 
 
-# Same palette, re-slotted for a categorical axis (the FAMILY_COLOR precedent): within THIS
-# figure a colour means one rival, everywhere on it.
 RIVAL_COLOR = {"DEMOTIC": C_TSEITIN, "Recurrent-CircuitSAT": C_ABC, "HTS": C_CMS}
 
 
 def fig_rivals_sps_scatter(plt, rival_paths, out_dir):
     """Every rival cell of the campaign on ONE picture: the rival's unique solutions/s (x)
-    against GPAP's (y), log-log, one dot per cell — the rivals' own metric, and the same
-    companion to Table 2 that `sps_scatter_all.png` is to Table 1.
-
-    Color = rival; marker = task (circle: the rival's OWN benchmark protocol, triangle: our
-    fixed-depth rare-target task). The two protocols are different tasks and are never pooled,
-    so there is no geomean anywhere on the figure — the constant-ratio diagonals are the frame
-    the cloud is read against.
-
-    Cell classification is `paper_tables.rival_cells`, IMPORTED — errors, misaligned pins,
-    zero-search cells and unmeasured unique/s estimates leave through the subtitle's ledger,
-    and a cell where either side scored zero has no log-log position (Table 2's zero columns),
-    so the figure states what it cannot show.
-    """
+    against GPAP's (y), log-log — the rivals' own metric, and the companion to Table 2 that
+    `sps_scatter_all.png` is to Table 1. Colour = rival, marker = task; the two protocols are
+    never pooled, so there is no geomean. Classification is `rival_cells`, IMPORTED."""
     spec = {stem: (key, rival, proto) for stem, key, rival, proto in RIVALS}
     pts = []                                       # (rival, proto, rival_rate, gpap_rate)
     drop = {}
@@ -798,8 +709,6 @@ def fig_rivals_sps_scatter(plt, rival_paths, out_dir):
     ax.grid(True, which="both", color=GRID, lw=0.6, alpha=0.7)
     lo = min(min(p[2] for p in pts), min(p[3] for p in pts)) * 0.4
     hi = max(max(p[2] for p in pts), max(p[3] for p in pts)) * 2.5
-    # constant-ratio guides, extended as far as the data spreads (rival ratios reach 1e5+,
-    # where the CMSGen figure's fixed five guides would stop far short of the cloud)
     _ratio_guides(ax, lo, hi)
     for stem, _key, rival, proto in RIVALS:        # RIVALS order = Table 2 row order
         sub = [p for p in pts if p[0] == rival and p[1] == proto]
@@ -868,32 +777,24 @@ def write_summary(stages, out_dir, src_dir):
         n_err = sum(1 for r in allr if r.get("error"))
         encs = payload.get("encoders") or []
         gm_row = _gm([r.get("ratio") for r in rows])
-        # One row per instance, chosen by OUR rate — the configuration a user would ship, and
-        # the same rule fig_vs_cmsgen uses. Never by `ratio`: that is the published statistic,
-        # so keying the argmax on it lets CMSGen's number pick which of our runs is reported
-        # (measured: 1.24-1.33x on the sequential families). The paper's tables go further and
-        # report each encoder as its own row, selecting nothing — see paper_tables.select_cells;
-        # this summary keeps a per-instance view because the figures are per-instance.
+        # One row per instance, chosen by OUR rate, never by `ratio`: an argmax on the published
+        # statistic lets CMSGen's number pick which run is reported. The paper's tables select
+        # nothing at all (paper_tables.select_cells).
         best = {}
         for r in rows:
             k = r["name"]
             if k not in best or (r.get("gpap_sps") or 0) > (best[k].get("gpap_sps") or 0):
                 best[k] = r
         gm = _gm([r.get("ratio") for r in best.values()])
-        # `clean` = the paper's rule, IMPORTED (paper_tables.zero_search + VACUOUS_PINS): drop
-        # vacuous pins and cells that sampled without searching — the ratio describes the
-        # instance there, not the sampler.
+        # `clean` = the paper's rule, IMPORTED: drop vacuous pins and no-search cells.
         gm_nv = _gm([r.get("ratio") for k, r in best.items()
                      if k.split(".")[0] not in VACUOUS_PINS and not zero_search(r)])
-        # THE SYMMETRIC LEDGER (paper_tables.cms_family's rule): a CMSGen-zero cell (ratio inf)
-        # is an outright win and a GPAP-zero cell an outright loss — neither has a finite ratio,
-        # so `wins` counts finite wins plus CMSGen's zeros, over finite + both zero columns, and
-        # each zero kind gets its own column. Counting inf inside a plain `ratio >= 1` (what
-        # this did) shows their zeros as wins while never showing the zeros as zeros.
+        # THE SYMMETRIC LEDGER (paper_tables.cms_family's rule): a CMSGen-zero cell is an outright
+        # win and a GPAP-zero cell an outright loss, neither with a finite ratio, so each gets its
+        # own column and `wins` counts finite wins plus CMSGen's zeros.
         fin = [r["ratio"] for r in best.values()
                if r.get("ratio") and r["ratio"] > 0 and r["ratio"] != float("inf")]
-        # ABSENT is not ZERO: only rows that CARRY a cms arm enter the ledger — a GPAP-only
-        # sweep (no --cmsgen) must read "no comparison", never "wins n/n over CMSGen=0 x n".
+        # ABSENT is not ZERO: only rows that CARRY a cms arm enter the ledger.
         cmsr = [r for r in best.values() if "cms_n_samples" in r or r.get("cms_sps") is not None]
         n_c0 = sum(1 for r in cmsr
                    if (r.get("n_models") or 0) > 0 and not (r.get("cms_n_samples") or 0))
@@ -919,7 +820,6 @@ def write_summary(stages, out_dir, src_dir):
                      f"{f'{gm_row:.1f}x' if gm_row else '—'} | "
                      f"{led} | {ab} | "
                      f"{f'{pen:.1f}x' if pen else '—'} |")
-    # skipped/error detail — a sweep that silently dropped instances is not a result
     detail = []
     for stage, payload in sorted(stages.items()):
         for r in payload.get("results", []):
@@ -929,7 +829,6 @@ def write_summary(stages, out_dir, src_dir):
     if detail:
         lines += ["", "## Instances not measured", "",
                   "| stage | instance | encoder | reason |", "|---|---|---|---|"] + detail
-    # engine provenance: which packed split / kernel variant produced the numbers
     seen = {}
     for payload in stages.values():
         for r in rows_of(payload):
@@ -963,8 +862,7 @@ def main():
         sys.exit(f"matplotlib unavailable ({e}) — cannot plot")
     stages = load_stages(args.results_dir)
     rival_paths = sorted(glob.glob(os.path.join(args.results_dir, "rivals*.json")))
-    # A campaign keeps its rival JSONs in their OWN directory (gpap_vs_gpu_rivals_*), so a
-    # rivals-only dir is a legitimate input: it gets the rival figures and nothing else.
+    # A campaign keeps its rival JSONs in their OWN directory, so a sibling is searched.
     if not stages and not rival_paths:
         sys.exit(f"no results JSONs in {args.results_dir}")
     made = []

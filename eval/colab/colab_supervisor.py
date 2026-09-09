@@ -1,40 +1,32 @@
 #!/usr/bin/env python3
 """Run a long GPAP sweep on a Colab VM that will be taken away before it finishes.
 
-Measured: a rented GPU assignment was reclaimed after **~1 h** with the keep-alive
-daemon running and no error logged — not idle pruning, just the assignment's lifetime. A 4-hour
-sweep therefore cannot be "launched and collected"; it has to survive the VM dying repeatedly.
-
-The rule this encodes, learned by losing a 1-hour run: **results only exist once they are on the
-local disk.** Checkpointing to the VM's disk buys nothing, because that disk dies with the VM.
+A rented GPU assignment is reclaimed after roughly an hour even with the keep-alive daemon
+running, so a multi-hour sweep cannot be launched and collected: it has to survive the VM dying
+repeatedly. Results only exist once they are on the LOCAL disk — checkpointing to the VM's own
+disk buys nothing, because that disk dies with it.
 
     ensure session -> bootstrap -> push local partials -> launch -> poll+PULL every cycle
          ^                                                              |
          +------------------ VM reclaimed, work not done ---------------+
 
-So each cycle downloads the result files, and each new VM is seeded with what we already have.
-The remote command must be RESUMABLE (`--resume` on the rival harnesses, `--resume` on
-`gpap bench`) or every restart would redo finished work.
+Each cycle downloads the result files and each new VM is seeded with what we already have, so
+the remote command must be resumable or every restart redoes finished work.
 
     eval/colab/colab_supervisor.py --session l4riv --gpu L4 \
         --tarball /tmp/gpap_src.tgz --bootstrap /tmp/bootstrap.sh \
         --remote-cmd 'bash eval/colab/colab_rivals_l4.sh' \
         --remote-dir /content/gpap/.experiments/full_eval/nvidia-l4 \
-        --files rivals_demotic_native.json rivals_demotic_miter.json rivals_hts.json \
-                rivals_recurrent_rare.json rivals_recurrent_table.json \
-                rivals_steps_calibration.json \
+        --files rivals_demotic_native.json rivals_recurrent_rare.json \
         --local-dir .experiments/l4_rivals --done-marker RIVALS_STAGE_COMPLETE
 
-⚠️ **Stop the SESSION before restarting this script.** Killing the supervisor mid-bootstrap and
-relaunching it starts a SECOND bootstrap on the same VM; both `rm -rf /content/gpap` and untar
-into it, one loses the race and writes `/content/bootstrap.fail`, and the run burns a VM
-recovering (observed 2026-08-26 while extending --max-hours). Either wait for the cycle to reach
-'launching', or `colab stop -s <session>` first and let the fresh supervisor build a clean VM.
+Stop the SESSION before restarting this script: killing the supervisor mid-bootstrap and
+relaunching starts a second bootstrap on the same VM, the two race over /content/gpap, and the
+run burns a VM recovering. Wait for the cycle to reach 'launching', or `colab stop` first.
 
-Console quirks this works around (all hit the hard way, see the colab-cli notes):
-`colab exec` is broken in 0.6.0, so everything goes through `colab console`; the console exits on
-piped EOF, so commands are fire-and-forget and progress is polled separately; tmux line-wraps and
-corrupts long one-liners, so commands are short and newline-separated.
+Console quirks this works around: `colab exec` is broken, so everything goes through
+`colab console`; the console exits on piped EOF, so commands are fire-and-forget and progress is
+polled separately; tmux line-wraps and corrupts long one-liners, so commands stay short.
 """
 import argparse
 import os
@@ -225,14 +217,13 @@ def main():
         endpoint = st.split("|")[0].strip() if "|" in st else st.strip()
 
         if endpoint != launched_on:          # fresh VM: build it, seed it, start the job
-            # Cached binaries go up BEFORE bootstrap, so the bootstrap script can use them
-            # instead of rebuilding. CMSGen is a full CryptoMiniSat build (~10 min); on a VM
-            # that only lives ~1 h that is a sixth of the machine, every hour.
+            # Cached binaries go up before bootstrap so it can use them instead of rebuilding:
+            # a CMSGen build is a large fraction of a VM's whole lifetime.
             for spec in args.cache:
                 remote, _, local = spec.partition(":")
                 if os.path.isfile(local):
-                    # the upload does NOT create parent dirs — without this the push fails and
-                    # the VM silently rebuilds from source (measured: cost a whole CMSGen build)
+                    # the upload does not create parent dirs; without this the push fails and
+                    # the VM silently rebuilds from source
                     console(args.session, [f"mkdir -p {os.path.dirname(remote)}"])
                     rc, _ = run([COLAB, "upload", "-s", args.session, local, remote], timeout=900)
                     console(args.session, [f"chmod +x {remote}"])
@@ -240,9 +231,8 @@ def main():
                         if rc == 0 else f"  cache push FAILED {local}")
             if not bootstrap(args.session, args.tarball, args.bootstrap):
                 boot_fails += 1
-                # Don't churn through VMs on a bug of our own: a bootstrap that fails on several
-                # fresh machines in a row is a broken script, not bad luck, and each retry costs
-                # a billable assignment.
+                # A bootstrap failing on several fresh machines is a broken script, not bad
+                # luck, and each retry costs a billable assignment.
                 if boot_fails >= 3:
                     log("bootstrap failed on 3 consecutive VMs — stopping (fix the script)")
                     run([COLAB, "stop", "-s", args.session], timeout=180)
@@ -274,10 +264,9 @@ def main():
                     if rc == 0 else f"  push FAILED {local}")
             push_partials(args.session, args.local_dir, args.remote_dir, args.files)
             log(f"launching: {args.remote_cmd}")
-            # Write the command to a script and nohup THAT. `nohup <cmd>` execs directly, so an
-            # env-var prefix (`FOO=bar bash x.sh`) makes nohup look for a program literally named
-            # "FOO=bar" and fail with "No such file or directory" — silently, in a log nobody
-            # reads, after the VM has already been built. Measured: 45 minutes of an empty run.
+            # Write the command to a script and nohup that: `nohup` execs directly, so an
+            # env-var prefix makes it look for a program literally named "FOO=bar" and fail
+            # silently, in a log nobody reads, after the VM has already been built.
             console(args.session, [
                 "cd /content/gpap",
                 f"cat > /content/job.sh <<'GPAPJOBEOF'\n{args.remote_cmd}\nGPAPJOBEOF",
@@ -292,11 +281,9 @@ def main():
             continue
 
         got = pull_results(args.session, args.local_dir, args.remote_dir, args.files)
-        # A VM can be reset WITHOUT the session changing endpoint — `colab status` still says OK
-        # while /content has been wiped. Observed: 3 straight cycles pulling nothing from a
-        # machine that had been mirroring 12/13 a moment earlier, with no rebuild triggered.
-        # Going from "results" to "none" is that signal; force a rebuild instead of polling a
-        # dead disk for the rest of the budget.
+        # A VM can be reset without the session changing endpoint: status still reads OK while
+        # /content has been wiped. Going from "results" to "none" is that signal, so force a
+        # rebuild rather than polling a dead disk for the rest of the budget.
         if not got and had_results and not marker(args.session, args.remote_dir):
             log("remote results vanished (VM reset, same endpoint) — rebuilding")
             launched_on = None

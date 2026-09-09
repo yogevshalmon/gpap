@@ -1,16 +1,6 @@
-/* Batched assumption checking: THE chunk loop behind both AssumptionChecker faces.
- *
- * Entry point 1 is reset(K) + apply — one launch, K sets. What every caller then wants is the
- * same packaging: ANY number of sets, chunked to what the GPU holds, validated before any work,
- * results reassembled in input order. That loop used to be written twice, once per face
- * (gpap::AssumptionChecker::check and Python's AssumptionChecker.check_assumptions), and the
- * two had already drifted — the Python face validated every literal before the first launch
- * while the C++ face threw mid-loop, after some chunks had already run. Same lesson as the
- * probe sweep (cpp/src/probe.cpp): a rule callers can observe must have one home.
- *
- * Everything here goes through the public ABI calls the faces themselves used
- * (reset/apply/flags/readout), so this file adds packaging, not a second engine path.
- */
+/* Batched assumption checking: the chunk loop behind both AssumptionChecker faces, so chunking,
+ * validate-before-any-launch and padding have one home. Entry point 1 is reset(K) + apply, one
+ * launch per K sets; this is the packaging around it, over the same public ABI. */
 #include "gpap_internal.hpp"
 
 #include <algorithm>
@@ -24,9 +14,8 @@ using gpap::set_error;
 extern "C" int64_t gpap_check_chunk_size(gpap_engine *e, int64_t n_sets, int64_t max_lits) {
     if (!e) return 0;
     if (n_sets <= 0) return 1;      /* the documented floor: a launch always holds >= 1 set */
-    /* The engine's own per-row state — the shared exact model, with THIS engine's real trail
-     * cap — plus the (chunk, L) int64 decision matrix this entry point allocates and the
-     * sampler's path never does. Read against LIVE free memory each call. */
+    /* The engine's per-row state (the shared exact model) plus the (chunk, L) decision matrix
+     * only this entry point allocates, against live free memory each call. */
     const int64_t per_row = gpap_row_bytes(e->num_long, e->num_vars, e->trail_cap) +
                             8ll * std::max<int64_t>(max_lits, 1);
     const int64_t budget = gpap_mem_available(e->device_ordinal, gpap::kMemFraction);
@@ -49,10 +38,8 @@ extern "C" gpap_status gpap_check_sets(gpap_engine *e, const int32_t *lits,
         return GPAP_ERR_ARG;
     }
 
-    /* Validate the WHOLE input before any launch. An out-of-range literal must never reach the
-     * kernel (an internal index past a row's bitmap makes atomic_or corrupt a LATER row — see
-     * gpap_probe_tuples), and an error thrown after some chunks ran would leave a partially
-     * filled result indistinguishable from a full one. One pass; being wrong is undetectable. */
+    /* Validate the WHOLE input before any launch: an index past a row's bitmap makes atomic_or
+     * corrupt a LATER row, and an error after some chunks ran leaves a partial-looking result. */
     int64_t max_len = 1;
     for (int64_t i = 0; i < n; ++i) {
         const int64_t len = offsets[i + 1] - offsets[i];
@@ -87,8 +74,7 @@ extern "C" gpap_status gpap_check_sets(gpap_engine *e, const int32_t *lits,
     for (int64_t a = 0; a < n; a += step) {
         const int64_t b = std::min(a + step, n);
         const int32_t K = static_cast<int32_t>(b - a);
-        /* Pad to the CHUNK's longest set (never the global one): the (K, L) upload is the
-         * per-chunk cost, and -1 padding is skipped by the kernel either way. */
+        /* Pad to the CHUNK's longest set, not the global one: (K, L) is the per-chunk upload. */
         int64_t L = 1;
         for (int64_t i = a; i < b; ++i) L = std::max(L, offsets[i + 1] - offsets[i]);
         decisions.assign(static_cast<size_t>(K) * static_cast<size_t>(L), -1);
@@ -100,9 +86,8 @@ extern "C" gpap_status gpap_check_sets(gpap_engine *e, const int32_t *lits,
 
         GPAP_TRY(gpap_engine_reset(e, K));   /* the LAST chunk is short: reset to its own size
                                               * (this is also where GPAP_MODE_AUTO resolves) */
-        /* Flags-only calls take the CLEAN kernel: the launch restores its own rows, so the
-         * next chunk's reset skips the K*M broadcast. Calls that read STATE (assignments /
-         * sat_count) need it to SURVIVE the launch — they keep the plain kernel. */
+        /* Flags-only calls take the CLEAN kernel, whose launch restores its own rows so the next
+         * reset skips the broadcast; calls that read state stay plain. */
         if (assign_out || sat_out)
             GPAP_TRY(gpap_engine_apply(e, decisions.data(), static_cast<int32_t>(L)));
         else

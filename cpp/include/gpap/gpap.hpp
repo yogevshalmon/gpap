@@ -1,37 +1,12 @@
-/* GPAP for C++ — one header, two tiers.
+/* GPAP (GPU-Parallel (partial) Assignment Propagation) for C++ — one header, two tiers.
  *
- * ============================ TIER 1: just sample a formula ============================
- *
- *     #include <gpap/gpap.hpp>
- *
- *     gpap::Sampler sampler("formula.cnf");
- *     gpap::Solutions sols = sampler.sample(100000);      // draw 100k satisfying assignments
- *
- *     printf("%zu solutions at %.0f/s\n", sols.size(), sols.rate());
- *     for (std::size_t i = 0; i < sols.size(); ++i)
- *         for (std::size_t j = 0; j < sols.columns(); ++j)
- *             bool value = sols(i, j);                    // of variable sols.variables()[j]
- *
- * That is the whole API for the flagship use case. The sampler sizes the GPU batch to the free
- * VRAM, picks the faster kernel variant, orders decisions so propagation does the work, runs as
- * many chunks as it takes, and — when SampleOptions::verify is set — re-checks on the device
- * that every row it returns is a real model.
- * Variables and literals are DIMACS (1-based, +v true / -v false) — the same numbers as the file.
- *
- * The other entry point, testing many assumption sets at once:
- *
- *     gpap::AssumptionChecker checker("formula.cnf");
- *     auto r = checker.check({{1, -2, 3}, {-1, 2}});      // K sets, ONE kernel launch
- *     if (!r.conflict(0)) for (int lit : r.literals(0)) ...
- *
- * ============================ TIER 2: drive the engine yourself ========================
- *
- * `Formula` + `Engine` below are a thin RAII/exception wrapper over the C ABI in <gpap/gpap.h>,
- * for callers who want to own the chunk loop, the decision order or the readout. Everything in
- * tier 1 is written in terms of it — there is no private back door. Tier 2 is where the concepts
- * live (K, packed splits, selection slots, pair masks, internal 2N literal indices); tier 1
- * exists so that using GPAP does not require any of them.
- */
+ * Tier 1: gpap::Sampler("f.cnf").sample(100000) draws satisfying assignments, sizing the GPU
+ * batch to free VRAM and running as many chunks as it takes; gpap::AssumptionChecker propagates
+ * many assumption sets in one launch; gpap::Prober BCP-probes every k-subset of a literal pool.
+ * Tier 2: `Formula` + `Engine`, a RAII/exception wrapper over the C ABI in <gpap/gpap.h>, for
+ * callers who want the chunk loop, the decision order or the readout themselves. Tier 1 is
+ * written entirely in terms of it and owns the concepts (K, packed splits, selection slots, pair
+ * masks, internal 2N literal indices). Literals are DIMACS (1-based, +v / -v) on both. */
 #ifndef GPAP_HPP
 #define GPAP_HPP
 
@@ -66,15 +41,10 @@ inline void check(gpap_status st, const char *what) {
     if (st != GPAP_OK) throw Error(st, what);
 }
 
-/** Propagate kernel variant. `Auto` picks per batch size — leave it alone unless benchmarking.
- *  Both variants are bit-identical in their results; only the speed differs. */
+/** Propagate kernel variant; `Auto` picks per formula/batch. All agree bit for bit. */
 enum class Mode { Auto = GPAP_MODE_AUTO, Scalar = GPAP_MODE_SCALAR, Wave = GPAP_MODE_WAVE };
 
-/** Engine construction options; every default is the sensible one — the same defaults the raw C
- *  ABI gives a NULL options pointer, which is the point: `mode` is Auto on BOTH faces, so no
- *  consumer has to know to ask for the dispatch. (The C ABI's zero value was once Scalar, and
- *  this note used to tell C callers to pick a mode themselves; both are fixed.)
- *  The choice never changes results, only speed. */
+/** Engine construction options; every field's zero is its default, `mode` Auto on both faces. */
 struct Options {
     int device = 0;
     Mode mode = Mode::Auto;
@@ -84,13 +54,9 @@ struct Options {
     std::int32_t vscan = 0;
 
     gpap_engine_options raw() const {
-        /* VALUE-INITIALIZED, so a field added to gpap_engine_options later reaches the core as
-         * its documented zero default rather than as stack garbage from this face. Same rule as
-         * "`{0}` must equal NULL on every options struct" — the C caller gets it from the
-         * struct's own zero, and this is how the C++ caller gets it. */
+        /* Value-initialized; Auto passes through and the core re-resolves it on each reset(K). */
         gpap_engine_options o{};
         o.device = device;
-        /* Auto goes THROUGH to the core, which re-resolves it on every reset(K). */
         o.mode = static_cast<gpap_mode>(mode);
         o.force_shift = force_shift;
         o.vscan = vscan;
@@ -143,10 +109,8 @@ class Formula {
     /** A `p cnf` file containing an empty clause is UNSAT outright; it has no solutions. */
     bool trivially_unsat() const { return info().has_empty_clause != 0; }
 
-    /** Independent support from the file's `c ind` lines, as 0-BASED variable indices (tier 2
-     *  speaks the ABI's indices throughout, so this drops straight into pair_mask/var_bits);
-     *  empty if the file declared none. Decide THESE first and let propagation determine the
-     *  rest — that phase structure is what makes projected sampling succeed. */
+    /** Independent support from the file's `c ind` lines, as 0-based variable indices (what
+     *  pair_mask/var_bits take); empty if none. Decide these first, then let propagation finish. */
     std::vector<std::int32_t> support() const {
         std::int32_t n = 0;
         check(gpap_formula_support(h_, nullptr, &n), "gpap_formula_support");
@@ -191,14 +155,11 @@ class Engine {
     Engine &operator=(const Engine &) = delete;
     ~Engine() { reset_handle(); }
 
-    // ---------------------------------------------------------------- configuration
-    /** Pin the propagate variant, or hand the choice back with Mode::Auto. */
+    /** Pin the propagate variant, or hand the choice back with Mode::Auto (auto_dispatch() asks). */
     void set_mode(Mode m) {
         check(gpap_engine_set_mode(h_, static_cast<gpap_mode>(m)), "gpap_engine_set_mode");
     }
     Mode mode() const { return static_cast<Mode>(gpap_engine_mode(h_)); }
-    /** Is the engine still choosing its kernel per reset(K)? (Nothing pinned one — not
-     *  options, not set_mode, not $GPAP_KERNEL.) */
     bool auto_dispatch() const { return gpap_engine_auto(h_) != 0; }
     std::int32_t shift() const { return gpap_engine_shift(h_); }
     std::int32_t k() const { return gpap_engine_k(h_); }
@@ -206,15 +167,7 @@ class Engine {
     std::int32_t num_clauses() const { return gpap_engine_num_clauses(h_); }
     bool flush_conflict() const { return gpap_engine_flush_conflict(h_) != 0; }
 
-    // ---------------------------------------------------------------- entry points
-    /** Which kernel a batch of `K` rows will run — a PURE query, unlike the Python twin's
-     *  namesake it does not touch engine state. Nothing needs to call it before sampling:
-     *  gpap_engine_reset resolves Mode::Auto itself, for every consumer of the ABI rather than
-     *  for the wrappers that remember to ask (this USED to be where the rule was applied, and a
-     *  core-side consumer, gpap_probe_combinations, duly ran SCALAR forever). Returns the pinned
-     *  mode when one is pinned — by options, by set_mode, or by $GPAP_KERNEL.
-     *  ⚠️ It used to be a second spelling of reset(): a caller who read "pure query" and used it
-     *  mid-run silently discarded every pending readout slot and paid a full K*M broadcast. */
+    /** Which kernel a batch of `K` rows runs: a pure query; reset() resolves Auto on its own. */
     Mode plan_for(std::int32_t K) const {
         if (!gpap_engine_auto(h_)) return mode();
         return gpap_dispatch_wave(gpap_engine_num_clauses(h_), K, device_)
@@ -230,19 +183,17 @@ class Engine {
         check(gpap_engine_apply(h_, decisions.data(), L), "gpap_engine_apply");
     }
 
-    /** apply() in CLEAN mode: identical flags and counters, but the launch restores its own
-     *  packed rows to the baseline so the NEXT reset(K) skips the K*M broadcast. Only for
-     *  callers that read flags/counters and nothing else — see gpap_engine_apply_clean in
-     *  gpap.h for exactly which readouts see the baseline, which see the fixpoint, and why
-     *  recache_flush() refuses afterwards. */
+    /** apply() in CLEAN mode: identical flags and counters, but the launch restores its own packed
+     *  rows to the baseline so the next reset(K) skips the K*M broadcast — so it is only for
+     *  callers that read flags/counters. See gpap_engine_apply_clean in gpap.h. */
     void apply_clean(const std::vector<std::int64_t> &decisions, std::int32_t L) {
         require_matrix(decisions, L, "apply_clean");
         check(gpap_engine_apply_clean(h_, decisions.data(), L), "gpap_engine_apply_clean");
     }
 
     /** Entry point 2: the whole randomized decide+propagate trajectory per row, one launch.
-     *  `order` is the decision priority as 0-based variable indices, support variables FIRST;
-     *  `n_support` is where phase 1 ends. Returns the max decision rounds any row used. */
+     *  `order` is decision priority (0-based variables, support first) and `n_support` where
+     *  phase 1 ends; returns the max decision rounds any row used. */
     std::int32_t trajectory(const std::vector<std::int32_t> &order, std::int32_t n_support,
                             std::int32_t B, std::int64_t seed, bool soft = false) {
         std::int32_t rounds = 0;
@@ -256,18 +207,15 @@ class Engine {
         check(gpap_engine_recache_flush(h_), "gpap_engine_recache_flush");
     }
 
-    /** How the resets executed: {full K*M broadcasts, broadcasts SKIPPED after a clean launch}.
-     *  The lite count is the proof CLEAN mode engaged — a silent fallback measures as 1.00x. */
+    /** {full K*M broadcasts, broadcasts skipped after a clean one}: the lite count proves CLEAN. */
     std::pair<std::int64_t, std::int64_t> reset_stats() const {
         std::int64_t full = 0, lite = 0;
         gpap_engine_reset_stats(h_, &full, &lite);
         return {full, lite};
     }
 
-    // ---------------------------------------------------------------- selections + readout
-    /** Register the variables a completion test considers (0-based); empty = all of them.
-     *  Call this ONCE per variable set and keep the id: masks live as long as the engine and
-     *  cannot be released, so creating one per chunk leaks ceil(2N/32) int32 each time. */
+    /** Register the variables a completion test considers (0-based); empty = all. Call once per
+     *  variable set and keep the id: a mask lives as long as the engine, so one per chunk leaks. */
     std::int32_t pair_mask(const std::vector<std::int32_t> &vars = {}) {
         std::int32_t id = 0;
         check(gpap_pair_mask_create(h_, vars.empty() ? nullptr : vars.data(),
@@ -276,7 +224,7 @@ class Engine {
         return id;
     }
 
-    /** Rows that are active AND fully assigned under `mask_id` — the models in this chunk. */
+    /** Rows that are active and fully assigned under `mask_id` — the models in this chunk. */
     std::int32_t select_complete(std::int32_t mask_id, std::int32_t slot = 0) {
         std::int32_t n = 0;
         check(gpap_select_complete(h_, mask_id, slot, &n), "gpap_select_complete");
@@ -294,17 +242,14 @@ class Engine {
               "gpap_selection_set");
     }
 
-    /** How many selected rows have a clause with sat_count == 0. Must be 0.
-     *  `max_rows = 0` (the default) checks EVERY selected row; a positive bound checks a prefix,
-     *  and then a 0 answer only speaks for that prefix. */
+    /** Selected rows with an emptied clause; must be 0. `max_rows` bounds it to a prefix. */
     std::int32_t check_sound(std::int32_t slot = 0, std::int32_t max_rows = 0) {
         std::int32_t n = 0;
         check(gpap_check_sound(h_, slot, max_rows, &n), "gpap_check_sound");
         return n;
     }
 
-    /** (count x cols.size()) row-major 0/1: is variable cols[j] (0-based) TRUE in the i-th
-     *  selected row? Gathers min(count, selection count) rows; the buffer is sized to `count`. */
+    /** (count x cols.size()) row-major 0/1: is 0-based variable cols[j] true in selected row i? */
     std::vector<std::uint8_t> var_bits(const std::vector<std::int32_t> &cols, std::int32_t count,
                                        std::int32_t slot = 0) {
         std::vector<std::uint8_t> out(static_cast<size_t>(count) * cols.size());
@@ -315,7 +260,7 @@ class Engine {
         return out;
     }
 
-    /** (count x 2N) row-major: 1 where that internal literal index is TRUE. */
+    /** (count x 2N) row-major: 1 where that internal literal index is true. */
     std::vector<std::int8_t> assignment_rows(std::int32_t count, std::int32_t slot = 0) {
         std::vector<std::int8_t> out(static_cast<size_t>(count) * 2 *
                                      static_cast<size_t>(num_vars()));
@@ -323,21 +268,19 @@ class Engine {
         return out;
     }
 
-    /** (K,) active and conflict flags. */
+    /** (K,) active and conflict flags; num_propagated() is the implication count per row. */
     std::pair<std::vector<std::int8_t>, std::vector<std::int8_t>> flags() {
         std::vector<std::int8_t> a(static_cast<size_t>(k())), c(static_cast<size_t>(k()));
         check(gpap_flags(h_, a.data(), c.data(), k()), "gpap_flags");
         return {std::move(a), std::move(c)};
     }
 
-    /** (K,) unit-propagation implications of the last launch (assigned minus decisions). */
     std::vector<std::int32_t> num_propagated() {
         std::vector<std::int32_t> out(static_cast<size_t>(k()));
         check(gpap_num_propagated(h_, out.data(), k()), "gpap_num_propagated");
         return out;
     }
 
-    // ---------------------------------------------------------------- counters
     gpap_counters counters() const {
         gpap_counters c{};
         check(gpap_counters_get(const_cast<gpap_engine *>(h_), &c), "gpap_counters_get");
@@ -349,18 +292,12 @@ class Engine {
     int device() const noexcept { return device_; }
 
   private:
-    /** MEMORY SAFETY, not politeness: the ABI stages K*L int64s from `decisions.data()` and has
-     *  no size to check against, so a short vector is read past its end and the garbage becomes
-     *  literal indices — and an index past 2N makes the kernel write into a LATER ROW's bitmap,
-     *  which nothing downstream can detect (see gpap_engine_apply in gpap.h). The size is free
-     *  here, so this face pays for it; the Python face already did. K is read from the CORE, so
-     *  it is right even if the caller never called reset(). */
+    /** Memory safety: the ABI reads K*L int64s unchecked, and an out-of-range literal index
+     *  writes into a later row's bitmap, undetectably. */
     void require_matrix(const std::vector<std::int64_t> &decisions, std::int32_t L,
                         const char *what) const {
         const std::size_t want = static_cast<std::size_t>(k()) * static_cast<std::size_t>(L);
-        /* `<`, not `!=`: the ABI reads exactly K*L entries, so a LARGER buffer is safe, and
-         * rejecting it breaks reusing one scratch vector sized for K_max across chunks. `L < 0`
-         * is not redundant — `k() * size_t(L)` can WRAP small (k()=2, L=-2^63 gives want 0). */
+        /* `<`, not `!=`: a larger buffer is safe. `L < 0` is not redundant — it can wrap small. */
         if (L < 0 || decisions.size() < want)
             throw Error(GPAP_ERR_ARG, std::string("Engine::") + what + ": decisions holds " +
                                           std::to_string(decisions.size()) + " literals but K=" +
@@ -376,198 +313,131 @@ class Engine {
     int device_ = 0;
 };
 
-/** Bytes available for new allocations on `device` (free VRAM minus a driver reserve).
- *  `fraction` is the ONLY headroom left in the sizing path now that gpap_row_bytes is the exact
- *  allocation list, and 0.80 is what EVERY other face uses — the sampler's own auto-K (cpp/src/sample.cpp),
- *  gpap_check_chunk_size, the probe batch, and Python's gpu_mem_available. This default used to
- *  be 0.75, so a tier-2 C++ caller writing the natural
- *  `compute_k_safe(info.num_long, info.num_vars, mem_available())` silently got a 6% smaller
- *  batch than every packaged path. One model means one number. */
+/** The batch-sizing model (cpp/src/calibrate.cpp). mem_available() is free VRAM minus a driver
+ *  reserve, and `fraction` — 0.80 on every face — is the only headroom left in the sizing path.
+ *  compute_k_safe() is the largest K fitting `bytes` and row_bytes() one row's device cost, both
+ *  over `gpap_formula_info::num_long`, NOT num_clauses. default_k_cap() is the `cap` itself. */
 inline std::int64_t mem_available(int device = 0, double fraction = 0.80) {
     return gpap_mem_available(device, fraction);
 }
 
-/** Largest K fitting `bytes` for a formula shape. See cpp/src/calibrate.cpp for the model.
- *  ⚠️ `num_long` is `gpap_formula_info::num_long`, NOT num_clauses — only length>=3 clauses
- *  carry per-row state. The total clause count is the natural misreading and it is SILENT: a
- *  1.78-2.36x smaller batch on circuit and sk_ CNFs, no error. */
 inline std::int32_t compute_k_safe(std::int32_t num_long, std::int32_t N, std::int64_t bytes,
                                    std::int32_t cap = 0) {
     return gpap_compute_k_safe(num_long, N, bytes, cap);
 }
-/** Device bytes one row of engine state costs. `num_long` as in compute_k_safe above. */
 inline std::int64_t row_bytes(std::int32_t num_long, std::int32_t N,
                               std::int32_t trail_cap = 0) {
     return gpap_row_bytes(num_long, N, trail_cap);
 }
 
-/** The default batch cap — the `cap` above, chosen for you. Device-independent. */
 inline std::int32_t default_k_cap(int device = 0) { return gpap_default_k_cap(device); }
 
 inline std::string version() { return gpap_version(); }
-/** Identity of this exact BUILD ("<version>+<hex of the library's bytes>"). Key a cache
- *  of measurements on THIS, never on version() — see the C header. */
+/** Identity of this exact build; key a cache of measurements on this, never on version(). */
 inline std::string build_id() { return gpap_build_id(); }
 
-/** Can this engine run that formula at all? The packed clause word has two field splits (16|16
- *  and 8|24) and a formula fits one of them or neither; constructing an Engine on a formula that
- *  fits neither throws. Sweeping a benchmark suite, call this to SKIP rather than to catch. */
+/** Can this engine run that formula? The packed clause word has two field splits (16|16, 8|24)
+ *  and an Engine over a formula that fits neither throws; sweep a suite with this, not a catch. */
 inline bool is_supported(const Formula &f) {
     const gpap_formula_info i = f.info();
     std::int32_t shift = 0;
     return gpap_packed_envelope(i.num_vars, i.max_clause_len, &shift) == GPAP_OK;
 }
 
-/* ======================================================================================
- *                       TIER 1 — the high-level API
- * ====================================================================================== */
+/* ================================ TIER 1 — the high-level API ======================== */
 
-/** How the sampler should run. Every field has a working default; `seed` is the only one most
- *  callers set. Sizes and kernel choices are derived from the GPU and the formula. */
-/** Which unassigned variable each decision picks. int-valued to match the ABI's
- *  gpap_sample_config.random_order (Random = 1, Structured = 0). */
+/** Which unassigned variable each decision picks; int-valued to match the ABI's config. */
 enum class VarOrder : std::int32_t {
-    Structured = 0,  ///< first free variable in index order — the gate-DAG order on a Tseitin
-                     ///< CNF; wins search-heavy instances where a random order keeps picking
-                     ///< variables propagation would have implied anyway
-    Random = 1       ///< uniform-random free variable (CMSGen's Algorithm 1) — diverse; default
+    Structured = 0,  ///< first free variable in index order; wins search-heavy instances
+    Random = 1       ///< uniform-random free variable (CMSGen's Algorithm 1); default
 };
 
-/** How the sampler should run. Every field has a working default; `seed` is the only one most
- *  callers set. Sizes and kernel choices are derived from the GPU and the formula.
- *
- *  A default run is DETERMINISTIC: same seed, same library build, same BATCH, same solutions,
- *  on any standard library (the RNG and shuffle are libgpap's own — see cpp/src/sample.cpp).
- *  Two things are outside that: a `portfolio` run is not machine-reproducible by design (the
- *  bandit selects configs on measured wall-clock throughput), and `k`/`k_cap` left at 0 size
- *  the batch from LIVE free VRAM, so a busier card runs a different number of trajectories and
- *  reports a different `found()`. Pin `k` when runs have to be comparable. */
+/** How the sampler should run; `seed` is the only field most callers set. A default run is
+ *  deterministic — same seed, build and batch, same solutions — except that a `portfolio` run is
+ *  not machine-reproducible by design and `k`/`k_cap` at 0 size the batch from live free VRAM. */
 struct SampleOptions {
-    /** Reproducibility: a single-config run at a fixed batch is a pure function of this seed
-     *  (see `k` — the batch is auto-sized from free VRAM and is NOT part of the seed). */
+    /** A single-config run at a fixed batch is a pure function of this seed (not of `k`). */
     std::int64_t seed = 0;
-    /** Stop after this many seconds of SAMPLING wall even if the target is not met (0 = no
-     *  limit). Delivery and verification are billed outside this clock. */
+    /** Stop short of the target after this much sampling wall, or this many chunks (0 = off). */
     double time_limit_s = 0.0;
-    /** Stop after this many chunks (0 = unbounded) — the expert knob behind fixed-work runs. */
     std::int64_t max_chunks = 0;
-    /** How many solutions to materialize on the host. 0 = count only, keep nothing (kept rows
-     *  are gathered per chunk and billed to Solutions::deliver_seconds, never to the rate). */
+    /** Solutions to materialize on the host (0 = count only) and the DIMACS variables to report
+     *  (empty = the `c ind` support, else all). Kept rows are billed outside the rate. */
     std::size_t max_keep = 100000;
-    /** Which variables to report, as DIMACS variables. Empty = the formula's `c ind` independent
-     *  support if it declares one, else every variable. */
     std::vector<std::int32_t> variables{};
-    /** CUDA device ordinal. */
     int device = 0;
-    /** THE PORTFOLIO: when non-empty, each chunk runs ONE of these configs at full K, raced as
-     *  a throughput bandit in the core (cold-start each once, then decaying-epsilon-greedy on
-     *  measured models/wall; kept rows are bucketed per config and only the winner's are
-     *  returned). Empty (default) = the single config the three fields below describe — the
-     *  deterministic, pinned-measurement mode. `gpap::default_portfolio()` is the same
-     *  portfolio the Python pipeline runs by default; reach for it when a formula yields
-     *  nothing under the default config (it is what samples the search-heavy instances the
-     *  single config cannot). */
+    /** When non-empty, each chunk runs one of these configs at full K, raced as a throughput
+     *  bandit in the core, and only the winner's kept rows are returned. Empty (default) = the
+     *  single config below, the deterministic pinned-measurement mode. */
     std::vector<gpap_sample_config> portfolio{};
-    /** Single-config mode: how decisions pick a variable. */
+    /** Single-config mode: how decisions pick a variable, and how many per round before
+     *  propagating. B = 1 lets propagation do more of the work and wins on tight formulas;
+     *  B >= |support| makes the surviving rows exact rejection sampling, hence exactly uniform. */
     VarOrder var_order = VarOrder::Random;
-    /** Single-config mode: variables decided per round before propagating. 8 is a good default;
-     *  1 lets propagation do more of the work and wins on tightly constrained formulas.
-     *  B >= |support| makes the surviving rows exact rejection sampling — exactly uniform. */
     std::int32_t batch = 8;
-    /** Single-config mode: in-kernel risk-aware polarity (prefer the value less likely to
-     *  conflict). A big success-rate win on tight/deep circuits (b03-c25: 10% -> 88%) and NOT
-     *  UNIFORM — it biases the distribution by construction, and Barbarik rejects it on 64 of
-     *  the 65 circuit instances it can sample. Use it for "many solutions fast, distribution
-     *  does not matter", never for a distribution claim. The Python face spells this opt-in
-     *  `--allow-soft` and prints a warning. docs/findings/UNIFORMITY_FINDINGS.md 4b. */
+    /** Single-config mode: in-kernel risk-aware ("soft") polarity, preferring the value less
+     *  likely to conflict. A large success-rate win on tight/deep circuits and NOT uniform — it
+     *  biases the distribution by construction and Barbarik rejects it on nearly every circuit
+     *  instance. Never for a distribution claim. docs/findings/UNIFORMITY_FINDINGS.md 4b. */
     bool lookahead = false;
-    /** If the run finds NOTHING in the first few chunks, try once more with `lookahead`
-     *  FLIPPED before giving up. Rescues instances that yield only under the risk polarity
-     *  (b12 unrolled 50 cycles: 0 either way, ~1100 models/s with it) — but that is exactly
-     *  why it is OFF by default and named for what it opts into: the flip turns the
-     *  NON-UNIFORM polarity on, silently, on the hard instances whose rows a caller is most
-     *  likely to publish. Check Solutions::lookahead_used() whenever this is set. (It was
-     *  `auto_retry = true`; renamed rather than reversed so an out-of-tree caller gets a
-     *  compile error, not a silent default change — the library's own ground rule.) */
+    /** If the run finds nothing in the first few chunks, try once more with `lookahead` flipped
+     *  before giving up. Off by default because the flip enables that non-uniform soft polarity;
+     *  check Solutions::lookahead_used() when it is set. (Renamed from `auto_retry`, not
+     *  reversed, so an out-of-tree caller gets a compile error.) */
     bool retry_with_lookahead = false;
-    /** Trajectories per chunk. 0 = size it to the free VRAM (recommended).
-     *  ⚠ At 0 the batch is NOT part of the seed: it is the analytic bound over LIVE free VRAM,
-     *  so the same formula and seed on a busier card draw a different number of trajectories
-     *  and report a different `found()`. Pin it (here, or `Sampler::set_k`) whenever two runs
-     *  have to be comparable — a cross-machine A/B, a regression gate, a recorded number. */
+    /** Trajectories per chunk, and the ceiling when they are auto-sized. k = 0 sizes the batch
+     *  to free VRAM, making it a function of live conditions rather than of the seed — pin it
+     *  whenever two runs must be comparable. k_cap: 0 = the library's device-independent batch
+     *  cap, positive = that cap verbatim, negative = no cap. */
     std::int32_t k = 0;
-    /** Upper bound on the auto-sized K. **0 (default) = the library's batch cap**
-     *  (`gpap_default_k_cap`, the same number on every GPU); a positive value is that cap
-     *  verbatim; negative means no cap at all, leaving the analytic memory model as the only
-     *  bound. */
     std::int32_t k_cap = 0;
-    /** Re-check on the device that every emitted row really satisfies every clause.
-     *  OFF by default: it is a self-test, not part of producing samples — a row is only counted
-     *  when it is active and fully assigned, which already means no clause was emptied. Turn it
-     *  on in tests, or in a run whose output will be published. When on it covers EVERY
-     *  completed row, its wall is billed to Solutions::verify_seconds (outside the rate), and
-     *  `Sampler::sample` throws if any row fails — after the run, with the evidence in
-     *  Solutions::sound_rows_checked. Matches gpap.sampling's `verify_sound`. */
+    /** Re-check on the device that every emitted row really satisfies every clause. Off by
+     *  default: a self-test, not part of producing samples. When on it covers every completed
+     *  row, is billed to Solutions::verify_seconds (outside the rate), and makes sample() throw
+     *  if any row fails. Matches gpap.sampling's `verify_sound`. */
     bool verify = false;
-    /** Some config must accumulate this many chunks before the target may stop a portfolio run
-     *  (a single chunk's rate is ±1.9x run-to-run noise). 0 = the core default (1). */
+    /** Chunks a config must accumulate before the target may stop a portfolio run (0 = 1). */
     std::int32_t min_measure_chunks = 0;
 };
 
-/** The portfolio the Python pipeline races by default: (random, B=8) — the classic niche
- *  config; (random, B=1) — the success-leaning deep-circuit winner; (structured, B=1) — the
- *  search-heavy "service" family. Uniformity-safe: no soft-polarity member. */
+/** The portfolio the Python pipeline races by default. Uniformity-safe: no soft member. */
 inline std::vector<gpap_sample_config> default_portfolio() {
     return {{1, 8, 0}, {1, 1, 0}, {0, 1, 0}};
 }
 
-/** The result of `Sampler::sample`: a bit matrix of solutions plus what it cost to get them.
- *  Row i, column j is the value of variable `variables()[j]` in the i-th solution. */
+/** `Sampler::sample`'s result: row i, column j is `variables()[j]` in solution i. */
 class Solutions {
   public:
-    /** Solutions materialized here (<= found(), capped by SampleOptions::max_keep). All from
-     *  ONE config — the winner's bucket, never a mixture of the bandit's arms. */
+    /** Solutions materialized here (<= found(), capped by max_keep), all from the winner. */
     std::size_t size() const noexcept { return n_kept_; }
     std::size_t columns() const noexcept { return vars_.size(); }
     bool empty() const noexcept { return n_kept_ == 0; }
 
-    /** Value of `variables()[col]` in solution `row`. */
     bool operator()(std::size_t row, std::size_t col) const {
         return bits_[row * vars_.size() + col] != 0;
     }
-    /** The DIMACS variables the columns correspond to. */
+    /** The DIMACS variables the columns correspond to; literals(row)/bits() read them out. */
     const std::vector<std::int32_t> &variables() const noexcept { return vars_; }
-    /** Solution `row` as DIMACS literals (+v where true, -v where false). */
     std::vector<std::int32_t> literals(std::size_t row) const {
         std::vector<std::int32_t> out(vars_.size());
         for (std::size_t j = 0; j < vars_.size(); ++j) out[j] = (*this)(row, j) ? vars_[j] : -vars_[j];
         return out;
     }
-    /** Raw row-major 0/1 buffer, size() x columns(). */
     const std::vector<std::uint8_t> &bits() const noexcept { return bits_; }
 
-    /** Total solutions found, including those past the keep cap. */
+    /** Totals: solutions found (keep cap included), trajectories run, chunks launched. */
     std::int64_t found() const noexcept { return stats_.n_models; }
-    /** Trajectories run to find them. */
     std::int64_t drawn() const noexcept { return stats_.attempts; }
-    /** Chunks (kernel launches) used. */
     std::int64_t chunks() const noexcept { return stats_.chunks; }
 
-    /** SAMPLING wall: the chunk loop only. Copying solutions to the host and the optional
-     *  soundness re-check are billed separately below and EXCLUDED here, so neither asking for
-     *  rows nor asking for verification can move the rate — the same contract gpap.sampling
-     *  keeps as `out_project_s` / `verify_sound_s`. */
+    /** Clocks. seconds() is the chunk loop alone, wall_seconds() all three: copy-out and the
+     *  verify re-check are billed apart so that neither can move rate(). */
     double seconds() const noexcept { return stats_.sampling_s; }
-    /** Host copy-out of the kept rows — delivery, not sampling. Grows with max_keep and with
-     *  the number of reported variables. */
     double deliver_seconds() const noexcept { return stats_.deliver_s; }
-    /** The SampleOptions::verify re-check — a self-test, not sampling. 0 when verify is off. */
     double verify_seconds() const noexcept { return stats_.verify_s; }
-    /** Everything the call took, including delivery and verification. */
     double wall_seconds() const noexcept {
         return stats_.sampling_s + stats_.deliver_s + stats_.verify_s;
     }
-    /** Solutions per second, over seconds(). */
     double rate() const noexcept {
         return stats_.sampling_s > 0 ? double(stats_.n_models) / stats_.sampling_s : 0.0;
     }
@@ -576,28 +446,21 @@ class Solutions {
         return stats_.attempts > 0 ? double(stats_.n_models) / double(stats_.attempts) : 0.0;
     }
 
-    /** Why the run ended — which safety valve fired, if one did. GPAP_SAMPLE_STOP_UNSAT is a
-     *  PROOF (the construction flush conflicted); ZERO_YIELD is only an absence of evidence. */
+    /** Why the run ended: STOP_UNSAT is a proof (construction conflicted), ZERO_YIELD is not. */
     gpap_sample_stop stop() const noexcept { return static_cast<gpap_sample_stop>(stats_.stop); }
-    /** True when the run stopped on the time limit rather than reaching the target. */
     bool timed_out() const noexcept { return stats_.timed_out != 0; }
-    /** Whether the retry_with_lookahead flip fired, and the soft flag the winning config (or
-     *  the final retry window) actually ran with — a distribution claim needs it false. */
+    /** Whether the retry flip fired, and the soft flag the winning config ran with. */
     bool retried() const noexcept { return stats_.retried != 0; }
     bool lookahead_used() const noexcept { return stats_.lookahead_used != 0; }
 
-    /** Rows the verify re-check covered — the EVIDENCE behind a soundness claim, and what
-     *  distinguishes "verified every one of a million rows" from "verify was on but nothing
-     *  ever completed, so it never ran". 0 with verify on is NOT a passing verdict. */
+    /** Rows the verify re-check covered; 0 with verify on means it never ran — no verdict. */
     std::int64_t sound_rows_checked() const noexcept { return stats_.sound_rows_checked; }
 
-    /** Portfolio breakdown: one entry per config passed to the run (a single entry for the
-     *  default single-config mode). `best_config()` is the winner whose rows fill bits(). */
+    /** Portfolio breakdown, one entry per config; `best_config()`'s rows fill bits(). */
     std::size_t n_configs() const noexcept { return cstats_.size(); }
     const gpap_config_stats &config_stats(std::size_t i) const { return cstats_.at(i); }
     std::int32_t best_config() const noexcept { return stats_.best_config; }
     std::int32_t dominant_config() const noexcept { return stats_.dominant_config; }
-    /** The whole core stats record, verbatim. */
     const gpap_sample_stats &stats() const noexcept { return stats_; }
 
   private:
@@ -609,29 +472,14 @@ class Solutions {
     std::vector<gpap_config_stats> cstats_;
 };
 
-/** Draws satisfying assignments of a CNF formula on the GPU.
- *
- *      gpap::Sampler sampler("formula.cnf");
- *      auto sols = sampler.sample(100000);
- *
+/** Draws satisfying assignments of a CNF formula on the GPU: `Sampler("f.cnf").sample(100000)`.
  *  Each of the K rows in a chunk walks its own randomized decide-and-propagate trajectory; a row
- *  that ends with every variable assigned and no conflict IS a satisfying assignment — there is
- *  no repair step and nothing to round. Rows that conflict are dropped, which is why
- *  `Solutions::success_rate()` is worth looking at: it is the fraction that made it.
- *
- *  THE LOOP LIVES IN THE CORE (`gpap_sampler_*`, cpp/src/sample.cpp), shared verbatim with the
- *  Python face — this class is marshalling: DIMACS ids, RAII, exceptions. Construction picks
- *  the batch size K from free VRAM, the propagate kernel from the formula, and the decision
- *  order from the formula's independent support. Read them back with k(), mode() and
- *  variables(); override them through SampleOptions if you must. If a formula yields nothing
- *  under the default config, run `SampleOptions::portfolio = gpap::default_portfolio()` — the
- *  adaptive portfolio the Python pipeline uses, which also samples the search-heavy instances
- *  a single random-order config cannot.
- *
- *  This is a SAMPLER, not a decision procedure: `found() == 0` with stop() != UNSAT means these
- *  trajectories did not reach a solution, never that the formula is unsatisfiable (UNSAT is
- *  reported only when construction PROVED it). Use a CDCL solver for the question.
- *
+ *  that ends fully assigned with no conflict is a satisfying assignment (no repair step, nothing
+ *  to round) and conflicted rows are dropped, so `Solutions::success_rate()` is the fraction that
+ *  made it. The chunk loop lives in the core (`gpap_sampler_*`, cpp/src/sample.cpp), shared with
+ *  the Python face; this class is marshalling, and construction picks K, the kernel and the
+ *  decision order for you. A sampler, not a decision procedure: `found() == 0` with stop() !=
+ *  UNSAT means these trajectories reached no solution, not that the formula is unsatisfiable.
  *  Not thread-safe (it owns an Engine): one Sampler per thread. */
 class Sampler {
   public:
@@ -644,7 +492,6 @@ class Sampler {
         const gpap_formula_info info = formula_.info();
         n_vars_ = info.num_vars;
 
-        /* --- the core handle --------------------------------------------------------- */
         run_opts_ = gpap_sampler_options{};          /* {0} is every default, by the ground rule */
         run_opts_.max_chunks = opts_.max_chunks;
         run_opts_.keep_cap = static_cast<std::int64_t>(opts_.max_keep);
@@ -654,10 +501,7 @@ class Sampler {
         run_opts_.retry_with_lookahead = opts_.retry_with_lookahead ? 1 : 0;
         check(gpap_sampler_create(engine_.handle(), opts_.seed, opts_.k_cap, &h_),
               "gpap_sampler_create");
-        /* Everything past the create can throw -- an out-of-range SampleOptions::variables is
-         * plain user error, and the support's pair mask is a device allocation. A constructor
-         * that throws never runs ~Sampler(), so without this the handle leaks AND the borrowed
-         * engine keeps the kernel this sampler pinned. */
+        /* A ctor that throws never runs ~Sampler(): without this the handle leaks. */
         try {
             init_from_options();
         } catch (...) {
@@ -671,8 +515,7 @@ class Sampler {
     Sampler &operator=(const Sampler &) = delete;
     ~Sampler() { reset_handle(); }
 
-    /** Draw solutions until `want` have been found, a safety valve fires, or the formula is
-     *  proved hopeless — `Solutions::stop()` says which. `want` is a target, not a promise. */
+    /** Draw until `want` solutions are found or a valve fires; `want` is a target, not a promise. */
     Solutions sample(std::int64_t want) {
         Solutions out;
         out.vars_ = vars_;
@@ -699,20 +542,14 @@ class Sampler {
         return out;
     }
 
-    // ------------------------------------------------------------------ what it chose
-    /** Trajectories per chunk. */
+    /** What construction chose: K, propagate variant, solution columns, support size, work. */
     std::int32_t k() const noexcept { return gpap_sampler_k(h_); }
-    /** The propagate variant in use. */
     Mode mode() const { return engine_.mode(); }
-    /** Variables reported in the solution columns (DIMACS). */
     const std::vector<std::int32_t> &variables() const noexcept { return vars_; }
-    /** Size of decision phase 1 — the independent support, or all variables if none declared. */
     std::int32_t num_support() const noexcept { return n_support_; }
-    /** Work done so far: literals assigned, decisions, occurrence entries, launches. */
     gpap_counters counters() const { return engine_.counters(); }
-    /** Restore the RNG to a known point — a run is then a function of the seed alone again. */
+    /** Restore the RNG to a known point; set_k pins the batch (k <= 0 = the calibrated one). */
     void reseed(std::int64_t seed) { check(gpap_sampler_reseed(h_, seed), "gpap_sampler_reseed"); }
-    /** Pin the batch (k <= 0 restores the calibrated value) — the cross-run A/B lever. */
     void set_k(std::int32_t k) { check(gpap_sampler_set_k(h_, k), "gpap_sampler_set_k"); }
 
     /** Escape hatches to tier 2 — the same objects the sampler is driving. */
@@ -720,14 +557,10 @@ class Sampler {
     const Formula &formula() const noexcept { return formula_; }
 
   private:
-    /* The fallible half of construction; see the try/catch in the ctor. */
     void init_from_options() {
         if (opts_.k > 0) check(gpap_sampler_set_k(h_, opts_.k), "gpap_sampler_set_k");
 
-        /* --- decision phase 1: the declared independent support ---------------------- */
-        /* `support` is 0-based (tier 2). A `c ind` line naming a variable the header never
-         * declared is dropped rather than trusted — it would otherwise become an out-of-range
-         * column. The head/tail split itself is the core's. */
+        /* Decision phase 1, 0-based; a `c ind` variable the header never declared is dropped. */
         std::vector<std::int32_t> support;
         for (std::int32_t v : formula_.support())
             if (v >= 0 && v < n_vars_) support.push_back(v);
@@ -737,9 +570,6 @@ class Sampler {
                   "gpap_sampler_set_support");
         n_support_ = support.empty() ? n_vars_ : static_cast<std::int32_t>(support.size());
 
-        /* --- what to report ---------------------------------------------------------- */
-        /* Default: the support (projected sampling), else all variables — DIMACS out here,
-         * 0-based columns into the core. */
         vars_ = opts_.variables;
         if (vars_.empty()) {
             if (support.empty()) {
@@ -779,10 +609,7 @@ class Sampler {
         }
     }
 
-    /* ~Sampler() frees the handle in its BODY, before any of these are destroyed, so the
-     * sampler is gone while the engine it borrowed is still alive — the order the ABI asks
-     * for. (gpap_sampler_free no longer depends on it: a destructor cannot verify a borrow,
-     * so it touches nothing but the sampler. Keeping the order right anyway is free.) */
+    /* ~Sampler() frees the handle in its body, while the borrowed engine is still alive. */
     Formula formula_;
     SampleOptions opts_;
     gpap_sampler_options run_opts_{};            // opts_, translated once for the ABI
@@ -799,17 +626,17 @@ enum class Value : std::int8_t { False = 0, True = 1, Free = 2 };
 class CheckResults {
   public:
     std::size_t size() const noexcept { return n_; }
-    /** True when the assumptions (plus everything they imply) falsify a clause. */
+    /** True when the assumptions, plus what they imply, falsify a clause. */
     bool conflict(std::size_t row) const { return conflict_[row] != 0; }
     std::size_t num_conflicts() const {
         std::size_t c = 0;
         for (auto f : conflict_) c += (f != 0);
         return c;
     }
-    /** Literals BCP derived beyond the assumptions themselves. */
     std::int32_t num_propagated(std::size_t row) const { return propagated_[row]; }
 
-    /** Value of DIMACS variable `var` in `row` — True, False, or Free (undetermined). */
+    /** Value of DIMACS variable `var` in `row` — True, False, or Free (undetermined);
+     *  `literals(row)` lists every literal true there, assumptions and implications alike. */
     Value value(std::size_t row, std::int32_t var) const {
         if (assign_.empty()) throw Error(GPAP_ERR_ARG, "assignments were not requested");
         const std::size_t base = row * 2 * static_cast<std::size_t>(n_vars_);
@@ -818,7 +645,6 @@ class CheckResults {
         if (assign_[l + 1]) return Value::False;
         return Value::Free;
     }
-    /** Every literal true in `row`, as DIMACS literals (assumptions and implications alike). */
     std::vector<std::int32_t> literals(std::size_t row) const {
         std::vector<std::int32_t> out;
         for (std::int32_t v = 1; v <= n_vars_; ++v) {
@@ -837,15 +663,10 @@ class CheckResults {
     std::int32_t n_vars_ = 0;
 };
 
-/** Tests many assumption sets against one formula in a single kernel launch — the engine's
- *  core primitive.
- *
- *      gpap::AssumptionChecker checker("formula.cnf");
- *      auto r = checker.check({{1, -2}, {-1, 3}, {2}});
- *      r.conflict(1);        // did assuming x1=false, x3=true falsify a clause?
- *      r.value(0, 5);        // what did BCP make of x5 under the first set?
- *
- *  The sets are independent: nothing learned in one affects another. */
+/** Tests many assumption sets against one formula in a single kernel launch — the engine's core
+ *  primitive. The sets are independent: nothing learned in one affects another.
+ *      auto r = gpap::AssumptionChecker("f.cnf").check({{1, -2}, {-1, 3}, {2}});
+ *      r.conflict(1);   // did assuming x1=false, x3=true falsify a clause? */
 class AssumptionChecker {
   public:
     explicit AssumptionChecker(const std::string &cnf_path, int device = 0)
@@ -856,19 +677,11 @@ class AssumptionChecker {
         n_vars_ = formula_.num_vars();
     }
 
-    /** Propagate every set to a fixpoint. `sets` hold DIMACS literals (+v / -v).
-     *
-     *  ANY NUMBER of sets: they are split into GPU-sized chunks internally and the results come
-     *  back in input order, so how many launches it took is not observable. `chunk_size()` says
-     *  what one launch holds if you want to know, but nothing here requires you to.
-     *
-     *  The chunk loop itself is `gpap_check_sets` in the CORE (cpp/src/check.cpp) — this method
-     *  only flattens the sets and shapes the results, so a Python caller and a C++ caller get
-     *  the same validation, the same chunking and the same padding.
-     *
-     *  `with_assignments` materializes the full per-row assignment (n x 2N bytes) so that
-     *  `value()` and `literals()` work; drop it when only the conflict flags matter — it is the
-     *  term that makes a large call expensive, and chunking cannot shrink it. */
+    /** Propagate every set to a fixpoint; `sets` hold DIMACS literals. Any number of sets: they
+     *  are split into GPU-sized chunks by `gpap_check_sets` (cpp/src/check.cpp — the one home of
+     *  that loop, shared with the Python face) and come back in input order. `with_assignments`
+     *  materializes the per-row assignment (n x 2N bytes) so `value()` and `literals()` work;
+     *  drop it when only the flags matter, since chunking cannot shrink that term. */
     CheckResults check(const std::vector<std::vector<std::int32_t>> &sets,
                        bool with_assignments = true) {
         CheckResults r;
@@ -900,8 +713,7 @@ class AssumptionChecker {
         return r;
     }
 
-    /** Assumption sets one launch holds — `gpap_check_chunk_size`, the core's one model
-     *  (the engine's exact per-row state plus the decision matrix this entry point adds). */
+    /** Assumption sets one launch holds — `gpap_check_chunk_size`, the core's one memory model. */
     std::size_t chunk_size(std::size_t n_sets, std::size_t max_lits) {
         return static_cast<std::size_t>(
             gpap_check_chunk_size(engine_.handle(), static_cast<std::int64_t>(n_sets),
@@ -922,23 +734,19 @@ class AssumptionChecker {
     std::int32_t n_vars_ = 0;
 };
 
-// ---------------------------------------------------------------------------- probing
-
 /** When a probe sweep should stop. Every field is optional; the first to bind wins. */
 struct ProbeBudget {
-    /** Wall-clock ceiling, checked BETWEEN chunks (a chunk is the smallest unit of GPU work). */
+    /** Wall-clock ceiling, checked between chunks (the smallest unit of GPU work). */
     double seconds = 0.0;
-    /** How many candidates to probe at most, checked against an EXACT count before anything is
-     *  generated. A WORK BUDGET: the sweep probes this many and reports `exhausted() == false`.
-     *  Every conflict found is still a genuine entailed clause. */
+    /** A work budget, checked against an exact count before anything is generated: the sweep
+     *  probes this many and reports `exhausted() == false`, and every conflict it found is still
+     *  a genuine entailed clause. `refuse_over_max` refuses such a sweep outright instead. */
     std::int64_t max_tuples = 0;
-    /** Refuse the sweep outright when it exceeds `max_tuples`, instead of probing that many.
-     *  For a caller that wants an exhaustive answer or none at all. */
     bool refuse_over_max = false;
     /** Tuples per launch; 0 sizes it from free VRAM with the library's one memory model. */
     std::int32_t batch = 0;
-    /** Drop tuples holding two literals of the SAME variable — they conflict for reasons that
-     *  have nothing to do with the formula. */
+    /** Drop tuples holding two literals of one variable: they conflict for reasons that have
+     *  nothing to do with the formula. */
     bool distinct_vars = true;
 };
 
@@ -952,35 +760,28 @@ class Probe {
     Probe &operator=(Probe &&o) noexcept { swap(o); return *this; }
     ~Probe() { if (h_) gpap_probe_free(h_); }
 
-    /** Number of conflicting tuples. */
     std::int64_t size() const { return stats_.conflicts; }
-    /** Tuple width. */
     std::int32_t width() const { return k_; }
-    /** Conflicting tuple `i` as DIMACS literals — assuming these drove BCP to a conflict, so the
-     *  formula entails the negation of their conjunction. */
+    /** Conflicting tuple `i` as DIMACS literals: assuming these drove BCP to a conflict, so the
+     *  formula entails the negation of their conjunction, which `clause(i)` returns. */
     std::vector<std::int32_t> operator[](std::int64_t i) const {
         const std::size_t off = static_cast<std::size_t>(i) * static_cast<std::size_t>(k_);
         return {tuples_.begin() + static_cast<std::ptrdiff_t>(off),
                 tuples_.begin() + static_cast<std::ptrdiff_t>(off + static_cast<std::size_t>(k_))};
     }
-    /** The CLAUSE tuple `i` proves: the negation of its literals. Mining is this, plus a
-     *  strategy for which pools and widths to sweep. */
     std::vector<std::int32_t> clause(std::int64_t i) const {
         std::vector<std::int32_t> c = (*this)[i];
         for (auto &l : c) l = -l;
         return c;
     }
 
-    /** Candidates the full enumeration has. */
     std::int64_t total() const { return stats_.total; }
-    /** Candidates actually probed — a prefix of the enumeration. */
     std::int64_t probed() const { return stats_.probed; }
     double seconds() const { return stats_.seconds; }
-    /** TRUE iff every candidate was probed. This is what makes a NEGATIVE result meaningful: an
-     *  exhausted sweep that found nothing PROVES no entailed clause of this width exists (that
-     *  BCP can see), where a sweep cut short by a budget proves nothing at all. */
+    /** True iff every candidate was probed — what makes a negative result meaningful: an
+     *  exhausted sweep that found nothing proves no entailed clause of this width exists (that
+     *  BCP can see), where a budget-truncated sweep proves nothing. */
     bool exhausted() const { return stats_.exhausted != 0; }
-    /** Why it stopped. */
     gpap_probe_stop stop() const { return static_cast<gpap_probe_stop>(stats_.stop); }
 
   private:
@@ -1006,24 +807,14 @@ class Probe {
 };
 
 /** BCP-probes every k-subset of a literal set — the engine's core primitive in its combinatorial
- *  shape.
- *
- *      gpap::Prober prober("formula.cnf");
- *      auto failed = prober.probe(1);                  // failed literals (the BCP backbone)
- *      for (std::int64_t i = 0; i < failed.size(); ++i)
- *          use(failed.clause(i));                      // each is an entailed unit
- *
+ *  shape. Literals are DIMACS throughout.
+ *      auto failed = prober.probe(1);   // failed literals; each clause(i) is an entailed unit
  *      gpap::ProbeBudget b; b.seconds = 5; b.max_tuples = 200000;
  *      auto pairs = prober.probe(support_literals, 2, b);
- *
  *  `probe(k)` with no pool sweeps every literal the formula's own unit propagation left
- *  undetermined — probing a settled literal tells you nothing. Literals are DIMACS throughout.
- *
- *  This is the PRIMITIVE, not a mining strategy: which widths to sweep, over which pool, whether
- *  to fold proven units back in and re-sweep, and which of the resulting clauses to keep
- *  are decisions an application makes. `gpap.mining` (Python) is one such application; a C++
- *  consumer builds its own on top of `probe` and `assume`.
- *
+ *  undetermined. This is the primitive, not a mining strategy: which widths to sweep, over which
+ *  pool, whether to fold proven units back in, and which clauses to keep are an application's
+ *  decisions (`gpap.mining` in Python is one such).
  *  Not thread-safe (it owns an Engine): one Prober per thread. */
 class Prober {
   public:
@@ -1041,20 +832,16 @@ class Prober {
         std::int32_t n = 0;
         check(gpap_free_literals(engine_.handle(), nullptr, &n), "gpap_free_literals");
         std::vector<std::int32_t> out(static_cast<std::size_t>(std::max(n, 0)));
-        /* `n` is now the CAPACITY on the way in and the count on the way out — the same value
-           here, since the vector was sized from the query. */
         if (n > 0) check(gpap_free_literals(engine_.handle(), out.data(), &n), "gpap_free_literals");
         return out;
     }
 
-    /** Probe every `k`-subset of every free literal. */
     Probe probe(std::int32_t k, const ProbeBudget &budget = ProbeBudget()) {
         return sweep(nullptr, 0, k, budget);
     }
-    /** Probe every `k`-subset of `pool` (DIMACS literals). An EMPTY pool is rejected rather than
-     *  silently swept: `std::vector::data()` is nullptr when empty, and nullptr is the ABI's
-     *  sentinel for "every free literal" — so a caller whose filter left nothing would have got
-     *  the LARGEST possible sweep (~1e11 tuples at k=3 on an unrolled circuit) instead of none. */
+    /** Probe every `k`-subset of `pool` (DIMACS literals). An empty pool is rejected, not swept:
+     *  `data()` is nullptr when empty and nullptr is the ABI's sentinel for every free literal,
+     *  so a caller whose filter left nothing would get the largest possible sweep. */
     Probe probe(const std::vector<std::int32_t> &pool, std::int32_t k,
                 const ProbeBudget &budget = ProbeBudget()) {
         if (pool.empty()) throw Error(GPAP_ERR_ARG, "gpap::Prober::probe: the pool is empty — "
@@ -1062,16 +849,11 @@ class Prober {
         return sweep(pool.data(), static_cast<std::int32_t>(pool.size()), k, budget);
     }
 
-    /** Exact candidate count for a sweep, WITHOUT generating it — check a ceiling against this
-     *  rather than against a materialized enumeration, which for a wide pool at k=3 is terabytes.
-     *  Saturates at INT64_MAX instead of wrapping. */
+    /** Exact candidate count for a sweep without generating it — check a ceiling against this,
+     *  never against a materialized enumeration. Saturates at INT64_MAX instead of wrapping. */
     std::int64_t count(const std::vector<std::int32_t> &pool, std::int32_t k,
                        const ProbeBudget &budget = ProbeBudget()) {
-        /* LOAD-BEARING, for the same reason probe() throws on an empty pool: `std::vector::data()`
-         * is nullptr when empty, and nullptr is the ABI's sentinel for EVERY FREE LITERAL — so
-         * without this an empty pool would be counted as the largest possible sweep instead of
-         * the smallest. Do not "simplify" it into the call below. The pair is deliberately
-         * asymmetric: counting nothing is 0, probing nothing is a caller mistake worth an error. */
+        /* Load-bearing, as in probe(): without it an empty pool counts as the largest sweep. */
         if (pool.empty()) return 0;
         const gpap_probe_options o = to_options(budget);
         return gpap_probe_count(engine_.handle(), pool.data(),
@@ -1082,8 +864,7 @@ class Prober {
         return gpap_probe_count(engine_.handle(), nullptr, 0, k, &o);
     }
 
-    /** Probe an explicit (n, k) row-major matrix of DIMACS literals — for a caller that builds
-     *  its own candidates (filtered, weighted, or from somewhere else entirely). */
+    /** Probe an explicit (n, k) row-major matrix of DIMACS literals (caller-built candidates). */
     Probe probe_tuples(const std::vector<std::int32_t> &tuples, std::int32_t k,
                        const ProbeBudget &budget = ProbeBudget()) {
         const gpap_probe_options o = to_options(budget);
@@ -1096,9 +877,8 @@ class Prober {
         return p;
     }
 
-    /** Fold PROVEN units into the cached flush state, so later sweeps see a narrowed formula
-     *  without it being rebuilt. Sound only if the literals really are entailed — probing at
-     *  k = 1 is one way to have earned that. */
+    /** Fold proven units into the cached flush state, so later sweeps see a narrowed formula
+     *  without a rebuild. Sound only if the literals really are entailed (probe at k = 1). */
     void assume(const std::vector<std::int32_t> &units) {
         if (units.empty()) return;
         check(gpap_assume_units(engine_.handle(), units.data(),

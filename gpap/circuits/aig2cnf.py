@@ -1,20 +1,18 @@
-"""Native .aig/.aag input support: unroll a (possibly sequential) AIGER circuit over T cycles and
-Tseitin-encode it into a projected-sampling CNF — the AIGER twin of `bench.py`, with the same
+"""Native .aig/.aag input: unroll a (possibly sequential) AIGER circuit over T cycles and
+Tseitin-encode it into a projected-sampling CNF. The AIGER twin of `bench.py`, sharing its
 conventions so the two input formats are interchangeable downstream:
 
-  * latch state at t=0 = its RESET value (AIGER default 0; explicit 0/1 honoured; `x` rejected),
-    at t>0 = the next-state literal's value at t-1 (variable SHARING, no clause);
-  * primary inputs get a fresh variable per cycle — these are the sampling support;
-  * outputs at the LAST cycle are pinned to a simulated (hence reachable => SAT) random target;
-  * support labels are `<input>@<cycle>` (symbol-table name when present, else `i<k>`).
+  * latch state at t=0 is its reset value (0 by default, explicit 0/1 honoured, `x` rejected);
+    at t>0 it is the next-state literal's value at t-1, by variable sharing and no clause;
+  * primary inputs get a fresh variable per cycle, and these are the sampling support;
+  * outputs at the last cycle are pinned to a simulated (hence reachable, hence SAT) target;
+  * support labels are `<input>@<cycle>`.
 
-This is the NO-DEPENDENCY path (pure Python). With berkeley-abc installed, `encoder="abc"`
-routes the same file through ABC's `dc2`/`fraig` first (see abc_backend) for a much smaller CNF
-with an identical projected solution space.
+This is the no-dependency path. With berkeley-abc installed, `encoder="abc"` routes the same file
+through `dc2`/`fraig` first (abc_backend) for a much smaller CNF over the same projected space.
 
 Everything walks the AIG with explicit worklists, never recursion: ASCII files may list AND
-definitions in any order, and unrolled dependency chains (latch -> frame t-1 -> ...) can be
-hundreds of thousands deep — far past any Python recursion limit.
+definitions in any order, and unrolled dependency chains run far past any Python recursion limit.
 """
 import random
 

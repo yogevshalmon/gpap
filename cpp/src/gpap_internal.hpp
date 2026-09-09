@@ -1,5 +1,5 @@
-/* Internal plumbing shared by the GPAP core translation units: driver-API helpers, the
- * AOT kernel registry, RAII device buffers and the engine/formula layouts. */
+/* Internal plumbing: driver-API helpers, the AOT kernel registry, RAII device buffers and the
+ * engine/formula layouts. */
 #ifndef GPAP_INTERNAL_HPP
 #define GPAP_INTERNAL_HPP
 
@@ -19,25 +19,16 @@ namespace gpap {
 void set_error(const char *fmt, ...);
 const char *get_error();
 
-/* Share of free VRAM one batch of rows may occupy — the ONLY proportional headroom in the
- * sizing path (the per-row model is exact; the absolute margin is calibrate.cpp's driver
- * reserve). ONE definition: sampling, probing and batched checking all size their chunk
- * against the same number, and a retune that reached only one of them would make the same
- * formula pick different batches depending on which entry point asked. It was a bare 0.80
- * spelled once per file, under a comment claiming it was the same constant everywhere. */
+/* Share of free VRAM one batch may occupy — the only proportional headroom in the sizing path,
+ * defined once so a formula cannot pick a different batch per entry point. */
 constexpr double kMemFraction = 0.80;
 
-/* Guard for PACKED-derived readouts: errors when a CLEAN launch left the baseline behind
- * (defined in engine.cpp, used by readout.cpp). */
+/* Guard for packed-derived readouts after a CLEAN launch (engine.cpp; used by readout.cpp). */
 gpap_status engine_reject_if_packed_is_baseline(gpap_engine *e, const char *what);
 
-/* DIMACS literal -> internal 2N index (+v -> 2(v-1), -v -> 2(v-1)+1), or -1 if out of range
- * for an N-variable formula. The one conversion every DIMACS-speaking entry point shares —
- * including the BUILDER, which used to carry its own copy built on std::abs().
- * The magnitude is taken in int64 because -INT32_MIN does not fit in int32: std::abs(INT32_MIN)
- * and -lit are both undefined behaviour, and the range check that would have rejected the
- * literal happened AFTER them. It is reachable from public API (gpap_formula_from_clauses takes
- * caller-supplied int32 literals), so it is a real input, not a theoretical one. */
+/* DIMACS literal -> internal 2N index, or -1 if out of range: the one conversion every
+ * DIMACS-speaking entry point shares. The magnitude is taken in int64 because
+ * std::abs(INT32_MIN) is undefined and INT32_MIN reaches this from the public API. */
 inline int64_t lit_index_from_dimacs(int32_t lit, int32_t num_vars) {
     if (lit == 0) return -1;
     const int64_t v = lit > 0 ? (int64_t)lit : -(int64_t)lit;
@@ -64,20 +55,8 @@ inline int64_t lit_index_from_dimacs(int32_t lit, int32_t num_vars) {
         if (_st != GPAP_OK) return _st;                                                  \
     } while (0)
 
-/* Run an entry point's body so that a C++ exception becomes a gpap_status instead of escaping.
- *
- * THE ABI PROMISES "every call returns gpap_status" — and an exception crossing an extern "C"
- * frame does not return anything, it calls std::terminate(). A C consumer has no handler and no
- * way to install one, so the failure mode is a core dump of THEIR process. That was not
- * theoretical: sizing the DIMACS buffer from ftell() made `gpap sample <a directory>` throw
- * std::length_error out of gpap_formula_from_dimacs and abort (fixed at the source in
- * formula.cpp — this is the second line of defence, not the fix).
- *
- * Used where CALLER- OR FILE-DERIVED sizes reach a host container, i.e. the two builders. The
- * rest of the ABI allocates against shapes already validated by then; on Linux with default
- * overcommit a genuinely huge request is SIGKILLed by the kernel before new ever throws, so a
- * blanket wrap would catch nothing that this does not. Add a call here when a new entry point
- * sizes a container from something a caller controls. */
+/* Run an entry point's body so a C++ exception becomes a gpap_status instead of escaping into
+ * std::terminate(). Used where caller- or file-derived sizes reach a host container. */
 template <typename F>
 gpap_status guard_entry(const char *what, F &&body) {
     try {
@@ -93,8 +72,6 @@ gpap_status guard_entry(const char *what, F &&body) {
         return GPAP_ERR_ARG;
     }
 }
-
-/* ------------------------------------------------------------------ kernels */
 
 struct Kernel {
     CUfunction fn = nullptr;
@@ -113,12 +90,8 @@ class KernelCache {
     std::vector<CUmodule> modules_;
 };
 
-/* Launch with a runtime grid. `args` must NOT include triton's two trailing scratch
- * pointers — those are appended here (both are null; the AOT build asserts no kernel
- * requires scratch). */
+/* Launch with a runtime grid; `args` must NOT include triton's two trailing scratch pointers. */
 gpap_status launch(const Kernel &k, unsigned gx, unsigned gy, std::vector<void *> args);
-
-/* ------------------------------------------------------------------ device memory */
 
 struct DevBuf {
     CUdeviceptr ptr = 0;
@@ -134,16 +107,12 @@ struct DevBuf {
     DevBuf &operator=(const DevBuf &) = delete;
 };
 
-/* ------------------------------------------------------------------ formula */
-
-/* A clause carries a packed word (and per-row state) iff it has at least this many literals;
- * shorter ones are implication edges / flush-cache facts. THE definition — the builder, the
- * off-split repack and the readout synthesis all test through it. */
+/* A clause carries a packed word (per-row state) iff it has this many literals; shorter ones
+ * are implication edges or flush-cache facts. The one definition. */
 constexpr int32_t kMinLongLen = 3;
 inline bool is_long_clause(int32_t n) { return n >= kMinLongLen; }
 
-/* Packed-word envelopes: (SHIFT, max 2N, max clause length). The sum field must hold any
- * literal index and the count field any clause length; anything outside both is rejected. */
+/* Packed-word envelopes: (SHIFT, max 2N, max clause length); outside both is rejected. */
 struct PackedSplit {
     int32_t shift, max_two_n, max_len;
 };
@@ -151,118 +120,95 @@ extern const PackedSplit kPackedSplits[2];
 
 }  // namespace gpap
 
-/* Host-side formula: built once, uploaded by the engine.
- *
- * Clauses are SEGREGATED BY LENGTH — only length >= 3 ("long") clauses carry a packed word
- * and per-row state:
- *   len == 0  ->  has_empty_clause (dropped from M as before)
- *   len == 1  ->  unit_lits ONLY: no occ entry, no packed word. The construction flush asserts
- *                 them into the baseline bitmap, and the bitmap detects any later ~u push —
- *                 observationally identical to the old per-word path, at zero state.
- *   len == 2  ->  IMPLICATION EDGES: two occ entries whose payload is THE OTHER LITERAL
- *                 (clause (~l | b) appears in occ[l] with payload b). Zero per-row state;
- *                 propagation is one bitmap push. bin_pairs keeps the pairs for readout,
- *                 reconstruction and the soundness check.
- *   len >= 3  ->  re-indexed 0..num_long-1: packed word + occ entries whose payload is the
- *                 LONG clause index.
- * Within each occ[l] segment the binary entries come FIRST — occ_mid[l] is the split point —
- * and both sub-ranges stay clause-ascending. clause_sizes / lit_sum keep ALL M kept clauses in
- * the original input order (accessors reconstruct in that order; the per-kind sub-lists are
- * aligned with it by construction). */
+/* Host-side formula: built once, uploaded by the engine. Clauses are SEGREGATED BY LENGTH —
+ * only length >= 3 ("long") clauses carry a packed word and per-row state:
+ *   len == 0  ->  has_empty_clause (dropped from M)
+ *   len == 1  ->  unit_lits only, no occ entry: the construction flush asserts them into the
+ *                 baseline bitmap, which detects any later ~u push
+ *   len == 2  ->  IMPLICATION EDGES: two occ entries payloading THE OTHER LITERAL, one bitmap
+ *                 push and zero per-row state (bin_pairs keeps them for readout and soundness)
+ *   len >= 3  ->  re-indexed 0..num_long-1: packed word + occ entries payloading that index
+ * Binary entries come FIRST in each occ[l] segment (occ_mid[l] splits them) and both sub-ranges
+ * stay clause-ascending; clause_sizes / lit_sum keep all M clauses in input order. */
 struct gpap_formula {
     int32_t num_vars = 0;
-    int32_t num_clauses = 0;           /* M: ALL kept clauses (unit + binary + long) */
-    int32_t num_bin = 0;               /* length-2 clauses (implication edges) */
-    int32_t num_long = 0;              /* length>=3 clauses (the packed-word list) */
+    /* M = all kept clauses; num_bin = length-2 (edges), num_long = length>=3; total_lits sums
+       the kept clause lengths (occ has fewer entries: units contribute none). */
+    int32_t num_clauses = 0;
+    int32_t num_bin = 0;
+    int32_t num_long = 0;
     int32_t max_clause_len = 0;
     int32_t shift = 0;
     int32_t has_empty_clause = 0;
-    int64_t total_lits = 0;            /* sum of kept clause lengths (occ has fewer entries:
-                                          unit clauses contribute none) */
-    std::vector<int32_t> occ_offsets;  /* (2N+1) CSR: occ[l] = entries where ~l appears */
-    std::vector<int32_t> occ_mid;      /* (2N) end of the binary prefix of occ[l] */
-    /* payload, ascending within each kind: below occ_mid[l] the OTHER LITERAL's 2N index
-       ORed with GPAP_OCC_BIN_TAG (the sign bit); at or above it the long clause's index in
-       [0, num_long), never tagged. BOTH readers depend on that tag — the scalar propagate
-       masks it off, the WAVE propagate classifies with `payload < 0` instead of gathering
-       occ_mid a second time — and it is free by construction: num_long <= total_lits <=
-       INT32_MAX (checked in build()) so a long payload's sign bit is 0, and a literal index
-       is capped at 0xFFFFFF by the widest packed envelope. */
+    int64_t total_lits = 0;
+    std::vector<int32_t> occ_offsets;  /* (2N+1) CSR: occ[l] = entries where ~l appears;
+                                          occ_mid = (2N) end of its binary prefix */
+    std::vector<int32_t> occ_mid;
+    /* payload, ascending within each kind: below occ_mid[l] the OTHER LITERAL's 2N index ORed
+       with GPAP_OCC_BIN_TAG (the sign bit), above it the untagged long clause index. */
     std::vector<int32_t> occ_clauses;
-    std::vector<int32_t> clause_sizes; /* (M) original order, all kept clauses */
-    std::vector<int32_t> lit_sum;      /* (M) sum of literal indices, exact mod 2^32 */
-    std::vector<int32_t> packed_init;  /* (num_long) size | ((sum & mask) << shift) */
-    std::vector<int32_t> bin_pairs;    /* (2*num_bin) sorted literal-index pairs, input order */
-    /* (M) THE clause -> per-kind slot map, and the only place the "k-th clause of kind K in input
-     * order occupies slot k" rule is written down. >= 0 : index into the long/packed list.
-     * < 0 : -(p+1) where p indexes the merged pair list [binaries..., units-as-(u,u)...], so
-     * p < num_bin is a binary clause and p >= num_bin a unit. Every consumer INDEXES this;
-     * nobody re-walks the clauses with their own cursors. */
+    /* (M) in original order: clause lengths and literal-index sums exact mod 2^32. packed_init
+       is (num_long) size | ((sum & mask) << shift); bin_pairs (2*num_bin) sorted pairs. */
+    std::vector<int32_t> clause_sizes;
+    std::vector<int32_t> lit_sum;
+    std::vector<int32_t> packed_init;
+    std::vector<int32_t> bin_pairs;
+    /* (M) The clause -> per-kind slot map: >= 0 the long/packed list, < 0 the value -(p+1) into
+     * the merged pair list [binaries..., units-as-(u,u)...]. Consumers index it, never re-walk. */
     std::vector<int32_t> sat_src;
-    std::vector<int32_t> unit_lits;    /* literal indices of the formula's own unit clauses */
-    std::vector<int32_t> support;      /* 0-based vars from `c ind` header lines (may be empty) */
+    std::vector<int32_t> unit_lits;    /* the formula's own units, as literal indices; support
+                                          is 0-based vars from `c ind` lines (may be empty) */
+    std::vector<int32_t> support;
 };
 
 namespace gpap {
-/* Build the (num_long,) packed init words for `shift`: size | ((lit_sum & mask) << shift), long
- * clauses only, in the same dense re-index the occ payloads use. ONE definition of the packed
- * layout — gpap_formula's own build and gpap_engine_create's force_shift repack both call it, so
- * a change to the split or to kMinLongLen cannot land in one and miss the other. */
+/* Build the (num_long,) packed init words for `shift`: size | ((lit_sum & mask) << shift), in
+ * the dense re-index the occ payloads use. One definition, shared with the force_shift repack. */
 inline void pack_long_init(const gpap_formula *f, int32_t shift, std::vector<int32_t> &out);
 }  // namespace gpap
 
-/* One row selection (see gpap_select_complete): a device row mask plus, lazily, the ascending
- * list of selected row indices that the readout kernels index through. */
+/* One row selection (gpap_select_complete): a device row mask plus, lazily, the ascending
+ * selected-row indices readout kernels index through. */
 struct Selection {
-    gpap::DevBuf mask;                 /* (K,) int8 */
-    gpap::DevBuf rows;                 /* (count,) int32, ascending */
-    std::vector<int32_t> host_rows;    /* same, host side (compaction happens here) */
+    gpap::DevBuf mask;                 /* (K,) int8; rows is (count,) int32 ascending and
+                                          host_rows the same list host-side */
+    gpap::DevBuf rows;
+    std::vector<int32_t> host_rows;
     int32_t count = 0;
     bool rows_valid = false;
-    /* Has anything actually SELECTED into this slot since the last reset? The mask is device
-     * memory that DevBuf::reserve does not zero, and only gpap_select_complete fills it — so
-     * without this, compacting the mask for a slot nobody selected into reads UNINITIALIZED
-     * bytes and produces arbitrary rows. reset() sets `count = 0` to say "nothing selected" and
-     * ensure_rows() would then overwrite it from that garbage; a gpap_check_sound on such a slot
-     * pronounces on rows the caller never chose. */
+    /* Has anything actually SELECTED into this slot since the last reset? reserve() does not
+     * zero the mask, so an unselected slot would compact garbage into arbitrary rows. */
     bool selected = false;
 };
 
 struct gpap_engine {
-    /* shape */
     int32_t num_vars = 0, num_clauses = 0, nw = 0, shift = 16;
-    int32_t num_long = 0;              /* packed-word (state) clauses; num_clauses stays TOTAL */
-    int32_t n_pairs = 0;               /* soundness pair list: binaries + units as (u,u) */
+    int32_t num_long = 0;              /* packed-word (state) clauses; num_clauses stays TOTAL,
+                                          n_pairs = soundness pairs (binaries + units as (u,u)) */
+    int32_t n_pairs = 0;
     int32_t K = 0, trail_cap = 0;
     int64_t total_lits = 0;
     int32_t max_clause_len = 0;
-    gpap_mode mode = GPAP_MODE_SCALAR;   /* always RESOLVED: scalar or wave, never auto */
-    gpap_mode env_mode = GPAP_MODE_AUTO; /* $GPAP_KERNEL, read once; AUTO = not set */
-    int auto_mode = 0;                   /* 1 = re-resolve `mode` on every reset(K) */
+    /* mode is always RESOLVED; env_mode is $GPAP_KERNEL read once (AUTO = unset); auto_mode = 1
+       re-resolves mode on every reset(K). */
+    gpap_mode mode = GPAP_MODE_SCALAR;
+    gpap_mode env_mode = GPAP_MODE_AUTO;
+    int auto_mode = 0;
     int vscan = 1;
     int has_empty_clause = 0;
     int flush_conflict = 0;
-    int flush_ready = 0;      /* the post-units cache is built (NOT packed_flushed.ptr:
-                                 an M == 0 formula has a null one) */
+    int flush_ready = 0;      /* the post-units cache is built (not packed_flushed.ptr) */
     int64_t launches = 0;
 
-    /* CLEAN-mode bookkeeping (gpap_engine_apply_clean): leading rows whose packed row is KNOWN
-     * equal to packed_flushed. Raised by a full reset broadcast; PRESERVED by a completed
-     * CLEAN-mode apply (it restores its own dirt); zeroed by anything that dirties or
-     * invalidates without a restorable record — a plain apply, a trajectory, recache_flush
-     * (the baseline itself moves), or a packed realloc (DevBuf::reserve grows by
-     * release+alloc, so the contents are gone). */
+    /* CLEAN-mode: leading rows KNOWN equal to packed_flushed. Raised by a full reset,
+     * preserved by a completed CLEAN apply, else zeroed. */
     int32_t packed_clean_rows = 0;
-    /* 1 = packed and abits describe DIFFERENT states: a CLEAN launch restored packed to the
-     * baseline while abits kept the fixpoint. Only recache_flush cares — snapshotting that pair
-     * would cache a self-contradictory baseline (abits claiming literals TRUE whose clause
-     * decrements packed never recorded), so it refuses. Cleared by reset (re-broadcasts abits)
-     * and by any plain apply / trajectory (both leave the two consistent). */
+    /* 1 = packed and abits describe DIFFERENT states (a CLEAN launch restored packed while
+     * abits kept the fixpoint); recache_flush refuses on it, reset clears it. */
     int abits_diverged = 0;
     int64_t resets_full = 0, resets_lite = 0;
     int clean_enabled = 1;   /* GPAP_CLEAN=0 kills the lite path (A/B lever + escape hatch) */
 
-    /* CUDA */
     CUdevice device = 0;
     CUcontext ctx = nullptr;   /* primary context, retained */
     int device_ordinal = 0;
@@ -272,10 +218,7 @@ struct gpap_engine {
     gpap::DevBuf occ_off, occ_mid, occ_cls, packed_init, packed_flushed, abits_flushed;
     gpap::DevBuf pair_check;           /* (2*n_pairs) int32 — sound_rows' binary/unit pass */
 
-    /* Host side of the original-order readout synthesis (gpap_sat_rows): the engine does not
-     * retain the formula, and binary/unit sat counts come from the BITMAP. `pair_host` is the
-     * SAME list staged into pair_check above (moved, not copied); `sat_src_host` is the
-     * formula's kind/slot map. */
+    /* Host side of the original-order readout synthesis (the engine drops the formula). */
     std::vector<int32_t> sat_src_host, pair_host;
     int32_t num_bin = 0;               /* pair indices below this are binary clauses */
 
@@ -284,9 +227,8 @@ struct gpap_engine {
     gpap::DevBuf nprops, nops, ndecs, nrounds;
     gpap::DevBuf acc_ops, acc_props, acc_decs;   /* int64 accumulators, no host sync */
 
-    /* scratch / staging */
-    gpap::DevBuf scratch_i32;      /* small results (counts) */
-    gpap::DevBuf staging_a, staging_b;  /* uploads (order, decisions, cols) + readout buffers */
+    gpap::DevBuf scratch_i32;           /* scratch: small results (counts) */
+    gpap::DevBuf staging_a, staging_b;  /* staging: uploads and readout buffers */
     std::vector<gpap::DevBuf *> pair_masks;
     Selection slots[GPAP_SLOTS];
 

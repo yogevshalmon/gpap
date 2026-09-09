@@ -1,17 +1,13 @@
 #!/usr/bin/env bash
 # CONSISTENCY RE-CHECK: re-measure instances we already have numbers for, on a FRESH L4 VM.
 #
-# The point is not more coverage — it is asking whether the numbers already collected are
-# reproducible on a different machine of the same type, after ~8 h of sweeps across many VMs.
-# Two things it can catch that a single sweep cannot:
-#   * a result that depended on one VM's state (a bad build, a warm cache, a noisy neighbour)
-#   * a silent protocol drift between the code that produced the old rows and today's tree
+# The point is not coverage but reproducibility: are the numbers already collected the same on
+# a different machine of the same type? It catches a result that depended on one VM's state and
+# a silent protocol drift between the code that produced the old rows and today's tree.
 #
-# It writes to its OWN directory, never the sweep's, so a re-check can never be mistaken for
-# (or resumed as) the original measurement. `eval/recheck_compare.py` does the diff.
-#
-# Everything below is pinned to match the original sweep exactly: same seed, same budgets, same
-# encoders, same portfolio. The ONE thing deliberately left free is the GPU itself.
+# It writes to its own directory, never the sweep's, so a re-check can never be mistaken for or
+# resumed as the original measurement; `eval/recheck_compare.py` does the diff. Everything is
+# pinned to the original sweep — seed, budgets, encoders, portfolio — except the GPU itself.
 set -uo pipefail
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"   # this file lives in eval/colab/
@@ -31,15 +27,15 @@ else
     echo "[warn] no patched cmsgen — GPAP-side re-check only" >&2
 fi
 
-# A deliberately MIXED sample: the flagship sequential family, the combinational family, the
-# projected-CNF family, and EPFL (our weakest, where succ==0 cells live). Small and large M.
+# A deliberately mixed sample: the sequential, combinational and projected-CNF families plus
+# EPFL, our weakest, where zero-success cells live. Small and large M.
 SEQ="${SEQ:-b03 b04 b12 s1196}"
 COMB="${COMB:-c432 c1355 c3540}"
 EPFL="${EPFL:-ctrl dec i2c adder}"
 SK_GLOB="${SK_GLOB:-benchmarks/sampling/27.sk_3_32.cnf}"
 
-# Stage the chosen instances as symlinks and glob THAT directory. `--glob` goes to Python's
-# glob.glob, which has no brace/extglob syntax, so a shell pattern would silently match nothing.
+# Stage the chosen instances as symlinks and glob that directory: `--glob` goes to Python's
+# glob.glob, which has no brace syntax, so a shell pattern would silently match nothing.
 STAGE="$OUT/stage"
 rm -rf "$STAGE"; mkdir -p "$STAGE/seq" "$STAGE/comb" "$STAGE/epfl"
 for i in $SEQ;  do ln -sf "$REPO_ROOT/benchmarks/circuits/bench/seq/$i.bench"  "$STAGE/seq/";  done

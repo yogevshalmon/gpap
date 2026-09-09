@@ -1,33 +1,15 @@
-/* Combinatorial probing: BCP every k-subset of a literal set, within a budget.
- *
- * Entry point 1 answers "do THESE assumption sets conflict". This answers the combinatorial form:
- * "which k-subsets of this literal set conflict" — the primitive behind failed-literal detection,
- * entailed-clause mining, backbone extraction and lookahead scoring. It is deliberately the SAME
- * machinery underneath (reset + apply + read the conflict flags); what belongs here, rather than
- * in every caller, is the enumeration, the chunking and the budget.
- *
- * TWO THINGS THIS FILE EXISTS TO GET RIGHT, both of which the Python original got wrong:
- *
- * 1. THE CEILING MUST PRECEDE THE ENUMERATION. `max_tuples` is what keeps a wide pool at k=3 from
- *    being hours of GPU work — but a ceiling checked AFTER materializing the candidate list cannot
- *    protect anything. The Python miner built the whole (C(P,k), k) array and then compared its
- *    length: at pool = "all free literals" of an unrolled circuit that is C(2N,3) ~ 1e11 tuples,
- *    2 TB of host memory, and the process was OOM-killed before the ceiling was ever consulted.
- *    Here the candidate count is computed EXACTLY and compared first (see count_candidates), and
- *    generation is PAGED — one chunk is materialized at a time, so peak host memory is the chunk,
- *    not the enumeration.
- *
- * 2. `exhausted` IS A PROOF, SO `total` MUST BE EXACT. A sweep that probed everything licenses
- *    "no entailed clause of this width exists (that BCP can see)"; a sweep that quietly stopped
- *    short licenses nothing. That distinction is only as good as the candidate count, which is
- *    why distinct_vars is counted with an elementary-symmetric DP rather than estimated.
- *
- * Generation stays on the HOST for now, and the API is shaped so that can change without a caller
- * noticing: candidates are produced one chunk at a time from (pool, k, first), which is exactly
- * the interface a device-side combinatorial-unranking kernel would implement. It is not built
- * because it is not the bottleneck — once the enumeration is vectorized, it costs a small fraction
- * of the probe it feeds, and paging already bounds the memory. Measure before adding a kernel.
- */
+/* Combinatorial probing: BCP every k-subset of a literal set, within a budget — the primitive
+ * behind failed-literal detection, entailed-clause mining, backbone extraction and lookahead
+ * scoring. Entry point 1 is the machinery underneath; what lives here rather than in every
+ * caller is the enumeration, the chunking and the budget, under two rules.
+ * (1) The ceiling must PRECEDE the enumeration: checked after materializing the candidate list
+ * it protects nothing, since at pool = "all free literals" of an unrolled circuit that array is
+ * ~1e11 tuples. The count is computed exactly and compared first, and generation is PAGED.
+ * (2) `exhausted` is a PROOF, so `total` must be exact — a sweep that probed everything licenses
+ * "no entailed clause of this width exists (that BCP can see)" and one that stopped short
+ * licenses nothing, which is why distinct_vars is counted with an elementary-symmetric DP.
+ * Generation stays on the host, one chunk at a time from (pool, k, first) — the interface a
+ * device-side unranking kernel would implement. Not the bottleneck; measure first. */
 #include "gpap_internal.hpp"
 
 #include <algorithm>
@@ -50,9 +32,7 @@ namespace {
 
 constexpr int64_t kInfinite = std::numeric_limits<int64_t>::max();
 
-/* Saturating helpers: candidate counts overflow int64 for any pool worth refusing, and a wrapped
- * count would compare BELOW the ceiling and let the sweep through — the exact failure the ceiling
- * exists to prevent. Saturation is sound here because the value is only ever compared. */
+/* Saturating: a candidate count that wrapped would compare BELOW the ceiling. */
 int64_t sat_add(int64_t a, int64_t b) {
     if (a >= kInfinite - b) return kInfinite;
     return a + b;
@@ -68,14 +48,9 @@ inline int32_t to_dimacs(int64_t idx) {
     return (idx % 2) ? -v : v;
 }
 
-/* How many k-subsets of `pool` there are, EXACTLY, without generating any of them.
- *
- * Without distinct_vars that is C(P, k). With it, tuples holding two literals of one variable are
- * excluded, and the count becomes the elementary symmetric polynomial e_k(m_1..m_v) where m_i is
- * how many literals of variable i the pool holds (1 or 2): choosing k distinct variables and one
- * literal from each. The usual pool holds both polarities of every variable, for which this is
- * C(v,k)*2^k — but a caller may pass a one-sided pool, so it is computed rather than assumed.
- * O(v*k), and saturating. */
+/* How many k-subsets of `pool` there are, EXACTLY, without generating any. Without distinct_vars
+ * that is C(P, k); with it, the elementary symmetric polynomial e_k over how many literals of
+ * each variable the pool holds. A two-sided pool gives C(v,k)*2^k, but one-sided ones exist. */
 int64_t count_candidates(const std::vector<int64_t> &pool, int32_t k, bool distinct_vars,
                          int32_t num_vars) {
     const int64_t P = static_cast<int64_t>(pool.size());
@@ -104,12 +79,9 @@ int64_t count_candidates(const std::vector<int64_t> &pool, int32_t k, bool disti
     return e[static_cast<size_t>(k)];
 }
 
-/* Lexicographic k-combinations of POOL POSITIONS, filtered and paged.
- *
- * The order matters beyond taste: it is the order the numpy reference enumerates (ascending
- * positions, and distinct_vars applied as a filter that preserves order), so a port can be gated
- * on producing the identical clause SET. `next_chunk` appends up to `want` tuples as internal
- * literal indices and returns how many it wrote; 0 means the enumeration is finished. */
+/* Lexicographic k-combinations of POOL POSITIONS, filtered and paged, in the order the numpy
+ * reference enumerates, so a port can be gated on the identical clause SET. `next_chunk` writes
+ * up to `want` tuples and returns how many; 0 means finished. */
 class Combinations {
   public:
     Combinations(const std::vector<int64_t> &pool, int32_t k, bool distinct_vars)
@@ -158,9 +130,8 @@ class Combinations {
 
 const gpap_probe_options kDefaults = {};   /* every field's default IS 0 — see the header */
 
-/* Tuples one launch can hold: the engine's own per-row state plus the (batch, k) int64 decision
- * matrix this entry point allocates and the sampler's path never does. ONE model, the shared one —
- * a second copy of the memory arithmetic is exactly what the sizing collapse removed. */
+/* Tuples one launch can hold: the engine's per-row state plus the (batch, k) decision matrix
+ * only this entry point allocates. One model, the shared one. */
 int32_t probe_batch(gpap_engine *e, int32_t k, int64_t n_tuples, int32_t requested) {
     if (requested > 0) return static_cast<int32_t>(std::min<int64_t>(requested, n_tuples));
     const int64_t per_row =
@@ -172,21 +143,15 @@ int32_t probe_batch(gpap_engine *e, int32_t k, int64_t n_tuples, int32_t request
     return static_cast<int32_t>(std::max<int64_t>(1, b));
 }
 
-/* Run one chunk of already-materialized tuples and append the conflicting ones to `out`.
- *
- * NOTE there is no redundancy filter here, deliberately. There was one (`skip_subsumed`: drop a
- * conflict the assumptions alone caused). It was SOUND but worth 0.0-0.3% of the result buffer on
- * every instance measured, while costing an int32 per row and a branch in the innermost loop of
- * both propagate kernels — and the host-side filter in gpap.mining has to be exact anyway, since
- * it is the one that decides what a caller receives. Redundancy is a property of the CLAUSE
- * against a FORMULA, so it belongs where the formula is known, not in the sweep. */
+/* Run one chunk of materialized tuples, appending conflicts to `out`. No redundancy filter, on
+ * purpose: redundancy is a property of a CLAUSE against a FORMULA (gpap.mining's job). */
 gpap_status probe_chunk(gpap_engine *e, const std::vector<int64_t> &tuples, int32_t k,
                         std::vector<int8_t> &flags, gpap_probe *out) {
     const int32_t rows = static_cast<int32_t>(tuples.size() / static_cast<size_t>(k));
     if (rows == 0) return GPAP_OK;
     GPAP_TRY(gpap_engine_reset(e, rows));       /* reset-LITE after chunk 1: the CLEAN launch
-                                                 * below restores its own rows, so only abits +
-                                                 * flags are rebuilt here (RESET_RESTORE_PLAN §9) */
+                                                 * restores its own rows, so only abits and flags
+                                                 * are rebuilt (CLEAN_MODE_FINDINGS.md) */
     GPAP_TRY(gpap_engine_apply_clean(e, tuples.data(), k));
     flags.resize(static_cast<size_t>(rows));
     GPAP_TRY(gpap_flags(e, nullptr, flags.data(), rows));
@@ -212,18 +177,15 @@ gpap_status run_sweep(gpap_engine *e, int32_t k, int64_t total, const gpap_probe
     out->stats.total = total;
 
     if (e->flush_conflict || e->has_empty_clause) {
-        /* The formula's own units already conflict: every assumption set conflicts trivially and
-         * none of it says anything about the assumptions. Report it rather than return noise. */
+        /* The formula's own units already conflict, so every set conflicts trivially. */
         out->stats.stop = GPAP_PROBE_UNSAT;
         out->stats.seconds = elapsed();
         return GPAP_OK;
     }
     int64_t limit = total;
     if (o.max_tuples > 0 && total > o.max_tuples) {
-        /* A WORK BUDGET by default: probe the first max_tuples candidates. Every conflict found
-         * is a genuine entailed clause whatever else went unprobed, so returning them beats
-         * returning nothing — only `exhausted` is lost, and it is reported honestly. Refusing
-         * outright is opt-in, for a caller that wants a proof or nothing. */
+        /* A WORK BUDGET by default: every conflict found is a genuine entailed clause whatever
+         * went unprobed, so only `exhausted` is lost. */
         if (o.refuse_over_max) {
             out->stats.stop = GPAP_PROBE_CEILING;
             out->stats.seconds = elapsed();
@@ -237,8 +199,7 @@ gpap_status run_sweep(gpap_engine *e, int32_t k, int64_t total, const gpap_probe
     std::vector<int64_t> chunk;
     std::vector<int8_t> flags;
     while (out->stats.probed < limit) {
-        /* Checked BETWEEN chunks: a chunk is the smallest unit of GPU work and abandoning one
-         * mid-flight would leave the engine's row state half-written. */
+        /* Checked BETWEEN chunks: abandoning one mid-flight leaves row state half-written. */
         if (o.seconds > 0.0 && elapsed() > o.seconds) {
             out->stats.stop = GPAP_PROBE_DEADLINE;
             break;
@@ -291,13 +252,10 @@ extern "C" gpap_status gpap_free_literals(gpap_engine *e, int32_t *out, int32_t 
     if (n > 0) GPAP_TRY(gpap_engine_flushed_assignment(e, assign.data()));
     int32_t found = 0;
     for (int32_t v = 0; v < n; ++v) {
-        /* Free = the flush settled NEITHER polarity. Probing a settled literal tells you nothing:
-         * if it is already TRUE the probe is a no-op, and if it is FALSE the probe conflicts for
-         * a reason that is already known. */
+        /* Free = the flush settled NEITHER polarity; a settled literal says nothing. */
         if (assign[static_cast<size_t>(2 * v)] || assign[static_cast<size_t>(2 * v + 1)]) continue;
         if (out) {
-            /* Bounds-checked BEFORE the write, not after the loop: the point is to not have
-               written past the caller's buffer by the time we notice. */
+            /* Bounds-checked BEFORE the write: the point is not to have overrun already. */
             if (found + 2 > capacity) {
                 set_error("gpap_free_literals: out holds %d literals, the formula has at least "
                           "%d free (query with out=NULL first)", capacity, found + 2);
@@ -324,9 +282,8 @@ extern "C" gpap_status gpap_assume_units(gpap_engine *e, const int32_t *lits, in
             return GPAP_ERR_ARG;
         }
     }
-    /* reset(1) + apply + recache: propagate the units once on top of the current cache and make
-     * the result the new baseline, which is exactly the fixpoint a rebuilt formula's flush would
-     * reach. Avoids rebuilding the occurrence lists per round, which dominated mining wall. */
+    /* reset(1) + apply + recache: propagate the units on top of the current cache and make the
+     * result the new baseline — the fixpoint a rebuilt formula's flush would reach. */
     GPAP_TRY(gpap_engine_reset(e, 1));
     GPAP_TRY(gpap_engine_apply(e, row.data(), n));
     return gpap_engine_recache_flush(e);
@@ -356,14 +313,10 @@ extern "C" gpap_status gpap_probe_tuples(gpap_engine *e, const int32_t *tuples, 
                                          int32_t k, const gpap_probe_options *opts,
                                          gpap_probe **out) {
     if (!e || !out || k < 1 || n < 0 || (n > 0 && !tuples)) return GPAP_ERR_ARG;
-    const gpap_probe_options o = opts ? *opts : kDefaults;   /* `same_var` is not read here: the
-                                                             * tuples are the caller's, so we probe
-                                                             * exactly the rows given (documented) */
-    /* Validate the WHOLE matrix before any GPU work. An out-of-range literal must not reach the
-     * kernel: internal indices past the end of a row's assignment bitmap make `atomic_or` write
-     * into a LATER ROW's words, so one bad tuple silently corrupts a different tuple's answer and
-     * nothing downstream can detect it. One pass over the caller's own array is cheap; being
-     * wrong here is undetectable. (Same reasoning as AssumptionChecker's `_flatten`.) */
+    const gpap_probe_options o = opts ? *opts : kDefaults;   /* `same_var` is not read: the rows
+                                                             * are exactly the caller's */
+    /* Validate the WHOLE matrix before any GPU work: an index past a row's assignment bitmap
+     * makes `atomic_or` write into a LATER ROW's words, corrupting a different tuple's answer. */
     for (int64_t i = 0; i < n * k; ++i) {
         if (gpap::lit_index_from_dimacs(tuples[i], e->num_vars) < 0) {
             set_error("probe tuple: literal %d out of range (formula has %d variables; literals "

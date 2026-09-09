@@ -1,30 +1,11 @@
 #!/usr/bin/env python3
-"""Cross-GPU benchmark driver for the GPAP **sampler** — designed to run on Colab (any GPU) or locally.
+"""Cross-GPU benchmark driver for the GPAP sampler (Colab or local).
 
-This is the sampling-direction analogue of scripts/colab_benchmark.py. It measures, on *this* GPU,
-how fast GPAP draws guaranteed-valid SAT models (GPU-parallel CMSGen: random var + random polarity +
-unit propagation, K trajectories at once) versus CMSGen (the SOTA fast "uniform-like" CPU sampler).
-
-Three measurements, all on the projected-sampling sk_ benchmarks (independent support via `c ind`):
-
-  1. **Throughput vs CMSGen** (the headline): end-to-end wall to produce models, GPAP-simplified
-     samples/s ÷ CMSGen samples/s, per niche instance + geomean. GPAP uses model-preserving
-     unit-propagation simplification (--simplify, on) so a much larger K fits — the throughput lever.
-
-  2. **Quality parity**: 2-wise coverage % (the combinatorial-testing metric CMSGen reports) for GPAP
-     vs CMSGen — the speed win must come at equal coverage, not lower quality.
-
-  3. **K-scaling** (the A100 story): on a couple of niche instances, sweep K and measure samples/s.
-     Throughput scales ~linearly with K until the GPU's compute saturates — a big-VRAM GPU (A100
-     80 GB) can hold a far larger K, so it lands further up the line. The plot marks this GPU's auto-K.
-
-K auto-sizes to the GPU's free VRAM: importing gpap.sampling.sampler enables CUDA `expandable_segments`
-(one growable segment instead of many fixed blocks) which removed the allocator fragmentation that
-used to inflate reserved memory ~2.3× and forced a small K; K is then set to 4× a proven-safe floor,
-bounded by the library's batch cap (default_k_cap), which is the SAME on every GPU so two cards'
-rows are comparable without pinning an override. Pass --k-cap to override. Results are saved per-GPU to
-benchmarks/colab_sampling_results/<gpu>.json (+ plots) so runs on different GPUs accumulate and can be
-ranked with compare_saved().
+Measures on this GPU: (1) throughput vs CMSGen (GPAP samples/s / CMSGen samples/s per instance +
+geomean), (2) quality parity via 2-wise coverage, (3) K-scaling (samples/s along a K ladder up to
+this GPU's auto-K). K auto-sizes to free VRAM under the library's batch cap (default_k_cap), the
+same on every GPU, so rows from two cards are comparable without pinning; --k-cap overrides.
+Results go to benchmarks/colab_sampling_results/<gpu>.json (+ plots); compare_saved() ranks them.
 
 Headless usage:
     PYTHONPATH=. .venv/bin/python scripts/colab_sampling_benchmark.py --quick --device cuda \
@@ -93,13 +74,10 @@ def _slug(name: str) -> str:
 DEFAULT_SAMPLING_DIR = os.path.join(REPO_ROOT, "benchmarks", "sampling")
 DEFAULT_OUT_DIR = os.path.join(REPO_ROOT, "benchmarks", "colab_sampling_results")
 
-# The K cap now lives in gpap.engine.calibrate (imported above) — it used to be
-# defined here, which is precisely why `gpap bench` and eval/run_full_eval.sh never got it and
-# pinned every GPU to the 12 GB laptop's K. One definition, every driver.
+# The K cap has one definition, gpap.engine.calibrate.default_k_cap; do not redefine it here.
 
-# The validated niche (freeAftSup≈0 ∧ high supOK): numeric sk_ where GPAP beats CMSGen. Used for the
-# quick run + K-sweep; the full run sweeps every *.cnf so the niche boundary (service family, low-supOK
-# 7/71/80.sk) shows up as ~0 success too.
+# The validated niche: numeric sk_ instances where GPAP beats CMSGen (quick run + K-sweep); the
+# full run sweeps every *.cnf so the niche boundary shows up as ~0-success rows.
 NICHE_FOCUS = [
     "35.sk_3_52.cnf", "10.sk_1_46.cnf", "27.sk_3_32.cnf", "32.sk_4_38.cnf",
     "111.sk_2_36.cnf", "53.sk_4_32.cnf", "55.sk_3_46.cnf", "109.sk_4_36.cnf",
@@ -113,15 +91,12 @@ def _resolve_device(device) -> torch.device:
     return torch.device(device)
 
 
-# ---------------------------------------------------------------------------
-# CMSGen build helper (Colab has no pip wheel — build meelgroup/cmsgen from source)
-# ---------------------------------------------------------------------------
+# --- CMSGen build helper (Colab has no pip wheel; build meelgroup/cmsgen from source) ---
 
 def build_cmsgen(dest: str | None = None) -> str | None:
     """Clone + cmake-build meelgroup/cmsgen, returning the binary path (or None on failure).
 
-    Idempotent: if the binary already exists it is returned immediately. On Colab this needs
-    `cmake` + `build-essential` + `zlib1g-dev` (the notebook's setup cell installs them)."""
+    Idempotent: an existing binary is returned immediately. Needs cmake, build-essential, zlib1g-dev."""
     dest = dest or os.path.join(REPO_ROOT, ".cmsgen")
     binp = os.path.join(dest, "build", "cmsgen")
     if os.path.exists(binp):
@@ -140,19 +115,15 @@ def build_cmsgen(dest: str | None = None) -> str | None:
     return binp if os.path.exists(binp) else None
 
 
-# ---------------------------------------------------------------------------
-# K-scaling sweep — the A100 headline (throughput ∝ K, VRAM-limited)
-# ---------------------------------------------------------------------------
+# --- K-scaling sweep (throughput vs K, VRAM-limited) ---
 
 def k_scaling(path: str, device: torch.device, *, b: int, chunks: int, k_cap: int,
               els: bool = True, n_points: int = 5, seed: int = 5) -> dict | None:
-    """Sweep K (batch size) on one instance and measure samples/s at each, to show throughput scales
-    ~linearly with K. Builds one simplified sampler, then runs `chunks` chunks at each K in a
-    geometric ladder up to the GPU's auto-K. Returns {auto_K, points:[{K,samples_per_s,success}]}."""
+    """Sweep K on one instance and measure samples/s at each point of a geometric ladder up to the
+    GPU's auto-K (`chunks` chunks per point, one simplified sampler).
+    Returns {auto_K, points:[{K,samples_per_s,success}]} or None if the instance is UNSAT."""
     smp = GPUSampler.from_cnf_file(path, device, simplify=True, els=els, k_cap=k_cap, seed=seed)
-    # `batch_size`, not `K`: K is a memory model, the batch a fused chunk actually runs is
-    # batch_size (usually much larger). Topping the ladder at K put the sweep's "auto-K" marker
-    # somewhere production never operates.
+    # `batch_size`, not `K`: the batch a chunk actually runs is what the ladder must top out at.
     auto_K = smp.batch_size
     if smp._recon and smp._recon.get("unsat"):
         return None
@@ -162,12 +133,9 @@ def k_scaling(path: str, device: torch.device, *, b: int, chunks: int, k_cap: in
     for k in ks:
         if k > auto_K:
             continue
-        # pin_batch, not `smp.K = k`: assigning K leaves the fused boost ON whenever k is still
-        # >= the construction value, so the TOP point of the ladder silently ran the boosted batch
-        # instead of k — i.e. the one plot meant to show throughput-vs-K mismeasured its own x-axis.
+        # pin_batch, not `smp.K = k`: only the pin bounds the batch actually run (tests/test_k_cap.py).
         smp.pin_batch(k)
-        # Reseed per point so every K samples the SAME trajectory distribution — isolates the
-        # throughput-vs-K effect from random success-rate noise across the sweep.
+        # Reseed per point so every K samples the same trajectory distribution.
         smp.reseed(seed)                    # all streams: core sampling, delivery, host fills
         smp.sample(k, decisions_per_round=b, max_chunks=1, collect=False)  # warmup
         if device.type == "cuda":
@@ -188,21 +156,16 @@ def k_scaling(path: str, device: torch.device, *, b: int, chunks: int, k_cap: in
     return {"name": os.path.basename(path), "auto_K": auto_K, "points": points}
 
 
-# ---------------------------------------------------------------------------
-# Per-instance throughput + quality vs CMSGen
-# ---------------------------------------------------------------------------
+# --- Per-instance throughput + quality vs CMSGen ---
 
 def run_instance(path: str, device: torch.device, *, cmsgen_bin: str | None, n_time: int,
                  n_cov: int, b: int, k_cap: int, scratch: str, els: bool = True,
                  seed: int = 5, configs="default") -> dict:
-    """Benchmark one CNF: GPAP-simplified throughput + 2-wise coverage + GPU soundness + a UNIQUE-
-    solutions count, and (if a cmsgen binary is given) the CMSGen throughput + coverage + distinct
-    count + the GPAP/CMSGen ratio. `els=True` adds equivalent-literal substitution (removes vars ->
-    faster propagate + bigger K; ~1.5x). `configs` = the adaptive-bandit portfolio (default
-    DEFAULT_PORTFOLIO for the sk_ niche; pass CIRCUIT_PORTFOLIO for circuits — adds soft-lookahead)."""
+    """Benchmark one CNF: GPAP throughput + 2-wise coverage + soundness + distinct-solution count,
+    and with a cmsgen binary the same for CMSGen plus the GPAP/CMSGen ratio. `els` enables
+    equivalent-literal substitution; `configs` is the bandit portfolio (CIRCUIT_PORTFOLIO for circuits)."""
     name = os.path.basename(path)
-    # verify_sound: these rows get published, so the soundness column must be evidence
-    # rather than an absence (its wall is excluded from every rate).
+    # verify_sound: published rows need a verdict, not an absence (its wall is outside every rate).
     g = gpap_sample(path, device, simplify=True, els=els, n_time=n_time, n_cov=n_cov, b=b,
                     verify_sound=True,
                     k_cap=k_cap, configs=configs)
@@ -212,25 +175,20 @@ def run_instance(path: str, device: torch.device, *, cmsgen_bin: str | None, n_t
         "name": name, "N": g["nv"], "M": g["n_clauses"], "support": len(sup1),
         "gpap_sps": round(g["samples_per_s"], 1), "succ": round(g["success_rate"], 4),
         "twise_gpap": round(twg, 2), "sound_check": g.get("sound_check", "off"),
-        # UNIQUE-solution readout — computed OFF the timing path (see gpap_sample): distinct support-
-        # projections among the n_collected coverage models. Verifies the sampler emits genuinely
-        # distinct solutions rather than re-emitting the same model; NOT part of samples/s.
+        # distinct support projections among the coverage models, computed off the timing path
         "n_distinct": g["n_distinct"], "n_collected": g.get("n_collected"),
         "tuned_rv": g.get("tuned_rv"), "tuned_b": g.get("tuned_b"), "tuned_la": g.get("tuned_la"),
-        # work stats (free) — diagnose low throughput: low samples/s + high attempts/s = low success;
-        # low attempts/s = BCP-bound (deep propagation, many rounds/ops per trajectory).
+        # work stats: high attempts/s + low samples/s = low success; low attempts/s = BCP-bound
         "attempts_per_s": g.get("attempts_per_s"), "bcp_rounds_pc": g.get("bcp_rounds_per_chunk"),
         "bcp_ops_pa": g.get("bcp_ops_per_attempt"),
-        # unique/s estimate (post-processing only — raw rate × distinct fraction of the cov sample)
-        # + literals-assigned/s (the CDCL props/sec analogue; CDCL ≈ 1e7/s single-core).
+        # unique/s estimate = raw rate x distinct fraction of the coverage sample (post-processing)
         "unique_sps_est": g.get("unique_sps_est"), "assigns_per_s": g.get("assigns_per_s"),
         "decisions_per_s": g.get("decisions_per_s"),     # branch decisions/s
-        "implications_per_s": g.get("implications_per_s"),  # unit-prop implications/s (assigns-decisions)
+        "implications_per_s": g.get("implications_per_s"),  # unit-prop implications/s
         "in_niche": g["success_rate"] > 0.10,           # rough: produces models at a usable rate
     }
     if cmsgen_bin:
-        # keep=n_cov: retain only the models needed for coverage; the rest are counted for the rate
-        # (retaining all n_time full models OOM-kills a 12 GB Colab — see cmsgen_sample).
+        # keep=n_cov: retain only the coverage models; keeping all n_time full models OOMs a small host
         crate, cmodels = cmsgen_sample(path, cmsgen_bin, n_time, scratch, keep=n_cov)
         twc = two_wise_coverage(cmodels[:n_cov], sup1)
         cms_uniq, cms_coll = distinct_projections(cmodels[:n_cov], sup1)   # same off-timing readout
@@ -241,40 +199,21 @@ def run_instance(path: str, device: torch.device, *, cmsgen_bin: str | None, n_t
     return row
 
 
-# ---------------------------------------------------------------------------
-# Sequential-circuit (ISCAS-89) unrolling benchmark — the CircuitSAT-paper family
-# ---------------------------------------------------------------------------
+# --- Circuit unrolling benchmark (the CircuitSAT-paper families) ---
 
 DEFAULT_CIRCUIT_DIR = os.path.join(REPO_ROOT, "benchmarks", "circuits", "bench")
 CIRCUIT_SEQ = ["s386", "s526", "s832", "s1196"]        # ISCAS-89 sequential (unrolled over cycles)
-# ITC'99 sequential (the "Recurrent CircuitSAT Sampling", arXiv 2502.21226, family). b01–b14; the
-# larger b15+ blow past the 100k-clause budget even shallow. Oversized (instance, cycle) combos are
-# skipped by the CIRCUIT_MAX_CLAUSES guard in run_circuits (e.g. b05/b12 at T=25, b14 at T>1).
+# ITC'99 sequential b01-b14 (Recurrent CircuitSAT Sampling, arXiv 2502.21226); oversized
+# (instance, cycle) combos are skipped by the CIRCUIT_MAX_CLAUSES guard in run_circuits.
 CIRCUIT_ITC = [f"b{i:02d}" for i in range(1, 15)]
 CIRCUIT_COMB = ["c432", "c499", "c880", "c1355", "c1908",    # ISCAS-85 combinational — DEMOTIC's
                 "c2670", "c3540", "c5315", "c6288", "c7552"]  # exact 10-circuit set
 CIRCUIT_CYCLES = [1, 5, 10, 25]
 CIRCUIT_MAX_CLAUSES = 100_000                          # skip any unroll whose CNF exceeds this
-# A curated fast subset for --quick (small-to-medium, both easy and hard cases represented).
+# A curated fast subset for --quick (small-to-medium, easy and hard cases represented).
 CIRCUIT_ITC_QUICK = ["b01", "b03", "b06", "b08", "b10", "b13"]
 
-# Circuit sampler portfolio (the adaptive bandit picks the winner per instance; measured per-config
-# on 22 circuit instances incl. all ISCAS-85 — each entry is the outright
-# winner somewhere):
-#   (True, 8, "fused") — v2 fused-trajectory kernel at boosted K_fused: broad deep-circuit winner
-#                        (b07 T=25, b05/b12; strong everywhere the support drives propagation).
-#   (True, 1, "fused") — B=1's success edge is FREE in-kernel: wins the conflict-heavy deep set
-#                        (s386 T=25 48k/s, s832 T=25 21k/s, s1196 T=25 22k/s, b04, most ISCAS-85).
-#   (True, 8, "fsoft") — in-kernel SOFT risk-polarity at fused speed: wins the tight-cascade family
-#                        (b03 T=25 267k/s = 3.8× the old v1-soft winner; c1355 T=1 830k/s at 100%).
-#                        Regime-dependent (0% where greedy polarity misleads) — the bandit gates it.
-#                        Replaces v1 (True,1,"soft"), which it dominates everywhere measured.
-#   (True, 64, "orac") — high-B on the PYTHON engine: ultra-shallow wide instances where the batched
-#                        tensor ops beat the per-warp kernel (b14 T=1: 53.7M/s vs 42M kernel-B64).
-# NOTES: there is no decision-round cap (the kernel structurally terminates in ≤|order| groups;
-# the old cap was a v1-Python-loop artifact that truncated B=1 on large supports). Per-trajectory
-# BCP work is ~UNIFORM on circuits ⇒ straggler early-stop has no tail to trim (measured; not an
-# option).
+# Circuit sampler portfolio: the bandit picks per instance; the list itself lives in the pipeline.
 from gpap.sampling.pipeline import CIRCUIT_PORTFOLIO  # single source of truth (same list)
 
 
@@ -283,20 +222,14 @@ def run_circuits(device: torch.device, *, cmsgen_bin: str | None, n_time: int, n
                  insts: list[str] | None = None, circuit_dir: str = DEFAULT_CIRCUIT_DIR,
                  max_clauses: int = CIRCUIT_MAX_CLAUSES, configs=CIRCUIT_PORTFOLIO,
                  verbose: bool = True, on_row=None, skip_keys=None) -> list[dict]:
-    """Benchmark GPAP vs CMSGen on the CIRCUIT-SAT sampling families the competitors use:
-      * ISCAS-89 + ITC'99 SEQUENTIAL (s*/b*.bench, has DFFs) — "Recurrent CircuitSAT Sampling"
-        (arXiv 2502.21226): unroll T cycles → Tseitin CNF → pin ALL final-cycle outputs to a simulated
-        target → sample the primary inputs. Swept over `cycles` (GPAP wins big at shallow T, degrades
-        with depth). Any (instance, T) whose CNF exceeds `max_clauses` is SKIPPED (keeps ≤100k clauses).
-      * ISCAS-85 COMBINATIONAL (c*.bench, no DFFs) — DEMOTIC (arXiv 2502.08086): T=1, pin ONE output
-        (pinning all over-constrains to a tiny solution set), sample the primary inputs.
-    Each `.bench` in `circuit_dir` is realised by gpap.circuits.bench; `c ind` = primary inputs.
-    `configs` = the sampler portfolio (default CIRCUIT_PORTFOLIO with soft-lookahead for tight circuits).
+    """Benchmark GPAP vs CMSGen on the CircuitSAT sampling families the competitors use.
 
-    Resumable: `skip_keys` = a set of (inst, T) already done (skipped); `on_row(row)` is called after
-    EACH (inst, T) completes so callers can persist incrementally (the Colab idle-disconnect
-    mitigation — see run_family). A single (inst, T) that raises is recorded as an error row and the
-    sweep continues (one WSL2/CUDA hiccup never loses the rest of the family)."""
+    Sequential (ISCAS-89 s*, ITC'99 b*): unroll T cycles, Tseitin, pin all final-cycle outputs to a
+    simulated target, sample the primary inputs, swept over `cycles`. Combinational (ISCAS-85 c*):
+    T=1, pin one output. A CNF above `max_clauses` is skipped. `c ind` = primary inputs; `configs`
+    is the sampler portfolio. Resumable: `skip_keys` = (inst, T) pairs already done; `on_row(row)`
+    is called after each (inst, T) so callers can persist incrementally. A cell that raises becomes
+    an error row and the sweep continues."""
     from gpap.circuits.bench import parse_bench, build_cnf, write_dimacs
     cycles = cycles or CIRCUIT_CYCLES
     insts = insts or (CIRCUIT_SEQ + CIRCUIT_ITC + CIRCUIT_COMB)
@@ -312,11 +245,11 @@ def run_circuits(device: torch.device, *, cmsgen_bin: str | None, n_time: int, n
         combinational = not circ[2]                    # circ = (inputs, outputs, dffs, gates)
         inst_cycles = [1] if combinational else cycles  # combinational = no unrolling
         for T in inst_cycles:
-            if (inst, T) in skip_keys:                 # already persisted on a prior (interrupted) run
+            if (inst, T) in skip_keys:                 # persisted on a prior run
                 continue
             cnfp = os.path.join(gen_dir, f"{inst}.c{T}.cnf")
             if not os.path.exists(cnfp):
-                # combinational (ISCAS-85): pin ONE output to keep a large samplable solution space
+                # combinational: pin one output to keep a large samplable solution space
                 builder, support, _, _ = build_cnf(circ, T, seed=1,
                                                 pin_outputs=1 if combinational else None)
                 if len(builder.clauses) > max_clauses:  # keep the unrolled CNF within budget
@@ -328,7 +261,7 @@ def run_circuits(device: torch.device, *, cmsgen_bin: str | None, n_time: int, n
             try:
                 r = run_instance(cnfp, device, cmsgen_bin=cmsgen_bin, n_time=n_time, n_cov=n_cov,
                                  b=b, k_cap=k_cap, scratch=scratch, els=els, configs=configs)
-            except Exception as e:  # noqa: BLE001 — keep the family going; record the failure
+            except Exception as e:  # noqa: BLE001
                 r = {"name": f"{inst}.c{T}.cnf", "error": str(e)}
                 if verbose:
                     print(f"   {inst} T={T:>2}: ERROR {e}", flush=True)
@@ -367,21 +300,14 @@ def _print_circuit_matrix(rows: list[dict]) -> None:
         print(f"{inst:<9}" + "".join(cells))
 
 
-# ---------------------------------------------------------------------------
-# Aggregation
-# ---------------------------------------------------------------------------
+# --- Aggregation ---
 
 def _sound_summary(rows: list[dict]) -> str:
-    """One line for the soundness re-check over a set of rows.
-
-    Three outcomes, because the check is OPT-IN: "ok (n/n)" when every row was checked and
-    passed, "UNSOUND" if any failed, and "not run" / a partial count otherwise. A bool would
-    have to call an unchecked sweep either a pass or a failure, and it is neither."""
+    """One line for the opt-in soundness re-check: "ok (n/n)" when every row passed, "UNSOUND" if
+    any failed, "not run" / a partial count otherwise (an unchecked sweep is neither verdict)."""
     if not rows:
         return "no rows"
-    # sound_verdict, not a bare string compare: a resumed campaign mixes rows written before
-    # `sound_check` existed (they carry `gpu_sound`), and reading those as "no verdict" reported
-    # a fully verified sweep as "not run" — and a legacy FAILURE as a non-verdict.
+    # sound_verdict, not a string compare: legacy rows carry `gpu_sound`, and it reads both shapes.
     verdicts = [sound_verdict(r) for r in rows]
     if "UNSOUND" in verdicts:
         return "UNSOUND"
@@ -421,20 +347,18 @@ def aggregate(results: list[dict], ksweeps: list[dict]) -> dict:
         "ratio_max":            round(max(ratios), 2) if ratios else None,
         "twise_delta_mean":     round(float(np.mean(dq)), 2) if dq else None,
         "all_sound_checked":    _sound_summary(results),
-        "kscale_slope_loglog":  slope,          # ~1.0 ⇒ samples/s ∝ K
+        "kscale_slope_loglog":  slope,          # ~1.0 => samples/s proportional to K
         "kscale_peak_sps":      round(peak_k_sps, 1),
         "auto_K":               auto_K,
-        # CDCL-comparable work rates (peak over the niche): branch decisions/s and the unit-prop
-        # implications/s they triggered (CDCL solvers report ≈1e7 props/s single-core).
+        # CDCL-comparable work rates (peak over the niche): decisions/s and implications/s
         "decisions_per_s_peak":     round(max(decs), 1) if decs else 0.0,
         "implications_per_s_peak":  round(max(impl), 1) if impl else 0.0,
     }
 
 
 def aggregate_circuits(circuits: list[dict], ksweeps: list[dict]) -> dict:
-    """Aggregate the circuit rows (over ALL circuits with a CMSGen comparison, not just the niche —
-    the point of the circuit suite is the head-to-head across depths). Includes the UNIQUE-solution
-    readout: mean distinct fraction (distinct/collected) for GPAP vs CMSGen, verifying diversity."""
+    """Aggregate the circuit rows over all circuits (not just the niche), including the mean
+    distinct/collected fraction for GPAP and CMSGen (the diversity readout)."""
     rows = [r for r in circuits if "error" not in r and "gpap_sps" in r]
     sps = [r["gpap_sps"] for r in rows if r.get("gpap_sps")]
     ratios = [r["ratio"] for r in rows if r.get("ratio")]
@@ -474,8 +398,7 @@ def aggregate_circuits(circuits: list[dict], ksweeps: list[dict]) -> dict:
         "kscale_slope_loglog":  slope,
         "kscale_peak_sps":      round(peak_k_sps, 1),
         "auto_K":               auto_K,
-        # CDCL-comparable work rates (peak across the circuit rows): branch decisions/s + the
-        # unit-prop implications/s they triggered (CDCL ≈ 1e7 props/s single-core).
+        # CDCL-comparable work rates (peak across the circuit rows)
         "decisions_per_s_peak":     round(max([r["decisions_per_s"] for r in rows
                                                if r.get("decisions_per_s")], default=0.0), 1),
         "implications_per_s_peak":  round(max([r["implications_per_s"] for r in rows
@@ -483,13 +406,10 @@ def aggregate_circuits(circuits: list[dict], ksweeps: list[dict]) -> dict:
     }
 
 
-# ---------------------------------------------------------------------------
-# Pretty printing
-# ---------------------------------------------------------------------------
+# --- Pretty printing ---
 
 def _print_circuit_table(rows: list[dict], has_cms: bool) -> None:
-    """Per-(circuit, cycle) throughput + UNIQUE-solution counts (distinct support-projections among
-    the collected coverage models — the diversity check, computed off the timing path)."""
+    """Per-(circuit, cycle) throughput + distinct-solution counts among the coverage models."""
     rows = [r for r in rows if "gpap_sps" in r]
     if not rows:
         return
@@ -567,9 +487,7 @@ def _print_headline(payload: dict) -> None:
     print("=" * 74)
 
 
-# ---------------------------------------------------------------------------
-# Top-level orchestration
-# ---------------------------------------------------------------------------
+# --- Top-level orchestration ---
 
 def run_all(quick: bool = False, device=None, sampling_dir: str = DEFAULT_SAMPLING_DIR,
             glob_pat: str | None = None, cmsgen_bin: str | None = "auto", n_time: int | None = None,
@@ -581,18 +499,11 @@ def run_all(quick: bool = False, device=None, sampling_dir: str = DEFAULT_SAMPLI
             circuit_insts: list[str] | None = None) -> dict:
     """Discover sampling CNFs, benchmark GPAP vs CMSGen + a K-scaling sweep, and return a payload.
 
-    quick=True restricts to the validated niche instances, lowers n_time, and sweeps K on one
-    instance (a few minutes). The full run sweeps every *.cnf in `sampling_dir` (the niche boundary
-    shows up as ~0-success rows) and sweeps K on two instances.
-
-    circuits_only=True runs ONLY the CircuitSAT-sampling suite (ISCAS-89 + ITC'99 sequential, swept
-    over unroll depth, + ISCAS-85 combinational on full runs) — the "Recurrent CircuitSAT Sampling"
-    family. It skips the sk_ suite entirely and K-sweeps the best-throughput circuit instead. This is
-    the current focus (the circuit regime is where the adaptive soft-lookahead config earns its keep).
-
-    k_cap=None (default) uses the library's batch cap (default_k_cap), the same on every GPU
-    K than a laptop GPU — the cross-GPU headroom this benchmark exposes.
-    """
+    quick=True restricts to the niche instances, lowers n_time and sweeps K on one instance; the
+    full run sweeps every *.cnf in `sampling_dir` and K on two instances. circuits_only=True runs
+    only the circuit suite (sequential families over unroll depth, + ISCAS-85 on full runs) and
+    K-sweeps its best-throughput circuit. k_cap=None uses the library's batch cap (default_k_cap),
+    the same on every GPU."""
     device = _resolve_device(device)
     if k_cap is None:
         k_cap = default_k_cap(device)
@@ -666,8 +577,7 @@ def run_all(quick: bool = False, device=None, sampling_dir: str = DEFAULT_SAMPLI
             except Exception as e:  # noqa: BLE001
                 print(f"   [K-sweep] {n} ERROR: {e}")
 
-    # Circuit-SAT unrolling suite (ISCAS-89 + ITC'99 sequential, ISCAS-85 combinational), swept over
-    # unroll depth — the CircuitSAT-paper families. Uses CIRCUIT_PORTFOLIO (adds soft-lookahead).
+    # Circuit unrolling suite, swept over depth, under CIRCUIT_PORTFOLIO.
     circuits = []
     if do_circuits:
         if verbose:
@@ -679,7 +589,7 @@ def run_all(quick: bool = False, device=None, sampling_dir: str = DEFAULT_SAMPLI
         except Exception as e:  # noqa: BLE001
             print(f"   [circuits] ERROR: {e}")
 
-    # circuits_only: K-sweep the best-throughput circuit just generated (the A100 headroom story).
+    # circuits_only: K-sweep the best-throughput circuit just generated.
     if circuits_only and circuits:
         best = max((r for r in circuits if r.get("in_niche") and "gpap_sps" in r),
                    key=lambda r: r["gpap_sps"], default=None)
@@ -737,15 +647,10 @@ def run_all(quick: bool = False, device=None, sampling_dir: str = DEFAULT_SAMPLI
     return payload
 
 
-# ---------------------------------------------------------------------------
-# Per-family runner (Colab idle-disconnect mitigation)
-# ---------------------------------------------------------------------------
-# Colab kills a runtime that looks "idle" — a single cell that runs for an hour without the browser
-# tab producing/receiving interaction can be reaped. Splitting the suite into one SHORT cell per
-# benchmark FAMILY (each ~minutes, printing per-instance rows) keeps the session lively AND, because
-# each family persists its rows to a partial file after EVERY instance, an interruption costs at most
-# the in-flight instance — re-running the cell RESUMES (skips already-saved instances). A final
-# `finalize_families()` cell merges the partials into the one <gpu>.json that compare_saved/plots read.
+# --- Per-family runner (Colab idle-disconnect mitigation) ---
+# Colab reaps a runtime that looks idle, so the suite runs as one short cell per family, each
+# persisting its rows to a partial file after every instance; re-running a cell resumes, and
+# `finalize_families()` merges the partials into the one <gpu>.json that compare_saved/plots read.
 FAMILIES = {                                    # family -> (kind, full-run insts, quick-run insts)
     "iscas89": ("circuit", CIRCUIT_SEQ, CIRCUIT_SEQ),          # ISCAS-89 sequential (s*)
     "itc99":   ("circuit", CIRCUIT_ITC, CIRCUIT_ITC_QUICK),    # ITC'99 (b01-b14)
@@ -767,12 +672,10 @@ def run_family(family: str, *, quick: bool = False, device=None, cmsgen_bin: str
                n_cov: int | None = None, b: int = 8, k_cap: int | None = None, els: bool = True,
                resume: bool = True, scratch: str | None = None, limit: int | None = None,
                verbose: bool = True) -> dict:
-    """Benchmark ONE family (see FAMILIES), persisting each instance to a partial file as it finishes.
+    """Benchmark one family (see FAMILIES), persisting each instance to a partial file as it finishes.
 
-    Run one family per notebook cell (the Colab idle-disconnect fix). Resumable: re-running the same
-    cell skips instances already saved in the partial file. Call finalize_families() once all the
-    family cells are done to merge + aggregate + plot + save the combined <gpu>.json.
-    Returns the partial payload {"gpu", "family", "rows", ...}."""
+    Resumable: re-running skips instances already saved. Call finalize_families() once every family
+    cell is done. Returns the partial payload {"gpu", "family", "rows", ...}."""
     if family not in FAMILIES:
         raise ValueError(f"unknown family {family!r}; choose from {list(FAMILIES)}")
     kind, insts_full, insts_quick = FAMILIES[family]
@@ -860,10 +763,9 @@ def run_family(family: str, *, quick: bool = False, device=None, cmsgen_bin: str
 
 def finalize_families(*, device=None, out_dir: str = DEFAULT_OUT_DIR, do_plots: bool = True,
                       verbose: bool = True) -> dict:
-    """Merge all per-family partial files for THIS GPU into the combined <gpu>.json (what
-    compare_saved + the plots read), aggregate, print the headline, and plot. Run once after all the
-    run_family() cells. Circuit families are aggregated as the circuit suite; an sk partial (if any)
-    is stored under `instances`."""
+    """Merge this GPU's per-family partial files into the combined <gpu>.json, aggregate, print the
+    headline and plot. Circuit families aggregate as the circuit suite; an sk partial goes under
+    `instances`."""
     device = _resolve_device(device)
     info = gpu_info(device)
     slug = _slug(info["name"])
@@ -921,11 +823,11 @@ def run_ksweep(payload: dict | None = None, *, device=None, out_dir: str = DEFAU
                scratch: str | None = None, b: int = 8, chunks: int | None = None,
                k_cap: int | None = None, els: bool = True, circuit: str | None = None,
                cycles: int | None = None, do_plots: bool = True, verbose: bool = True) -> dict:
-    """K-scaling sweep on ONE circuit — the A100 headroom story (throughput ∝ K up the VRAM curve).
+    """K-scaling sweep on one circuit, run after finalize_families().
 
-    Run after finalize_families(). With no `circuit` it sweeps the highest-throughput circuit in the
-    finalized `<gpu>.json` (or the passed `payload`); the CNF must still be in `scratch/circuits/`
-    (it is, right after the family runs). Merges the sweep into the saved payload and re-plots."""
+    With no `circuit` it sweeps the highest-throughput circuit in the finalized `<gpu>.json` (or
+    `payload`); the CNF must still be in `scratch/circuits/`. Merges the sweep into the saved
+    payload and re-plots."""
     device = _resolve_device(device)
     if k_cap is None:
         k_cap = default_k_cap(device)

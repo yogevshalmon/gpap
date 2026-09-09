@@ -5,9 +5,9 @@
 # family list and ENCODERS. Resumable under eval/colab/colab_supervisor.py exactly like the
 # full driver: every stage JSON is written after each row and --resume skips finished cells.
 #
-# The CMSGen preflight is a HARD fail on purpose (review of 2026-09-02): a stage resumed
-# without the binary would append armless rows to an armed file — `gpap bench --resume` now
-# refuses that mix, so a soft warn here would burn a VM producing nothing.
+# The CMSGen preflight is a hard fail on purpose: a stage resumed without the binary would
+# append armless rows to an armed file, which `gpap bench --resume` refuses, so a soft warning
+# here would burn a VM producing nothing.
 #
 #   bash eval/colab/colab_cmsgen_circuits_abc_l4.sh
 #   TARGETS=rare CYCLES=25 bash eval/colab/colab_cmsgen_circuits_abc_l4.sh   # headline slice
@@ -43,13 +43,11 @@ if ! "$CMSGEN" --help 2>&1 | grep -q -- --maxtime; then
     exit 1
 fi
 
-# seq first: the flagship family, and the run may be cut short (rare targets already lead
-# inside each stage because TARGETS lists them first).
-# STAGES narrows the sweep for an INCREMENTAL run: seeded with a previous campaign's JSONs,
-# `gpap bench --resume` skips every finished cell, so re-running only the families that gained
-# instances costs just the new cells (2026-09-02: seq +4, comb +1 -> 18 cells, not 164).
-# The seq stage globs benchmarks/circuits/bench/seq/*.bench, and b17-b22 are fetched rather than
-# committed — pull them first so a fresh VM sweeps the same 29 circuits as every other one.
+# seq first: the flagship family, and the run may be cut short. STAGES narrows the sweep for an
+# incremental run — seeded with a previous campaign's JSONs, `--resume` skips finished cells, so
+# re-running only the families that gained instances costs just the new cells. The seq stage
+# globs benchmarks/circuits/bench/seq/*.bench and b17-b22 are fetched rather than committed, so
+# pull them first or a fresh VM sweeps a smaller set.
 bash "$REPO_ROOT/scripts/fetch_benchmarks.sh" itc99 2>&1 | sed 's/^/[bench] /' || \
     echo "[warn] could not fetch ITC'99 b17-b22 — the seq stage will run without them"
 echo "[bench] sequential family: $(ls "$REPO_ROOT"/benchmarks/circuits/bench/seq/*.bench 2>/dev/null | wc -l) circuits"

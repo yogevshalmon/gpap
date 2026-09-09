@@ -14,8 +14,7 @@
 # The three rivals are PyTorch programs run as subprocesses on the same GPU; nothing is vendored.
 set -uo pipefail
 
-# This file lives in eval/rivals/, so the repo root is TWO levels up ("..", from before the
-# eval/ reorganization, silently pointed GPAP_HOME at eval/.gpap — every tool read MISSING).
+# This file lives in eval/rivals/, so the repo root is two levels up.
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 GPAP_HOME="${GPAP_HOME:-$REPO_ROOT/.gpap}"
 SRC="$GPAP_HOME/src"
@@ -28,10 +27,10 @@ declare -A RIVALS=(
   [Recurrent-CircuitSAT-Sampler]="https://github.com/arashardakani/Recurrent-CircuitSAT-Sampler"
   [High-Throughput-SAT-Sampler]="https://github.com/arashardakani/High-Throughput-SAT-Sampler"
 )
-# PINNED at the commits the recorded head-to-heads were measured with, like abc and cmsgen —
-# an unpinned rival can move (or rewrite) HEAD and silently change the comparison. Every
-# harness also records the checkout's actual HEAD into its results JSON (rival_common.py).
-# Override (empty = branch tip): GPAP_DEMOTIC_COMMIT / GPAP_RECURRENT_COMMIT / GPAP_HTS_COMMIT.
+# Pinned at the commits the recorded head-to-heads were measured with, like abc and cmsgen: an
+# unpinned rival can move HEAD and silently change the comparison. Every harness also records the
+# checkout's actual HEAD into its results JSON. Override with GPAP_DEMOTIC_COMMIT /
+# GPAP_RECURRENT_COMMIT / GPAP_HTS_COMMIT (empty = branch tip).
 declare -A PINS=(
   [Demotic]="${GPAP_DEMOTIC_COMMIT-f4e8ede73cb1b68d4806c96fb384ddddf53c2b2b}"
   [Recurrent-CircuitSAT-Sampler]="${GPAP_RECURRENT_COMMIT-b9b048aecb5954fb66333821dc6c1adf94d3432f}"
@@ -65,13 +64,10 @@ if [ "$MODE" != "check" ]; then
     done
 
     # --- Python >= 3.13 compatibility shim, function-preserving --------------------------------
-    # All three rivals load their GENERATED circuit model with `exec(src)` followed by
-    # `locals()[name]`. PEP 667 (Python 3.13) makes exec unable to fill a function's locals(),
-    # so on a 3.13 runtime EVERY run of every rival dies with `KeyError: '<module>'` (observed
-    # on a fresh Colab L4, 2026-08-22, python 3.13.15 — the same checkouts run fine on 3.12).
-    # Exec-ing into an explicit namespace (module globals still visible) is bit-identical
-    # semantics on <= 3.12 and works on 3.13. Idempotent: touches only files still carrying
-    # the old pattern; like scripts/cmsgen_gpap_eval.patch, it changes no rival behaviour.
+    # All three rivals load their generated circuit model with `exec(src)` then `locals()[name]`,
+    # and PEP 667 makes exec unable to fill a function's locals(), so on 3.13 every rival run
+    # dies with a KeyError. Exec-ing into an explicit namespace is identical semantics on 3.12
+    # and works on 3.13. Idempotent, and it changes no rival behaviour.
     SRC_DIR="$SRC" "$PY_BIN" - <<'PYFIX'
 import os, re
 files = [os.path.join(os.environ["SRC_DIR"], p) for p in (
@@ -94,22 +90,16 @@ for p in files:
     print(f"[fix]  py3.13 exec-namespace shim: {p}")
 PYFIX
 
-    # Rival python deps: none of the three ships a requirements file, and HTS's baseline_sat
-    # imports pycryptosat UNCONDITIONALLY — on a fresh box every HTS run dies on the import.
-    # python-sat (imported as `pysat`) is in all three rivals' import chains: without it EVERY
-    # rival run of EVERY stage dies at import and a whole campaign is error rows — the status
-    # table below always PROBED pysat but this line never installed it (caught live on the
-    # 2026-09-02 L4 rivals sweep: 40/40 rows errored before anything was measured).
-    # pandas/tqdm usually come with the Colab image; install whatever is missing.
-    # python-sat is BOUNDED: it adjudicates the proved-UNSAT screen (rival_common.unsat_at_depth),
-    # so which version — and which solver classes it ships — can move a cell between the `unsat`
-    # bucket and `both0`. Keep in step with pyproject.toml's extras.
+    # Rival python deps: none of the three ships a requirements file. python-sat (imported as
+    # `pysat`) is in all three import chains, so without it every rival run of every stage dies
+    # at import and a whole campaign is error rows. Its version is BOUNDED, because it
+    # adjudicates the proved-UNSAT screen (rival_common.unsat_at_depth) and the solver classes it
+    # ships can move a cell between buckets; keep in step with pyproject.toml's extras.
     "$PY_BIN" -m pip install -q pycryptosat "python-sat>=0.1.8.dev0,<1.10" pandas tqdm \
         || echo "[warn] rival python deps (pycryptosat/python-sat/pandas/tqdm) failed to install"
 
-    # THE ENGINE. Since the engine became a C++ library there is no Python fallback: without
-    # libgpap every GPAP row of every stage errors out. Build it FIRST and fail loudly, because
-    # a missing core turns a multi-hour sweep into a few hundred error rows.
+    # The engine. There is no Python fallback, so without libgpap every GPAP row of every stage
+    # errors out: build it first and fail loudly.
     if ! bash "$REPO_ROOT/scripts/build_core.sh"; then
         echo "[FATAL] libgpap did not build — the sweep would produce nothing but error rows." >&2
         echo "        Needs cmake + a C++17 compiler + the NVIDIA driver + python/triton." >&2
@@ -132,8 +122,8 @@ import importlib, shutil, torch
 ok = torch.cuda.is_available()
 name = torch.cuda.get_device_properties(0).name if ok else "-"
 print(f'{"torch / CUDA":<34} {torch.__version__} cuda={torch.version.cuda} avail={ok} {name}')
-# THE engine is libgpap now, not the triton JIT — probe the library, or a green table would
-# promise a run that cannot happen (kernel_available() stays True with no core built).
+# Probe the library, not the triton JIT: `kernel_available()` stays True with no core built, so
+# a green table would promise a run that cannot happen.
 try:
     from gpap.engine import core_available
     from gpap.engine import _core

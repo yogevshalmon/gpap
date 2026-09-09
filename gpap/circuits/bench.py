@@ -1,26 +1,17 @@
 #!/usr/bin/env python3
 """Unroll a sequential ISCAS-89 `.bench` circuit over T clock cycles and emit a projected-sampling
-DIMACS CNF — reproducing the CircuitSAT-sampling setup of Ardakani et al., "Recurrent CircuitSAT
-Sampling for Sequential Circuits" (arXiv:2502.21226), so GPAP can be compared vs CMSGen on the same
-instances.
+DIMACS CNF, reproducing the CircuitSAT-sampling setup of Ardakani et al., "Recurrent CircuitSAT
+Sampling for Sequential Circuits" (arXiv:2502.21226).
 
-Pipeline:
-  parse  : INPUT()/OUTPUT()/`g = DFF(d)`/`g = AND|OR|NAND|NOR|NOT|BUFF(...)` (sequential .bench).
-  unroll : T copies of the combinational logic; a flip-flop's output at cycle t is its D-input's
-           value at cycle t-1 (variable SHARING, no clause); at t=0 the state is the reset value 0.
-           Primary inputs get a FRESH variable per cycle — these are the sampling support.
-  Tseitin: each gate instance -> a fresh CNF var + the standard gate clauses.
-  constrain: simulate one random input sequence (reset state 0) and pin the primary OUTPUTS at the
-           last cycle to the simulated (hence reachable -> SAT) values. This is the CRV setup: sample
-           input stimuli consistent with an output constraint.
-  emit   : DIMACS with a `c ind` header listing the primary-input variables across all cycles
-           (the independent support GPAP/CMSGen sample over).
+  unroll   : T copies of the combinational logic; a flip-flop's output at cycle t is its D-input's
+             value at t-1 (variable SHARING, no clause), at t=0 the reset value 0. Primary inputs
+             get a FRESH variable per cycle — these are the sampling support.
+  Tseitin  : each gate instance -> a fresh CNF var + the standard gate clauses.
+  constrain: simulate one random input sequence and pin the last-cycle primary OUTPUTS to the
+             simulated (hence reachable, hence SAT) values — the CRV setup.
+  emit     : DIMACS with a `c ind` header listing the primary-input variables across all cycles.
 
-Usage (the CLI drives this module; it also handles AIGER and the ABC encoder):
-  # single instance
-  gpap circuit2cnf s386.bench s386-c25.cnf --cycles 25 --seed 1
-  # whole folder of circuits -> folder of .cnf files (named <stem>-c<cycles>.cnf)
-  gpap circuit2cnf benches/ cnf_out/ --cycles 25 --seed 1
+The CLI drives this module (`gpap circuit2cnf`), and also handles AIGER and the ABC encoder.
 """
 import random
 import re
@@ -65,7 +56,7 @@ def _eval_gate(op, vals):
         return not vals[0]
     if op in ("BUFF", "BUF"):
         return vals[0]
-    if op in ("XOR", "XNOR"):                 # ISCAS-85 uses XOR/XNOR
+    if op in ("XOR", "XNOR"):
         r = False
         for v in vals:
             r ^= bool(v)
@@ -76,7 +67,7 @@ def _eval_gate(op, vals):
 def simulate(circ, in_seq, T):
     """Forward-simulate (reset state 0). in_seq[t][input]=bool. Returns outputs at the LAST cycle."""
     inputs, outputs, dffs, gates = circ
-    state = {d: False for d in dffs}                      # t=0 reset state
+    state = {d: False for d in dffs}
     last_out = {}
     for t in range(T):
         vals = dict(state)
@@ -96,7 +87,7 @@ def simulate(circ, in_seq, T):
             return r
 
         last_out = {o: ev(o) for o in outputs}
-        state = {d: ev(din) for d, din in dffs.items()}   # next-state = D-input now
+        state = {d: ev(din) for d, din in dffs.items()}
     return last_out
 
 
@@ -113,7 +104,6 @@ class CnfBuilder:
         self.clauses.append(list(lits))
 
     def _xor2(self, y, a, b):
-        """y <-> a ⊕ b (4 clauses)."""
         self.add(-y, -a, -b); self.add(-y, a, b); self.add(y, -a, b); self.add(y, a, -b)
 
     def tseitin(self, op, o, ins):
@@ -137,28 +127,27 @@ class CnfBuilder:
             else:
                 self.add(-o, -acc); self.add(o, acc)
             return
-        pos = op in ("AND", "NAND")          # AND-like (conjunction) vs OR-like
-        neg_out = op in ("NAND", "NOR")      # output inverted
-        # y <-> AND(ins) for AND/NAND (y is the conjunction); for OR/NOR use De Morgan via y<->OR
-        if pos:                               # y = AND(ins); o = y (AND) or ¬y (NAND)
+        pos = op in ("AND", "NAND")
+        neg_out = op in ("NAND", "NOR")
+        # y <-> AND(ins) for AND/NAND; for OR/NOR use De Morgan via y <-> OR
+        if pos:
             y = o if not neg_out else self.newvar()
             for a in ins:
-                self.add(-y, a)               # y -> a
-            self.add(y, *[-a for a in ins])   # (a∧b∧..) -> y
-        else:                                 # y = OR(ins); o = y (OR) or ¬y (NOR)
+                self.add(-y, a)
+            self.add(y, *[-a for a in ins])
+        else:
             y = o if not neg_out else self.newvar()
             for a in ins:
-                self.add(y, -a)               # a -> y
-            self.add(-y, *ins)                # y -> (a∨b∨..)
+                self.add(y, -a)
+            self.add(-y, *ins)
         if neg_out:
-            self.add(-o, -y); self.add(o, y)  # o <-> ¬y
+            self.add(-o, -y); self.add(o, y)
 
 
 def random_target(circ, T, seed):
     """The default pinned target: simulate ONE random input sequence (reset state 0) and take the
-    last-cycle outputs. NOTE this draws the target from the circuit's own output DISTRIBUTION, so
-    it is size-biased toward high-probability (rejection-easy) patterns — see
-    gpap/circuits/simulate.py's rare_target for the adversarial alternative."""
+    last-cycle outputs. It draws from the circuit's own output DISTRIBUTION, so it is size-biased
+    toward rejection-easy patterns; `simulate.rare_target` is the adversarial alternative."""
     inputs = circ[0]
     rng = random.Random(seed)
     in_seq = [{inp: (rng.random() < 0.5) for inp in inputs} for _ in range(T)]
@@ -166,13 +155,11 @@ def random_target(circ, T, seed):
 
 
 def build_cnf(circ, T, seed, pin_outputs=None, target=None):
-    """Unroll T cycles → Tseitin CNF; sample the primary inputs (support). `pin_outputs` = how many
-    final-cycle primary outputs to constrain to the simulated target: None = all (sequential circuits,
-    where the whole output pattern is the spec). For COMBINATIONAL circuits (ISCAS-85, many outputs vs
-    inputs) pinning all outputs over-constrains to a tiny solution set — pass a small count (e.g. 1) so
-    the CircuitSAT problem keeps a large, samplable solution space (the DEMOTIC-style single-output
-    setup). `target` overrides the pinned pattern ({output: bool}, e.g. simulate.rare_target);
-    it MUST be a simulation-reachable pattern or the CNF is UNSAT — default = random_target(seed)."""
+    """Unroll T cycles -> Tseitin CNF, sampling the primary inputs (the support). `pin_outputs` is
+    how many final-cycle outputs to constrain to the simulated target: None = all, right for a
+    sequential circuit; for a COMBINATIONAL one that over-constrains to a tiny solution set, so
+    pass a small count. `target` overrides the pinned pattern ({output: bool}) and MUST be
+    simulation-reachable or the CNF is UNSAT (default: random_target(seed))."""
     if T < 1:
         raise ValueError(f"cycles must be >= 1, got {T}")
     inputs, outputs, dffs, gates = circ
@@ -181,60 +168,54 @@ def build_cnf(circ, T, seed, pin_outputs=None, target=None):
 
     b = CnfBuilder()
     false_var = b.newvar()
-    b.add(-false_var)                                     # a constant-0 literal for t=0 DFF state
-    input_vars = {}                                       # (input, t) -> var  (the support)
+    b.add(-false_var)
+    input_vars = {}
     for inp in inputs:
         for t in range(T):
             input_vars[(inp, t)] = b.newvar()
-    gate_memo = {}                                        # (sig, t) -> var  (memoized Tseitin)
+    gate_memo = {}
 
     def var_of(sig, t):
-        if (sig, t) in input_vars:                        # primary input (the support)
+        if (sig, t) in input_vars:
             return input_vars[(sig, t)]
         if (sig, t) in gate_memo:
             return gate_memo[(sig, t)]
-        if sig in dffs:                                   # flip-flop output
-            v = false_var if t == 0 else var_of(dffs[sig], t - 1)   # share with D-input at t-1
+        if sig in dffs:
+            v = false_var if t == 0 else var_of(dffs[sig], t - 1)
             gate_memo[(sig, t)] = v
             return v
-        op, ins = gates[sig]                              # combinational gate -> Tseitin
+        op, ins = gates[sig]
         o = b.newvar()
         gate_memo[(sig, t)] = o
         b.tseitin(op, o, [var_of(i, t) for i in ins])
         return o
 
-    # Realise the FULL unrolled circuit (every gate at every cycle) so the CNF matches the paper's
-    # Tseitin-of-the-whole-unrolling, not just the final-output cone.
+    # Realise the FULL unrolled circuit (every gate at every cycle), matching the paper's
+    # Tseitin-of-the-whole-unrolling rather than just the final-output cone.
     for t in range(T):
         for g in gates:
             var_of(g, t)
-    # Pin the primary OUTPUTS at the last cycle to the simulated (reachable => SAT) target.
     pin = outputs if pin_outputs is None else outputs[:pin_outputs]
     for o in pin:
         v = var_of(o, T - 1)
         b.add(v if target[o] else -v)
 
     support = [input_vars[(inp, t)] for inp in inputs for t in range(T)]
-    # A human label per support variable: the primary-input wire and the cycle it belongs to.
     support_labels = [f"{inp}@{t}" for inp in inputs for t in range(T)]
     return b, support, target, support_labels
 
 
 def write_dimacs(path, builder, support, support_labels=None, encoder=None):
-    """Write the projected-sampling CNF. The `c ind` header lists the support variables; when
-    `support_labels` is given (from a .bench conversion) a `c wire <var> <input@cycle>` map is
-    embedded too, so sample output can be reported in circuit-wire terms and the map travels WITH
-    the CNF (readable back via parse_support_labels). `encoder` records provenance as a
-    `c encoder <name>` line — the sampling pipeline reads it to skip work the encoder already did
-    (ABC's dc2/fraig removes the backbone the entailed-clause miner would otherwise re-probe)."""
+    """Write the projected-sampling CNF. The `c ind` header lists the support variables; with
+    `support_labels` a `c wire <var> <input@cycle>` map is embedded too, so sample output can be
+    named in circuit-wire terms. `encoder` records provenance as `c encoder <name>`."""
     with open(path, "w") as f:
         f.write("c unrolled CircuitSAT sampling instance (support = primary inputs x cycles)\n")
         if encoder:
             f.write(f"c encoder {encoder}\n")
-        # `c ind ... 0` lines (UniGen/QuickSampler convention), chunked
         for i in range(0, len(support), 10):
             f.write("c ind " + " ".join(map(str, support[i:i + 10])) + " 0\n")
-        if support_labels:                                 # wire map: var -> input@cycle
+        if support_labels:
             for v, lbl in zip(support, support_labels):
                 f.write(f"c wire {v} {lbl}\n")
         f.write(f"p cnf {builder.nv} {len(builder.clauses)}\n")
@@ -243,8 +224,7 @@ def write_dimacs(path, builder, support, support_labels=None, encoder=None):
 
 
 def parse_support_labels(path):
-    """Read the `c wire <var> <label>` map embedded by write_dimacs. Returns {var(int): label} or
-    an empty dict for a CNF without a wire map (e.g. a non-circuit instance)."""
+    """Read the `c wire <var> <label>` map write_dimacs embeds: {var: label}, or empty."""
     out = {}
     with open(path) as f:
         for line in f:
@@ -253,28 +233,26 @@ def parse_support_labels(path):
                 if len(parts) >= 4:
                     out[int(parts[2])] = parts[3]
             elif line and line[0] not in "c":
-                break                                      # past the header
+                break
     return out
 
 
 def parse_encoder_comment(path):
-    """Read the `c encoder <name>` provenance line embedded by write_dimacs (None if absent)."""
     with open(path) as f:
         for line in f:
             if line.startswith("c encoder "):
                 return line.split()[2]
             if line and line[0] not in "c":
-                break                                      # past the header
+                break
     return None
 
 
 def convert_common(kind, circ, cycles, seed, pin_outputs, encoder, abc_path, target_mode,
                    out_path, native_build, abc_build):
-    """THE conversion driver both circuit formats share (`convert_one` for .bench,
-    `aig2cnf.convert_aig_one` for AIGER): resolve the target mode, resolve the encoder, build,
-    write — so the target/encoder dispatch rule has one home rather than a twin per format.
-    `native_build(target)` / `abc_build(target)` return (builder, support, target, labels).
-    Returns (builder, support, rare_est, resolved_encoder)."""
+    """THE conversion driver both circuit formats share (`convert_one`, `aig2cnf.convert_aig_one`):
+    resolve the target mode and the encoder, build, write, so that dispatch has one home.
+    `native_build(target)` / `abc_build(target)` return (builder, support, target, labels); this
+    returns (builder, support, rare_est, resolved_encoder)."""
     target = rare_est = None
     if target_mode == "rare":
         from gpap.circuits.simulate import rare_target
@@ -296,23 +274,17 @@ def convert_common(kind, circ, cycles, seed, pin_outputs, encoder, abc_path, tar
 
 def convert_one(bench_path, out_path, cycles, seed, pin_outputs=None, encoder="tseitin",
                 abc_path=None, quiet=False, abc_opt="auto", target_mode="random"):
-    """Convert a single .bench file to a DIMACS CNF at out_path. Returns the CnfBuilder.
+    """Convert a single .bench file to a DIMACS CNF at out_path; returns the CnfBuilder.
 
-    `encoder`:
-      "tseitin" (default) — the native gate-by-gate Tseitin of the unrolled circuit.
-      "abc"               — unroll + logic-optimize with berkeley-abc, then Tseitin its AIG
-                            (2-8x fewer clauses; see gpap/circuits/abc_backend.py). Raises if no
-                            `abc` binary is found. `abc_opt` picks the optimization preset
-                            (full | fast | auto — see abc_backend.ABC_OPT_PRESETS).
-      "auto"              — "abc" when a binary is available, else "tseitin".
-    The two encoders describe the SAME projected solution space over the primary inputs (same seed
-    => same simulated output target); only the internal gate variables differ. The default stays
-    "tseitin" so results never depend silently on whether abc happens to be installed.
+    `encoder` is "tseitin" (default, the native gate-by-gate Tseitin), "abc" (unroll +
+    logic-optimize with berkeley-abc, then Tseitin its AIG — abc_backend.py; raises without an
+    `abc` binary, `abc_opt` picks the preset), or "auto". Both encoders describe the SAME projected
+    solution space over the primary inputs at one seed; only internal gate variables differ, and
+    the default stays "tseitin" so results never depend on whether abc is installed.
 
-    `target_mode`: "random" (default — pin the outputs of one seed-random simulated sequence;
-    size-biased toward high-probability patterns) | "rare" (pin the RAREST pattern observed in a
-    large bit-parallel simulation batch — still reachable => SAT, but adversarial for rejection
-    sampling; see gpap/circuits/simulate.py)."""
+    `target_mode` is "random" (default: pin the outputs of one seed-random simulated sequence) or
+    "rare" (the RAREST pattern in a large simulation batch — still reachable, but adversarial for
+    rejection sampling)."""
     circ = parse_bench(bench_path)
     inputs, outputs, dffs, gates = circ
 

@@ -1,34 +1,16 @@
-/* Solution sampling: THE chunk loop and the adaptive config bandit behind both sampler faces.
+/* Solution sampling: the chunk loop and the adaptive config bandit behind both sampler faces,
+ * so a rule callers can observe has one home. Entry point 2 is reset(K) + trajectory — one
+ * launch, K randomized decide-and-propagate trajectories; this is the packaging around it
+ * (chunks until a target or a valve, a portfolio of configs raced by measured throughput,
+ * completion counted on device, kept rows gathered per config, delivery and self-test wall
+ * billed OUTSIDE the sampling clock), built from the public ABI and borrowing its engine.
  *
- * Entry point 2 is reset(K) + trajectory — one launch, K randomized decide-and-propagate
- * trajectories. What every caller then wants is the same packaging: chunks until a target or a
- * valve, a portfolio of decision configs raced by measured throughput, completion counted on
- * device, kept rows gathered per config, and delivery/self-test wall billed OUTSIDE the
- * sampling clock. That loop used to be written twice, once per face (gpap::Sampler in the
- * header and Python's GPUSampler.sample), and the two had drifted much further than the
- * checking loop ever did — the C++ face had no structured order and no portfolio (instances
- * the Python face sampled fine returned NOTHING), charged delivery and verification to the
- * sampling clock, and defaulted into the non-uniform soft retry. Same lesson as check.cpp and
- * probe.cpp: a rule callers can observe must have one home.
- *
- * Everything here goes through the public ABI calls the faces themselves used (reset /
- * trajectory / select_complete / var_bits / check_sound / counters), so this file adds
- * packaging, not a second engine path. The sampler BORROWS its engine, exactly as
- * gpap_check_sets does.
- *
- * DETERMINISM IS PART OF THE CONTRACT: the RNG is the library's own (splitmix64-seeded
- * xoshiro256**), the shuffle is an in-house Fisher-Yates, and uniform draws use masked
- * rejection — never std::mt19937 / std::shuffle / uniform_int_distribution, whose outputs are
- * implementation-defined and would make "same seed, same solutions" true on one stdlib and
- * false on another. A single-config run at a FIXED BATCH is a pure function of (formula,
- * options, seed). TWO things sit outside that, both on purpose: a PORTFOLIO run is not
- * cross-machine reproducible (the bandit selects on measured wall-clock throughput), and K
- * itself is the analytic bound over LIVE free VRAM unless pinned, so the same seed on a busier
- * card runs fewer trajectories and reports fewer models (the rows agree as far as they go —
- * a trajectory is a function of the seed and its row index). Two streams, as the Python face had: `rng` drives sampling (the
- * per-chunk shuffle and trajectory seed), `bandit_rng` drives the epsilon-greedy draws — so
- * WHICH config the bandit explores cannot shift the sampling stream.
- */
+ * Determinism is part of the contract: the RNG is the library's own (splitmix64-seeded
+ * xoshiro256**), the shuffle an in-house Fisher-Yates and uniform draws masked rejection —
+ * never std::mt19937 / std::shuffle / uniform_int_distribution, whose outputs are
+ * implementation-defined. A single-config run at a FIXED BATCH is a pure function of (formula,
+ * options, seed); a portfolio run is not, and unpinned K follows live free VRAM. `rng` drives
+ * sampling and `bandit_rng` the bandit draws, so exploration cannot shift the sample stream. */
 #include "gpap_internal.hpp"
 
 #include <algorithm>
@@ -40,8 +22,6 @@
 using gpap::set_error;
 
 namespace {
-
-/* ------------------------------------------------------------------ RNG (deterministic) */
 
 uint64_t splitmix64(uint64_t &x) {
     x += 0x9E3779B97F4A7C15ull;
@@ -84,13 +64,11 @@ struct Rng {                                   /* xoshiro256** (public domain re
     }
 };
 
-/* The two seeds one options.seed expands into. The bandit stream is offset so the two cannot
- * collide at small seeds (the Python face kept the same split for the same reason). */
+/* The two seeds one options.seed expands into; offset so they cannot collide at small seeds. */
 constexpr uint64_t kBanditSeedXor = 0xB0BA5EED0117ull;
 
-/* Portfolio ceiling. ONE constant, because two numbers have to agree: the argument check in
- * gpap_sampler_run and the exploration candidate buffer in its loop. Spelling 4096 twice meant
- * raising the ceiling would silently smash that stack buffer. */
+/* Portfolio ceiling: one constant, because the run's argument check and its exploration
+ * candidate buffer have to agree. */
 constexpr int32_t kMaxConfigs = 4096;
 
 double seconds_between(std::chrono::steady_clock::time_point a,
@@ -103,32 +81,28 @@ double seconds_between(std::chrono::steady_clock::time_point a,
 /* One sampler: borrowed engine + decision phases + per-config buckets. Opaque to callers. */
 struct gpap_sampler {
     gpap_engine *e = nullptr;
-    gpap_sampler_options opt{};          /* the CURRENT run's knobs (set per gpap_sampler_run) */
+    gpap_sampler_options opt{};          /* the current run's knobs */
     int32_t k_cap = 0;
 
-    int32_t K_auto = 0;                  /* calibrated at create */
-    int32_t K = 0;                       /* effective (set_k overrides) */
+    int32_t K_auto = 0;                  /* calibrated at create; K is effective (set_k wins) */
+    int32_t K = 0;
     int we_pinned_mode = 0;              /* WE resolved the engine's AUTO, not the caller */
-    gpap_mode pinned_mode = GPAP_MODE_AUTO;  /* ...and WHICH kernel we left there, so a pin the
-                                              * caller makes AFTERWARDS is distinguishable.
-                                              * Read only by pin_mode, under a live caller —
-                                              * gpap_sampler_free touches no engine state. */
+    gpap_mode pinned_mode = GPAP_MODE_AUTO;  /* ...and WHICH kernel, so a later caller pin shows */
 
     Rng rng, bandit_rng;
 
-    /* Decision phases, 0-based, ascending (the STRUCTURED order); a chunk copies and, for a
-     * random-order config, shuffles each phase in place. */
-    std::vector<int32_t> head0, tail0, order;
-    int32_t n_support = 0;               /* head0.size(); == num_vars when no support is set */
+    std::vector<int32_t> head0, tail0, order;   /* the structured order; a random-order chunk
+                                                 * shuffles its own copy of each phase */
+    int32_t n_support = 0;               /* head0.size(); num_vars when no support is set */
     int has_support = 0;
 
-    int32_t mask_all = -1;               /* completion over every variable */
-    int32_t mask_sup = -1;               /* completion over phase 1 (== mask_all, no support) */
+    int32_t mask_all = -1;               /* completion over every variable, and over phase 1 */
+    int32_t mask_sup = -1;
 
     std::vector<int32_t> cols;           /* kept-row columns; empty = every variable */
 
-    /* Last run. `run_cols_n` snapshots the column width the buckets were gathered with, so a
-     * set_columns between run and bits cannot misshape the readout. */
+    /* Last run; `run_cols_n` snapshots the gathered column width, so a set_columns cannot
+     * misshape the readout. */
     std::vector<gpap_config_stats> cstats;
     std::vector<std::vector<uint8_t>> buckets;
     std::vector<gpap_sample_config> run_cfgs;
@@ -147,17 +121,12 @@ int32_t auto_k(gpap_engine *e, int32_t k_cap) {
 }
 
 /* Pin the propagate kernel to the batch the chunks will run, so a short reset elsewhere cannot
- * switch kernels mid-measurement — the same rule the Python face applied. Only when the choice
- * is ours to make: an explicit pin ($GPAP_KERNEL, gpap_engine_set_mode) is never overridden,
- * which is what gpap_engine_auto reports. Once WE pinned, engine_auto goes 0, so re-pins after
- * set_k key off we_pinned_mode instead. */
+ * switch kernels mid-measurement — but only when the choice is ours: an explicit pin is never
+ * overridden, and once WE pinned, engine_auto goes 0 so re-pins key off we_pinned_mode. */
 gpap_status pin_mode(gpap_sampler *s) {
     if (!gpap_engine_auto(s->e)) {
-        /* Someone else owns the choice. Either they pinned BEFORE we existed (we never did), or
-         * they pinned AFTER we did -- which we can see, because e->mode is no longer the kernel
-         * we left there. Checking we_pinned_mode alone was a latch: once set it never cleared,
-         * so every later set_k re-dispatched OVER a caller's pin, silently switching the kernel
-         * under a forced-kernel A/B. */
+        /* Someone else owns the choice (e->mode is no longer what we left); we_pinned_mode
+         * alone is a latch that never clears. */
         if (!s->we_pinned_mode) return GPAP_OK;
         if (s->e->mode != s->pinned_mode) { s->we_pinned_mode = 0; return GPAP_OK; }
     }
@@ -172,8 +141,7 @@ void rebuild_phases(gpap_sampler *s) {
     s->head0.clear();
     s->tail0.clear();
     if (!s->has_support) {
-        /* No support: ONE phase over every variable (phase 2 empty), completion == support
-         * completion by definition. */
+        /* No support: one phase over every variable, so the two completion tests coincide. */
         s->head0.resize((size_t)N);
         for (int32_t v = 0; v < N; ++v) s->head0[(size_t)v] = v;
     }
@@ -197,10 +165,7 @@ int32_t best_by_rate(const std::vector<gpap_config_stats> &cs) {
 extern "C" gpap_status gpap_sampler_create(gpap_engine *e, int64_t seed, int32_t k_cap,
                                            gpap_sampler **out) {
     if (!e || !out) {
-        /* Every guard here NAMES ITSELF. gpap_last_error() is a thread-local that nothing
-         * clears, so a bare `return GPAP_ERR_ARG` leaves the previous call's message standing
-         * and the faces append it verbatim -- a caller who passed a null handle was told, with
-         * confidence, about an out-of-range variable in a formula it had never seen. */
+        /* Every guard names itself: gpap_last_error() is a thread-local nothing clears. */
         set_error("gpap_sampler_create: %s must not be NULL", !e ? "engine" : "out");
         return GPAP_ERR_ARG;
     }
@@ -216,7 +181,7 @@ extern "C" gpap_status gpap_sampler_create(gpap_engine *e, int64_t seed, int32_t
         rebuild_phases(s);
         gpap_status st = gpap_pair_mask_create(e, nullptr, 0, &s->mask_all);
         if (st == GPAP_OK) {
-            s->mask_sup = s->mask_all;              /* no support yet: the two tests coincide */
+            s->mask_sup = s->mask_all;
             st = pin_mode(s);
         }
         if (st != GPAP_OK) {
@@ -230,18 +195,9 @@ extern "C" gpap_status gpap_sampler_create(gpap_engine *e, int64_t seed, int32_t
 
 extern "C" void gpap_sampler_free(gpap_sampler *s) {
     if (!s) return;
-    /* TOUCHES NOTHING BUT THE SAMPLER — above all not s->e, which is BORROWED and may already
-     * be gone. This used to hand the kernel choice back (set_mode(AUTO)) when the sampler had
-     * resolved it, which meant READING s->e->mode from a destructor. "The engine outlives the
-     * sampler" is the documented precondition, and a C++ caller keeps it by construction — but
-     * a garbage-collected face cannot promise destruction ORDER. Python's binding holds a
-     * reference to the engine for exactly this reason, and that is enough under refcounting and
-     * NOT enough under the cycle collector or at interpreter shutdown, which finalize in
-     * arbitrary order: a traceback holding a sampler frame is a cycle, and freeing it ran this
-     * line on a freed engine (heap-use-after-free, caught by ASan in tests/test_sample_core.py).
-     * A destructor cannot verify its borrow, so it must not depend on it. The pin it leaves
-     * behind is a pure launch flag — confluence means it can only change speed — and a caller
-     * who reuses the engine restores dispatch with gpap_engine_set_mode(e, GPAP_MODE_AUTO). */
+    /* Touches nothing but the sampler — above all not s->e, which is BORROWED and may already be
+     * gone: a garbage-collected face cannot promise destruction order, and a destructor cannot
+     * verify its borrow. The kernel pin left behind is a pure launch flag. */
     delete s;
 }
 
@@ -269,14 +225,13 @@ extern "C" gpap_status gpap_sampler_set_support(gpap_sampler *s, const int32_t *
     }
     return gpap::guard_entry("gpap_sampler_set_support", [&]() -> gpap_status {
         const int32_t N = s->e->num_vars;
-        if (n == 0) {                               /* back to "no support" */
+        if (n == 0) {
             s->has_support = 0;
             s->mask_sup = s->mask_all;
             rebuild_phases(s);
             return GPAP_OK;
         }
-        /* Deduplicate + validate through one bitmap; keep phases ASCENDING (the structured
-         * order), a random-order chunk shuffles its copy. */
+        /* Deduplicate and validate through one bitmap; phases stay ascending. */
         std::vector<char> in((size_t)N, 0);
         for (int32_t i = 0; i < n; ++i) {
             const int32_t v = vars[i];
@@ -290,11 +245,7 @@ extern "C" gpap_status gpap_sampler_set_support(gpap_sampler *s, const int32_t *
         std::vector<int32_t> head, tail;
         for (int32_t v = 0; v < N; ++v) (in[(size_t)v] ? head : tail).push_back(v);
         /* Re-setting the SAME support is a no-op, not a re-create: a pair mask lives until the
-         * engine dies (there is no release — see gpap.h), so each create costs ceil(2N/32)
-         * device words forever. Both faces re-push the support on every sample() call, and the
-         * set is the same one nearly every time; without this, a long-running caller leaks one
-         * mask per call. A genuinely CHANGED support still costs a mask, which is why the
-         * header tells callers to set it once. */
+         * engine dies, and both faces re-push the support on every sample() call. */
         if (s->has_support && head == s->head0) return GPAP_OK;
         s->head0 = std::move(head);
         s->tail0 = std::move(tail);
@@ -334,7 +285,7 @@ extern "C" gpap_status gpap_sampler_run(gpap_sampler *s, int64_t n_target,
         return GPAP_ERR_ARG;
     }
     s->opt = opts ? *opts : gpap_sampler_options{};   /* {0} == NULL == the defaults */
-    if (n_configs > kMaxConfigs) {                 /* a portfolio, not a candidate sweep */
+    if (n_configs > kMaxConfigs) {
         set_error("gpap_sampler_run: %d configs (max %d) — the portfolio races configs by "
                   "measured throughput, it is not a probe primitive (see "
                   "gpap_probe_combinations)",
@@ -344,7 +295,6 @@ extern "C" gpap_status gpap_sampler_run(gpap_sampler *s, int64_t n_target,
     return gpap::guard_entry("gpap_sampler_run", [&]() -> gpap_status {
         using clock = std::chrono::steady_clock;
 
-        /* Normalize once: batch clamps to >= 1, flags to 0/1. */
         s->run_cfgs.assign(configs, configs + n_configs);
         for (auto &c : s->run_cfgs) {
             c.batch = std::max<int32_t>(1, c.batch);
@@ -374,8 +324,7 @@ extern "C" gpap_status gpap_sampler_run(gpap_sampler *s, int64_t n_target,
         st.stop = GPAP_SAMPLE_STOP_TARGET;
 
         if (gpap_engine_flush_conflict(s->e)) {
-            /* The construction units flush already conflicted: PROVABLY no models. Distinct
-             * from "none found" — the faces report it as UNSAT, not as a sampler failure. */
+            /* The construction units flush conflicted: provably no models, reported as UNSAT. */
             st.stop = GPAP_SAMPLE_STOP_UNSAT;
             if (stats_out) *stats_out = st;
             return GPAP_OK;
@@ -389,42 +338,35 @@ extern "C" gpap_status gpap_sampler_run(gpap_sampler *s, int64_t n_target,
 
         int64_t rounds_sum = 0;
         int64_t window_start = 0;               /* first chunk of the current retry window */
-        int retry_soft = 0;                     /* single-config retry state (see below) */
+        int retry_soft = 0;
 
         const auto t0 = clock::now();
         auto elapsed_s = [&] { return seconds_between(t0, clock::now()); };
         auto sampling_s = [&] { return elapsed_s() - st.deliver_s - st.verify_s; };
 
         for (;;) {
-            /* ---- stop valves (between chunks) -------------------------------------- */
             bool cold = false;
             if (adaptive)
                 for (const auto &c : s->cstats) cold |= (c.chunks == 0);
             int64_t max_measured = 0;
             for (const auto &c : s->cstats) max_measured = std::max(max_measured, c.chunks);
-            /* Target met — but the bandit must first measure every config once (a big-K GPU
-             * meets the target in the cold start, and an unmeasured config is undiscoverable)
-             * and pile min_measure_chunks onto SOME config (a single chunk's rate is ±1.9x
-             * run-to-run noise; the headline would rest on it). */
+            /* Target met — but the bandit must measure every config once (a big-K GPU meets it
+             * during the cold start) and pile min_measure_chunks onto some config. */
             const bool enough = !adaptive || max_measured >= mmc;
-            if (!cold && enough && st.n_models >= n_target) break;               /* TARGET */
+            if (!cold && enough && st.n_models >= n_target) break;
             if (s->opt.max_chunks > 0 && st.chunks >= s->opt.max_chunks) {
                 st.stop = GPAP_SAMPLE_STOP_CHUNKS;
                 break;
             }
-            /* REAL wall, not sampling_s: this is a promise about how long the call takes.
-             * Charging delivery and the verify self-test to the caller's budget would be wrong,
-             * but so is running past it -- in `gpap bench` the same number is also the rival
-             * subprocess's timeout, and a column has to charge both sides or neither. */
+            /* Real wall, not sampling_s: a promise about how long the call takes (and in
+             * `gpap bench` also the rival's timeout, which must charge both sides or neither). */
             if (s->opt.time_limit_s > 0 && elapsed_s() >= s->opt.time_limit_s) {
                 st.stop = GPAP_SAMPLE_STOP_TIME;
                 st.timed_out = st.n_models < n_target ? 1 : 0;
                 break;
             }
-            /* Zero yield: NOTHING after the cold start plus a grace window — the target is
-             * unreachable ("this chunk was empty" is not a signal at a 0.01% success rate).
-             * The lookahead retry (opt-in, SINGLE config only — a portfolio says which configs
-             * may run, and soft belongs in it or not at all) flips the risk polarity once. */
+            /* Zero yield: nothing after the cold start plus a grace window, so the target is
+             * unreachable. The lookahead retry (opt-in, single-config) flips the polarity once. */
             if (st.n_models == 0 && !cold && st.chunks - window_start >= cold_size + grace) {
                 if (s->opt.retry_with_lookahead && !adaptive && !st.retried) {
                     st.retried = 1;
@@ -436,21 +378,18 @@ extern "C" gpap_status gpap_sampler_run(gpap_sampler *s, int64_t n_target,
                 }
             }
 
-            /* ---- pick the chunk's config ------------------------------------------- */
             int32_t ci = 0;
             if (adaptive) {
                 if (cold) {
                     for (int32_t i = 0; i < n_configs; ++i)
                         if (s->cstats[(size_t)i].chunks == 0) { ci = i; break; }
                 } else if (st.n_models >= n_target) {
-                    /* Past the target, short of the window: EXPLOIT, so the winner's rate is
-                     * measured on back-to-back chunks rather than diluted by exploration. */
+                    /* Past the target, short of the window: exploit, so the winner's rate is
+                     * measured back-to-back. */
                     ci = best_by_rate(s->cstats);
                 } else {
-                    /* Decaying epsilon-greedy, exploration PLAUSIBILITY-FILTERED to configs
-                     * within 20x of the best measured rate: run-to-run noise is ~1.9x, so a
-                     * 20x-slower config is dead on this formula, not noisy — it keeps exactly
-                     * its one cold-start chunk. */
+                    /* Decaying epsilon-greedy, exploring only configs within 20x of the best
+                     * rate: slower than that is dead on this formula, not noisy. */
                     const int32_t best = best_by_rate(s->cstats);
                     ci = best;
                     const double eps =
@@ -468,15 +407,12 @@ extern "C" gpap_status gpap_sampler_run(gpap_sampler *s, int64_t n_target,
                 }
             }
             const gpap_sample_config &cfg = s->run_cfgs[(size_t)ci];
-            /* FLIP, not OR: a config already running soft would otherwise retry with the
-             * identical polarity and report that a different one was tried. */
+            /* Flip, not OR: a config already soft would retry with the same polarity. */
             const int soft = retry_soft ? !cfg.soft : cfg.soft;
 
-            /* ---- one chunk --------------------------------------------------------- */
-            /* Order: phase 1 (support) then phase 2, each phase shuffled for a random-order
-             * config and left ascending (the gate-DAG order) for a structured one. The kernel
-             * never straddles the boundary; deciding a variable propagation would have implied
-             * is a wasted decision AND a chance to conflict, which is why the split exists. */
+            /* Order: phase 1 (support) then phase 2, each shuffled for a random-order config
+             * and left ascending (the gate-DAG order) for a structured one. The kernel never
+             * straddles the boundary: deciding an implied variable wastes a decision. */
             s->order.assign(s->head0.begin(), s->head0.end());
             const int32_t P_all = (int32_t)(s->head0.size() + s->tail0.size());
             if (!s->opt.support_only)
@@ -496,10 +432,7 @@ extern "C" gpap_status gpap_sampler_run(gpap_sampler *s, int64_t n_target,
 
             GPAP_TRY(gpap_engine_reset(s->e, s->K));
             int32_t rounds = 0;
-            /* A formula whose variables unit propagation already determined has an EMPTY order
-             * (P == 0): every active row is a complete model of it. std::vector::data() is null
-             * then, and the host entry point refuses null unconditionally — hand it a dummy the
-             * P == 0 early-return never reads. */
+            /* A fully determined formula has an empty order (P == 0) and data() is null then. */
             static const int32_t kNoOrder = 0;
             const int32_t *order_p = s->order.empty() ? &kNoOrder : s->order.data();
             GPAP_TRY(gpap_engine_trajectory(s->e, order_p, P, s->n_support, cfg.batch,
@@ -509,8 +442,7 @@ extern "C" gpap_status gpap_sampler_run(gpap_sampler *s, int64_t n_target,
             int32_t n_sup = n;
             if (s->has_support)
                 GPAP_TRY(gpap_select_complete(s->e, s->mask_sup, /*slot=*/1, &n_sup));
-            /* select_complete reads the count back, so the launch has drained: the wall stamp
-             * below covers real GPU work, not an async enqueue. */
+            /* select_complete reads the count back, so the wall stamp covers real GPU work. */
             const double wall = seconds_between(tc, clock::now());
 
             gpap_counters c1{};
@@ -530,8 +462,8 @@ extern "C" gpap_status gpap_sampler_run(gpap_sampler *s, int64_t n_target,
             rounds_sum += rounds;
             st.rounds_max = std::max(st.rounds_max, rounds);
 
-            /* Self-test (opt-in): EVERY completed row, billed to verify_s so it cannot move a
-             * rate. The C ABI reports; whether a bad row aborts is the face's policy. */
+            /* Self-test (opt-in): every completed row, billed to verify_s so it cannot move a
+             * rate. The ABI reports; aborting on a bad row is the face's policy. */
             if (s->opt.verify && n > 0) {
                 const auto tv = clock::now();
                 int32_t bad = 0;
@@ -541,9 +473,8 @@ extern "C" gpap_status gpap_sampler_run(gpap_sampler *s, int64_t n_target,
                 st.verify_s += seconds_between(tv, clock::now());
             }
 
-            /* Delivery (opt-in): keep up to keep_cap rows PER CONFIG, gathered off the chunk
-             * that produced them (a prefix of the selection — rows are i.i.d. trajectories, so
-             * a prefix carries no information). Billed to deliver_s. */
+            /* Delivery (opt-in): up to keep_cap rows per config, gathered off the chunk that
+             * produced them (rows are i.i.d., so a prefix loses nothing). Billed to deliver_s. */
             if (keep_cap != 0 && n > 0) {
                 const int64_t have = cs.kept_rows;
                 const int64_t room = keep_cap < 0 ? n : keep_cap - have;
@@ -561,15 +492,12 @@ extern "C" gpap_status gpap_sampler_run(gpap_sampler *s, int64_t n_target,
             }
         }
 
-        /* ---- verdicts of the run ------------------------------------------------------ */
         st.sampling_s = sampling_s();
         st.rounds_mean = st.chunks > 0 ? (double)rounds_sum / (double)st.chunks : 0.0;
         int32_t dom = 0, best = 0;
         for (int32_t i = 1; i < n_configs; ++i)
             if (s->cstats[(size_t)i].models > s->cstats[(size_t)dom].models) dom = i;
-        /* Best-THROUGHPUT config, preferring one that is WELL-MEASURED (>= mmc chunks) over a
-         * lucky single cold-start chunk — the headline rests on the config the top-up phase
-         * committed to, and its kept rows are what bits(-1) delivers. */
+        /* Best-throughput config, preferring a well-measured one; its rows fill bits(-1). */
         for (int32_t i = 1; i < n_configs; ++i) {
             const auto &a = s->cstats[(size_t)best], &b = s->cstats[(size_t)i];
             const bool am = a.chunks >= mmc, bm = b.chunks >= mmc;
@@ -623,12 +551,8 @@ extern "C" gpap_status gpap_sampler_bits(const gpap_sampler *s, int32_t i, uint8
     }
     const auto &bucket = s->buckets[(size_t)idx];
     const size_t row = (size_t)std::max<int32_t>(s->run_cols_n, 1);
-    /* Bounded by BOTH counters, which agree on every normal path — kept_rows and the bucket
-     * grow together per gather. They come apart only if a gather FAILED after its resize: the
-     * bucket then carries `take` uninitialized rows that kept_rows never counted, and a caller
-     * who ignored the error and asked for a big capacity would read them. The buffer bound is
-     * still needed on its own, because a zero-variable formula counts kept rows into an
-     * empty bucket (n_cols == 0). */
+    /* Bounded by BOTH counters: they come apart only if a gather failed after its resize, and
+     * the buffer bound is needed too, since a zero-variable formula has an empty bucket. */
     const size_t kept = (size_t)std::max<int64_t>(s->cstats[(size_t)idx].kept_rows, 0);
     const size_t rows = std::min({(size_t)capacity, kept, bucket.size() / row});
     if (rows) std::memcpy(out, bucket.data(), rows * row);

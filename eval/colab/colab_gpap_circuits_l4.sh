@@ -1,16 +1,13 @@
 #!/usr/bin/env bash
 # GPAP-ONLY re-measurement of the CIRCUIT families on a Colab L4 — no CMSGen, no rivals.
 #
-# Why this campaign exists: the sampling loop moved into libgpap (2026-09-01, `gpap_sampler_*`,
-# seed era re-baselined) after the last full L4 campaign (l4_campaign_20260827, repo c33ed7b),
-# so every recorded GPAP circuit number predates the engine that now ships. This sweep re-runs
-# ONLY the GPAP arm of the circuit matrix under the identical protocol, so that:
-#   * new-vs-old GPAP is a clean engine A/B (eval/recheck_compare.py against the 20260827
-#     campaign's gpap_vs_cmsgen_l4 — deterministic fields must match, rates are the result);
-#   * the tables can be regenerated pairing this GPAP data with the CARRIED CMSGen and rival
-#     arms (their numbers did not change; re-running them re-measures nothing new).
-# ⚠️ Seed-era note (docs/BENCHMARKING.md §3): counts recorded before 2026-09-01 are not
-# same-seed-comparable to these rows; the compare gates on M/support/split/mode + succ, not counts.
+# Why this campaign exists: the sampling loop moved into libgpap after the last full L4
+# campaign, so every recorded GPAP circuit number predates the engine that ships. This re-runs
+# only the GPAP arm of the circuit matrix under the identical protocol, so new-vs-old GPAP is a
+# clean engine A/B (eval/recheck_compare.py) and the tables can be regenerated pairing it with
+# the carried CMSGen and rival arms, whose numbers did not change. Seed-era note
+# (docs/BENCHMARKING.md §3): older counts are not same-seed-comparable, so the compare gates on
+# the deterministic fields and success rate, not counts.
 #
 # Protocol pinned to the 20260827 campaign: tseitin+abc:fast, rare+random, T=25+50,
 # n_time 50k, 60 s budget, VERIFY_SOUND=1 (run_full_eval.sh's campaign default), seed 5.
@@ -28,12 +25,11 @@ export PYTHON="${PYTHON:-python3}"
 export CYCLES="${CYCLES:-25 50}"
 export N_TIME="${N_TIME:-50000}"
 export TIME_LIMIT="${TIME_LIMIT:-60}"
-# GPAP-ONLY, deliberately: pointing CMSGEN at a path that cannot exist makes run_full_eval.sh
-# print its "[warn] no cmsgen" line and omit the --cmsgen arm on every stage. The CMSGen and
-# rival numbers this campaign will be tabled WITH are the 20260827 campaign's.
+# GPAP-only, deliberately: pointing CMSGEN at a path that cannot exist makes run_full_eval.sh
+# warn and omit the arm on every stage. This campaign is tabled with the earlier CMSGen rows.
 export CMSGEN=/nonexistent-gpap-only
-# A fixed OUT (not the GPU slug): the supervisor mirrors these filenames, and a slug surprise
-# on a new VM image must not silently retarget the sweep.
+# A fixed OUT, not the GPU slug: the supervisor mirrors these filenames, and a slug surprise on
+# a new VM image must not silently retarget the sweep.
 export OUT="${OUT:-$REPO_ROOT/.experiments/full_eval/nvidia-l4-gpaponly}"
 
 "$PYTHON" -m gpap.cli info 2>/dev/null | head -8 || true

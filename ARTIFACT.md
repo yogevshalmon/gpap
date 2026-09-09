@@ -1,23 +1,20 @@
-# GPAP — artifact evaluation guide (SKETCH — not final)
+# GPAP — artifact evaluation guide (SKETCH)
 
-> **STATUS: placeholder.** The full evaluation is being re-run on the release commit and every
-> table regenerated; numbers, the data-archive name and the tag below will change. Structure is
-> settled, contents are TODO until that re-run lands.
+> **STATUS: placeholder.** The evaluation is re-running on the release commit; numbers and tag
+> will change.
 
-Maps the paper's claims to the data, the tables, and the commands that regenerate both.
-The two tiers are deliberate: Tier 1 needs **no GPU and no dependencies beyond Python 3.10+**;
-Tier 2 re-measures on any CUDA machine.
+Claims → data → tables, with commands. Tier 1 needs **no GPU and nothing beyond Python
+3.10+**; Tier 2 re-measures on CUDA.
 
-- **TODO** release tag / commit: `vX.Y.Z` (`<sha>`) — tag once the re-run data is final
-- **TODO** data archive: `gpap_experiments_<gpu>_<date>.tar.gz` (DOI: TBD) — regenerate with
-  `eval/artifact/make_artifact.sh` after the re-run
-- **TODO** CITATION.cff: fill DOI / repository URL / paper reference (remove its TODO line)
+- **TODO** release tag / commit `vX.Y.Z` (`<sha>`)
+- **TODO** data archive `gpap_experiments_<gpu>_<date>.tar.gz` (DOI: TBD) from
+  `eval/artifact/make_artifact.sh`
+- **TODO** CITATION.cff: DOI, repository URL, paper reference
 
-## Tier 1 — regenerate every table from the shipped data (minutes, CPU-only)
+## Tier 1 — regenerate every table from the data (CPU-only)
 
-The archive carries the raw per-instance JSONs, a MANIFEST (commit, host, SHA-256 per file) and
-the captured verification verdict. `eval/artifact/paper_tables.py` and
-`eval/artifact/verify_artifact.py` are stdlib-only.
+The archive carries the per-instance JSONs, a MANIFEST (commit, host, SHA-256 per file) and the
+captured verdict. `paper_tables.py` and `verify_artifact.py` are stdlib-only.
 
 ```bash
 tar xf gpap_experiments_<...>.tar.gz && cd gpap_experiments_<...>
@@ -25,14 +22,13 @@ tar xf gpap_experiments_<...>.tar.gz && cd gpap_experiments_<...>
 eval/artifact/verify_artifact.py <...>       # the publishability gate: re-derives every caveat
 ```
 
-- **TODO** claims table: paper claim → table/figure → generator flag → JSON file(s)
-- **TODO** state the expected verifier verdict verbatim (N ok / N warnings / 0 failures) and
-  that every warning appears in the paper text
+- **TODO** claims table: claim → table/figure → generator flag → JSON file(s)
+- **TODO** the verdict verbatim (N ok / N warnings / 0 failures), every warning in the paper
 
-## Tier 2 — re-measure (any CUDA box; budget ~5–8 h for the full sweep)
+## Tier 2 — re-measure (any CUDA box; ~5–8 h full sweep)
 
-Requirements: NVIDIA GPU + driver, cmake + C++17 compiler, Python ≥ 3.10. **No CUDA toolkit,
-no nvcc** — the Triton kernels are AOT-compiled by `scripts/build_core.sh`.
+NVIDIA GPU + driver, cmake + C++17 compiler, Python ≥ 3.10. **No CUDA toolkit, no nvcc**:
+`scripts/build_core.sh` AOT-compiles the kernels.
 
 ```bash
 pip install -e ".[dev]"
@@ -42,21 +38,19 @@ eval/run_full_eval.sh smoke          # ~5 min kick-the-tires: every stage, 1–2
 eval/run_full_eval.sh all            # the full sweep (staged, resumable)
 ```
 
-Full runbook (stages, time table, Colab notes, troubleshooting): `docs/EVAL_RUNBOOK.md`.
+Runbook: `docs/EVAL_RUNBOOK.md`.
 
-- **TODO** expected-variance statement: absolute rates are GPU- and power-state-dependent
-  (`docs/BENCHMARKING.md` §1, `docs/findings/CROSS_GPU_FINDINGS.md`); which quantities are
-  expected to reproduce exactly (soundness, win/loss structure, model counts at fixed K/seed)
-  vs within a factor (rates, ratios)
-- **TODO** known-issues disclosure list (b12/A100 success cliff; soft-portfolio removal and its
-  measured price; vacuous-pin / zero-search exclusions) — one place, linking the findings docs
+- **TODO** expected variance (`docs/BENCHMARKING.md` §1, `docs/findings/CROSS_GPU_FINDINGS.md`):
+  what reproduces exactly (soundness, win/loss, counts at fixed K/seed), what within a factor
+- **TODO** known issues in one place: b12/A100 cliff, soft portfolio, degeneracy exclusions
 
-## What is third-party, and how it is pinned
+## Third-party components and their pins
 
-| component | fetched by | pin |
-|---|---|---|
-| berkeley-abc | `scripts/build_abc.sh` | commit in script (`GPAP_ABC_COMMIT`) |
-| CMSGen (+ eval patch) | `scripts/build_cmsgen.sh` | commit in script (`GPAP_CMSGEN_COMMIT`) |
-| DEMOTIC / Recurrent-CircuitSAT / HTS | `eval/rivals/rivals_setup.sh` | commits in script; each result JSON records the checkout's actual HEAD (`rival_commit`). Setup also installs their python deps and applies a **function-preserving py3.13 shim** (their `exec`+`locals()` model loader breaks under PEP 667; verified bit-identical output on 3.12) |
-| barbarik + SPUR | manual, see `eval/uniformity/barbarik_gpap.py` docstring | commit in docstring |
-| benchmark suites | committed subsets (`benchmarks/*/README.md` = provenance/licenses); full sets via `scripts/fetch_benchmarks.sh` | **TODO**: pin the raw-URL fetches to commit SHAs |
+- berkeley-abc (`scripts/build_abc.sh`), CMSGen + eval patch (`scripts/build_cmsgen.sh`): commit
+  pinned in each script, `GPAP_ABC_COMMIT` / `GPAP_CMSGEN_COMMIT`.
+- DEMOTIC / Recurrent-CircuitSAT / HTS (`eval/rivals/rivals_setup.sh`): commits in the script, each
+  result JSON records the checkout's HEAD (`rival_commit`); setup adds a function-preserving
+  py3.13 shim, verified bit-identical on 3.12.
+- barbarik + SPUR: manual, commit in `eval/uniformity/barbarik_gpap.py`'s docstring.
+- benchmark suites: committed subsets (`benchmarks/*/README.md`), full sets via
+  `scripts/fetch_benchmarks.sh`; **TODO** pin the raw-URL fetches to SHAs.
