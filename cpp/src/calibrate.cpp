@@ -7,6 +7,7 @@
 
 #include <algorithm>
 #include <cstdint>
+#include <cstdlib>
 
 #include "gpap/gpap.h"
 
@@ -31,6 +32,21 @@ constexpr int32_t kWaveMinClauses = 2048;
 /* Trail headroom past the exact bound — one wavefront; see gpap_trail_cap for why that is the
  * unit. Keep in step with WAVE_W (cpp/tools/build_kernels.py). */
 constexpr int32_t kTrailSlack = 32;
+
+/* GPAP_VRAM_BUDGET_MIB: an upper bound, in MiB, on what gpap_mem_available may report. Unset (or
+ * <= 0) is the default and changes nothing. It exists for CROSS-CARD REPRODUCTION: K is
+ * memory-bound on large formulas, so the same run on a larger card sizes a larger batch, and a
+ * head-to-head whose rival is pinned to a recorded batch would then be measuring two different
+ * grants. Capping the budget to the recorded card's makes both sides identical on any card at
+ * least that large. It is a CEILING, never a floor: a smaller card still reports less. */
+int64_t env_budget_cap() {
+    const char *e = std::getenv("GPAP_VRAM_BUDGET_MIB");
+    if (!e || !*e) return 0;
+    char *end = nullptr;
+    const long long mib = std::strtoll(e, &end, 10);
+    if (end == e || mib <= 0) return 0;               /* unparsable or non-positive: no cap */
+    return (int64_t)mib << 20;
+}
 }  // namespace
 
 /* There is deliberately no formula-bytes deduction here: gpap_mem_available() reports memory
@@ -83,7 +99,9 @@ extern "C" int64_t gpap_mem_available(int device, double fraction) {
     cuDevicePrimaryCtxRelease(dev);
     if (rc != CUDA_SUCCESS) return 0;
     const int64_t usable = std::max<int64_t>(0, (int64_t)free_b - kFreeVramReserveBytes);
-    return (int64_t)(usable * fraction);
+    const int64_t budget = (int64_t)(usable * fraction);
+    const int64_t cap = env_budget_cap();
+    return cap > 0 ? std::min(budget, cap) : budget;
 }
 
 extern "C" int32_t gpap_default_k_cap(int device) {

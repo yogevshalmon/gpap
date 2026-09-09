@@ -474,7 +474,10 @@ void gpap_counters_reset(gpap_engine *e);
  * formula-bytes helper: gpap_mem_available() already reports memory free AFTER the formula was
  * uploaded, so deducting it again would double-count. */
 
-/* Bytes available for new allocations (free VRAM minus a driver reserve, times `fraction`). */
+/* Bytes available for new allocations (free VRAM minus a driver reserve, times `fraction`),
+ * capped by GPAP_VRAM_BUDGET_MIB when that is set to a positive integer. The cap is for
+ * CROSS-CARD REPRODUCTION — a memory-bound K sizes larger on a larger card — and is a ceiling
+ * only: a card with less free memory still reports less. Unset = no cap. */
 int64_t gpap_mem_available(int device, double fraction);
 /* Trail slots one row needs — THE rule (cpp/src/calibrate.cpp), which the engine's allocator
  * calls too. A function of the variable count ALONE: every push is deduplicated through the

@@ -96,6 +96,87 @@ def test_auto_is_stable_across_calls():
     assert default_k_cap(dev) == before
 
 
+# ---------------------------------------------------------------- the VRAM budget ceiling
+# `GPAP_VRAM_BUDGET_MIB` exists so a reproduction on a LARGER card sizes the same K as the
+# recorded one: K is memory-bound on big formulas (63 of the paper campaign's 141 rows sat below
+# the cap), and a head-to-head whose rival is pinned to a recorded batch would otherwise compare
+# a grown K against a fixed grant. It is a CEILING — a smaller card must still report less — and
+# it is applied in ONE place, gpap_mem_available, so every consumer sees it.
+
+@pytest.mark.gpu
+def test_vram_budget_cap_is_a_ceiling_not_a_floor(monkeypatch):
+    if not torch.cuda.is_available():
+        pytest.skip("needs CUDA")
+    from gpap.engine import _core
+    uncapped = _core.mem_available(0, 0.80)
+    assert uncapped > 0
+    monkeypatch.setenv("GPAP_VRAM_BUDGET_MIB", str(max(1, uncapped // (1 << 20) // 2)))
+    assert _core.mem_available(0, 0.80) == pytest.approx(uncapped / 2, rel=0.01)
+    # Above what the card has, the CARD binds: the cap can never hand out memory.
+    monkeypatch.setenv("GPAP_VRAM_BUDGET_MIB", str(uncapped // (1 << 20) * 4))
+    assert _core.mem_available(0, 0.80) == uncapped
+
+
+@pytest.mark.gpu
+@pytest.mark.parametrize("value", ["", "0", "-1", "bogus"])
+def test_vram_budget_cap_ignores_meaningless_values(monkeypatch, value):
+    """An unset, zero, negative or unparsable value must mean NO CAP, not a cap of zero: a
+    budget of zero sizes K=1 and every run would silently crawl instead of failing."""
+    if not torch.cuda.is_available():
+        pytest.skip("needs CUDA")
+    from gpap.engine import _core
+    monkeypatch.delenv("GPAP_VRAM_BUDGET_MIB", raising=False)
+    uncapped = _core.mem_available(0, 0.80)
+    monkeypatch.setenv("GPAP_VRAM_BUDGET_MIB", value)
+    assert _core.mem_available(0, 0.80) == uncapped
+
+
+def test_vram_budget_cap_reporter_matches_the_env(monkeypatch):
+    """`vram_budget_cap` only REPORTS; the clamp is the core's. Same parse, though, or a row's
+    provenance would disagree with the budget that sized it."""
+    from gpap.engine.calibrate import vram_budget_cap
+    monkeypatch.delenv("GPAP_VRAM_BUDGET_MIB", raising=False)
+    assert vram_budget_cap() == 0
+    monkeypatch.setenv("GPAP_VRAM_BUDGET_MIB", "18120")
+    assert vram_budget_cap() == 18120 << 20
+    for junk in ("", "0", "-5", "bogus"):
+        monkeypatch.setenv("GPAP_VRAM_BUDGET_MIB", junk)
+        assert vram_budget_cap() == 0
+
+
+@pytest.mark.gpu
+def test_the_vram_cap_actually_moves_the_sampler_batch(monkeypatch):
+    """The cap has to reach K, not merely `mem_available`. Cheap to leave unproven and easy to
+    get wrong: nothing else in the sampler reads the environment, so if the C++ side ever stopped
+    consulting the model here, every capped reproduction would silently run at the full batch.
+
+    A formula tiny enough that the batch CAP would bind is useless for this — it would answer the
+    same number either way — so the test caps the BUDGET low enough that the analytic bound is
+    what binds, and asks for two different budgets."""
+    if not torch.cuda.is_available():
+        pytest.skip("needs CUDA")
+    from gpap.engine.calibrate import compute_k_safe, row_bytes
+    monkeypatch.delenv("GPAP_VRAM_BUDGET_MIB", raising=False)
+    smp = _tiny_sampler(None)                    # k_cap None: the MEMORY bound is what answers
+    wide, N, num_long = smp.K, smp.engine.num_vars, smp.engine.num_long
+    # a budget admitting an eighth of what the uncapped card does
+    mib = max(1, (wide // 8) * row_bytes(num_long, N) // (1 << 20))
+    monkeypatch.setenv("GPAP_VRAM_BUDGET_MIB", str(mib))
+    narrow = _tiny_sampler(None).K
+    assert narrow < wide, f"the cap did not reach K ({narrow} vs {wide} at {mib} MiB)"
+    assert narrow == compute_k_safe(num_long, N, mib << 20, None), \
+        "K under a cap must be the memory model's own answer for exactly that budget"
+
+
+def test_rival_budget_honours_the_same_ceiling(monkeypatch):
+    """BOTH sides or neither: capping only ours would hand the rival the whole card."""
+    from eval.rivals.rival_common import rival_vram_budget
+    monkeypatch.setenv("GPAP_VRAM_BUDGET_MIB", "1024")
+    assert rival_vram_budget() <= (1024 << 20)
+    monkeypatch.delenv("GPAP_VRAM_BUDGET_MIB", raising=False)
+    assert rival_vram_budget() > (1024 << 20) or not torch.cuda.is_available()
+
+
 # ---------------------------------------------------------------- the batch-size API
 # `batch_size` is the one number that says what a chunk runs, and `pin_batch` the one way to
 # bound it. These gate that contract, because getting it wrong is not a wrong number — it is
