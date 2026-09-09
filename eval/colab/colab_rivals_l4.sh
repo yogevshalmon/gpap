@@ -1,18 +1,14 @@
 #!/usr/bin/env bash
-# GPAP vs the three GPU gradient samplers, on a Colab L4, driven from a terminal.
+# GPAP vs the GPU gradient samplers on a rented Colab L4, driven from a terminal.
 #
-# Why this exists instead of `run_full_eval.sh rivals`: that stage is one fixed sequence with one
-# set of circuit variants, and it took ~7 h on the 4080. A rented GPU has a deadline, so this
-# driver (a) orders the sub-stages by how much each one carries the headline, (b) spends the
-# expensive `raw abc` variant axis only where it is cheap, and (c) refuses to START a sub-stage
-# it cannot finish. Everything else — instances, seeds, steps, timeouts, T — is IDENTICAL to
-# run_full_eval.sh's rivals stage, so rows are directly comparable to the 4080 run.
+# Why not `run_full_eval.sh rivals`: a rented GPU has a deadline, so this driver orders the
+# sub-stages by how much each carries the headline, spends the circuit-variant axis only where it
+# is cheap, and refuses to start a sub-stage it cannot finish. Everything else — instances, seeds,
+# steps, timeouts, T — is identical, so rows are directly comparable to the 4080 run.
 #
-# THE CMSGEN ARM RIDES ON EVERY ROW (converged protocol, 2026-09-03): the patched binary on the
-# very CNF the GPAP arm sampled, same n and budget — three tools on one constraint per row, and
-# Table 1 is read off these files. So this driver IS the campaign; there is no separate CMSGen
-# sweep to run. The host CPU is recorded per row (a CMSGen ratio is meaningless without it).
-# CMSGEN=none runs the rival comparison alone (no Table 1 from those rows).
+# The CMSGen arm rides on every row: the patched binary on the very CNF the GPAP arm sampled,
+# same n and budget, so this driver IS the campaign and Table 1 is read off these files. The host
+# CPU is recorded per row. CMSGEN=none runs the rival comparison alone.
 #
 #   DEADLINE_H=4.3 bash eval/colab/colab_rivals_l4.sh
 set -uo pipefail
@@ -31,83 +27,62 @@ LOGS="$OUT/logs"
 mkdir -p "$OUT" "$LOGS"
 
 # --- identical to run_full_eval.sh's rivals stage --------------------------------------------
-# INSTANCE SETS: Recurrent-CircuitSAT on EVERY b*/s* sequential circuit (their pins where their
-# table names the instance, our rare pin everywhere; what it cannot process is an error row,
-# omitted from the table with the count stated); DEMOTIC on its paper's 11 ISCAS-85 (`paper` ->
-# eval/rivals/rival_common.py::PAPER_INSTANCES, the dict paper_tables.py scores from). b17/b19/b22
-# are fetched, not committed: pull them first, or a fresh VM reports them as skipped. `itc99`
-# pulls only those ~25 MB and is a no-op when they are already installed.
+# Instance sets: Recurrent-CircuitSAT on every b*/s* sequential circuit (their pins where their
+# table names it, our rare pin everywhere); DEMOTIC on its 11 ISCAS-85. What a tool cannot
+# process is an error row, omitted with the count stated. b17/b19/b22 are fetched, not
+# committed, or a fresh VM reports them as skipped.
 bash "$REPO_ROOT/scripts/fetch_benchmarks.sh" itc99 2>&1 | sed 's/^/[bench] /' || \
     echo "[warn] could not fetch ITC'99 b17-b22 — the Recurrent stage will report them as skipped"
 SEQ_INSTS="${SEQ_INSTS:-$(cd "$REPO_ROOT/benchmarks/circuits/bench/seq" 2>/dev/null \
     && ls *.bench 2>/dev/null | sed 's/\.bench$//' | tr '\n' ' ')}"
 COMB_INSTS="${COMB_INSTS:-paper}"
-# 3 seeds, NOT run_full_eval.sh's current RIVAL_SEEDS=5: the 4080 rows this run is compared
-# against were produced at median-of-3, and matching the protocol exactly is worth more than the
-# extra circuit-variant axis it costs (which is why Recurrent gets `raw` only below).
+# 3 seeds: the 4080 rows this run is compared against were produced at median-of-3, and
+# matching the protocol exactly is worth more than what it costs.
 RSEEDS="${RSEEDS:-5 6 7}"
-# 'auto' = each rival at the num_steps ITS OWN artifacts specify (rival_common.RIVAL_STEPS).
-# Pinning one value for all three taxed two of them: the 2026-08-23 campaign ran 10 everywhere,
-# which costs DEMOTIC 2.6x and Recurrent 8.5x (both saturate their batch on the first step).
+# 'auto' = each rival at the num_steps its own artifacts specify (rival_common.RIVAL_STEPS).
+# Pinning one value for all of them taxes two: both saturate their batch on the first step.
 STEPS="${STEPS:-auto}"
-# Per-run wall for the rival subprocess, and Recurrent's SEPARATE initialization budget
-# (2026-09-05): every one of the 2026-09-04 campaign's 20 Recurrent failures was the 300 s
-# initialization budget expiring, and §11 had measured b14 initializing at ~743 s. 1200 s for
-# both — the cap that same measurement used to show b17 does NOT initialize. The
-# initialization wall BOUNDS the search and is in no published rate (protocol v1.0, §17).
+# Per-run wall for the rival subprocess, and Recurrent's separate initialization budget. The
+# initialization wall bounds the search and is in no published rate (protocol v1.0,
+# docs/findings/RIVAL_FAIRNESS_FINDINGS.md §11/§17).
 TIMEOUT="${TIMEOUT:-1200}"
 INIT_BUDGET="${INIT_BUDGET:-1200}"
-# GRANTS=<grants file> pins every recorded cell's batch rung (and Recurrent's start_point) to
-# the values a previous campaign measured — no ladder walk, no probe (rival_common.load_grants;
-# eval/rivals/extract_grants.py writes the file). The rule is unchanged; the search is skipped.
+# GRANTS=<file> pins each recorded cell's batch rung and Recurrent's start_point to a previous
+# campaign's measurements: the rule is unchanged, the search is skipped.
 GRANT_ARGS=()
 [ -n "${GRANTS:-}" ] && GRANT_ARGS=(--grants "$GRANTS")
-# RETRY_ERRORS=1 re-runs rows that errored (the budget-bound cells of a resumed campaign);
-# off by default because a rival timeout costs the full budget to rediscover on every restart.
+# RETRY_ERRORS=1 re-runs errored rows; off by default, because a rival timeout costs the full
+# budget to rediscover on every restart.
 RETRY_ARGS=()
 [ "${RETRY_ERRORS:-0}" = "1" ] && RETRY_ARGS=(--retry-errors)
 T="${T:-25}"
 
-# Default OFF (24 h). MEASURED: a Colab L4 assignment is reclaimed after ~1 h, so an in-VM
-# deadline guard would permanently skip any stage costing more than one VM lifetime. Interruption
-# is handled the other way round now — every harness runs with --resume and eval/colab/colab_supervisor.py
-# mirrors results to the local disk each cycle, then rebuilds the VM and continues. Set
-# DEADLINE_H=<hours> only for a single-shot run on a machine you actually own.
-# Which sub-stages to run. A finished stage still costs real time on a restart, because
-# --resume retries ERROR rows and a rival timeout fails again identically (~300 s each) --
-# measured: 3 HTS timeouts ate ~15 min of every rebuilt VM before the later stages could start.
-# Set STAGES to skip what is already done, e.g. STAGES="recurrent-rare recurrent-table".
-# Circuit-variant axis (see rival_common.py): which circuit each side is handed. Default keeps
-# the recorded protocol (DEMOTIC raw+abc, Recurrent raw-only for cost). Override to converge a
-# campaign on one encoding — e.g. VARIANTS_DEM=abc VARIANTS_RCS=abc HTS_ENCS=abc for an
-# abc:fast-only sweep (2026-09-02: no tseitin arm anywhere in the tables).
-# ONE circuit variant, `abc`, for every tool and every stage (2026-09-05, the user's call):
-# every tool receives the SAME sequential-ABC-simplified netlist GPAP encodes from. Measured,
-# the choice is nobody's friend — it cost GPAP `b12` (a 16x win became a 0.69x loss) and cost
-# Recurrent `b09` 58x under one pin while helping it 1.6x under another (§16c). The raw-vs-abc
-# axis remains implemented (`VARIANTS_*="raw abc"`, scored per instance for the rival by
-# `paper_tables.rival_cells`) and is not part of the protocol.
+# Default off (24 h): a Colab VM is reclaimed after about an hour, so an in-VM deadline guard
+# would permanently skip any stage costing more than one VM lifetime. Interruption is handled by
+# --resume plus eval/colab/colab_supervisor.py, which mirrors results out each cycle and rebuilds
+# the VM. Set DEADLINE_H only for a single-shot run on a machine you own.
+# Which sub-stages to run. A finished stage still costs time on a restart, because --resume
+# retries error rows and a rival timeout fails again identically. Set STAGES to skip what is
+# done, e.g. STAGES="recurrent-rare recurrent-table".
+# Circuit-variant axis (rival_common.py): which circuit each side is handed. The protocol is
+# ONE variant, `abc`, for every tool and stage — the same sequential-ABC-simplified netlist GPAP
+# encodes from. Measured, that choice is nobody's friend, hurting GPAP on one instance and the
+# rival on another (docs/findings/RIVAL_FAIRNESS_FINDINGS.md §16c). `VARIANTS_*="raw abc"` is
+# still implemented and is not part of the protocol.
 VARIANTS_DEM="${VARIANTS_DEM:-abc}"
 VARIANTS_RCS="${VARIANTS_RCS:-abc}"
 HTS_ENCS="${HTS_ENCS:-tseitin abc}"
-# HTS dropped 2026-09-02: its paper evaluates no circuit at all (see run_full_eval.sh).
-# `demotic-miter` is NOT in the default set: it is measured-but-unpublished (see
-# paper_tables.RIVALS — its instances are in neither paper), and it is the most expensive
-# DEMOTIC arm at ~50 min. Add it back explicitly to refresh the archived rows.
-# `steps-calib` (the rival at num_steps 1 vs 10) is a calibration, not a measurement — the
-# campaign runs each rival at the ONE setting its own script names (rival_common.RIVAL_STEPS);
-# add it to STAGES to re-derive the tie-break on this card.
-# PROTOCOL v1.0 (frozen 2026-09-06, docs/EVAL_RUNBOOK.md §0): the campaign is the four T=25
-# stages + the calibrations. T=50 is the rival's own script depth (`--num_clock_cycles 50`,
-# eta=50, over which its sampler pools every depth) and is an ADDITIVE appendix run under the
-# identical protocol — STAGES="recurrent-rare-t50 recurrent-table-t50 steps-calib-t50" —
-# reported beside the T=25 rows, never in their place.
+# HTS is not in the default set: its paper evaluates no circuit. Nor is `demotic-miter`
+# (measured but unpublished, and the most expensive DEMOTIC arm) or `steps-calib` (a calibration,
+# not a measurement — add it to re-derive the tie-break on this card).
+# The campaign is the four T=25 stages plus the calibrations (protocol v1.0,
+# docs/EVAL_RUNBOOK.md §0). T=50 is the rival's own script depth and an additive appendix:
+# STAGES="recurrent-rare-t50 recurrent-table-t50 steps-calib-t50", reported beside T=25.
 STAGES="${STAGES:-lr-calib demotic-native demotic-comb-rare recurrent-rare recurrent-table steps-calib}"
 want() { case " $STAGES " in *" $1 "*) return 0 ;; *) echo "[skip] $1 (not in STAGES)"; return 1 ;; esac; }
 
-# The CMSGen arm: a HARD preflight, like colab_cmsgen_circuits_abc_l4.sh — a stage resumed
-# without the binary would append armless rows to an armed file (absent is not zero, and
-# verify_artifact fails the mix). CMSGEN=none opts out explicitly.
+# The CMSGen arm gets a hard preflight: a stage resumed without the binary would append armless
+# rows to an armed file, and absent is not zero. CMSGEN=none opts out explicitly.
 CMSGEN="${CMSGEN:-$REPO_ROOT/.gpap/bin/cmsgen}"
 CMS_ARGS=()
 if [ "$CMSGEN" != "none" ]; then
@@ -140,26 +115,24 @@ have() {
     return 0
 }
 
-# The GPAP-arm cache (rival_common.cached_gpap) lives beside the JSONs, so it survives a VM
-# only if it is mirrored like them. Ship it as ONE file the supervisor can carry: unpack whatever
-# a previous VM built, and re-pack after every stage. This is what makes a RIVAL-side re-run
-# cheap — of the 2026-08-23 campaign's ~3.3 h, only 64 min was the rivals' own subprocesses; the
-# rest was our arm, the start_point probes and sim_baseline, all of it identical across re-runs.
+# The GPAP-arm cache (rival_common.cached_gpap) survives a VM only if it is mirrored like the
+# JSONs, so ship it as one file the supervisor can carry. This is what makes a rival-side re-run
+# cheap: most of a campaign's wall is our arm, the start_point probes and sim_baseline, all
+# identical across re-runs.
 CACHE_TGZ="$OUT/gpap_cache.tgz"
 [ -f "$CACHE_TGZ" ] && tar xzf "$CACHE_TGZ" -C "$OUT" 2>/dev/null && \
     echo "[cache] restored $(ls "$OUT/.gpap_cache" 2>/dev/null | wc -l) GPAP arm(s)"
 save_cache() { tar czf "$CACHE_TGZ.tmp" -C "$OUT" .gpap_cache 2>/dev/null \
                    && mv "$CACHE_TGZ.tmp" "$CACHE_TGZ"; }
-# ...and keep packing it in the background (2026-09-05): a start_point probe or an OOM ceiling
-# settled mid-stage used to live only in this VM's directory until the STAGE ended, and on the
-# big-circuit tail the VM is reclaimed first — so every fresh VM re-paid them. The supervisor
-# mirrors the tarball every 3 min; 4 min here keeps the two from thrashing.
+# ...and keep packing it in the background: on the big-circuit tail the VM is reclaimed before
+# the stage ends, so a probe settled mid-stage would otherwise be re-paid by every fresh VM. The
+# supervisor mirrors the tarball every 3 min; 4 min here keeps the two from thrashing.
 ( while true; do sleep 240; save_cache; done ) &
 CACHE_PACKER=$!
 trap 'kill $CACHE_PACKER 2>/dev/null' EXIT
 
 # ---------------------------------------------------------------------------- 1. DEMOTIC
-# Cheap (median 3.7-15.3 s per run), so it gets BOTH circuit variants.
+# Cheap per run, so it can afford both circuit variants.
 if want demotic-native && have 25 "demotic-native"; then
     banner "DEMOTIC native (their ISCAS-85 pins, raw + abc)"
     $PY eval/rivals/rivals_demotic.py --mode native $COMB_INSTS --seeds $RSEEDS --steps "$STEPS" \
@@ -168,8 +141,8 @@ if want demotic-native && have 25 "demotic-native"; then
     save_cache
 fi
 
-# THE CONTROLLED CONTRAST: their own ISCAS-85 circuits under OUR rare pin. Paired with the
-# native arm above, the circuit is held fixed and only the TASK changes.
+# The controlled contrast: the same ISCAS-85 circuits under our rare pin, so against the native
+# arm above only the task changes.
 if want demotic-comb-rare && have 25 "demotic-comb-rare"; then
     banner "DEMOTIC (their ISCAS-85 circuits, OUR rare pin)"
     $PY eval/rivals/rivals_demotic.py --mode miter $COMB_INSTS -T 1 --target rare \
@@ -190,7 +163,7 @@ if want demotic-miter && have 50 "demotic-miter"; then
 fi
 
 # ---------------------------------------------------------------------------- 2. HTS
-# A CNF consumer, so its "circuit variant" is the ENCODER: build both CNFs it should see.
+# A CNF consumer, so its circuit variant is the encoder: build both CNFs it should see.
 if want hts && have 40 "hts"; then
     banner "HTS (same CNFs, same GPU)"
     HTS_DIR="$OUT/hts_cnf"; mkdir -p "$HTS_DIR"
@@ -210,12 +183,10 @@ if want hts && have 40 "hts"; then
 fi
 
 # ---------------------------------------------------------------------------- 3. Recurrent
-# The strongest rival and by far the most expensive (~15 min/row on the 4080), so it gets the
-# `raw` variant only. The 4080 run has raw rows too, so the cross-GPU comparison is unaffected;
-# what is lost is the raw-vs-abc axis, which measured nearly flat for the rivals anyway
-# (b03 129->127 ANDs) — the note lives in eval/rivals/rival_common.py.
-# RARE FIRST: it is the headline regime. Both harnesses now checkpoint per row, so a sub-stage
-# cut off by the deadline still leaves every row it finished.
+# The strongest rival and by far the most expensive per row, so it gets one variant only; the
+# raw-vs-abc axis measures nearly flat for the rivals (eval/rivals/rival_common.py). Rare first,
+# the headline regime; both harnesses checkpoint per row, so a deadline still leaves what
+# finished.
 if want recurrent-rare && have 60 "recurrent-rare"; then
     banner "Recurrent-CircuitSAT — OUR rare pins (raw)"
     $PY eval/rivals/rivals_recurrent.py $SEQ_INSTS -T "$T" --rare --seeds $RSEEDS --steps "$STEPS" \
@@ -253,19 +224,17 @@ if want recurrent-table-t50 && have 45 "recurrent-table-t50"; then
 fi
 
 # ------------------------------------------------------- 4. the num_steps tie-break, on THIS card
-# EVIDENCE, not configuration. RIVAL_STEPS pins one of the two values each tool itself ships,
-# choosing the one better for the rival; that choice was first measured on an RTX 4080. This
-# re-derives it here so the campaign carries its own proof instead of importing one. A FLIP is
-# printed and recorded, never acted on automatically. Last, because it needs the HTS CNFs and
-# because nothing else depends on it.
+# Evidence, not configuration. RIVAL_STEPS pins one of the two values each tool ships, the one
+# better for the rival; this re-derives that choice on this card so the campaign carries its own
+# proof. A flip is printed and recorded, never acted on automatically.
 if want steps-calib && have 30 "steps-calib"; then
     banner "num_steps: script vs argparse vs PAPER (and the paper's paired config), T=$T"
     $PY eval/rivals/steps_calibration.py --timeout "$TIMEOUT" --tools demotic recurrent \
         --cycles "$T" --out "$OUT/rivals_steps_calibration.json" 2>&1 | tee -a "$LOGS/rivals.log"
     save_cache
 fi
-# The same evidence at the rival's own depth: their Figure 5 shows unique count rising over 5
-# iterations at eta=50, so "saturates on the first step" (measured at T=25) is re-derived at 50.
+# The same evidence at the rival's own depth: their Figure 5 shows the unique count rising over
+# 5 iterations, so "saturates on the first step" is re-derived at T=50.
 if want steps-calib-t50 && have 45 "steps-calib-t50"; then
     banner "num_steps: script vs argparse vs PAPER (and the paired config), T=50"
     $PY eval/rivals/steps_calibration.py --timeout "$TIMEOUT" --tools recurrent \
@@ -273,11 +242,9 @@ if want steps-calib-t50 && have 45 "steps-calib-t50"; then
     save_cache
 fi
 
-# THE LEARNING-RATE TIE-BREAK, on this card. Recurrent ships two values for the knob a gradient
-# method depends on most — 15 in its run script, 50 in its paper text — so the rule that applies
-# to num_steps applies here: run it at whichever is better FOR THE RIVAL. Cheap (one instance,
-# two arms, our arm pinned to a token budget) and it is EVIDENCE, not configuration: a flip is
-# reported loudly and RIVAL_LR is changed deliberately, never mid-sweep.
+# The learning-rate tie-break on this card. Recurrent ships two values (15 in its run script,
+# 50 in its paper), so the num_steps rule applies: run it at whichever is better for the rival.
+# Evidence, not configuration — a flip is reported and RIVAL_LR changed deliberately.
 if want lr-calib && have 15 "lr-calib"; then
     banner "learning-rate tie-break (Recurrent: their script's 15 vs their paper's 50)"
     $PY eval/rivals/steps_calibration.py --axis lr --tools recurrent --timeout "$TIMEOUT" \

@@ -3,40 +3,18 @@
 solutions while another is not.
 
 GPAP's timed run gathers no MODEL to the host — `sample(collect=False)` never reconstructs a
-model row (`keep_rows` is False, so `var_bits` is not called), and the sample writer runs after
-the clock stops. What the timed run CAN do is project the delivered rows' support bits on the
-device as it goes (`out_cap`): the benchmark driver leaves it at 0, and the rival GPAP arm
-(eval/rivals/rivals_recurrent.py::run_gpap) sets it to `UNIQUE_ROWS` (4,000,000) so that EVERY
-delivered row is kept for the exact distinct count — one projected row per sample, up to the
-cap (measured: `unique_rows == n_models` on 71 of 74 campaign cells, up to 1,048,576 rows). That
-is symmetric only because the pipeline measures the projection wall (`out_project_s`) and
-subtracts it from the STEADY-STATE wall (checked below, [2]); Table 2's e2e column CHARGES it,
-beside the rival's own dedup and results write (paper_tables.rival_family). It replaced a
-separate coverage run that reconstructed thousands of full models on the host and OOM-killed
-b14. Until 2026-09-06 this docstring and the printed verdict below said "a FIXED 1,000 rows,
-not one per sample" — 4,000x stale, and the check could not see the value it named because it
-accepts `out_cap` as a bare parameter name (it re-derives only the subtraction).
-CMSGen is timed with the patch's `--nowrite` for exactly this
-reason (a stock binary writing every sample cost 8.2x of its wall on 27.sk_3_32). The GPU
-gradient rivals must therefore also be timed on generation alone — otherwise our ratio is
-partly a measurement of THEIR disk/PCIe traffic, which is not what the paper claims.
+model row and the sample writer runs after the clock stops. What it CAN do is project the
+delivered rows' support bits on the device as it goes (`out_cap`), which is symmetric only
+because the pipeline measures the projection wall (`out_project_s`) and subtracts it from the
+STEADY-STATE wall, while Table 2's e2e column CHARGES it beside the rival's own dedup and write.
 
-This checker RE-DERIVES that from the pinned rival sources instead of asserting it in prose:
-
-  1. rival timed regions  — AST-scan each rival's run.py for the function its own `timer(...)`
-     wraps, and report every host-transfer / IO call inside it (.cpu/.item/.numpy/.tolist,
-     open/print, to_csv/save). The modules that function reaches (model/, utils/) are scanned
-     too. Anything not in ALLOWED below is a FAILURE.
-  2. GPAP timed region    — AST-check that every `.sample(...)` call inside pipeline.py's timed
-     window passes `collect=False`.
-  3. CMSGen               — audit `cms_mode` over a recorded results tree; anything but
-     `nowrite` means that row timed CMSGen WITH sample emission.
-  4. Recurrent egress bound — the one known, documented exception (below) is quantified per
-     recorded cell from its own parameters, so the paper can state a bound rather than a hope.
-
-Usage:
-  PYTHONPATH=. python eval/rivals/check_emission_symmetry.py \
-      [--results .experiments/l4_campaign_20260823] [--rivals-root .gpap/src]
+RE-DERIVED from the pinned rival sources, never asserted in prose:
+  1. rival timed regions  — AST-scan for the function each rival's own `timer(...)` wraps and
+     report every host-transfer / IO call inside it; anything not in ALLOWED fails.
+  2. GPAP timed region    — every `.sample(...)` in the timed window passes `collect=False`,
+     and the wall subtracts the projection.
+  3. CMSGen               — anything but `cms_mode: nowrite` timed it WITH sample emission.
+  4. Recurrent egress bound — the one documented exception, quantified per recorded cell.
 """
 import argparse
 import ast
@@ -52,10 +30,8 @@ sys.path.insert(0, REPO_ROOT)
 EGRESS_ATTRS = {"cpu", "item", "numpy", "tolist", "to_csv", "save", "write", "writelines", "dump"}
 EGRESS_NAMES = {"open", "print"}
 
-# The ONLY tolerated host transfer inside any timed region, kept because removing it would mean
-# editing the rival's measured algorithm. Recurrent-CircuitSAT snapshots its per-depth candidate
-# assignments to the host at the end of every unroll depth; the cost is bounded in section 4 and
-# it is charged to THEM, i.e. it can only make our ratio look better than it is.
+# The ONLY tolerated host transfer inside a timed region, kept because removing it would edit the
+# rival's measured algorithm. Bounded in section 4 and charged to THEM.
 ALLOWED = {
     ("Recurrent-CircuitSAT-Sampler", "run_back_prop_seq", "cpu"):
         "per-depth candidate-solution snapshot — its share of their model_runtime is bounded "
@@ -67,21 +43,15 @@ RIVALS = [("Demotic", "src/pytorch/run.py"),
           ("Recurrent-CircuitSAT-Sampler", "src/pytorch/run.py"),
           ("High-Throughput-SAT-Sampler", "src/pytorch/run.py")]
 
-# Per-copy cost of THEIR access pattern (strided (batch,T) column -> pageable host), measured on
-# an RTX 4080 Laptop at ramped clocks: 0.098 ms @30k, 0.185 ms @100k, 0.367 ms @300k rows =>
-# t(ms) ~ 0.069 + 0.261 * MB (3.7 GB/s effective). PESSIMISTIC doubles it, covering a slower
-# host PCIe path than the box the fit came from.
+# Per-copy cost of THEIR access pattern (a strided (batch,T) column to pageable host), measured
+# as t(ms) ~ COPY_FIXED_MS + COPY_MS_PER_MB * MB; PESSIMISM doubles it for a slower PCIe path.
 COPY_FIXED_MS, COPY_MS_PER_MB, PESSIMISM = 0.069, 0.261, 2.0
 
 
 def _marks(node, helpers=None):
-    """Every host-transfer / IO call inside an AST subtree, as (lineno, marker).
-
-    `helpers` maps module-level function names to their defs, and calls into them are resolved
-    ONE level deep. Without that, wrapping the transfer in a helper hides it — which is exactly
-    what the setup script's egress meter does to Recurrent's `.cpu()` (`_gpap_snap`), so the
-    checker would have gone quiet on the one case it exists to catch.
-    """
+    """Every host-transfer / IO call inside an AST subtree, as (lineno, marker); `helpers` maps
+    module-level names to their defs and calls resolve ONE level deep, or a transfer wrapped in
+    a helper would hide."""
     hits = []
     for n in ast.walk(node):
         if not isinstance(n, ast.Call):
@@ -165,15 +135,10 @@ def scan_rivals(root):
 
 def scan_gpap():
     """Every `.sample(...)` inside pipeline.py's timed window must pass collect=False AND leave
-    `out_cap` at 0.
-
-    `out_cap` is the second way the timed run can deliver rows to the host: it projects each
-    chunk's support bits as the run goes (that is what makes `gpap sample --out` cheap). The
-    benchmark driver never sets it; the rival GPAP arm sets it to UNIQUE_ROWS, one projected
-    row per delivered sample up to 4,000,000 (module docstring), which is only symmetric because
-    the pipeline subtracts the projection wall from the timed wall — so this check also
-    re-derives THAT: the `wall = ...` assignment that closes the window must subtract `proj_s`. Re-deriving the property instead of asserting a claim
-    that used to follow from `collect=False` alone and no longer does."""
+    `out_cap` at 0, `out_cap` being the second way the timed run can deliver rows to the host.
+    The rival GPAP arm sets it, which is symmetric only because the pipeline subtracts the
+    projection wall — so this re-derives THAT too: the `wall = ...` assignment closing the
+    window must subtract `proj_s`."""
     path = os.path.join(REPO_ROOT, "gpap", "sampling", "pipeline.py")
     tree = ast.parse(open(path).read())
     ends = [n.lineno for n in ast.walk(tree)
@@ -210,8 +175,8 @@ def scan_gpap():
         v = kw.get("collect")
         good = isinstance(v, ast.Constant) and v.value is False
         oc = kw.get("out_cap")
-        # Absent, the literal 0, or the `out_cap` NAME (which the benchmark path always passes as
-        # 0) — anything else means the timed window may be projecting rows to the host.
+        # Absent, the literal 0, or the `out_cap` NAME (the benchmark path passes 0); anything
+        # else means the timed window may be projecting rows to the host.
         oc_ok = (oc is None
                  or (isinstance(oc, ast.Constant) and oc.value == 0)
                  or (isinstance(oc, ast.Name) and oc.id == "out_cap"))
@@ -229,11 +194,8 @@ def scan_gpap():
 
 
 def campaign_jsons(results, pattern):
-    """The campaign's OWN result files: the top level of `results` when it holds any, else a
-    recursive walk (the older per-GPU layout). A campaign directory also keeps its history —
-    `rerun_*/` removed-row archives, `split_*/` per-session mirrors — and scanning those as rows
-    reported a 208% worst-case bound off a superseded `s208.1` row that the live file had
-    already replaced (2026-09-06). History is evidence for the README, not rows for the audit."""
+    """The campaign's OWN result files: the top of `results` when it holds any, else a recursive
+    walk. History (`rerun_*/`, `split_*/`) is evidence for the README, not rows for the audit."""
     top = sorted(glob.glob(os.path.join(results, pattern)))
     if top:
         return top
@@ -249,9 +211,7 @@ def scan_cmsgen(results):
             d = json.load(open(f))
         except (ValueError, OSError):
             continue
-        # `gpap bench` stages keep their rows under `results`; the rival harnesses (which carry
-        # the CMSGen arm on their own rows since the converged protocol) under `rows`, or as a
-        # bare list (rivals_recurrent_*.json). Every one of them is audited.
+        # `gpap bench` stages keep rows under `results`, the rivals under `rows` or a bare list.
         if isinstance(d, dict):
             rows = list(d.get("results") or []) + list(d.get("rows") or [])
         else:
@@ -272,14 +232,8 @@ def scan_cmsgen(results):
 
 
 def recurrent_egress(results, cycles=25):
-    """Bound the one allowed exception, per recorded cell, from its own parameters.
-
-    Copy count x the measured per-copy cost of that access pattern. Corroborated end-to-end by
-    timing the block directly inside the rival on an RTX 4080: 0.70% (b03@100k), 1.32-1.42%
-    (s386@100k), 0.88% (s1196@30k) of model_runtime, and removing the copy entirely leaves
-    num_unique_solutions bit-identical while saving 1.41% on s386 over 4 interleaved reps. The
-    direct measurements land near the PESSIMISTIC column here, so quote that one.
-    """
+    """Bound the one allowed exception per recorded cell from its own parameters: copy count x
+    the measured per-copy cost, corroborated by timing the block inside the rival."""
     bench = os.path.join(REPO_ROOT, "benchmarks", "circuits", "bench", "seq")
     print("\n[4] Recurrent-CircuitSAT per-depth host snapshot — measured bound")
     rows = []
@@ -307,8 +261,8 @@ def recurrent_egress(results, cycles=25):
     for mode, name, copies, gib, rt, sec in rows:
         pct, pes = 100 * sec / rt, 100 * sec * PESSIMISM / rt
         worst = max(worst, pes)
-        # a share >= 100% is exactly the row a reader must be able to see: at width 6 the
-        # percent fused with the egress column (`3.46104.23%`) and a column parser dropped it
+        # a share >= 100% is the row a reader must be able to see, so it must not fuse with the
+        # egress column
         print(f"    {mode:<7}{name:<9}{copies:>8,}{gib:>7.2f}{rt:>10.1f}{sec:>10.2f}"
               f"{pct:>8.2f}%{pes:>10.2f}%")
     print(f"    => worst case {worst:.2f}% of their reported model_runtime (the bound is per "

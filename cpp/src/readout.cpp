@@ -1,10 +1,5 @@
-/* Row selections and readout: the completion test, the soundness check and the two gathers
- * the sampler needs. All of it runs on device — the host only ever receives the small result
- * (a count, a bit matrix, or an assignment slice), never a (K, M) or (K, N) transient.
- *
- * Replaces the torch-side `active & ~any_free(...)`, `sat_rows(...) > 0`, `var_true_bits` and
- * `_bits_to_bytes` of the Python engine.
- */
+/* Row selections and readout: the completion test, the soundness check and the two gathers the
+ * sampler needs, all on device — the host receives a count or a small matrix, never (K, M). */
 #include "gpap_internal.hpp"
 
 #include <algorithm>
@@ -48,8 +43,7 @@ extern "C" gpap_status gpap_pair_mask_create(gpap_engine *e, const int32_t *vars
                                              int32_t *mask_id_out) {
     if (!e || !mask_id_out) return GPAP_ERR_ARG;
     GPAP_TRY(engine_use_ctx(e));
-    /* Even bit 2v set for every selected variable; padding pairs beyond N stay 0 (a raw
-     * even-bits constant would misread them as free — the pair mask is REQUIRED). */
+    /* Even bit 2v per selected variable; padding pairs beyond N stay 0, so the mask is needed. */
     std::vector<uint32_t> bits((size_t)e->nw, 0u);
     const int32_t n = vars ? n_vars : e->num_vars;
     for (int32_t i = 0; i < n; ++i) {
@@ -86,7 +80,7 @@ extern "C" gpap_status gpap_select_complete(gpap_engine *e, int32_t mask_id, int
                     {&e->abits.ptr, &e->pair_masks[(size_t)mask_id]->ptr, &e->active.ptr,
                      &s.mask.ptr, &NW}));
     s.rows_valid = false;
-    s.selected = true;                   /* the mask now holds a real selection */
+    s.selected = true;
     GPAP_TRY(reduce_flags(e, s.mask, e->K, &s.count));
     if (count_out) *count_out = s.count;
     return GPAP_OK;
@@ -105,15 +99,12 @@ extern "C" gpap_status gpap_selection_set(gpap_engine *e, int32_t slot, const in
         }
     s.host_rows.assign(rows, rows + n_rows);
     s.count = n_rows;
-    /* INVALIDATED BEFORE the fallible upload, not just set true after it. The host side has
-     * already moved; if the upload then failed, `rows_valid` would keep its PREVIOUS value, and
-     * a slot that was valid would pair the NEW count with the OLD device row list — so
-     * gpap_var_bits would gather the previous selection's rows while reporting this one's
-     * count, with no error anywhere downstream. */
+    /* Invalidated BEFORE the fallible upload: the host side has already moved, so a failed one
+     * would pair the NEW count with the OLD device rows, with no error downstream. */
     s.rows_valid = false;
     s.selected = true;
     GPAP_TRY(engine_stage(s.rows, s.host_rows.data(), s.host_rows.size() * sizeof(int32_t)));
-    s.rows_valid = true;                 /* explicit rows: no mask compaction needed */
+    s.rows_valid = true;
     return GPAP_OK;
 }
 
@@ -123,8 +114,7 @@ extern "C" gpap_status gpap_selection_rows(gpap_engine *e, int32_t slot, int32_t
     GPAP_TRY(engine_use_ctx(e));
     GPAP_TRY(engine_ensure_rows(e, slot));
     const Selection &s = e->slots[slot];
-    /* Bounded by the caller's capacity: the selection can be recompacted between the
-     * gpap_select_complete that produced the count and this call. */
+    /* Bounded by the caller's capacity: the selection can be recompacted since the count. */
     const size_t n = std::min((size_t)capacity, s.host_rows.size());
     if (n) memcpy(rows_out, s.host_rows.data(), n * sizeof(int32_t));
     return GPAP_OK;
@@ -145,8 +135,8 @@ extern "C" gpap_status gpap_check_sound(gpap_engine *e, int32_t slot, int32_t ma
     GPAP_TRY(e->staging_b.reserve((size_t)n));
     Kernel k;
     GPAP_TRY(e->kernels.get("sound_rows.s" + std::to_string(e->shift), &k));
-    /* Long clauses are checked against their packed words; binary + unit clauses against the
-     * bitmap through the (n_pairs, 2) pair list (see helpers.py::sound_rows). */
+    /* Long clauses against their packed words, binary/unit against the bitmap via the
+     * (n_pairs, 2) pair list (helpers.py::sound_rows). */
     int32_t M = e->num_long, NW = e->nw, NP = e->n_pairs;
     GPAP_TRY(launch(k, (unsigned)n, 1,
                     {&e->packed.ptr, &e->abits.ptr, &s.rows.ptr, &M, &NW, &e->pair_check.ptr,
@@ -162,9 +152,8 @@ extern "C" gpap_status gpap_var_bits(gpap_engine *e, int32_t slot, const int32_t
     GPAP_TRY(engine_use_ctx(e));
     GPAP_TRY(engine_ensure_rows(e, slot));
     Selection &s = e->slots[slot];
-    const int32_t n_rows = std::min(max_rows, s.count);   /* never write past the caller */
-    /* Zero rows or zero columns are legal degenerate requests (a formula whose variables were
-     * all determined by unit propagation / ELS has nothing left to gather). */
+    const int32_t n_rows = std::min(max_rows, s.count);
+    /* Zero rows or columns are legal: a fully determined formula has nothing to gather. */
     if (n_rows == 0 || n_cols == 0) return GPAP_OK;
 
     GPAP_TRY(engine_stage(e->staging_a, cols, (size_t)n_cols * sizeof(int32_t)));
@@ -198,8 +187,8 @@ extern "C" gpap_status gpap_assignment_rows(gpap_engine *e, int32_t slot, int8_t
     GPAP_TRY(engine_ensure_rows(e, slot));
     Selection &s = e->slots[slot];
     const int32_t two_n = 2 * e->num_vars;
-    const int32_t n_rows = std::min(max_rows, s.count);   /* never write past the caller */
-    if (n_rows == 0 || two_n == 0) return GPAP_OK;        /* degenerate: nothing to unpack */
+    const int32_t n_rows = std::min(max_rows, s.count);
+    if (n_rows == 0 || two_n == 0) return GPAP_OK;
     if (!out_host) return GPAP_ERR_ARG;
     int32_t step = (int32_t)std::max<int64_t>(
         32, (int64_t)(engine_readout_slice_bytes() / (size_t)std::max(two_n, 1)));
@@ -252,17 +241,14 @@ extern "C" gpap_status gpap_num_propagated(gpap_engine *e, int32_t *out_host,
 extern "C" gpap_status gpap_sat_rows(gpap_engine *e, const int32_t *rows, int32_t n_rows,
                                      int32_t *out_host) {
     /* (n, M_TOTAL) in the ORIGINAL clause order. Long clauses read their packed word's count
-     * field; binary and unit clauses have no per-row word, so their non-falsified count is
-     * synthesized from the row's assignment bitmap — identical values (a packed word also
-     * counts non-falsified literals), with no per-row state behind them. */
+     * field; binary and unit clauses have none, so theirs is synthesized from the bitmap. */
     if (!e || !rows || !out_host || n_rows < 0) return GPAP_ERR_ARG;
     GPAP_TRY(gpap::engine_reject_if_packed_is_baseline(e, "gpap_sat_rows"));
     GPAP_TRY(engine_use_ctx(e));
     const int32_t M = e->num_clauses, ML = e->num_long;
     const uint32_t sat_mask = (1u << e->shift) - 1;
-    /* The bitmap is only read to synthesize binary/unit counts, so a formula made entirely of
-     * length>=3 clauses must not pay for it: that copy is per ROW, and this runs over a whole
-     * chunk from gpap_check_sets. */
+    /* The bitmap is only read to synthesize binary/unit counts, and that copy is per ROW, so an
+     * all-long formula must not pay for it. */
     const bool need_bits = e->n_pairs > 0;
     std::vector<int32_t> lw((size_t)ML);
     std::vector<uint32_t> aw((size_t)(need_bits ? e->nw : 0));
@@ -284,9 +270,9 @@ extern "C" gpap_status gpap_sat_rows(gpap_engine *e, const int32_t *rows, int32_
             if (src >= 0) {
                 dst[c] = (int32_t)((uint32_t)lw[(size_t)src] & sat_mask);
             } else {
-                const int32_t p = -src - 1;                   /* merged pair index */
+                const int32_t p = -src - 1;
                 dst[c] = not_falsified(e->pair_host[(size_t)(2 * p)]);
-                if (p < e->num_bin)                           /* a unit's pair is (u, u) */
+                if (p < e->num_bin)
                     dst[c] += not_falsified(e->pair_host[(size_t)(2 * p + 1)]);
             }
         }
@@ -296,9 +282,8 @@ extern "C" gpap_status gpap_sat_rows(gpap_engine *e, const int32_t *rows, int32_
 
 extern "C" gpap_status gpap_packed_rows(gpap_engine *e, const int32_t *rows, int32_t n_rows,
                                         int32_t *out_host) {
-    /* RAW words, sum field included, (n, num_long) — the packed state's true width: only
-     * length>=3 clauses have words. gpap_sat_rows above masks the sum off, which would hide
-     * sum corruption from the CLEAN-mode identity gate (tests/test_clean_mode.py). */
+    /* RAW words, sum field included, (n, num_long): gpap_sat_rows masks the sum off, which would
+     * hide sum corruption from the CLEAN-mode gate (tests/test_clean_mode.py). */
     if (!e || !rows || !out_host || n_rows < 0) return GPAP_ERR_ARG;
     GPAP_TRY(engine_use_ctx(e));
     const int32_t M = e->num_long;

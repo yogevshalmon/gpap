@@ -1,67 +1,32 @@
-"""The two Triton BCP kernels — the ONLY execution path of the GPAP engine (packed SUM-trick).
+"""The two Triton BCP kernels — the only execution path of the engine (packed sum-trick).
 
-BUILD INPUT, NOT RUNTIME CODE. Nothing imports this module to run it: `cpp/tools/build_kernels.py`
-loads it (with `cpp/kernels/helpers.py`, the support kernels) and AOT-compiles every specialization
-into `libgpap.so`. The shipped library needs `libcuda.so.1` alone — no triton, no torch, no nvcc.
-Editing this file therefore changes nothing until the kernels are rebuilt; `scripts/build_core.sh`
-does both steps.
+BUILD INPUT, NOT RUNTIME CODE: cpp/tools/build_kernels.py AOT-compiles every specialization into
+libgpap.so, which then needs libcuda alone. Never import torch here; CI builds with triton alone.
 
-Design — one program per batch row, sequential trail, atomics only WITHIN a row's warp(s):
-  * Each Triton program owns row k exclusively: its row of the packed clause state and of the
-    assignment bitmap are program-private, so there are no cross-PROGRAM races by construction;
-    the WAVE variant's in-row lane races are resolved by the atomics' return values (below).
-  * The program keeps a "trail" queue of newly-TRUE literals. It pops literals (one at a time
-    scalar, up to W at once in WAVE) and walks their occurrence lists (clauses where ~lit
-    appears), updating the packed counters.
-  * GPU-wide parallelism comes from the K programs (thousands to hundreds of thousands), which
-    saturates the SMs; per-row work is uniform on the target formulas, so warps stay balanced.
+One program per batch row, whose packed row and bitmap row are program-private (no cross-program
+races; WAVE's in-row lane races are resolved by atomic return values). Each pops literals off a
+trail of newly-TRUE ones — one at a time in scalar, up to W at once in WAVE — and walks their
+occurrence lists. Only length>=3 clauses have a packed word, so M here is num_long; length-2
+clauses are IMPLICATION EDGES in the binary prefix of each occ segment (payload = the other
+literal) propagated by one bitmap push, and units live in the flush cache.
 
-CLAUSES ARE SEGREGATED BY LENGTH (cpp/src/formula.cpp): only length>=3 clauses have a packed
-word — M in these kernels is num_long. Length-2 clauses are IMPLICATION EDGES in the occ list
-(payload = the other literal, the binary prefix of each segment, split at occ_mid[l]): their
-whole propagation is one bitmap push, zero per-row state. Length-1 clauses live in the flush
-cache's bitmap. ~65-75% of occ entries on circuit CNFs take the binary path.
+Both row states are single words updated by ONE op whose old value IS the detection logic:
+  * PACKED clause word, one int32 per (row, clause): low SHIFT bits = sat_count, high 32-SHIFT
+    bits = SUM of the non-falsified literal indices mod 2^(32-SHIFT) (SHIFT=16 for 2N <= 65535,
+    SHIFT=8 for 2N <= 0xFFFFFF with clause length <= 255; anything else is rejected). Every
+    removal is exact mod 2^F, so at sat_count==1 the sum field IS the last literal, and one
+    falsified literal costs one subtraction st -= 1 + (neg << SHIFT) — the count never borrows,
+    the sum wraps off the top. In WAVE that subtraction is a tl.atomic_add whose RETURN gives
+    race-free detection: old count==1 means this lane emptied the clause, old count==2 means it
+    made it unit and (old_sum - neg) & SUM_MASK is the forced literal.
+  * Assignment BITMAP, bit l of (K, ceil(2N/32)) int32 words, where l and l^1 share a word, so
+    ONE load answers free/duplicate/contradiction and in WAVE the push is a tl.atomic_or whose
+    RETURN deduplicates (old bit l) and detects contradictions (old bit l^1).
 
-BOTH row states are single words updated by ONE op whose old value is the detection logic:
-
-  * PACKED clause state — ONE int32 word per (row, clause), `SHIFT` selects the field split
-    (compile-time constexpr): low SHIFT bits = sat_count, high 32-SHIFT bits = SUM of the
-    non-falsified literal indices mod 2^(32-SHIFT).
-      SHIFT=16 -> 16|16, covers 2N <= 65535     (sat half holds any realistic clause size)
-      SHIFT=8  -> 8|24,  covers 2N <= 0xFFFFFF and max clause len <= 255 (the "wide" instances)
-    The engine REJECTS formulas outside both envelopes (see BCPEngine). Every removal is exact
-    mod 2^F, so at sat_count==1 the field IS the last literal. The update per falsified literal
-    is ONE subtraction, st -= 1 + (neg << SHIFT) (count never borrows — count >= 1; sum wraps
-    off the top of the word). In WAVE that subtraction is a tl.atomic_add whose RETURN gives
-    race-free detection: old count==1 -> this lane emptied the clause (conflict), old count==2
-    -> this lane made it unit and (old_sum - neg) & SUM_MASK IS the forced literal.
-  * Assignment BITMAP — bit l of the (K, ceil(2N/32)) int32 words = literal l TRUE. l and l^1
-    always share a word (2v / 2v+1), so ONE load answers free/duplicate/contradiction, and in
-    WAVE the push is a tl.atomic_or whose RETURN deduplicates (old bit l set) and detects
-    contradictions (old bit l^1 set) under any lane interleaving. 8x smaller than the former
-    int8-per-literal array — on the big unrolls the whole bitmap approaches L2 residency.
-
-The inner BCP loop is memory-bound on SCATTERED clause-state sectors (uncoalesced by
-construction), so the single packed word is half the traffic of separate tensors.
-
-Two entry-point kernels share the `_propagate` helper (triton inlines it — one source, two
-binaries per SHIFT):
-  * `_bcp_fixpoint_kernel`   — batched assumption checking: seed a (K,B) decision tensor and
-    BCP to fixpoint (the engine's `apply_and_propagate`; miner/checker consume this).
-  * `_bcp_trajectory_kernel` — the WHOLE randomized decide+propagate sampling loop in one
-    launch, with an optional in-kernel soft risk-polarity (`SOFT`).
-
-Semantics contract:
-  * conflict/active flags are exact (BCP fixpoints are confluent).
-  * NON-conflicted rows: assignment / packed counters are the exact BCP fixpoint.
-  * Conflicted rows: partial counter state is propagation-order-dependent and intentionally
-    unspecified (the sampler only reads rows that are active & fully-assigned).
-  * Fixpoint decisions: duplicate literals are skipped; an l/~l pair or a decision contradicting
-    the existing assignment conflicts the row.
-
-NO torch import, at module scope or anywhere: CI builds the library with triton ALONE (triton's
-NVIDIA backend reports itself inactive without torch + a GPU, which is why build_kernels.py goes
-around the JIT binder). Keep it that way or the driverless build job stops working.
+`_bcp_fixpoint_kernel` seeds a (K,B) decision tensor and BCPs to fixpoint;
+`_bcp_trajectory_kernel` runs the whole randomized decide+propagate loop. Contract:
+conflict/active flags are exact (fixpoints are confluent) and a non-conflicted row's assignment
+and counters are the exact fixpoint, while a CONFLICTED row's partial state is unspecified.
 """
 import triton
 import triton.language as tl
@@ -69,17 +34,12 @@ import triton.language as tl
 @triton.jit
 def _propagate(st_row, ab_row, trail_row, occ_off_ptr, occ_mid_ptr, occ_cls_ptr,
                head, tail, conflict, nops, TRAIL_CAP, SHIFT: tl.constexpr):
-    """Pop literals off the trail and BCP to fixpoint (or conflict) on the packed row.
-    Inlined by both kernels; returns the updated (head, tail, conflict, nops).
-
-    Each occ[lit] segment is [BINARY | LONG] (split at occ_mid[lit]). A binary entry's payload
-    IS the forced literal — the clause (~lit | payload) just lost ~lit — so the whole update is
-    the bitmap push below, with no clause word anywhere. Long entries keep the packed-word
-    decrement. Binaries run FIRST: cheap fail-fast, and BCP confluence makes the order
-    unobservable on surviving rows.
-
-    The assignment is a BITMAP (int32 words, bit l = literal l TRUE): l and l^1 always
-    share a word (2v / 2v+1), so ONE load answers duplicate + contradiction at once."""
+    """Pop literals off the trail and BCP to fixpoint (or conflict) on the packed row. Inlined by
+    both kernels; returns the updated (head, tail, conflict, nops). Each occ[lit] segment is
+    [BINARY | LONG], split at occ_mid[lit], and a binary entry's payload IS the forced literal —
+    the clause (~lit | payload) just lost ~lit — so its whole update is the bitmap push, with no
+    clause word. Binaries run first for cheap fail-fast; confluence makes the order
+    unobservable on surviving rows."""
     SAT_MASK: tl.constexpr = (1 << SHIFT) - 1
     SUM_MASK: tl.constexpr = (1 << (32 - SHIFT)) - 1
     while (head < tail) & (conflict == 0):
@@ -91,19 +51,19 @@ def _propagate(st_row, ab_row, trail_row, occ_off_ptr, occ_mid_ptr, occ_cls_ptr,
         end = tl.load(occ_off_ptr + lit + 1)
         nops += end - start
         o = start
-        while (o < mid) & (conflict == 0):          # binary prefix: payload = forced literal
+        while (o < mid) & (conflict == 0):          # binary prefix: payload IS the forced lit
             forced = tl.load(occ_cls_ptr + o) & 0x7FFFFFFF     # strip the binary tag bit
             w = tl.load(ab_row + (forced >> 5))
             bit = 1 << (forced & 31)
             if (w & bit) == 0:
                 if (w & (1 << ((forced ^ 1) & 31))) != 0:
-                    conflict = 1                    # both literals falsified: clause empty
+                    conflict = 1
                 elif tail < TRAIL_CAP:
                     tl.store(ab_row + (forced >> 5), w | bit)
                     tl.store(trail_row + tail, forced)
                     tail += 1
-                else:                               # structurally unreachable (cap >= N+B)
-                    conflict = 1
+                else:
+                    conflict = 1                    # structurally unreachable (cap >= N+B)
             o += 1
         o = mid
         while (o < end) & (conflict == 0):          # long suffix: packed clause words
@@ -111,7 +71,7 @@ def _propagate(st_row, ab_row, trail_row, occ_off_ptr, occ_mid_ptr, occ_cls_ptr,
             st = tl.load(st_row + c) - 1 - (neg << SHIFT)
             tl.store(st_row + c, st)
             sat = st & SAT_MASK
-            if sat == 0:                            # all literals falsified
+            if sat == 0:
                 conflict = 1
             elif sat == 1:                          # unit: remaining literal IS the sum field
                 forced = (st >> SHIFT) & SUM_MASK
@@ -119,44 +79,32 @@ def _propagate(st_row, ab_row, trail_row, occ_off_ptr, occ_mid_ptr, occ_cls_ptr,
                 bit = 1 << (forced & 31)
                 if (w & bit) == 0:
                     if (w & (1 << ((forced ^ 1) & 31))) != 0:
-                        conflict = 1                # forced both polarities
+                        conflict = 1
                     elif tail < TRAIL_CAP:
                         tl.store(ab_row + (forced >> 5), w | bit)
                         tl.store(trail_row + tail, forced)
                         tail += 1
-                    else:                           # structurally unreachable (cap >= N+B)
+                    else:
                         conflict = 1
             o += 1
     return head, tail, conflict, nops
 
 @triton.jit
 def _seg_lookup(cum_v, adj_v, t_v, lanes, W: tl.constexpr):
-    """Map each lane's flattened index `t` to (segment, occ offset) for a frontier chunk.
-
-    `cum_v` is the INCLUSIVE prefix sum of the segment lengths and `adj_v = s_v - (cum_v -
-    len_v)` the per-segment offset correction, so entry `t` of segment `j` lives at occ index
-    `adj_j + t`. Returns `(seg_v, o_v)`.
-
-    The segment is `#{j: cum_j <= t}`, computed as a branchless lower_bound: log2(W) `tl.gather`
-    probes, each ONE `shfl.sync`. It replaced a W x W compare-reduce plus three one-hot gathers,
-    which Triton lowers through SHARED MEMORY with barriers (~13x the PTX instructions; the
-    kernel now uses none) — docs/findings/WAVE_SHUFFLE_FINDINGS.md.
-
-    IN RANGE by construction: an ACTIVE lane has `t < T <= cum_{f-1}`, so `seg <= f-1 <= W-1`
-    and the classic sum-of-steps-(W-1) ladder suffices; every probe index is `<= W-2` (the
-    running `seg` is `<= W-2s` entering the step-s round). Duplicate `cum` values (empty
-    segments) resolve past them, exactly as the count-of-<= did. Inactive lanes saturate at
-    `W-1` — still in range, and their result is masked off by every caller.
-
-    W must be a power of two; `tl.arange` above already rejects anything else."""
+    """Map each lane's flattened index `t` to (segment, occ offset) for a frontier chunk. `cum_v`
+    is the inclusive prefix sum of the segment lengths and `adj_v = s_v - (cum_v - len_v)` the
+    per-segment offset correction, so entry `t` of segment `j` is at occ index `adj_j + t`. The
+    segment is `#{j: cum_j <= t}`, a branchless lower_bound of log2(W) `tl.gather` probes, each
+    one `shfl.sync` — this replaced a WxW compare-reduce that Triton lowered through SHARED
+    memory with barriers (docs/findings/WAVE_SHUFFLE_FINDINGS.md). In range by construction: an
+    active lane has `t < T <= cum_{f-1}`, so every probe index is `<= W-2`; inactive lanes
+    saturate at `W-1`, masked off by every caller. W must be a power of two."""
     seg_v = lanes * 0
     step = W // 2
     while step >= 1:
-        # `step` is a constexpr, but triton's frontend still EMITS this loop (visit_While has no
-        # static-condition path) — the constant trip count is fully unrolled by MLIR/LLVM, which
-        # is what makes the schedule log2(W) shuffles with zero shared memory. That is an
-        # OPTIMIZER outcome, not a structural guarantee: if W or this body changes, re-dump the
-        # PTX and check for `shfl.sync` with no `.shared` / `bar.sync` before trusting the cost.
+        # `step` is a constexpr but triton still emits this loop; MLIR/LLVM unroll the constant
+        # trip count, which is what makes the schedule log2(W) shuffles with no shared memory.
+        # An optimizer outcome: if W or this body changes, re-check the PTX.
         probe_v = tl.gather(cum_v, seg_v + (step - 1), 0)
         seg_v += tl.where(probe_v <= t_v, step, 0)
         step //= 2
@@ -166,37 +114,25 @@ def _seg_lookup(cum_v, adj_v, t_v, lanes, W: tl.constexpr):
 def _wave_propagate(st_row, ab_row, trail_row, occ_off_ptr, occ_mid_ptr, occ_cls_ptr,
                     head, tail, conflict, nops, TRAIL_CAP,
                     SHIFT: tl.constexpr, W: tl.constexpr):
-    """Warp-wide wavefront BCP (selected by WAVE=1): pop up to W trail literals at once,
-    flatten the union of their occ segments, and process W clause updates per step with
-    masked vector ops — one warp-wide gather instead of a serial dependent chain (up to W
-    scattered requests in flight per row instead of 1).
-
-    BOTH state updates are one atomic whose RETURN VALUE is the detection logic:
-
-    * clause word: two frontier literals CAN share a clause, and the modular-SUM packing
-      makes the whole update a single tl.atomic_add of -(1 + (neg << SHIFT)) (count field
-      never borrows — count >= 1; sum field wraps off the top). Old count==1 -> this lane
-      emptied the clause (conflict); old count==2 -> this lane made it unit and the forced
-      literal is (old_sum - neg) & SUM_MASK (the serialized old sum holds exactly the
-      not-yet-removed literals, of which neg is one).
-    * assignment BITMAP: pushing forced literal l is tl.atomic_or of bit l, and l / l^1
-      always share a word (2v / 2v+1) — old bit(l) set -> duplicate (drop: replaces the
-      old WxW in-warp dedup), old bit(l^1) set -> contradiction (conflict). Two lanes
-      forcing l and ~l in the SAME step serialize in the L2 atomic unit, so exactly one
-      of them sees the other's bit: race-free with zero extra loads.
-
-    `occ_mid_ptr` is unused here — the binary/long split is read from the payload tag — but stays
-    in the signature so both propagate variants take the same arguments.
-
-    Propagation ORDER differs from the scalar kernel, but BCP fixpoints are confluent:
-    non-conflicted rows reach the IDENTICAL fixpoint (bit-identical models — the
-    no-change gate validates this variant directly); conflicted rows' partial state is
-    unspecified, as ever. `nops` counts the same occ entries."""
+    """Warp-wide wavefront BCP (WAVE=1): pop up to W trail literals at once, flatten the union of
+    their occ segments, and process W clause updates per step with masked vector ops — one
+    warp-wide gather instead of a serial dependent chain. Both state updates are one atomic whose
+    RETURN VALUE is the detection logic:
+    * clause word: two frontier literals CAN share a clause, and the modular-sum packing makes
+      the whole update a single tl.atomic_add of -(1 + (neg << SHIFT)). Old count==1 means this
+      lane emptied the clause; old count==2 means it made it unit, and the forced literal is
+      (old_sum - neg) & SUM_MASK, since the serialized old sum holds exactly the not-yet-removed
+      literals, of which neg is one.
+    * assignment BITMAP: pushing forced literal l is tl.atomic_or of bit l, and l / l^1 share a
+      word — old bit(l) means duplicate, old bit(l^1) contradiction. Two lanes forcing l and ~l
+      in one step serialize in the L2 atomic unit, so exactly one sees the other's bit.
+    `occ_mid_ptr` is unused (the split is read from the payload tag) but stays in the signature so
+    both variants take the same arguments. Order differs from the scalar kernel, but fixpoints
+    are confluent, so non-conflicted rows reach the identical one."""
     SAT_MASK: tl.constexpr = (1 << SHIFT) - 1
     SUM_MASK: tl.constexpr = (1 << (32 - SHIFT)) - 1
     lanes = tl.arange(0, W)
     while (head < tail) & (conflict == 0):
-        # ---- frontier chunk: up to W pending literals; flatten their occ segments ----
         f = tl.minimum(tail - head, W)
         lm = lanes < f
         lit_v = tl.load(trail_row + head + lanes, mask=lm, other=0)
@@ -204,9 +140,9 @@ def _wave_propagate(st_row, ab_row, trail_row, occ_off_ptr, occ_mid_ptr, occ_cls
         s_v = tl.load(occ_off_ptr + lit_v, mask=lm, other=0)
         e_v = tl.load(occ_off_ptr + lit_v + 1, mask=lm, other=0)
         len_v = tl.where(lm, e_v - s_v, 0)
-        cum_v = tl.cumsum(len_v, 0)                       # inclusive prefix sum
-        T = tl.max(cum_v, 0)                              # total occ entries this chunk
-        adj_v = s_v - (cum_v - len_v)                     # occ offset of entry t in seg j = adj_j + t
+        cum_v = tl.cumsum(len_v, 0)                       # inclusive prefix sum; T = its max
+        T = tl.max(cum_v, 0)
+        adj_v = s_v - (cum_v - len_v)                     # entry t of seg j is at adj_j + t
         head += f
         nops += T
         t0 = f * 0
@@ -216,20 +152,16 @@ def _wave_propagate(st_row, ab_row, trail_row, occ_off_ptr, occ_mid_ptr, occ_cls
             seg_v, o_v = _seg_lookup(cum_v, adj_v, t_v, lanes, W)
             mneg_v = tl.gather(neg_v, seg_v, 0)
             pay_v = tl.load(occ_cls_ptr + o_v, mask=act, other=0)
-            # A TAGGED (negative) payload is a BINARY entry: it IS the forced literal and there
-            # is no clause word, so it goes STRAIGHT to the push block below. Reading the tag off
-            # the value already loaded costs nothing; gathering this segment's occ_mid instead
-            # would be a third shuffle gather in the hottest loop of the engine.
+            # A TAGGED (negative) payload is a BINARY entry: it IS the forced literal and has no
+            # clause word, so it goes straight to the push block below (reading the tag off the
+            # loaded value is free; gathering occ_mid would be a third shuffle gather).
             binm = act & (pay_v < 0)
             lngm = act & (pay_v >= 0)
             c_v = pay_v.to(tl.int64)
-            # ---- ONE atomic per LONG entry: st -= 1 + (mneg << SHIFT); old value = detection
             old_v = tl.atomic_add(st_row + c_v, -(1 + (mneg_v << SHIFT)), mask=lngm)
             oldsat_v = old_v & SAT_MASK
-            # ---- forced pushes: ONE atomic_or per literal; old word = dedup+contra.
-            #      Binary lanes join the long-unit lanes here; a binary conflict IS a
-            #      contradiction push (both polarities), race-free by the same L2
-            #      serialization argument as ever.
+            # ---- forced pushes: ONE atomic_or per literal; old word = dedup + contradiction,
+            #      binary lanes joining the long-unit lanes, race-free by L2 serialization.
             fm = binm | (lngm & (oldsat_v == 2))
             forced_v = tl.where(
                 fm, tl.where(binm, pay_v & 0x7FFFFFFF,
@@ -253,22 +185,17 @@ def _seed_and_propagate(st_row, ab_row, trail_row, dec_ptr, k,
                         active_ptr, conflict_ptr, nprops_ptr, nops_ptr, ndecs_ptr,
                         B, TRAIL_CAP,
                         SHIFT: tl.constexpr, WAVE: tl.constexpr, W: tl.constexpr):
-    """THE body of entry point 1: seed row k's decisions, propagate to fixpoint, write the row's
-    flags and its three counters. Returns `tail`, the trail depth the CLEAN tail needs.
-
-    Shared by _bcp_fixpoint_kernel and _bcp_fixpoint_clean_kernel. It used to be duplicated
-    VERBATIM into the second one under a comment asking the reader to keep the two in lockstep,
-    which is a request no reader can be relied on to honour. The two must agree EXACTLY: CLEAN
-    mode's whole gate (tests/test_clean_mode.py) is that a clean launch reaches state identical
-    to a plain one, so a divergence here would not be a slowdown, it would be a wrong answer --
-    caught after the fact by a fuzz test rather than prevented. `@triton.jit` helpers are inlined,
-    so this costs nothing: the emitted SASS is unchanged."""
-    conflict = B * 0            # runtime-typed int32 scalars (loop-carried)
+    """The body of entry point 1: seed row k's decisions, propagate to fixpoint, write the row's
+    flags and its three counters. Returns `tail`, the trail depth the CLEAN tail needs. Shared by
+    _bcp_fixpoint_kernel and _bcp_fixpoint_clean_kernel, which must agree EXACTLY: CLEAN mode's
+    gate (tests/test_clean_mode.py) is that a clean launch reaches state identical to a plain
+    one, so a divergence here is a wrong answer, not a slowdown."""
+    conflict = B * 0            # runtime-typed int32 scalar (loop-carried)
     tail = B * 0
     head = B * 0
     nops = B * 0
 
-    # --- seed: assign each decision literal + queue it (occ decrements happen below) ---
+    # --- seed: assign each decision literal and queue it ---
     for j in range(0, B):
         lit64 = tl.load(dec_ptr + k * B + j)
         if (lit64 >= 0) & (conflict == 0):
@@ -276,7 +203,7 @@ def _seed_and_propagate(st_row, ab_row, trail_row, dec_ptr, k,
             w = tl.load(ab_row + (lit >> 5))        # lit / lit^1 share this word
             if (w & (1 << ((lit ^ 1) & 31))) != 0:  # contradicts existing / earlier seed
                 conflict = 1
-            elif (w & (1 << (lit & 31))) == 0:      # skip duplicates
+            elif (w & (1 << (lit & 31))) == 0:
                 tl.store(ab_row + (lit >> 5), w | (1 << (lit & 31)))
                 tl.store(trail_row + tail, lit)
                 tail += 1
@@ -304,20 +231,20 @@ def _seed_and_propagate(st_row, ab_row, trail_row, dec_ptr, k,
 def _bcp_fixpoint_kernel(
     st_ptr,        # (K, M)  int32 packed clause state (row-private per program)
     ab_ptr,        # (K, NW) int32 assignment BITMAP (bit l = literal l TRUE)
-    active_ptr,    # (K,)    int8 view of bool
-    conflict_ptr,  # (K,)    int8 view of bool
+    active_ptr,    # (K,) int8 flags
+    conflict_ptr,
     dec_ptr,       # (K, B)  int64 literal indices, -1 = padding
-    occ_off_ptr,   # (2N+1,) int32 CSR offsets  (occ[l] = entries where ~l appears)
-    occ_mid_ptr,   # (2N,)   int32 end of the binary prefix of occ[l]
-    occ_cls_ptr,   # (total,) int32 payload: other literal (binary) | long clause id (long)
+    occ_off_ptr,   # (2N+1,) int32 CSR offsets (occ[l] = entries where ~l appears); occ_mid ends
+    occ_mid_ptr,   #   the binary prefix of occ[l]; occ_cls payloads the other literal (binary)
+    occ_cls_ptr,   #   or the long clause id
     trail_ptr,     # (K, TRAIL_CAP) int32 workspace
-    nprops_ptr,    # (K,) int32 out: literals set TRUE this call (seeds + forced)
-    nops_ptr,      # (K,) int32 out: occ entries processed
-    ndecs_ptr,     # (K,) int32 out: DECISION literals (seeds; implications = nprops - ndecs)
+    nprops_ptr,    # (K,) int32 out: literals set TRUE (seeds + forced), occ entries processed,
+    nops_ptr,      #   and DECISION literals; implications = nprops - ndecs
+    ndecs_ptr,
     M, NW, B, TRAIL_CAP,
     SHIFT: tl.constexpr,
-    WAVE: tl.constexpr,                   # 1 = warp-wide wavefront propagate (experimental)
-    W: tl.constexpr,                      # wavefront lane width (power of 2)
+    WAVE: tl.constexpr,                   # 1 = warp-wide wavefront propagate, W lanes wide
+    W: tl.constexpr,
 ):
     k = tl.program_id(0).to(tl.int64)
     if tl.load(active_ptr + k) != 0:
@@ -329,12 +256,10 @@ def _bcp_fixpoint_kernel(
 @triton.jit
 def _risk(st_row, ab_row, occ_off_ptr, occ_mid_ptr, occ_cls_ptr, lit, SHIFT: tl.constexpr):
     """SOFT conflict-avoidance risk of setting `lit` TRUE: the weighted cost of the clauses it
-    falsifies, over occ[lit]. ONE definition of the weights, called once per polarity.
-
-    BINARY entries are scored EXACTLY from the bitmap — other literal TRUE => satisfied (0),
-    FALSE => this would empty the clause (1e6), free => this would force it (4) — which is
-    sharper than a sat_count read, since a count cannot see satisfaction. LONG entries keep the
-    packed-word weights: w(1)=1e6 (would empty), w(2)=4 (forces a unit), w(3)=1."""
+    falsifies, over occ[lit]. One definition of the weights, called once per polarity. Binary
+    entries are scored exactly from the bitmap (other literal true => satisfied, 0; false =>
+    would empty the clause, 1e6; free => would force it, 4), sharper than a sat_count read since
+    a count cannot see satisfaction. Long entries use the packed-word weights."""
     SAT_MASK: tl.constexpr = (1 << SHIFT) - 1
     r = lit * 0
     o = tl.load(occ_off_ptr + lit)
@@ -358,27 +283,22 @@ def _risk(st_row, ab_row, occ_off_ptr, occ_mid_ptr, occ_cls_ptr, lit, SHIFT: tl.
 @triton.jit
 def _bcp_trajectory_kernel(
     st_ptr, ab_ptr, active_ptr, conflict_ptr,
-    order_ptr,                            # (P,) int32 var indices: the decision order (support
-                                          #   first, then completion vars; a per-chunk permutation)
+    order_ptr,                            # (P,) int32 decision order: support vars first
     occ_off_ptr, occ_mid_ptr, occ_cls_ptr,
-    trail_ptr, nrounds_ptr, nops_ptr, nprops_ptr, ndecs_ptr,   # (K,·) workspace / outputs
+    trail_ptr, nrounds_ptr, nops_ptr, nprops_ptr, ndecs_ptr,   # (K,) workspace and outputs
     M, NW, P, NSUP, B, TRAIL_CAP, MAX_ROUNDS, seed,
-    SOFT: tl.constexpr,                   # 1 = "soft": in-kernel soft risk-polarity (see below)
+    SOFT: tl.constexpr,                   # 1 = in-kernel soft risk-polarity (see below)
     SHIFT: tl.constexpr,
-    WAVE: tl.constexpr,                   # 1 = warp-wide wavefront propagate (experimental)
-    W: tl.constexpr,                      # wavefront lane width (power of 2)
-    VSCAN: tl.constexpr,                  # 1 = warp-wide decision scan. Only WAVE and only
-                                          # !SOFT reads it (see the guard below), so those
-                                          # combinations are not specialized on it at all
-                                          # -- cpp/tools/build_kernels.py::vscan_is_read.
+    WAVE: tl.constexpr,                   # 1 = warp-wide wavefront propagate; W = its lane
+    W: tl.constexpr,                      #     width (a power of two)
+    VSCAN: tl.constexpr,                  # 1 = warp-wide decision scan; read only under WAVE
+                                          # and not SOFT (build_kernels.py::vscan_is_read)
 ):
-    """The WHOLE trajectory in one launch: repeatedly pick the next B still-free variables in
-    `order`, assign each a hash-random polarity, and propagate to fixpoint.
-
-    NSUP = number of leading `order` entries that are PHASE-1 (support) vars. A decision group
-    must never straddle the phase boundary: phase 1 must reach fixpoint over the support before
-    any completion var is decided (else the group decides variables that propagation would have
-    determined, and conflicts explode — measured 100%->0% on b07 when straddled)."""
+    """The whole trajectory in one launch: repeatedly pick the next B still-free variables in
+    `order`, assign each a hash-random polarity, and propagate to fixpoint. NSUP is the number of
+    leading `order` entries that are phase-1 (support) vars, and a decision group must never
+    straddle that boundary — phase 1 must reach fixpoint over the support first, or the group
+    decides variables propagation would have determined and conflicts explode."""
     k = tl.program_id(0).to(tl.int64)
     if tl.load(active_ptr + k) != 0:
         st_row = st_ptr + k * M
@@ -390,33 +310,29 @@ def _bcp_trajectory_kernel(
         tail = B * 0
         nops = B * 0
         rounds = B * 0
-        decs = B * 0                        # DECISION literals; implications = tail - decs
+        decs = B * 0                        # decisions; implications = tail - decs
         ptr = B * 0
         while (ptr < P) & (conflict == 0) & (rounds < MAX_ROUNDS):
-            # --- decision group: next B free vars in order, hash-random polarity.
-            #     The group ends at the support/completion boundary (see docstring). ---
+            # --- decision group: next B free vars, hash-random polarity, ending at the
+            #     support/completion boundary (see docstring). ---
             phase_end = NSUP if ptr < NSUP else P
             picked = B * 0
             if WAVE and VSCAN and not SOFT:
-                # Warp-wide decision SCAN (bit-identical picks: the first B still-free vars
-                # in `order`, same per-(chunk,k,v) polarity hash): each step screens W
-                # entries with ONE bitmap-word gather (var v's literal bits 2v/2v+1 sit in
-                # word v>>4). WAVE-only: the bitmap shrank the scan's working set 8-16x
-                # (small-2N rows are L1-resident), which made the serial scan cheap enough
-                # that the warp-wide screen + take-atomics LOSE in scalar mode (b06 0.82x,
-                # b03 0.91x) while still winning at wave's low-K regime (b04 1.13x,
-                # b12/b14 1.19x). The take is an atomic_or because two taken vars can
-                # share a bitmap word.
+                # Warp-wide decision SCAN, bit-identical picks (the first B still-free vars in
+                # `order`, same per-(chunk,k,v) polarity hash): each step screens W entries with
+                # ONE bitmap-word gather, since var v's bits 2v/2v+1 sit in word v>>4. WAVE-only,
+                # since the bitmap makes the serial scan win in scalar mode. The take is an
+                # atomic_or because two taken vars can share a bitmap word.
                 lanes_d = tl.arange(0, W)
                 while (picked < B) & (ptr < phase_end):
                     am = ptr + lanes_d < phase_end
                     v_v = tl.load(order_ptr + ptr + lanes_d, mask=am, other=0)
                     w_v = tl.load(ab_row + (v_v >> 4), mask=am, other=-1)
                     free_v = am & (((w_v >> ((v_v & 15) * 2)) & 3) == 0)
-                    rank_v = tl.cumsum(free_v.to(tl.int32), 0)     # inclusive rank among free
+                    rank_v = tl.cumsum(free_v.to(tl.int32), 0)
                     need = B - picked
                     take_v = free_v & (rank_v <= need)
-                    # entries consumed: through the need-th free pick (else the whole chunk)
+                    # entries consumed: through the need-th free pick, else the whole chunk
                     hitpos = tl.min(tl.where(free_v & (rank_v == need), lanes_d, W), 0)
                     chunkw = tl.minimum(phase_end - ptr, W)
                     consumed = tl.minimum(hitpos + 1, chunkw)
@@ -435,27 +351,22 @@ def _bcp_trajectory_kernel(
             while (picked < B) & (ptr < phase_end):
                 v = tl.load(order_ptr + ptr)
                 ptr += 1
-                wp = tl.load(ab_row + (v >> 4))         # var v's pair bits: word v>>4
+                wp = tl.load(ab_row + (v >> 4))
                 if ((wp >> ((v & 15) * 2)) & 3) == 0:
-                    # stateless per-(chunk,k,v) polarity bit (splitmix-style 64-bit mix;
-                    # constants are the standard splitmix64 ones as SIGNED int64 literals)
+                    # stateless per-(chunk,k,v) polarity bit (splitmix64 mix, signed literals)
                     h = seed + k * -7046029254386353131 + v.to(tl.int64) * -4658895280553007687
                     h = (h ^ (h >> 30)) * -4658895280553007687
                     h = (h ^ (h >> 27)) * -7723592293110705685
                     pol = ((h >> 13) & 1).to(tl.int32)
                     if SOFT:
-                        # Pick the lower-risk polarity; the hash bit breaks ties. Weights and the
-                        # binary/long split both live in _risk, so the two polarities can never
-                        # be scored on different scales.
+                        # Lower-risk polarity, hash bit breaking ties; weights live in _risk.
                         r0 = _risk(st_row, ab_row, occ_off_ptr, occ_mid_ptr, occ_cls_ptr,
                                    2 * v, SHIFT)
                         r1 = _risk(st_row, ab_row, occ_off_ptr, occ_mid_ptr, occ_cls_ptr,
                                    2 * v + 1, SHIFT)
                         # ε-greedy (25% hash-forced random): pure risk-argmin is
-                        # row-DETERMINISTIC when risks never tie — all K trajectories
-                        # replicate ONE path (measured: c1355 collapsed to 70 distinct
-                        # solutions in 6,144 samples while CMSGen's were 100% distinct).
-                        # ε keeps most conflict-avoidance and guarantees divergence.
+                        # row-deterministic when risks never tie, so all K trajectories would
+                        # replicate ONE path. ε keeps the conflict-avoidance and diverges.
                         risky = tl.where(r0 < r1, 0, tl.where(r1 < r0, 1, pol))
                         pol = tl.where(((h >> 17) & 7) == 0, pol, risky)
                     lit = 2 * v + pol
@@ -466,7 +377,6 @@ def _bcp_trajectory_kernel(
             if picked > 0:
                 rounds += 1
                 decs += picked
-            # --- propagate to fixpoint ---
             if WAVE:
                 head, tail, conflict, nops = _wave_propagate(
                     st_row, ab_row, trail_row, occ_off_ptr, occ_mid_ptr, occ_cls_ptr,
@@ -481,33 +391,20 @@ def _bcp_trajectory_kernel(
             tl.store(active_ptr + k, 0)
         tl.store(nrounds_ptr + k, rounds)
         tl.store(nops_ptr + k, nops)
-        tl.store(nprops_ptr + k, tail)    # literals assigned (decisions + implications)
-        tl.store(ndecs_ptr + k, decs)     # decisions only (implications = nprops - ndecs)
+        tl.store(nprops_ptr + k, tail)    # literals assigned; decisions only in ndecs
+        tl.store(ndecs_ptr + k, decs)
 
 @triton.jit
 def _clean_packed(st_row, init_ptr, trail_row, occ_off_ptr, occ_mid_ptr, occ_cls_ptr, tail, M,
                   W: tl.constexpr):
-    """Rewrite every packed word this row can have touched back to the baseline row
-    (`init_ptr` = the post-units-flush packed state) — the CLEAN-mode tail.
+    """Rewrite every packed word this row can have touched back to the baseline row (`init_ptr` =
+    the post-units-flush packed state) — the CLEAN-mode tail.
 
-    Soundness (docs/plans/RESET_RESTORE_PLAN.md §3.1): packed writes only ever happen in the
-    occ walk of literals POPPED FROM THE TRAIL, so the damage is a subset of
-    ∪ occ[l] over trail[0..tail) — for surviving AND conflicted rows (a mid-list or mid-wave
-    stop only shrinks the damage). Every store writes the baseline value, so over-covering
-    (trail tails never propagated, occ words never reached, two trail literals sharing a
-    clause) rewrites baseline over baseline: idempotent, no atomics, benign lane races.
-
-    Only the LONG sub-ranges [occ_mid[l], occ_off[l+1]) are walked: binary entries never touch
-    a packed word, so the restore shrinks by the binary share of the occ — and M here is
-    num_long, the packed row's true width (init_ptr is num_long-sized).
-
-    DEEP-ROW GUARD: scattered 4-byte stores pull 32-byte sectors (~8x amplification), so a row
-    whose total occ work exceeds M/8 streams its WHOLE row from baseline instead — that row
-    degrades to (its share of) the old broadcast cost, never past it.
-
-    Vectorized W-wide in both kernel modes (the scalar/wave split is about the PROPAGATE
-    algorithm; nothing here mutates shared state non-idempotently, so redundant lanes and the
-    flattened-segment races are all benign)."""
+    Soundness (docs/findings/CLEAN_MODE_FINDINGS.md): packed writes only ever happen in the occ
+    walk of literals POPPED FROM THE TRAIL, so the damage is a subset of the union of occ[l] over
+    trail[0..tail) for surviving and conflicted rows alike, and every store writes the baseline
+    value, so over-covering is idempotent — no atomics, benign lane races. Only the LONG
+    sub-ranges are walked. Deep-row guard: a row whose occ work exceeds M/8 streams instead."""
     lanes = tl.arange(0, W)
     total = tail * 0
     t = tail * 0
@@ -552,24 +449,19 @@ def _clean_packed(st_row, init_ptr, trail_row, occ_off_ptr, occ_mid_ptr, occ_cls
 @triton.jit
 def _bcp_fixpoint_clean_kernel(
     st_ptr, ab_ptr, active_ptr, conflict_ptr, dec_ptr, occ_off_ptr, occ_mid_ptr, occ_cls_ptr,
-    init_ptr,      # (M,) int32 packed_flushed — the baseline the clean tail restores
+    init_ptr,      # (M,) int32 packed_flushed: the baseline the clean tail restores
     trail_ptr, nprops_ptr, nops_ptr, ndecs_ptr,
     M, NW, B, TRAIL_CAP,
     SHIFT: tl.constexpr,
     WAVE: tl.constexpr,
     W: tl.constexpr,
 ):
-    """CLEAN-mode batched assumption check: seed + propagate EXACTLY as _bcp_fixpoint_kernel,
-    emit the same flags/counters, then restore this row's packed words to the baseline before
-    exiting — so the NEXT chunk's reset needs no K·M broadcast (docs/plans/RESET_RESTORE_PLAN.md
-    §9; v1 cleans PACKED only, abits/flags are restored by the cheap reset-lite).
-
-    A caller that reads post-apply STATE (assignment_rows, sat_rows, recache_flush, the
-    selection api) must use the plain kernel — after this one, the state IS the baseline.
-    Flags and the (K,) counters survive; they are the result.
-
-    Seed and propagate are _seed_and_propagate — the SAME code the plain kernel runs, not a copy
-    of it kept in step by hand. Only the restore below is this kernel's own."""
+    """CLEAN-mode batched assumption check: seed and propagate exactly as _bcp_fixpoint_kernel,
+    emit the same flags and counters, then restore this row's packed words to the baseline before
+    exiting, so the next chunk's reset needs no K·M broadcast (this cleans PACKED only; abits and
+    flags come back through the cheap reset-lite). A caller that reads post-apply STATE must use
+    the plain kernel — after this one the state IS the baseline, and only the flags and (K,)
+    counters survive. Seed and propagate are _seed_and_propagate, the plain kernel's own code."""
     k = tl.program_id(0).to(tl.int64)
     if tl.load(active_ptr + k) != 0:
         st_row = st_ptr + k * M

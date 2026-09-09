@@ -1,32 +1,21 @@
 #!/usr/bin/env python3
 """Verify the experiment artifact is publishable: sound, complete, and self-describing.
 
-Run this before quoting a number anywhere. It is deliberately a CHECKER, not a summariser — it
-answers "is there anything here I would be embarrassed to defend?" and exits non-zero if so.
+A CHECKER, not a summariser — "is there anything here I would be embarrassed to defend?" — that
+exits non-zero if so. Run it before quoting a number anywhere.
 
-    eval/artifact/verify_artifact.py <results-dir> \\
-        --rivals .experiments/l4_rivals --uniformity .experiments/uniformity/*.json
+    eval/artifact/verify_artifact.py <results-dir> --rivals DIR --uniformity FILES
 
-Checks, and why each one exists:
-
-  SOUNDNESS   no scored cell may REPORT itself unsound. The on-GPU re-check is opt-in
-              (`gpap bench --verify-sound`), so most cells simply carry no verdict — that is
-              counted, not required. An unsound row means the
-              sampler emitted something that is not a model, which invalidates the whole run --
-              this is the one check that can never be waived.
-  FAIRNESS    CMSGen must be the PATCHED binary in every stage. Stock CMSGen is timed WITH sample
-              emission (~88% of its wall on 27.sk_3_32), which silently inflates every ratio.
-  PROVENANCE  each stage must record GPU *and* CPU. CMSGen is single-core, so a ratio without its
-              CPU is not interpretable (measured: the same suite reads 48.5x and 113x on two
-              machines purely because one host is 0.41x the other).
-  AGGREGATION the vacuous-pin instances must not sit inside a sequential geomean, and a geomean
-              standing on fewer than 3 instances must be flagged rather than quoted.
-  COVERAGE    stages short of their family's instance count are listed, so a partial sweep can
-              never be mistaken for a complete one.
-  ORACLE      the uniformity campaign must include BOTH controls; without an exact-uniform
-              negative and a known-TV positive, "no skew detected" is uncalibrated and unusable.
-  RECHECK     (--recheck DIR) the reproducibility claim is re-derived from the raw rows: the
-              deterministic fields (M, support, packed split, propagate variant) must match the
+  SOUNDNESS   no scored cell may REPORT itself unsound (the opt-in re-check's "off" is counted,
+              not required). This check can never be waived.
+  FAIRNESS    CMSGen must be the PATCHED binary: stock CMSGen is timed WITH sample emission.
+  PROVENANCE  each stage records GPU and CPU; CMSGen is single-core, so a ratio without its CPU
+              is not interpretable.
+  AGGREGATION vacuous pins stay out of a geomean, and a geomean on fewer than three instances is
+              flagged rather than quoted.
+  COVERAGE    stages short of their family's instance count are listed.
+  ORACLE      the uniformity campaign must include BOTH controls, or "no skew detected" is
+              uncalibrated. RECHECK (--recheck DIR): the deterministic fields must match the
               original sweep exactly on every shared cell.
 """
 import argparse
@@ -90,30 +79,22 @@ def main():
             continue
         rows = [r for r in d.get("results", []) if not r.get("skipped") and not r.get("error")]
         tot_cells += len(rows)
-        # MIXED CMSGen provenance: some rows carry the comparison arm and some never ran it —
-        # the signature of a campaign resumed on a VM where the cmsgen binary failed to restore.
-        # The armless rows carry no `cms_*` keys, and any consumer that read the missing count
-        # as a number would score them as CMSGen zeros (phantom wins). paper_tables screens
-        # them per row; here the stage FAILS, because the fix is to re-run the cells, not to
-        # publish around them. A FULLY armless stage is fine — that is a GPAP-only sweep.
+        # MIXED CMSGen provenance: reading a missing count as a number mints phantom zeros.
         armed = [r for r in rows if cms_arm_ran(r)]
         if armed and len(armed) != len(rows):
             fail.append(f"{stem}: MIXED CMSGen provenance — {len(rows) - len(armed)} of "
                         f"{len(rows)} rows never ran the CMSGen arm (a resume without the "
                         f"binary?). Re-run those cells or delete them; absent is not zero")
-        # A crashed CMSGen subprocess (binary missing/unrunnable on that VM) is recorded as
-        # `cms_error` with a count of 0. That zero is an environment failure, not a measurement,
-        # and scoring it publishes a broken binary as a stage of outright wins.
+        # A crashed CMSGen subprocess is `cms_error` with a count of 0: scoring that zero
+        # publishes a broken binary as a stage of outright wins.
         cerr = [r for r in rows if r.get("cms_error")]
         if cerr:
             fail.append(f"{stem}: the CMSGen subprocess ERRORED on {len(cerr)} row(s) "
                         f"({', '.join(sorted(r.get('name', '?') for r in cerr)[:6])}"
                         f"{', …' if len(cerr) > 6 else ''}) — a crashed baseline is not a "
                         f"zero; re-run before publishing")
-        # A row that says UNSOUND is a hard failure. A row that ran NO check is not: the
-        # re-check is opt-in (`gpap bench --verify-sound`), it is a self-test rather than part
-        # of producing the numbers this file gates, and demanding it would make the artifact
-        # depend on a flag nobody needs for a throughput claim. Counted, never required.
+        # A row that says UNSOUND fails; a row that ran NO check does not, the re-check being an
+        # opt-in self-test. Counted, never required.
         uns = [r for r in rows if sound_failed(r)]
         tot_unsound += len(uns)
         for r in uns:
@@ -129,14 +110,8 @@ def main():
         if not (d.get("cpu") or {}).get("model"):
             warn.append(f"{stem}: no CPU recorded — a GPAP/CMSGen ratio is not interpretable "
                         f"without it (this stage predates the cpu provenance fix)")
-        # ---- ONE ENGINE PER STAGE -----------------------------------------------------------
-        # `gpap_build_id` fingerprints the loaded library's own bytes, and compilation is
-        # deterministic, so two ids in one stage means two different engines produced rows that
-        # a table then geomeans together. It is what `--resume` does when a stage is topped up
-        # after a rebuild (or on a VM that built from a different tree): the 2026-09-02 seq
-        # stages carry 19 rows on one build and 10 on another — exactly the instances that were
-        # added incrementally. Not fatal, because the added rows may be perfectly good; but the
-        # campaign cannot claim one engine, and this is the only place that would notice.
+        # ---- ONE ENGINE PER STAGE: two `gpap_build_id`s in one stage means two engines produced
+        # rows a table then geomeans together. Not fatal, but the campaign cannot claim one.
         cores = {}
         for r in rows:
             c = (r.get("engine") or {}).get("core")
@@ -149,13 +124,8 @@ def main():
                           "table geomeans them together. Re-run the stage, or say so.")
         inst = {r["name"].split(".")[0] for r in rows}
         fam_inst.setdefault(stem.split("-")[0], {})[stem] = len(inst)
-        # ---- CMSGen's sample count must be EXACT where it is published -----------------------
-        # A killed CMSGen reports its last --statsevery multiple, so `cms_n_samples: 0` can mean
-        # "fewer than 1000 in the budget" rather than "none". On the 2026-08-23 campaign that
-        # was 174 of 357 rows, 81 of them recorded as zeros and counted as our wins; one of them
-        # (b14/abc:fast) really delivers 941 samples, i.e. an ~10-25x LOSS published as an
-        # infinite win. The patch's --maxtime makes CMSGen stop itself and print an exact final
-        # count (`cms_count_exact`), so a floored count is now a defect, not a fact of life.
+        # ---- CMSGen's count must be EXACT where published: a killed CMSGen reports its last
+        # --statsevery multiple, so a 0 can mean "fewer than 1000". `--maxtime` prints an exact one.
         floored = [r for r in rows
                    if r.get("cms_count_exact") is False or
                    (r.get("cms_count_exact") is None and r.get("cms_timed_out"))]
@@ -168,9 +138,8 @@ def main():
         # ---- aggregation traps. One cell per (instance, encoder): there is no best-of ---------
         best = {(r["name"].split(".")[0], r.get("enc_key") or r.get("encoder")): r
                 for r in rows}
-        # The same population as the paper's n_gm: finite ratios, minus vacuous pins AND
-        # zero-search cells (re-derived below). Counting the zero-search cells here made this
-        # warning disagree with the table about how many instances the geomean stands on.
+        # The same population as the paper's n_gm (finite ratios minus vacuous and zero-search
+        # cells), or this warning disagrees with the table.
         finite = [r["ratio"] for (k, _e), r in best.items()
                   if r.get("ratio") and math.isfinite(r["ratio"])
                   and k not in VACUOUS_PINS
@@ -182,13 +151,8 @@ def main():
                         f"(a small family, or CMSGen scored zero / the screens removed the "
                         f"rest) — flag it, do not quote it")
 
-        # SYMMETRY of the zero ledger. Reporting the instances CMSGen could not sample while
-        # dropping the ones WE could not is the single easiest way to publish a flattering table
-        # by accident; it is exactly what the first version of paper_tables.py did, because a
-        # GPAP-zero row carries ratio == 0.0 and fell through every branch.
-        # Only rows whose comparison RAN enter the ledger: an armless row (GPAP-only sweep)
-        # is not "CMSGen scored 0", and reading it into b0 claimed "defeated both samplers"
-        # about a tool that never ran.
+        # SYMMETRY of the zero ledger: reporting the instances CMSGen could not sample while
+        # dropping the ones WE could not flatters a table by accident.
         g0 = [f"{k}/{e or '-'}" for (k, e), r in best.items()
               if cms_arm_ran(r)
               and (r.get("cms_n_samples") or 0) > 0 and not (r.get("n_models") or 0)]
@@ -203,9 +167,7 @@ def main():
             warn.append(f"{stem}: {len(b0)} instance(s) defeated both samplers "
                         f"({', '.join(sorted(b0))}) — report as a limit of the comparison")
 
-        # ZERO-SEARCH cells: samples emitted with no decisions and no implications means the
-        # support is free after propagation, so the ratio measures the instance. Worse, the
-        # cell is about the instance, not the sampler.
+        # ZERO-SEARCH cells: no decisions and no implications means the ratio measures the instance.
         free = [f"{k}/{e or '-'}" for (k, e), r in best.items()
                 if (r.get("n_models") or 0) > 0 and not (r.get("decisions_per_s") or 0)
                 and not (r.get("implications_per_s") or 0)]
@@ -220,11 +182,9 @@ def main():
                      f"the default)" if checked else " (no cell ran the opt-in re-check)"))
 
     # ---------------------------------------------------------------- the propagation identity
-    # Table 3 claims  samples/s ratio == (impl/s ratio) / (impl-per-sample ratio)  on every
-    # family. It is algebra, so it cannot fail unless the aggregation is wrong — which is exactly
-    # what happened once (columns filtered independently let EPFL `bar`, which propagates hard
-    # and emits nothing, into the numerator only, breaking the family by 3x). Re-derive it here
-    # from the raw rows rather than trusting the generator that produced the claim.
+    # Table 3 claims  samples/s ratio == (impl/s ratio) / (impl-per-sample ratio). It is algebra,
+    # so it can only fail when the aggregation is wrong — filtering columns independently once
+    # let an instance that propagates hard and emits nothing into the numerator only.
     ident_bad, ident_ok = [], 0
     for p in stages:
         d = load(p)
@@ -269,10 +229,8 @@ def main():
             if n < mx:
                 warn.append(f"coverage: {stem} has {n}/{mx} instances (incomplete stage)")
 
-    # coverage: a stage that CRASHED before writing its JSON leaves no other trace — the colab
-    # drivers print their completion markers unconditionally, so a lost stage would otherwise
-    # be invisible (every check above only sees files that exist). Warn, not fail: sub-campaign
-    # directories legitimately hold a subset, but the absence must be a stated choice.
+    # coverage: a stage that CRASHED before writing its JSON leaves no other trace, since every
+    # check above only sees files that exist. Warn, not fail — a subset can be a stated choice.
     present_stems = {os.path.basename(p)[:-5] for p in stages}
     known = [stem for stem, _, _, _ in CMS_FAMILIES]
     if present_stems & set(known):
@@ -282,12 +240,8 @@ def main():
                         f"{', '.join(missing)} — Table 1 will silently have no row for them; "
                         f"confirm those families were deliberately not run")
 
-    # ---------------------------------------------------------------- reproducibility recheck
-    # Table 6 claims the deterministic fields (M, support, packed split, propagate variant)
-    # match exactly between the sweep and its fresh-VM re-measurement. RE-DERIVE that from the
-    # raw rows — through the same cell reader the comparison tool uses (eval/recheck_compare) —
-    # rather than trusting the generator: an accepted-but-ignored flag here was exactly the
-    # "VERIFIED per row, enforced by nobody" shape this file exists to prevent.
+    # Table 6's deterministic-field claim, RE-DERIVED from the raw rows through the comparison
+    # tool's own cell reader.
     if args.recheck:
         from eval.recheck_compare import cells as recheck_cells
         det_bad, n_shared = [], 0
@@ -321,14 +275,9 @@ def main():
             d = load(p)
             rows = (d.get("rows") if isinstance(d, dict) else d) or []
             stem = os.path.basename(p)[:-5]
-            # AN ARM THAT MEASURED NOTHING IS NOT A PASSING ARM. A well-formed JSON holding
-            # `"rows": []` is what a stage writes when every instance was skipped — e.g. the
-            # miter arm pointed at ISCAS-85 names without --bench-dir, which resolves to
-            # bench/seq/ and finds none of them (2026-09-02). The campaign ran on, and the empty
-            # file was indistinguishable from a stage that had not started.
-            # `rivals_steps_calibration.json` is EVIDENCE, not an arm: it has no `rows` key at
-            # all (its schema is {generated, tools}). Distinguish by the KEY, not by emptiness —
-            # an arm that measured nothing writes `"rows": []`, which is the case below.
+            # AN ARM THAT MEASURED NOTHING IS NOT A PASSING ARM: `"rows": []` is what a stage
+            # writes when every instance was skipped, while a calibration file has no `rows` key
+            # at all — distinguish by the KEY, not by emptiness.
             if isinstance(d, dict) and "rows" not in d:
                 continue
             if not rows:
@@ -345,11 +294,8 @@ def main():
             key = next((k for k in ("demotic", "rcs", "hts")
                         if any(k in r for r in rows)), None)
             errs = sum(1 for r in seen.values() if (r.get(key) or {}).get("error"))
-            # COUNT IT THE WAY THE TABLE DOES. A raw error tally and the generator's `error`
-            # bucket are different numbers whenever a failed cell is screened first — `b19` is
-            # vacuous AND Recurrent fails to initialize on it — and the 2026-09-03 gate warned
-            # "10/29 failed" beside a paper that said "9 of 29". The gate's verdict is
-            # "publishable PROVIDED every warning is stated", so a warning the paper cannot
+            # COUNT IT THE WAY THE TABLE DOES: a raw error tally and the generator's `error`
+            # bucket differ when a failed cell is screened first, and a warning the paper cannot
             # state verbatim is a defect in the gate.
             from eval.artifact.paper_tables import rival_cells as _cells
             tabled = sum(1 for _n, _v, b, _o, _r in _cells(rows, key) if b == "error") if key else 0
@@ -360,10 +306,8 @@ def main():
                          f"— quote {tabled}")
                 warn.append(f"{stem}: {errs}/{len(seen)} rival runs failed "
                             f"(reported, not folded in as zeros){extra}")
-            # MULTIPLE CIRCUIT VARIANTS ARE NOW EXPECTED (2026-09-04): the table scores the one
-            # BETTER FOR THE RIVAL per instance, so a stage holding `raw` and `abc` is the fair
-            # comparison, not a double count. What must still be checked is that every instance
-            # HAS the same variants — a half-run axis silently scores some instances raw-only.
+            # MULTIPLE CIRCUIT VARIANTS ARE EXPECTED (the table scores the one BETTER FOR THE
+            # RIVAL per instance); what must be checked is that every instance has the same ones.
             variants = {v for _n, v in seen}
             per_inst = {}
             for _n, _v in seen:
@@ -373,14 +317,9 @@ def main():
                 warn.append(f"{stem}: circuit variants {sorted(variants)} are not run on every "
                             f"instance ({len(ragged)} short: {', '.join(ragged[:6])}) — the "
                             f"rival gets its better variant only where both exist")
-            # A row whose constraint-alignment check FAILED compared two different tasks; the
-            # tables exclude it (paper_tables.rival_family), and it must not go unnoticed here.
-            # HOW the rival's batch was reached is part of whether it was fairly granted.
-            # `probe_truncated`: the ladder walk hit its wall budget and fell back to the VRAM
-            # model's rung — the estimator that under-granted DEMOTIC 1.5-3.9x — so those cells
-            # may hold a smaller grant than an equally capable cell whose rungs failed fast.
-            # `budget_bound`: EVERY rung timed out, so the cell is bounded by our wall rather
-            # than by the rival's capability, and is re-runnable at a longer timeout.
+            # A row whose constraint-alignment check FAILED compared two different tasks. HOW the
+            # batch was reached matters too: `probe_truncated` = the walk hit its wall budget and
+            # fell back to the under-granting VRAM model, `budget_bound` = every rung timed out.
             trunc = [n for (n, _v), r in seen.items() if (r.get(key) or {}).get("probe_truncated")]
             bound = [n for (n, _v), r in seen.items() if (r.get(key) or {}).get("budget_bound")]
             if trunc:
@@ -391,24 +330,16 @@ def main():
                 warn.append(f"{stem}: {len(bound)} cells timed out at EVERY batch rung "
                             f"({', '.join(sorted(bound)[:6])}) — bounded by our wall budget, not "
                             f"by the rival's capability; state it or re-run them longer")
-            # A SCREEN THAT NEVER RAN IS NOT A SCREEN THAT FOUND NOTHING. The proved-UNSAT
-            # column reads `gpap.unsat_at_T`, which only exists on rows written by a harness
-            # that computed it; on an older campaign every cell reads False and the table prints
-            # a confident `unsat 0` for a question nobody asked. Same tri-state lesson as
-            # `sound_check` — "not run" is neither verdict.
+            # A SCREEN THAT NEVER RAN IS NOT A SCREEN THAT FOUND NOTHING: the proved-UNSAT column
+            # reads `gpap.unsat_at_T`, absent on older rows (the `sound_check` tri-state).
             zero_models = [r for r in seen.values() if not ((r.get("gpap") or {}).get("n_models"))]
             asked = [r for r in zero_models if "unsat_at_T" in (r.get("gpap") or {})]
             if zero_models and not asked:
                 warn.append(f"{stem}: {len(zero_models)} cells where GPAP emitted nothing, and "
                             f"NONE carries an unsat_at_T verdict — the proved-UNSAT screen did "
                             f"not run on this campaign, so its column is 'not asked', not 0")
-            # The unique/s figure is an exact dedup of the rows the gather returned; if that was
-            # a PREFIX of what the run delivered it is a fraction over a prefix, which is the
-            # estimate this metric was changed to stop publishing silently.
-            # Re-derive rather than trust the stored string: rows written before 2026-09-04
-            # carry a `partial-gather` status that compared the WINNER's kept rows against ALL
-            # configs' model count, which a healthy adaptive run trips by construction. The
-            # condition that matters is whether the gather cap actually bound.
+            # The unique/s figure is an exact dedup of the rows the gather returned; a PREFIX
+            # makes it a fraction over a prefix. Re-derive rather than trust the stored string.
             partial = [n for (n, _v), r in seen.items()
                        if ((r.get("gpap") or {}).get("unique_est_status") == "partial-gather"
                            and ((r.get("gpap") or {}).get("unique_rows") or 0) >= 4_000_000)]
@@ -421,12 +352,7 @@ def main():
                 fail.append(f"{stem}: {len(mis)} row(s) FAILED the constraint-alignment check "
                             f"({', '.join(sorted(mis))}) — the two sides were not given the "
                             f"same task; re-run before publishing")
-            # ---- the CMSGen arm on these rows (the converged protocol: Table 1 is read off
-            # them). The SAME gates the `gpap bench` stages get above, because the same numbers
-            # are now published from here: mixed provenance FAILS (absent is not zero), a crashed
-            # subprocess FAILS, anything but --nowrite FAILS, an unpatched binary FAILS, and a
-            # floored count FAILS where it is a zero. `paper_tables.rival_cms_family` screens per
-            # row; this refuses the file.
+            # ---- the CMSGen arm on these rows: the SAME gates the `gpap bench` stages get above.
             meas = [r for r in seen.values() if not (r.get("gpap") or {}).get("error")]
             armed = [r for r in meas if cms_arm_ran(r)]
             if armed and len(armed) != len(meas):
@@ -465,11 +391,8 @@ def main():
             uns = [r.get("name", "?") for r in meas if sound_failed(r.get("gpap") or {})]
             for n in uns:
                 fail.append(f"UNSOUND cell {stem}/{n}")
-            # AN UN-RUN CHECK IS NOT A PASSING ONE. This gate only ever FAILED on "UNSOUND" and
-            # printed nothing on "ok" — so a campaign run without --verify-sound produced a
-            # byte-identical "Publishable" verdict (referee round 4, 2026-09-06). Every row
-            # that emitted a model must carry an "ok" verdict; rows that emitted nothing are
-            # counted as "off", never as passing (the sound_check tri-state doctrine).
+            # AN UN-RUN CHECK IS NOT A PASSING ONE: gating only on "UNSOUND" lets a run without
+            # --verify-sound produce a byte-identical "Publishable" verdict.
             emitted = [r for r in meas if ((r.get("gpap") or {}).get("n_models") or 0) > 0]
             nok = sum(1 for r in emitted if sound_verdict(r.get("gpap") or {}) == "ok")
             missing = [r.get("name", "?") for r in emitted
@@ -482,9 +405,8 @@ def main():
                 ok.append(f"{stem}: device soundness re-check ok on {nok}/{len(emitted)} rows "
                           f"that emitted a model ({len(meas) - len(emitted)} emitted nothing: "
                           f"counted as 'off', not as passing)")
-            # ...and the ENCODER-INDEPENDENT check: the kept output rows simulated through the
-            # original circuit must reproduce the pinned outputs (`sim_check`, run by the arm on
-            # every row with a wire map). BAD is a hard failure; "off" is counted, not required.
+            # ...and the ENCODER-INDEPENDENT check: kept rows simulated through the original
+            # circuit must reproduce the pinned outputs. BAD fails, "off" is counted.
             simbad = [r.get("name", "?") for r in meas
                       if (r.get("gpap") or {}).get("sim_check") == "BAD"]
             for n in simbad:
@@ -506,15 +428,11 @@ def main():
                               "table geomeans them together. Re-run the stage, or say so.")
         ok.append("rivals: error rows counted, never treated as zero")
 
-        # ---- Table 3 under the converged protocol. The propagation identity is ALGEBRA
-        # (work := (a/s)/(b/t) makes impl/work == s/t by construction), so the only thing it can
-        # catch is a ROW-SET mismatch between the propagation table and Table 1 — and until
-        # 2026-09-05 this file re-derived it only for the `gpap bench` schema, so under
-        # --rivals the block never ran and Table 3 shipped with no gate at all (a 5000x
-        # sabotage of one row's impl/s moved the headline and left this report byte-identical).
-        # Check the row sets AGAINST THE GENERATOR'S OWN OUTPUT (the number that is printed),
-        # not against a second private recomputation, and add what an identity cannot see: a
-        # plausibility band on the counters themselves.
+        # ---- Table 3 under the converged protocol. The identity is ALGEBRA (work := (a/s)/(b/t)
+        # makes impl/work == s/t by construction), so all it can catch is a ROW-SET mismatch
+        # against Table 1 — and while this block only understood the `gpap bench` schema, Table 3
+        # shipped under --rivals with no gate at all. Check the row sets AGAINST THE GENERATOR'S
+        # OWN OUTPUT, and add a plausibility band on the counters.
         from eval.artifact.paper_tables import (RIVAL_CMS_SETS, _RIVAL_KEY,  # noqa: E402
                                                 rival_cms_family, rival_prop_rates)
         for stem, _label, _tgt in RIVAL_CMS_SETS:
@@ -534,9 +452,8 @@ def main():
             else:
                 ok.append(f"rivals_{stem}: Table 3 is over the same {t3['n']} cells as Table 1 "
                           f"and the identity closes on the printed numbers")
-        # counters outside a physical band: GPAP's packed-word kernel holds ~1e9 impl/s on
-        # every family (1e6..5e10 leaves room for any card); CMSGen's own counters read
-        # 1e6-1e7 (1e3..1e9). An identity cancels a wrong counter; a range does not.
+        # counters outside a physical band: GPAP's packed-word kernel holds ~1e9 impl/s on every
+        # family, CMSGen's own counters 1e6-1e7. An identity cancels a wrong counter, a range not.
         odd = []
         for p in sorted(globmod.glob(os.path.join(args.rivals, "rivals_*.json"))):
             d = load(p)

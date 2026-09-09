@@ -1,21 +1,20 @@
 """Ahead-of-time compile every GPAP kernel specialization into the C core.
 
-The kernels stay written in Triton — `cpp/kernels/bcp.py` is the single source of truth for
-the two BCP kernels, `cpp/kernels/helpers.py` for the support kernels. This script
-compiles them for a fixed set of `constexpr` specializations and emits
+The kernels stay written in Triton — `cpp/kernels/bcp.py` for the two BCP kernels,
+`cpp/kernels/helpers.py` for the support kernels — and this script compiles them for a fixed set
+of `constexpr` specializations, emitting
 
     cpp/src/generated/gpap_kernels.c   (cubin blobs + the lookup table)
     cpp/src/generated/gpap_kernels.h   (the descriptor type + externs)
 
-so the shipped library embeds the binaries and needs nothing but `libcuda.so.1` at runtime.
+so the shipped library embeds the binaries and needs only `libcuda.so.1` at runtime. The cubins
+are bit-identical at SASS level to what the Triton JIT produces from the same source and
+constants, so this changes no behaviour.
 
-We call `triton.compile()` directly rather than `python -m triton.tools.compile`: that CLI
-bakes the launch grid into its wrapper, ignores dynamic shared memory in the generated launch
-call, and mangles symbol names with a signature hash. We only want the cubin plus its launch
-metadata (entry name, dynamic shared bytes, threads per block) and we launch it ourselves.
-
-Verified: the cubin produced here is BIT-IDENTICAL (SASS) to what the Triton JIT produces for
-the same source and constants, so this changes no sampling behaviour whatsoever.
+`triton.compile()` is called directly rather than through `python -m triton.tools.compile`: that
+CLI bakes the launch grid into its wrapper, ignores dynamic shared memory in the generated launch
+call and mangles symbol names with a signature hash. We want the cubin plus its launch metadata
+and launch it ourselves.
 
 Usage:
     python cpp/tools/build_kernels.py [--arch 89] [--out cpp/src/generated]
@@ -37,11 +36,9 @@ import triton.backends                                           # noqa: E402
 
 # Field splits the engine supports (see gpap.engine.bcp_engine.PACKED_SPLITS).
 SHIFTS = (16, 8)
-# Wavefront lane width: 32 only, and W must be a power of two (tl.arange enforces it). BOTH
-# ways of raising it are measured out: over W/32 REAL warps (num_warps>1) it was 2-5x WORSE —
-# cross-warp reduction sync per step, docs/findings/INSIGHTS.md — and since every BCP spec below
-# pins num_warps=1, raising W here instead gives W/32 elements per lane (ILP), which measured
-# 0.918x at W=64 (docs/findings/WAVE_SHUFFLE_FINDINGS.md).
+# Wavefront lane width: 32 only, and a power of two (tl.arange enforces it). Both ways of
+# raising it measured out — over real warps and as ILP within one
+# (docs/findings/WAVE_SHUFFLE_FINDINGS.md).
 WAVE_W = 32
 
 _PTR_I32, _PTR_I8, _PTR_I64 = "*i32:16", "*i8:16", "*i64:16"
@@ -66,16 +63,12 @@ def _require_triton_gather():
 def vscan_is_read(wave: int, soft: int) -> bool:
     """Does the trajectory kernel's VSCAN constant reach any code for this (wave, soft)?
 
-    Its only use is guarded `if WAVE and VSCAN and not SOFT` (cpp/kernels/bcp.py), so for a
-    scalar or a SOFT trajectory the two VSCAN values compile to THE SAME kernel. We used to
-    emit both anyway: 6 of the 33 shipped cubins were byte-identical duplicates of another
-    entry, 0.19 MB of a 0.83 MB payload, and every one of them was a second copy of a
-    trajectory the engine can reach by two keys. `traj_key` in cpp/src/engine.cpp applies the
-    same rule, so the engine asks for the key that exists.
-
-    THE RULE LIVES IN TWO LANGUAGES and must agree; gated by
-    tests/test_kernel_table.py, which hashes the generated table and launches
-    every reachable key.
+    Its only use is guarded `if WAVE and VSCAN and not SOFT` (cpp/kernels/bcp.py), so a scalar or
+    a SOFT trajectory compiles to the same kernel under either VSCAN value: a cubin the kernel
+    cannot tell apart is not shipped. `traj_key` in cpp/src/engine.cpp applies the same rule, so
+    the engine asks for the key that exists. The rule lives in two languages and must agree;
+    gated by tests/test_kernel_table.py, which hashes the generated table and launches every
+    reachable key.
     """
     return bool(wave and not soft)
 
@@ -117,9 +110,8 @@ def kernel_specs():
     for shift in SHIFTS:
         for wave in (0, 1):
             # _bcp_fixpoint_clean_kernel(... occ_cls, INIT, trail ... M, NW, B, TRAIL_CAP,
-            # SHIFT, WAVE, W) — CLEAN mode (docs/plans/RESET_RESTORE_PLAN.md §9). Appended
-            # LAST so the 29 pre-existing blobs keep their order in the generated file (the
-            # no-regression check diffs them key by key).
+            # SHIFT, WAVE, W) — CLEAN mode (docs/findings/CLEAN_MODE_FINDINGS.md). Appended last
+            # so the pre-existing blobs keep their order in the generated file.
             out.append((f"fixpoint_clean.s{shift}.w{wave}", "bcp", "_bcp_fixpoint_clean_kernel",
                         _FIX_CLEAN_PTRS + ["i32"] * 4 + [shift, wave, WAVE_W], 1))
     return out
@@ -146,11 +138,9 @@ def compile_one(fn, signature: list, num_warps: int, target, num_stages: int = 3
     for h in hints.values():
         assert h == 16, f"only 16-byte divisibility hints are used here, got {h}"
     attrs = {k: [["tt.divisibility", 16]] for k in hints}
-    # Import ASTSource directly rather than via fn.create_binder(): the binder calls
-    # `driver.active.get_current_target()`, and triton's NVIDIA driver reports itself INACTIVE
-    # unless torch is installed AND torch.cuda.is_available() — i.e. unless a real GPU is
-    # present. Going through the binder would make cross-compilation (`--arch`) impossible on
-    # exactly the machines it exists for: CI runners and build containers with no GPU.
+    # Import ASTSource directly rather than via fn.create_binder(): the binder asks the driver
+    # for the current target, which triton reports as inactive without a real GPU, making
+    # cross-compilation (`--arch`) impossible on exactly the machines it exists for.
     from triton.compiler import ASTSource
     src = ASTSource(fn=fn, constexprs=constants, signature=sig, attrs=attrs)
     backend = triton.compiler.make_backend(target)

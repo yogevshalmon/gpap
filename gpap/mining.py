@@ -1,26 +1,14 @@
 """Entailed-clause mining: prove small clauses the formula already implies, before solving it.
 
-An application of `gpap.engine.probe` — nothing here knows about sampling. If assuming a set of
-literals drives BCP to a conflict, the formula entails the negation of their conjunction, which
-is a clause. Probing every k-subset of a literal pool therefore yields every entailed clause of
-width k that BCP alone can see:
+An application of `gpap.engine.probe`; nothing here knows about sampling. If assuming a set of
+literals drives BCP to a conflict, the formula entails the negation of their conjunction, so
+probing every k-subset of a literal pool yields every entailed clause of width k that BCP alone
+can see (k=1 is the BCP-visible backbone). Every clause returned is entailed, so adding it leaves
+the model set exactly unchanged (verified in tests): mining can only strengthen propagation.
 
-    k = 1   assuming l conflicts  =>  unit (~l)          the BCP-visible BACKBONE
-    k = 2   assuming a,b conflicts =>  (~a | ~b)
-    k = 3   ...and so on
+    result = mine_entailed(num_vars, clauses, device); stronger = clauses + result.clauses
 
-Every clause returned is ENTAILED, so adding it to the formula leaves the model set EXACTLY
-unchanged. That is what makes mining safe to apply before any downstream use: it can only make
-propagation stronger, never change the answer. (Verified in tests against the original clauses,
-not merely argued.)
-
-    from gpap.mining import mine_entailed
-    result = mine_entailed(num_vars, clauses, device)
-    stronger = clauses + result.clauses
-
-Why it pays: a mined clause is proven once and then prunes doomed search EARLY in every
-subsequent propagation. The measured effect on solution sampling, and the tier-by-tier cost
-breakdown, are in docs/findings/MINING_FINDINGS.md — results belong there, not in this docstring.
+Measured effect on sampling and the tier-by-tier cost: docs/findings/MINING_FINDINGS.md.
 """
 from __future__ import annotations
 
@@ -41,44 +29,32 @@ log = logging.getLogger(__name__)
 __all__ = ["mine_entailed", "MiningResult", "DROP_LEVELS", "DEFAULT_WIDTHS",
            "DEFAULT_MAX_TUPLES"]
 
-#: Widths mined by default: units, then binaries, then ternaries.
 DEFAULT_WIDTHS = (1, 2, 3)
 
-#: Per-width WORK BUDGET: how many candidates a width may probe. C(P,k) grows fast enough that a
-#: wide pool at k=3 is hours of GPU work — and the cost is the PROBE, not the enumeration (probing
-#: n tuples initializes n x M clause words). A width over its budget probes that many and reports
-#: itself NOT exhaustive; the clauses it found are still entailed, so partial results are kept
-#: rather than thrown away. An int applies to every width; a dict gives per-width budgets, which
-#: is what you want when the widths cost wildly different amounts.
+#: Per-width WORK BUDGET: how many candidates a width may probe (an int for all, or a dict). A
+#: width over budget probes that many and reports itself NOT exhaustive; partial results are kept
+#: because the clauses found are entailed regardless.
 DEFAULT_MAX_TUPLES = 200_000
 
 
 @dataclass
 class MiningResult:
-    """What was proven, and whether the search was complete.
-
-    `clauses` are DIMACS clauses, each independently entailed by the input formula.
-    `exhausted[k]` says width k was searched EXHAUSTIVELY — i.e. no entailed clause of that width
-    escaped, which is a stronger statement than "we found these".
-    """
+    """What was proven, and whether the search was complete. `clauses` are DIMACS clauses, each
+    entailed by the input formula; `exhausted[k]` says width k was searched EXHAUSTIVELY."""
 
     clauses: list[list[int]] = field(default_factory=list)
     by_width: dict[int, int] = field(default_factory=dict)
     exhausted: dict[int, bool] = field(default_factory=dict)
     skipped: dict[int, str] = field(default_factory=dict)
-    #: candidates the full enumeration HAS, and how many were actually probed, per width. Without
-    #: these a caller cannot tell "nothing is entailed here" from "we barely started" — the two
-    #: look identical in `by_width` and mean opposite things.
+    #: candidates the enumeration HAS and how many were probed, per width: without them "nothing
+    #: is entailed here" and "we barely started" look identical.
     candidates: dict[int, int] = field(default_factory=dict)
     probed: dict[int, int] = field(default_factory=dict)
-    #: sweeps run per width. 1 for every width >= 2; width 1 is iterated to a FIXPOINT, so its
-    #: `candidates`/`probed` are SUMS over this many rounds and are NOT comparable to the pool
-    #: size — the pool shrinks each round, and proving convergence always costs one final round
-    #: that finds nothing. Without this the totals read as an impossible over-count of the pool.
+    #: sweeps per width: 1 for width >= 2, more for width 1 (a FIXPOINT), whose
+    #: `candidates`/`probed` are therefore SUMS over rounds and NOT comparable to the pool size.
     rounds: dict[int, int] = field(default_factory=dict)
-    #: BCP implications the engine derived across every sweep. The hardware-work metric: unlike
-    #: clauses/s it does not depend on how many clauses happened to be entailed, so it is what to
-    #: compare across instances, GPUs or engine changes.
+    #: BCP implications derived across every sweep — the hardware-work metric, independent of how
+    #: many clauses were entailed, so it is what compares across instances or engines.
     implications: int = 0
     #: clauses removed because propagation already derives them (`drop="derivable"` only).
     derivable: int = 0
@@ -96,13 +72,9 @@ class MiningResult:
         return [c for c in self.clauses if len(c) == 1]
 
     def summary(self) -> str:
-        """One line: what was proven, how much was probed, how fast.
-
-        The probed count is a plain total; it is deliberately NOT printed as a fraction of the
-        candidate space. Summing `candidates` across widths adds a width-1 count that is itself a
-        sum over fixpoint rounds to a width-2 count of C(P,2), which produced lines like
-        a ratio of two incomparable things. Per-width coverage is exact and belongs per width
-        (see `candidates` / `probed` / `rounds`)."""
+        """One line: what was proven, how much was probed, how fast. The probed count is a plain
+        total, deliberately not a fraction of the candidate space: summing `candidates` across
+        widths adds a width-1 fixpoint sum to a width-2 C(P,2)."""
         parts = [f"{n} of width {k}" for k, n in sorted(self.by_width.items()) if n]
         done = sum(self.probed.values())
         cover = (f", probed {done:,} tuple(s)" if done else "")
@@ -122,40 +94,25 @@ def mine_entailed(num_vars: int, clauses: list, device, *, pool: list | None = N
                   on_plan=None) -> MiningResult:
     """Mine entailed clauses of the given `widths` and return them.
 
-    `pool`: DIMACS LITERALS to combine at widths >= 2, and the natural knob — the interesting
-      joint constraints usually live in a known subset (an independent support, a set of primary
-      inputs). None means every free literal. Pass both polarities of a variable to ask about it
-      in general, or one to ask about a single side. Width 1 always sweeps ALL free literals: the
-      backbone is cheap and is the dominant win.
-    `seconds`: wall-clock budget across all widths (None = unbounded). Binds between chunks.
-    `max_tuples`: per-width work budget — an int for every width, or {width: budget}. A width
-      above it probes that many candidates and is reported as not exhaustive (see
-      `MiningResult.candidates` / `.probed` for the coverage).
-    `min_units_for_wide`: run widths >= 2 only if width 1 proved at least this many units. The
-      wide tiers are the expensive ones and on many formulas they find nothing, so a caller that
-      wants mining to be nearly free on barren inputs sets this to 1.
-    `drop`: which REDUNDANT clauses to leave out. Three levels, each stronger than the last:
-      "none"       keep everything proved (for analysis).
-      "subsumed"   (default) leave out a clause some clause already covers — a subset of it is
-                   present in the formula the sweep ran against, so it constrains nothing new.
-                   Free: a set test over the handful of clauses found.
-      "derivable"  ALSO leave out clauses propagation re-derives on demand (assume all but one
-                   literal, and the last one is forced). This is the probing literature's notion
-                   for hyper-binary resolvents, and it is far stronger: on b03-c25 it removes 96%
-                   where "subsumed" removes 0%. Costs one extra batched launch (~40-70% of mining
-                   wall). ⚠️ NOT the default, deliberately: a derivable clause still SHORTENS
-                   propagation, and GPAP's own sampler is propagation-bound — keeping them is
-                   measured at +29-43% end-to-end. Drop them for a consumer that wants a minimal
-                   formula (a CDCL preprocessor), not for one that wants speed.
+    `pool`: DIMACS literals to combine at widths >= 2 (None = every free literal); pass both
+      polarities of a variable to ask about it in general, one for a single side. Width 1 always
+      sweeps ALL free literals — the backbone is cheap and the dominant win.
+    `seconds`: wall-clock budget across all widths (None = unbounded), binding between chunks.
+    `max_tuples`: per-width work budget, an int for every width or {width: budget}. A width above
+      it probes that many candidates and is reported not exhaustive (`.candidates` / `.probed`).
+    `min_units_for_wide`: run widths >= 2 only if width 1 proved at least this many units, so
+      mining stays nearly free where the expensive wide tiers find nothing.
+    `drop`: which REDUNDANT clauses to leave out, each level stronger than the last — "none"
+      keeps everything; "subsumed" (default) drops a clause the swept-against formula already
+      covers, free as a set test; "derivable" ALSO drops the ones propagation re-derives on
+      demand, at one extra batched launch. Derivable is deliberately not the default: such a
+      clause still shortens propagation and GPAP's sampler is propagation-bound, so keeping them
+      is measured faster end-to-end (docs/findings/MINING_FINDINGS.md).
+    `on_plan`: on_plan(width, candidates, ceiling) before any probing, so a front-end can show
+      what a sweep will cost while aborting is cheap; it lives here because the count needs a
+      built engine the caller would otherwise construct twice.
 
-    `on_plan`: called as on_plan(width, candidates, ceiling) for each width BEFORE any probing,
-      so a front-end can show what a sweep is about to cost while it is still cheap to abort.
-      It lives here because the count needs a built engine: a caller doing this for itself had to
-      construct a second `LiteralProbe` over the same formula and throw it away to obtain numbers
-      this one already has for free.
-
-    Width 1 is iterated to a FIXPOINT: each proven unit narrows the formula, which can expose
-    further failed literals. Later widths run once, on the narrowed formula.
+    Width 1 is iterated to a FIXPOINT; later widths run once, on the narrowed formula.
     """
     if drop not in DROP_LEVELS:
         raise ValueError(f"drop must be one of {DROP_LEVELS}, got {drop!r}")
@@ -163,24 +120,14 @@ def mine_entailed(num_vars: int, clauses: list, device, *, pool: list | None = N
     res = MiningResult()
     sub = _Subsumption(max(widths, default=0))
     budget = ProbeBudget(deadline=t0 + seconds if seconds is not None else None)
-    current = list(clauses)          # original + everything proven so far
+    current = list(clauses)
 
     def keep(clause: tuple, check: bool = True) -> bool:
-        """Record a clause unless something already known SUBSUMES it (see `_Subsumption`).
-
-        `check=False` skips the test for a caller that has already PROVEN it cannot fire. Width 1
-        is the case: a mined unit (u) comes from probing ~u, and ~u was probed only because it was
-        FREE — so neither u nor ~u was settled by the flush. Had (u) been a formula unit, or a unit
-        mined in an earlier fixpoint round (those are folded in by `assume`), the flush would have
-        set u and ~u would not have been free. Hence no width-1 unit can be subsumed by anything
-        known, and the test is vacuous rather than merely cheap. Verified: the overlap between
-        formula units and mined units is 0 on b03-c25, s386-c25 and b09-c25. (It is worth ~0.1% of
-        mining wall — recorded for the invariant, not the speed; the recording still happens
-        because later widths need it.)
-
-        It runs on the conflicts the sweep REPORTED, never on candidates. Its predecessor filtered
-        CANDIDATES and cost 65s to drop 0 of 122M.
-        """
+        """Record a clause unless something already known SUBSUMES it (see `_Subsumption`), on
+        the conflicts the sweep REPORTED and never on candidates. `check=False` skips the test
+        where it is provably vacuous, which is width 1: a mined unit (u) comes from probing ~u,
+        and ~u was probed only because it was FREE, so had (u) been a formula unit or one mined in
+        an earlier fixpoint round (both folded in by `assume`), ~u would not have been free."""
         if check and drop != "none" and sub.subsumes(clause):
             return False
         sub.add(clause)
@@ -192,9 +139,8 @@ def mine_entailed(num_vars: int, clauses: list, device, *, pool: list | None = N
     try:
         probe = LiteralProbe(num_vars, clauses, device)
         if on_plan is not None:
-            # UPPER BOUNDS, and exact only for the first width run: width 1's proven units narrow
-            # the formula, so a later width sees a smaller free pool than counted here. Width 1's
-            # own count is ONE round of its fixpoint, not the total it will probe.
+            # UPPER BOUNDS, exact only for the first width run: width 1's units narrow the
+            # formula, and its own count is ONE fixpoint round, not the total it will probe.
             for width in sorted(widths):
                 on_plan(width, probe.count(pool if width > 1 else None, width),
                         _ceiling(max_tuples, width))
@@ -208,10 +154,8 @@ def mine_entailed(num_vars: int, clauses: list, device, *, pool: list | None = N
             if width > 1 and res.by_width.get(1, 0) < min_units_for_wide:
                 res.skipped[width] = "too few units at width 1"
                 continue
-            # The subsumption reference is the formula REDUCED by the baseline the probe is about
-            # to run on, so it is rebuilt whenever that baseline moves — which `assume` (inside the
-            # width-1 fixpoint) and a formula rebuild both do. Width 1 never consults it (its
-            # clauses provably cannot be subsumed, see `keep`), so it does not pay for the pass.
+            # The subsumption reference is the formula REDUCED by the baseline the probe runs on,
+            # so it is rebuilt whenever that baseline moves; width 1 never consults it.
             if width > 1:
                 sub.rebuild(current, num_vars, probe.assigned_literals())
             ceil_w = _ceiling(max_tuples, width)
@@ -223,25 +167,20 @@ def mine_entailed(num_vars: int, clauses: list, device, *, pool: list | None = N
             res.candidates[width], res.probed[width] = w.candidates, w.probed
             res.rounds[width] = w.rounds
             if not w.exhausted:
-                # ONE message for both widths, from the probe's OWN stop reason. Asserting
-                # "(max_tuples)" here named a bound that may never have been the binding one:
-                # width 1 is just as often cut by the shared wall-clock deadline, and a user told
-                # to raise a budget they had already set to unbounded has been sent nowhere.
+                # ONE message for both widths, from the probe's OWN stop reason: never assert
+                # "(max_tuples)", since width 1 is as often cut by the shared wall-clock deadline.
                 res.skipped[width] = (
                     f"probed {w.probed:,} of {w.candidates:,} candidates "
                     f"({w.stopped or 'incomplete'}) — clauses found are still entailed, but this "
                     f"width was NOT searched exhaustively")
-            # Each width STRENGTHENS the formula the next one probes: a clause proven at width 2
-            # can make a width-3 assumption conflict that would not have conflicted without it.
-            # Units are folded in place by `assume`; wider clauses need the formula rebuilt, which
-            # is why this only fires when a wide tier actually proved something. Skipping it costs
-            # real clauses — measured 4 ternaries instead of 7 on an unrolled b03.
+            # Each width STRENGTHENS the formula the next one probes. Units are folded in place
+            # by `assume`; wider clauses need the rebuild, and skipping it costs real clauses.
             if found and width > 1 and width < max(widths):
                 res.implications += probe.implications      # bank before the rebuild resets them
                 probe = LiteralProbe(num_vars, current, device)
     except RuntimeError as e:
         # Mining is an OPTIMIZATION: every clause already proven stays valid, so a mid-tier CUDA
-        # failure abandons the rest rather than failing the caller's whole job.
+        # failure abandons the rest rather than failing the caller's job.
         log.warning("mining stopped after a device error, keeping %d proven clause(s): %s",
                     len(res.clauses), e)
         res.skipped[-1] = f"device error: {e}"
@@ -258,33 +197,17 @@ def mine_entailed(num_vars: int, clauses: list, device, *, pool: list | None = N
 
 
 def _derivable_mask(clauses, base_clauses, num_vars: int, device) -> np.ndarray:
-    """Which of `clauses` can propagation over `base_clauses` fully replace? (n,) bool.
+    """Which of `clauses` can propagation over `base_clauses` fully replace? (n,) bool, in one
+    batched launch of `sum(len(c) for c in clauses)` assumption sets.
 
     A clause `(l1|...|lk)` does k separate JOBS: when the other k-1 literals are false it forces
-    the remaining one, and which job fires depends on the search. This marks a clause only when
-    propagation over `base_clauses` covers EVERY one of them — for each j, assuming the other
-    literals false either conflicts (the consumer gets a backtrack, at least as informative) or
-    already forces `lj`. Then the clause adds no propagation power in any direction and a consumer
-    that wants a minimal formula can drop it.
-
-    ⚠️ Derivable is NOT the same as useless. A derivable clause still SHORTENS the derivation, and
-    GPAP's sampler is propagation-bound, so keeping them is measured at +29-43% end-to-end. Drop
-    them for a consumer that wants a minimal formula (a CDCL preprocessor), not for one that wants
-    speed. That is why `mine_entailed(drop=...)` defaults to keeping them.
-
-    ⚠️ CONSERVATIVE, deliberately. Requiring all k jobs makes this weaker than the literature's
-    transitive reduction for hyper-binary resolvents, which can treat one direction as enough
-    because it runs on the binary implication graph, where a binary clause IS both of its edges.
-    Our reference is the PROPAGATION relation, which also holds implications squeezed out of long
-    clauses going unit, and those are one-way: `(-1|5),(-1|6),(-5|-6|2)` propagates 1 => 2 but not
-    -2 => -1, because the backward step would have to conclude "not both 5 and 6" and unit
-    propagation can only conclude a single literal. Measured with a one-direction-is-enough rule
-    instead: 95.4% vs 60.7% dropped on b03-c25, 54.5% vs 20.3% on b09-c25 — i.e. a THIRD of the
-    mined wide clauses have a live direction the weaker rule silently discards. Never a soundness
-    question either way (every mined clause is entailed, so the model set is unchanged whatever is
-    dropped) — only propagation strength. docs/findings/MINING_FINDINGS.md.
-
-    One batched launch: `sum(len(c) for c in clauses)` assumption sets.
+    the remaining one, and a clause is marked only when propagation covers EVERY one of them.
+    Requiring all k is deliberately more conservative than the literature's transitive reduction
+    for hyper-binary resolvents, which treats one direction as enough because a binary clause IS
+    both of its implication-graph edges; our reference is the PROPAGATION relation, which also
+    holds one-way implications squeezed out of long clauses going unit (`(-1|5),(-1|6),(-5|-6|2)`
+    gives 1 => 2 but not -2 => -1), and a third of the mined wide clauses have a live direction
+    the weaker rule discards. Only propagation strength is at stake, never soundness.
     """
     wide = [list(c) for c in clauses if len(c) > 1]
     out = np.zeros(len(clauses), dtype=bool)
@@ -299,12 +222,10 @@ def _derivable_mask(clauses, base_clauses, num_vars: int, device) -> np.ndarray:
     res = ck.check_assumptions(sets, assignments=True)
     conflict = res["conflict"].cpu().numpy()
     asg = res["assignment"]
-    # DIMACS literal -> internal 2N index (+v -> 2(v-1), -v -> 2(v-1)+1).
     cols = torch.as_tensor([2 * (abs(w) - 1) + (0 if w > 0 else 1) for _, w in tag],
                            device=asg.device)
     forced = asg[torch.arange(len(tag), device=asg.device), cols].bool().cpu().numpy()
     hit = conflict | forced
-    # EVERY job must be covered, not just one (see the docstring). Count per clause.
     wide_pos = [i for i, c in enumerate(clauses) if len(c) > 1]
     owner = np.array([ci for ci, _ in tag], dtype=np.int64)
     jobs = np.bincount(owner, minlength=len(wide))
@@ -314,11 +235,8 @@ def _derivable_mask(clauses, base_clauses, num_vars: int, device) -> np.ndarray:
 
 
 def _drop_derivable(res: MiningResult, num_vars: int, clauses: list, device) -> None:
-    """Remove the clauses propagation already derives, judged against what the caller will HAVE.
-
-    That is the input formula plus the mined UNITS — not the input alone. A caller takes the whole
-    result, so the units are part of the context a wider clause has to earn its place against;
-    judging against the input alone understates the redundancy (on b03-c25, 53% vs 96%)."""
+    """Remove the clauses propagation already derives, judged against what the caller will HAVE:
+    the input formula plus the mined UNITS, not the input alone."""
     units = [c for c in res.clauses if len(c) == 1]
     mask = _derivable_mask(res.clauses, list(clauses) + units, num_vars, device)
     kept = [c for c, red in zip(res.clauses, mask) if not red]
@@ -334,34 +252,21 @@ def _drop_derivable(res: MiningResult, num_vars: int, clauses: list, device) -> 
 class _Subsumption:
     """The clauses a mined one must not repeat — as REDUCED by the baseline the probe runs on.
 
-    Why not just the input clauses: mining folds every proven unit into the engine's flush cache
-    (`assume`), so a sweep propagates on top of an assignment, and a conflict proves a clause
-    relative to THAT. An input clause (a | b | c) whose `c` the baseline falsified is a BINARY
-    constraint during the sweep, so assuming (~a, ~b) empties it and "proves" (a | b) — entailed,
-    but redundant: any consumer that takes the mined units too will derive it by propagation. It
-    is not subsumed by any INPUT clause, which is why testing against those let 17 of them through
-    on b03-c25.
-
-    That also makes the answer DETERMINISTIC. There used to be a second filter inside the engine
-    (`skip_subsumed`) that read the implication counter, and on a conflicted row that counter is
-    order-dependent — wave can derive implications in the same warp-wide step that empties the
-    clause — so scalar dropped 17 where wave dropped 0. Same soundness either way, different
-    output, and a library whose results move with a launch flag is a library that cannot be gated.
-    It was deleted (it was worth 0.0-0.3% of the result buffer): redundancy is a property of a
-    CLAUSE against a FORMULA, so it belongs on the host, where the formula is known. This is the
-    only filter, and it is exact.
-    """
+    Not the input clauses: mining folds every proven unit into the engine's flush cache, so a
+    sweep propagates on top of an assignment and a conflict proves a clause relative to THAT. An
+    input clause (a | b | c) whose `c` the baseline falsified is a binary constraint during the
+    sweep, so assuming (~a, ~b) "proves" (a | b) — entailed, but redundant for a consumer that
+    also takes the mined units, and subsumed by no input clause. Keep this as the ONLY filter: in
+    the engine it would read an order-dependent counter and make the output kernel-dependent
+    (gated by test_mining_is_kernel_invariant)."""
 
     def __init__(self, max_width: int):
         self._max_width = int(max_width)
         self.known: set[tuple] = set()
 
     def rebuild(self, clauses: list, num_vars: int, assigned: np.ndarray) -> None:
-        """Recompute the reference: `clauses` reduced by the baseline `assigned` (DIMACS literals).
-
-        Vectorised, because it runs once per width on the whole formula — the obvious per-clause
-        Python loop is ~0.5 s on a 219k-clause unroll, which would be a larger cost than the sweep
-        it protects."""
+        """Recompute the reference: `clauses` reduced by the baseline `assigned` (DIMACS
+        literals). Vectorised: a per-clause Python loop costs more than the sweep it protects."""
         self.known = set()
         lens = np.fromiter((len(c) for c in clauses), dtype=np.int64, count=len(clauses))
         if lens.size == 0 or lens.sum() == 0:
@@ -376,13 +281,13 @@ class _Subsumption:
         free = state == 0
         sat = np.add.reduceat((state > 0).astype(np.int32), starts) > 0
         width = np.add.reduceat(free.astype(np.int32), starts)
-        # A satisfied clause constrains nothing, and a residue wider than the widest width mined
-        # cannot subsume anything that could be emitted.
+        # A satisfied clause constrains nothing; a residue wider than the widest mined width
+        # cannot subsume anything emittable.
         take = ~sat & (width >= 1) & (width <= self._max_width) & (lens > 0)
         if not take.any():
             return
-        pos = np.flatnonzero(free)                                    # free literal positions
-        owner = np.searchsorted(starts, pos, side="right") - 1        # ...and their clause
+        pos = np.flatnonzero(free)
+        owner = np.searchsorted(starts, pos, side="right") - 1
         rank = np.arange(pos.size) - np.searchsorted(owner, owner, side="left")
         sel = take[owner]
         rows = np.zeros((len(clauses), self._max_width), dtype=np.int32)
@@ -396,11 +301,8 @@ class _Subsumption:
         self.known.add(clause)
 
     def subsumes(self, clause: tuple) -> bool:
-        """True if something known SUBSUMES `clause` — i.e. some subset of it is already a clause.
-        Not a duplicate test: mining cannot emit the same clause twice (candidates within a width
-        are distinct combinations, widths differ in length, and width 1's fixpoint removes each
-        proven variable from the pool). Subsumption is the thing that matters: if (~a | ~b) is
-        present then (~a | ~b | ~c) adds nothing while still slowing every later propagation."""
+        """True if something known SUBSUMES `clause`, i.e. some subset of it is already a clause
+        — not a duplicate test: with (~a | ~b) present, (~a | ~b | ~c) only slows propagation."""
         for r in range(1, len(clause) + 1):
             for sub in itertools.combinations(clause, r):
                 if sub in self.known:
@@ -421,9 +323,8 @@ def _ceiling(max_tuples, width: int) -> int:
 
 
 class _WidthResult(NamedTuple):
-    """What one width's sweep did — the SAME shape from both workers, so the caller records it
-    once. `_mine_units` used to report through a positional `seen` list and drop `stopped`
-    entirely, which is how the caller ended up asserting a stop reason it had not been told."""
+    """What one width's sweep did — the same shape from both workers, `stopped` included, so the
+    caller records it once and never asserts a stop reason it was not told."""
 
     found: int
     exhausted: bool
@@ -435,14 +336,11 @@ class _WidthResult(NamedTuple):
 
 def _mine_units(probe: LiteralProbe, budget: ProbeBudget, keep,
                 max_tuples: int = 0) -> _WidthResult:
-    """Width 1, to a fixpoint: a proven unit can expose further failed literals.
-
-    `max_tuples` is the width's WHOLE budget, spent ACROSS the fixpoint's rounds — the pool
-    shrinks each round, so a per-round ceiling would let a many-round sweep spend an unbounded
-    multiple of it. 0 = unbounded. This used to be hardcoded to 0 with no way to reach it, so the
-    CLI printed an over-budget warning for a bound that could not fire.
-    ⚠️ A caller passing a per-width DICT must give width 1 an explicit `0`: the fallback is
-    DEFAULT_MAX_TUPLES, which would cap the backbone fixpoint (see pipeline.STAGE1_MAX_TUPLES)."""
+    """Width 1, to a fixpoint: a proven unit can expose further failed literals. `max_tuples` is
+    the width's WHOLE budget, spent ACROSS the fixpoint's rounds (0 = unbounded), since a
+    per-round ceiling would let a many-round sweep spend an unbounded multiple of it. A caller
+    passing a per-width DICT must give width 1 an explicit `0`, or the DEFAULT_MAX_TUPLES fallback
+    caps the backbone fixpoint (see pipeline.STAGE1_MAX_TUPLES)."""
     found, exhausted = 0, True
     cand = done = rounds = 0
     stopped = ""
@@ -469,16 +367,14 @@ def _mine_units(probe: LiteralProbe, budget: ProbeBudget, keep,
         found += len(fresh)
         if not fresh or not r.exhausted:
             break
-        probe.assume(fresh)                                  # narrow, then look again
+        probe.assume(fresh)
     return _WidthResult(found, exhausted, cand, done, rounds, stopped)
 
 
 def _mine_width(probe: LiteralProbe, width: int, pool, budget: ProbeBudget, max_tuples: int,
                 keep) -> _WidthResult:
-    """One width >= 2 over the pool's still-free literals."""
-    # The pool is DIMACS LITERALS. Restricted to the ones still free, because a settled literal
-    # cannot teach anything: TRUE makes the probe a no-op, FALSE makes it conflict for a reason
-    # already known.
+    """One width >= 2 over the pool's still-free literals: a settled literal cannot teach
+    anything (TRUE makes the probe a no-op, FALSE conflicts for a reason already known)."""
     free_vars = probe.free_variables()                       # DIMACS variables, 1-based
     if pool is None:
         lits = np.stack([free_vars, -free_vars], axis=1).reshape(-1).astype(np.int32)
@@ -487,23 +383,11 @@ def _mine_width(probe: LiteralProbe, width: int, pool, budget: ProbeBudget, max_
         lits = cand[np.isin(np.abs(cand), free_vars)]
     if lits.size < width:
         return _WidthResult(0, True, 0, 0, 1, "")
-    # COUNT FIRST, then decide. The ceiling has to be checked against an exact count computed
-    # WITHOUT generating anything: `combinations` below materializes C(P,k) tuples, so a ceiling
-    # applied to its output cannot protect against the very case it exists for. At pool=None and
-    # width 3 on an unrolled circuit that is ~1e11 candidates (~2 TB), and this function used to
-    # be OOM-killed there before it ever reached the comparison.
-    # ONE call into the core, which enumerates and probes CHUNK BY CHUNK. Nothing proportional to
-    # C(P,k) is materialized here — for this instance's 122M pairs the old host-side path built a
-    # 0.9 GiB array first, and `max_tuples` is a work budget, so a huge width now yields whatever
-    # it can reach instead of nothing.
-    #
-    # There is deliberately no candidate pre-filter. There used to be one (_drop_subsumed), meant
-    # to skip candidates whose clause is already known and so save GPU work. MEASURED on
-    # plain7824 at width 2: it cost 65.3s and dropped 0 of 122,289,160 candidates — 0.0000%. It
-    # cannot do better in general, because width 1 runs first and `assume` folds its units into
-    # the flush, which removes those variables from the pool entirely; what is left to subsume is
-    # just the formula's existing binary clauses, a vanishing fraction. `keep()` already rejects a
-    # re-derived clause, so correctness never depended on it.
+    # COUNT FIRST, then decide: the ceiling must be checked against an exact count computed
+    # WITHOUT generating anything (at pool=None and width 3 the enumeration is ~1e11 candidates,
+    # and materializing it to compare would OOM). Then ONE call into the core, which enumerates
+    # and probes CHUNK BY CHUNK. Do not add a candidate pre-filter: measured, it dropped 0 of
+    # 122M candidates, because `assume` has already removed width 1's variables from the pool.
     r = probe.probe(lits, width, budget=_budget_with(budget, max_tuples))
     found = 0
     for row in r.conflicting:
@@ -512,8 +396,8 @@ def _mine_width(probe: LiteralProbe, width: int, pool, budget: ProbeBudget, max_
 
 
 def _release(device) -> None:
-    """Hand the probe engine's VRAM back. Reserved-but-free memory poisons the next component's
-    batch calibration, which reads FREE memory — measured K collapsing to 1 without this."""
+    """Hand the probe engine's VRAM back: reserved-but-free memory poisons the next component's
+    batch calibration, which reads FREE memory."""
     if getattr(device, "type", None) == "cuda":
         import torch
         torch.cuda.empty_cache()

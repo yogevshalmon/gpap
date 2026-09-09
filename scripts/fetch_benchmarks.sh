@@ -7,8 +7,8 @@
 #   scripts/fetch_benchmarks.sh              # every set
 #   scripts/fetch_benchmarks.sh itc99        # just the big ITC'99 circuits (~25 MB)
 #
-# The set filter exists so a driver that needs only b17-b22 does not also pull 93 MB of HWMCC:
-# eval/colab/colab_rivals_l4.sh calls it on a fresh VM, and a rival sweep touches no AIGER set.
+# The set filter exists so a driver that needs only b17-b22 does not also pull the AIGER sets:
+# eval/colab/colab_rivals_l4.sh calls it on a fresh VM, and a rival sweep touches none of them.
 set -euo pipefail
 
 WANT="${1:-all}"
@@ -51,14 +51,10 @@ for b in b17 b18 b19 b20 b21 b22; do
         "https://raw.githubusercontent.com/cad-polito-it/I99T/master/i99t/$b/$b.bench"
 done
 
-# ...and INSTALL them beside the committed circuits, because that is the ONE directory every
-# driver reads. `eval/run_full_eval.sh` and `eval/colab/colab_rivals_l4.sh` both build their
-# instance list from `benchmarks/circuits/bench/seq/*.bench` — the colab driver derives the whole
-# sequential family from it — so a big instance sitting only in $CACHE is SILENTLY ABSENT: no
-# error, no skip line, just a sweep six instances shorter than the one the comments describe.
-# That is what happened to b17-b22 in the 2026-09-02 campaign; they ran only because they had
-# been copied over by hand. They stay out of git (.gitignore), so this is an install step, not a
-# commit: `git status` is unchanged after running it.
+# ...and install them beside the committed circuits, the one directory every driver reads: both
+# campaign drivers build their instance list from `benchmarks/circuits/bench/seq/*.bench`, so a
+# big instance sitting only in $CACHE is silently absent — no error, no skip line, just a shorter
+# sweep. They stay out of git, so this is an install step and `git status` is unchanged.
 SEQ_DIR="$REPO/benchmarks/circuits/bench/seq"
 if [ -d "$SEQ_DIR" ]; then
     n=0

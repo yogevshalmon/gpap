@@ -1,30 +1,28 @@
 #!/usr/bin/env python3
-"""WAVE vs SCALAR propagate-kernel A/B across the benchmark families — GPAP only.
+"""WAVE vs SCALAR propagate-kernel A/B across the benchmark families, GPAP only.
 
-The engine picks the propagate kernel per formula (`cpp/src/calibrate.cpp::gpap_dispatch_wave`:
-WAVE, one warp per row, when M >= 2048; SCALAR, the serial trail, below). This measures what
-that choice is worth per instance and binned by clause count, with the kernel FORCED on each
-arm via `$GPAP_KERNEL` (read by the core binding at engine construction, so it can be toggled
-between `sample_file` calls in one process).
+The engine picks the propagate kernel per formula (`gpap_dispatch_wave`: WAVE, one warp per row,
+above a clause-count threshold; SCALAR, the serial trail, below). This measures what that choice
+is worth per instance and binned by clause count, with the kernel forced per arm via
+`$GPAP_KERNEL`, which the core reads at engine construction and so can be toggled between calls
+in one process.
 
-METHOD — every rule here was a wrong number once; do not "simplify":
-  * each CNF is encoded ONCE and both arms run in the SAME process, order ALTERNATED per rep
-    (SM clocks drift within a run; an un-alternated before/after cannot resolve a few percent);
-  * the config is PINNED (`--portfolio b8`, no bandit): a free bandit picks differently per arm
-    and the A/B would be measuring the bandit, not the kernel;
-  * MINING IS OFF: mining is wall-budgeted, so a faster kernel mines MORE clauses and the two
-    arms would run DIFFERENT formulas (M, K and everything downstream would move);
-  * VALIDATION before timing: both arms at a pinned K (`--val-k-cap`) for a fixed number of
-    chunks (`--val-chunks`) must pass the soundness re-check and produce IDENTICAL model counts — BCP is
-    confluent, so at equal K/seed/chunks the kernels agree on every model (the repo's no-change
-    gate). Every arm also records the sampler's own `engine.mode` provenance, the proof that the
-    forced kernel is what ran;
-  * TIMING: a fixed wall per arm (`--time-limit`, the cross-GPU protocol's 20 s so several chunks
-    run), `--reps` repetitions with the order alternated, best-of per arm (drift makes any
-    single run a lower bound); ratio = wave/scalar of the bests; K is recorded per arm and
-    flagged if the arms differ.
-  * the dispatch rule's own pick (`dispatch_mode(M, K)`) is recorded per row, so the result
-    doubles as a check of the rule on this GPU.
+Method — every rule here was a wrong number once; do not "simplify":
+  * each CNF is encoded once and both arms run in the same process, order alternated per rep,
+    because SM clocks drift within a run and an un-alternated before/after cannot resolve a few
+    percent;
+  * the config is pinned (no bandit): a free bandit picks differently per arm, and the A/B would
+    then measure the bandit;
+  * mining is off: it is wall-budgeted, so a faster kernel mines more clauses and the arms would
+    run different formulas;
+  * validation before timing: both arms at a pinned K for a fixed number of chunks must pass the
+    soundness re-check and produce identical model counts, since BCP is confluent. Each arm
+    records the sampler's own `engine.mode`, the proof that the forced kernel is what ran;
+  * timing: a fixed wall per arm, `--reps` repetitions with the order alternated, best-of per arm
+    (drift makes any single run a lower bound); ratio = wave/scalar of the bests, with K recorded
+    per arm and flagged if the arms differ;
+  * the dispatch rule's own pick is recorded per row, so the result doubles as a check of the
+    rule on this GPU.
 
 Resumable (`--resume`): rows are keyed by (family, instance, encoder); the JSON is written after
 every CNF. Vacuous-pin and zero-search instances are measured but flagged and excluded from the
@@ -112,9 +110,9 @@ def measure(cnf, device, configs, args):
     # ---- validation: same K, same seed, same chunk count -> the kernels must agree exactly
     val = {}
     for k in KERNELS:
-        # verify_sound ON for the VALIDATION arms only: this is the pass whose job is to
-        # prove both kernels emit real models, and it is untimed. The timing arms below leave it
-        # off so nothing is charged to a measured wall.
+        # verify_sound on for the validation arms only: this pass exists to prove both kernels
+        # emit real models and is untimed. The timing arms leave it off so nothing is charged to
+        # a measured wall.
         val[k] = run_arm(k, cnf, device, configs, n_time=10**9, time_limit=args.val_time_limit,
                          k_cap=args.val_k_cap, max_chunks=args.val_chunks, seed=args.seed,
                          verify_sound=True)
@@ -132,9 +130,8 @@ def measure(cnf, device, configs, args):
         row["validation"]["identical_models"] = (same_k and
                                                 val["scalar"]["models"] == val["wave"]["models"])
         row["validation"]["mode_ok"] = all(val[k]["mode"] == k for k in KERNELS)
-        # `sound` is the TRI-STATE string, so it must be compared to "ok" — truthiness passes
-        # for "off" AND for "UNSOUND", which silently disarmed this gate when the key changed
-        # from the old `gpu_sound` bool.
+        # `sound` is the tri-state string and must be compared to "ok": truthiness passes for
+        # "off" and for "UNSOUND" alike, which would disarm this gate.
         row["validation"]["sound_ok"] = all(val[k]["sound"] == "ok" for k in KERNELS)
         row["validation"]["passed"] = bool(row["validation"]["identical_models"]
                                            and row["validation"]["mode_ok"]
@@ -284,9 +281,8 @@ def main(argv=None):
     if args.only:
         keep = {tuple(k.split("/")) for k in args.only}
         work = [w for w in work if (w[0], w[1], w[2]) in keep]
-        # MERGE BY KEY, as the help says: a re-measurement replaces the old row. Without this,
-        # --resume skipped the named cells (already "done") and a run without --resume threw
-        # away every OTHER row — either way the pass could not do what it exists for.
+        # Merge by key: a re-measurement replaces the old row. Otherwise --resume skips the
+        # named cells as already done and a run without it discards every other row.
         rows = [r for r in rows if (r["family"], r["instance"], r["encoder"]) not in keep]
         done -= keep
     for i, (fam, inst, enc, src, kind, cycles, pin) in enumerate(work):

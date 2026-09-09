@@ -1,45 +1,17 @@
-"""Benchmark the GPU BCP-completion sampler (gpap.sampling) against CMSGen — a thin CLI/table
-layer over gpap.sampling.pipeline.sample_file (the shared e2e flow). Lives INSIDE the package so
-the installed `gpap bench` entry point works from any directory.
+"""Benchmark the GPU sampler against CMSGen — a CLI/table layer over
+gpap.sampling.pipeline.sample_file, inside the package so the installed `gpap bench` works from
+any directory. Columns follow the SAT-sampling literature (Golia et al., FMCAD'21): samples/s,
+decisions/s and implications/s for both samplers, 2-wise coverage, GPAP soundness.
 
-GPAP runs CMSGen's UniformLikeWitness algorithm (random var + random polarity + unit propagation)
-massively in parallel on the GPU. This harness compares them with the SAT-sampling literature's
-own metrics (Golia et al., FMCAD'21):
-
-  THROUGHPUT  — samples/sec (wall time to produce --n-time samples, including setup).
-  WORK RATES  — decisions/s + unit-prop implications/s for BOTH samplers (CMSGen's come from its
-                own CryptoMiniSat counters; needs the patched binary, see --cmsgen below).
-  QUALITY     — 2-wise coverage %: for each pair of sampling-set vars, the fraction of pairs whose
-                all four (±,±) combinations appear across the samples (the combinatorial-testing
-                quality metric CMSGen reports). Higher = better solution-space spread.
-  SOUNDNESS   — GPAP: GPU check (every model's clauses all have sat_count>0) + optional CPU verify.
-
-### Emission fairness (the CMSGen protocol; read before quoting a ratio)
-
-GPAP's timed run EMITS NOTHING — models stay on the GPU and delivery is a separate, off-timing
-pass (docs/BENCHMARKING.md §4). Stock CMSGen instead formats and writes every sample as a full
-N-variable DIMACS assignment, which on wide formulas costs MORE than the sampling itself
-(measured on 27.sk_3_32, 50k samples: 0.42 s generating vs 3.6 s with --samplefile — 373 MB of
-output). Comparing GPAP-without-emission to CMSGen-with-emission measures file I/O, not sampling.
-
-So the driver prefers a CMSGen built with scripts/build_cmsgen.sh (upstream + the small in-repo
-patch scripts/cmsgen_gpap_eval.patch) which adds `--nowrite` (generate, emit nothing) and
-`--statsevery` (parseable propagation/decision counters). It auto-detects those flags:
-  * patched  -> the timed CMSGen run uses --nowrite (like-for-like), and the write-mode rate is
-                reported too whenever a samplefile run happens anyway (--n-cov) or --cmsgen-both;
-  * stock    -> falls back to the samplefile run, and the row is marked cms_mode="write" so the
-                handicap is visible in the JSON rather than silently folded into the ratio.
-
-The glob may mix DIMACS CNFs with circuits (.bench / .aig / .aag): circuits are converted first
-(same --encoder / --abc-opt / --cycles / --pin-outputs / --target flags as `gpap sample`; the
-encode wall is reported per instance and in the JSON, NOT folded into the sampler's e2e rate —
-both samplers consume the identical CNF, so the encode cost is common to the comparison).
-`--encoders tseitin abc:fast` runs EVERY circuit through each encoder back-to-back in one pass,
-emitting one row per (instance, encoder) — the paired A/B the encoder plots consume.
-
-Usage:
-  gpap bench 'benchmarks/sampling/*.cnf' --cmsgen .gpap/bin/cmsgen --n-cov 5000
-  gpap bench 'benchmarks/circuits/bench/seq/*.bench' --encoders tseitin abc:fast --target rare
+Emission fairness (docs/BENCHMARKING.md §4, read before quoting a ratio): GPAP's timed run emits
+nothing, while stock CMSGen writes every sample as a full N-variable assignment, which on wide
+formulas costs more than the sampling. The driver therefore prefers a CMSGen built with
+scripts/build_cmsgen.sh (upstream + scripts/cmsgen_gpap_eval.patch), adding `--nowrite` and
+`--statsevery`; patched times the emission-free run, stock falls back to the samplefile run and
+marks the row cms_mode="write" so the handicap stays visible. The glob may mix DIMACS CNFs with
+circuits (.bench / .aig / .aag), which are converted first with the same flags as `gpap sample`;
+the encode wall is reported per instance but folded into neither sampler's rate, and
+`--encoders tseitin abc:fast` gives one row per (instance, encoder).
 """
 import argparse
 import glob
@@ -50,24 +22,19 @@ import subprocess
 import sys
 import time
 
-# Shared with the `gpap` CLI — INCLUDING the numeric validators. This module owns its own parser
-# and eval/run_full_eval.sh invokes it as `python -m gpap.benchmark`, so a bound that lived only in
-# gpap/cli.py's wrapper would be absent on exactly the campaign path it was written to protect
-# (`--time-limit 0` here is also the rival subprocess's timeout).
+# Shared with the `gpap` CLI, validators included: this module owns its own parser and is also
+# invoked as `python -m gpap.benchmark`, so a bound living only in gpap/cli.py would be absent on
+# the campaign path (`--time-limit 0` here is also the rival subprocess's timeout).
 from gpap.cli import CIRCUIT_EXTS, _NONNEG_INT, _POS_INT, _POS_SECS, _k_cap_arg
 from gpap.sampling.pipeline import merge_sound_check, sound_verdict
 
 SCHEMA = 4          # results-JSON schema version (docs/BENCHMARKING.md §9)
-#   1: original flat rows
-#   2: + encode_s / encoder / sim_baseline / per_seed
-#   3: + one row per (instance, ENCODER) with `enc_key`; engine provenance (`engine`); CMSGen
-#      work-rate stats + emission mode (`cms_*`); error rows; resumable incremental output
-#   4: - `uniformity` (the readout left the library for eval/uniformity/; nothing read the key,
-#      so a schema-3 file still reads correctly — the bump records WHEN the column stopped
-#      being produced, which is what a reader comparing two campaigns needs)
+#   1: flat rows;  2: + encode_s / encoder / sim_baseline / per_seed
+#   3: + one row per (instance, ENCODER) with `enc_key`; engine provenance; CMSGen work-rate
+#      stats + emission mode (`cms_*`); error rows; resumable incremental output
+#   4: - `uniformity` (the readout moved to eval/uniformity/; schema-3 files still read)
 
 
-# --------------------------------------------------------------------------- CMSGen runner
 
 _GPAP_STATS_RE = re.compile(
     r"c gpap-stats samples=(\d+) props=(\d+) decisions=(\d+) conflicts=(\d+) "
@@ -90,26 +57,18 @@ def cmsgen_supports_nowrite(cmsgen_bin: str) -> bool:
 
 
 def cmsgen_supports_maxtime(cmsgen_bin: str) -> bool:
-    """True iff this binary can enforce its own sampling deadline (--maxtime). Cached.
-
-    Added to the patch after the count-flooring finding; an older patched binary has --nowrite
-    and --statsevery but not this, so the two capabilities are probed separately rather than
-    assumed together."""
+    """True iff this binary can enforce its own sampling deadline (--maxtime). Cached. Probed
+    separately from --nowrite/--statsevery: an older patched binary has those but not this."""
     if cmsgen_bin not in _maxtime_cache:
-        cmsgen_supports_nowrite(cmsgen_bin)                     # fills both caches
+        cmsgen_supports_nowrite(cmsgen_bin)
     return _maxtime_cache.get(cmsgen_bin, False)
 
 
 def _parse_cms_stats(text: str) -> dict | None:
-    """Last `c gpap-stats` line of a CMSGen run -> counters dict.
-
-    `final` is True when that line is the one printed AFTER the sampling loop, which is the only
-    one carrying an exact count. The cadence lines are printed every --statsevery samples, so a
-    run that is KILLED reports the last multiple of the cadence and silently drops everything
-    since — measured on the 2026-08-23 L4 campaign, all 174 killed runs reported an exact
-    multiple of 1000 and 81 of them reported 0, i.e. "CMSGen sampled nothing" meant "CMSGen
-    sampled fewer than 1000". `--maxtime` (below) exists so that never happens; `final` is how a
-    caller proves it did not."""
+    """Last `c gpap-stats` line of a CMSGen run -> counters dict. `final` is True when that line
+    is the one printed AFTER the sampling loop, the only one with an exact count: cadence lines
+    print every --statsevery samples, so a KILLED run reports the last cadence multiple and a
+    nonzero count can floor to 0. `--maxtime` avoids that, and `final` proves it did."""
     last = None
     for m in _GPAP_STATS_RE.finditer(text or ""):
         last = m
@@ -123,30 +82,17 @@ def _parse_cms_stats(text: str) -> dict | None:
 
 def cmsgen_run(path, cmsgen_bin, n, scratch, *, keep=None, timeout=60.0, write=True,
                stats_every=1000, seed=None) -> dict:
-    """Run CMSGen once and return a dict describing the run.
-
-    write=True  -> stock protocol: samples are written to a samplefile (which is then parsed for
-                   the model list the quality pass needs). This INCLUDES the emission cost.
-    write=False -> `--nowrite` (patched binaries only): generate and count, emit nothing. The
-                   apples-to-apples mode against GPAP's non-emitting timed run; the sample count
-                   then comes from the `c gpap-stats` counters instead of the file.
-
-    `keep` caps how many parsed models are retained in memory (the rest are only COUNTED). This is
-    essential on low-RAM hosts (a 12 GB Colab): retaining all `n` full models is `n × N` Python
-    ints (~8-9 GB at n=50k, N=5k) and OOM-kills the session. None = keep all.
-
-    `timeout` is the SAMPLING budget, the same quantity GPAP's --time-limit bounds (parse and
-    construction sit outside both). A patched binary enforces it itself via `--maxtime` and exits
-    through its normal path, so the final counters are exact; the subprocess timeout is only a
-    backstop for the phases the deadline does not cover (parsing) and therefore allows a grace
-    margin on top. On a stock binary there is no deadline flag, so the subprocess kill IS the
-    budget and the counters are floored to the last `--statsevery` line.
-
-    Two rates are returned, and they differ only in who is charged for getting ready:
-    `samples_per_s` over the SAMPLING wall (CMSGen's steady state, the like-for-like partner of
+    """Run CMSGen once and return a dict describing the run. `write=True` is the stock protocol
+    (samples to a samplefile, parsed for the quality pass; the rate includes the emission cost);
+    `write=False` uses `--nowrite` on a patched binary — generate and count, emit nothing, the
+    like-for-like partner of GPAP's non-emitting timed run — taking the count from
+    `c gpap-stats`. `keep` caps how many parsed models stay in memory; None keeps all and
+    OOM-kills a low-RAM host. `timeout` is the SAMPLING budget, the quantity GPAP's --time-limit
+    bounds: a patched binary enforces it via `--maxtime` and exits normally so the counters are
+    exact, while on a stock binary the subprocess kill IS the budget and the counters floor to
+    the last `--statsevery` line. Returns `samples_per_s` over the SAMPLING wall (the partner of
     GPAP's `samples_per_s`) and `samples_per_s_e2e` over the whole subprocess wall, parse
-    included (the partner of GPAP's `sps_e2e_total`). Scoring CMSGen's steady state on its
-    subprocess wall while scoring GPAP's on its sampling wall charges one side twice."""
+    included (the partner of `sps_e2e_total`)."""
     out = os.path.join(scratch, "cms_" + os.path.basename(path) + ".txt")
     cmd = [cmsgen_bin, "--samples", str(n)]
     patched = cmsgen_supports_nowrite(cmsgen_bin)
@@ -165,15 +111,14 @@ def cmsgen_run(path, cmsgen_bin, n, scratch, *, keep=None, timeout=60.0, write=T
     t0 = time.perf_counter()
     timed_out = False
     stdout = ""
-    # With --maxtime, CMSGen stops itself after `timeout` seconds of SAMPLING; the subprocess
-    # cap must therefore leave room for the phases the deadline does not cover (reading a
-    # million-clause CNF), or the backstop would fire first and put us back on a floored count.
+    # With --maxtime, CMSGen stops itself after `timeout` seconds of SAMPLING, so the subprocess
+    # cap must leave room for what the deadline does not cover (reading a huge CNF).
     hard = timeout + max(30.0, 0.5 * timeout) if deadline else timeout
     try:
         p = subprocess.run(cmd, capture_output=True, text=True, timeout=hard)
         stdout = (p.stdout or "") + (p.stderr or "")
     except subprocess.TimeoutExpired as e:
-        timed_out = True                        # partial output still carries the counters
+        timed_out = True
         stdout = ((e.stdout or "") if isinstance(e.stdout, str)
                   else (e.stdout or b"").decode("utf-8", "replace"))
     except Exception as ex:  # noqa: BLE001
@@ -189,7 +134,7 @@ def cmsgen_run(path, cmsgen_bin, n, scratch, *, keep=None, timeout=60.0, write=T
                 lits = lits[:-1]
             if not lits:
                 continue
-            count += 1                           # the rate uses the full count, not just kept
+            count += 1
             if keep is None or len(models) < keep:
                 models.append(lits)
         try:
@@ -198,24 +143,21 @@ def cmsgen_run(path, cmsgen_bin, n, scratch, *, keep=None, timeout=60.0, write=T
             pass
     elif stats:
         count = stats["samples"]
-    # The SAMPLING wall: CMSGen's own measurement of its generation loop, which starts after it
-    # has read the CNF. That is the wall GPAP's steady-state rate is measured on, so it is the
-    # one the headline ratio must use; `dt` (the whole subprocess) is the e2e partner.
+    # The SAMPLING wall: CMSGen's own measure of its generation loop, the partner of GPAP's
+    # steady-state rate; `dt` (whole subprocess) is the e2e partner.
     samp_wall = stats["wall_s"] if (stats and stats.get("wall_s")) else dt
     r = {"samples_per_s": (count / samp_wall if samp_wall else 0.0),
          "samples_per_s_e2e": (count / dt if dt else 0.0),
          "models": models, "n_samples": count,
          "wall_s": dt, "sampling_wall_s": samp_wall, "timed_out": timed_out,
-         # The count is exact only when CMSGen printed the post-loop line: either it finished, or
-         # its own --maxtime stopped it. A kill leaves the last cadence multiple instead.
+         # Exact only when CMSGen printed the post-loop line (it finished, or --maxtime stopped
+         # it); a kill leaves the last cadence multiple instead.
          "count_exact": bool(stats and stats.get("final")) and not timed_out,
          "budget_stop": "c gpap-maxtime" in stdout,
          "mode": "write" if (write or not patched) else "nowrite", "patched": patched}
     if stats:
-        # CMSGen's own counters over its own sampling wall -> the CPU numbers our dec/s and
-        # impl/s face. implications = propagations - decisions (same definition as the GPAP
-        # columns). Same wall as `samples_per_s`, so Table 3's identity
-        # (samples/s ratio = impl/s ratio / impl-per-sample ratio) stays exact.
+        # CMSGen's counters over its own sampling wall, so implications = propagations -
+        # decisions as in the GPAP columns and Table 3's identity stays exact.
         r["stats"] = stats
         w = samp_wall
         r["decisions_per_s"] = stats["decisions"] / w if w else 0.0
@@ -226,20 +168,17 @@ def cmsgen_run(path, cmsgen_bin, n, scratch, *, keep=None, timeout=60.0, write=T
 
 
 def cmsgen_sample(path, cmsgen_bin, n, scratch, keep=None, timeout=60.0):
-    """Back-compat wrapper (eval/colab/colab_sampling_benchmark.py imports this): stock write-mode run,
-    returning (samples_per_s, models)."""
+    """Back-compat wrapper (eval/colab/colab_sampling_benchmark.py imports it): stock write-mode
+    run, returning (samples_per_s, models)."""
     r = cmsgen_run(path, cmsgen_bin, n, scratch, keep=keep, timeout=timeout, write=True)
     return r["samples_per_s"], r["models"]
 
 
-# --------------------------------------------------------------------------- encoder specs
 
 def parse_encoder_specs(tokens, default_encoder, default_abc_opt):
-    """['tseitin', 'abc:fast'] -> [('tseitin', None), ('abc', 'fast')].
-
-    A bare 'abc' inherits --abc-opt. The returned order is the run order; every circuit is
-    converted+sampled once per spec (back-to-back, same process, same GPU state — the paired A/B
-    the encoder plots want)."""
+    """['tseitin', 'abc:fast'] -> [('tseitin', None), ('abc', 'fast')]; a bare 'abc' inherits
+    --abc-opt. The returned order is the run order — each circuit is converted+sampled once per
+    spec, back-to-back in one process, which is what makes the encoder A/B paired."""
     if not tokens:
         return [(default_encoder, default_abc_opt if default_encoder != "tseitin" else None)]
     specs = []
@@ -258,7 +197,6 @@ def enc_key(encoder, abc_opt):
     return encoder if encoder == "tseitin" else f"{encoder}:{abc_opt}"
 
 
-# --------------------------------------------------------------------------- driver
 
 def _build_argparser():
     ap = argparse.ArgumentParser(prog="gpap bench")
@@ -274,7 +212,6 @@ def _build_argparser():
                     help="with a patched cmsgen, ALSO time the write-mode (samplefile) run even "
                          "when no quality pass needs the models — the emission-cost appendix")
     ap.add_argument("--cmsgen-seed", type=int, default=None, help="cmsgen -s seed")
-    # circuit-conversion flags (identical to `gpap sample` / `gpap circuit2cnf`)
     from gpap.cli import _add_encoder_args
     _add_encoder_args(ap)
     ap.add_argument("--encoders", nargs="+", default=None, metavar="ENC",
@@ -351,10 +288,8 @@ def _build_argparser():
                          "this to reproduce a run made before it became the default)")
     ap.add_argument("--also-plain", action="store_true", help="also run GPAP without simplification")
     ap.add_argument("--verify-cpu", action="store_true", help="also CPU-verify a few models vs clauses")
-    # OFF, like every other entry point: a soundness re-check is a self-test, not part of
-    # measuring throughput, and a row is only counted when it is fully assigned with no clause
-    # emptied. `eval/run_full_eval.sh` turns it on for the campaign, which is where the extra
-    # coverage is worth its wall (excluded from every rate, but it grows with the formula).
+    # Off, like every other entry point: the re-check is a self-test, not part of measuring
+    # throughput. `eval/run_full_eval.sh` turns it on for the campaign.
     ap.add_argument("--verify-sound", action="store_true",
                     help="re-check on the GPU that every emitted model satisfies every clause")
     ap.add_argument("--max-clauses", type=_POS_INT, default=None,
@@ -384,15 +319,10 @@ def _row_key(row):
 
 
 def _cms_arm_mismatch(results, cmsgen):
-    """Resume guard: refuse to append rows with a different CMSGen arm than the file holds.
-
-    A campaign VM whose cmsgen binary failed to restore would otherwise resume the stage
-    GPAP-only and append ARMLESS rows to an armed file — and a consumer reading the missing
-    counts as numbers scores every one of them as a CMSGen zero, i.e. a phantom win (absent is
-    not zero; eval/artifact/paper_tables.py screens it, verify_artifact FAILS it, and this is
-    where the mixed file is refused existence in the first place). The reverse mix is refused
-    too: resume skips finished rows, so old armless rows would never gain the comparison and the
-    stage would stay half-measured forever. Returns the refusal message, or None."""
+    """Resume guard: refuse to append rows with a different CMSGen arm than the file holds;
+    returns the refusal message, or None. Absent is not zero, so armless rows in an armed file
+    would read as CMSGen zeros; the reverse mix is refused too, since resume skips finished rows
+    and old armless ones would never gain the comparison."""
     live = [r for r in results if not r.get("skipped") and not r.get("error")]
     if not live:
         return None
@@ -423,7 +353,7 @@ def _dimacs_header(path):
                         return int(parts[2]), int(parts[3])
                     return None, None
                 if s and s[0] not in "c%":
-                    break                          # no header (rare) — let the parse decide
+                    break
     except OSError:
         pass
     return None, None
@@ -446,11 +376,11 @@ def main(argv=None):
     if args.allow_soft:
         print(soft_warning())
     if args.twise and args.n_cov == 0:
-        args.n_cov = 2000                          # 2-wise needs the collected quality sample
+        args.n_cov = 2000
     quality = args.n_cov > 0
     mine = {"auto": "auto", "on": True, "off": False}[args.mine]
     specs = parse_encoder_specs(args.encoders, args.encoder, args.abc_opt)
-    os.makedirs(args.scratch, exist_ok=True)       # converted CNFs + CMSGen samplefiles land here
+    os.makedirs(args.scratch, exist_ok=True)
     has_circuits = any(f.endswith(CIRCUIT_EXTS) for f in files)
     multi_enc = len(specs) > 1
     cms_patched = bool(args.cmsgen) and cmsgen_supports_nowrite(args.cmsgen)
@@ -459,7 +389,6 @@ def main(argv=None):
               "sample to a file, which GPAP's timed run does not do. Build the patched binary "
               "with scripts/build_cmsgen.sh for the like-for-like number.", file=sys.stderr)
 
-    # ---- resume / incremental output -------------------------------------------------------
     results, done = [], set()
     if args.output and args.resume and os.path.exists(args.output):
         try:
@@ -470,20 +399,16 @@ def main(argv=None):
             mismatch = _cms_arm_mismatch(results, args.cmsgen)
             if mismatch:
                 raise SystemExit(mismatch)
-            # Resuming a file written by a DIFFERENT engine silently mixes provenance in one
-            # result set. Rows carry engine.core since the libgpap port (absent = the retired
-            # torch/Triton-JIT engine), so say so rather than let it into a summary unnoticed.
+            # Resuming a file written by a DIFFERENT engine mixes provenance in one result set.
+            # Rows carry engine.core (absent = the retired torch/Triton-JIT engine), so say so.
             from gpap.sampling.pipeline import _core_provenance
             here = _core_provenance()
             others = {(r.get("engine") or {}).get("core") or "pre-libgpap (torch engine)"
                       for r in results
                       if (r.get("engine") or {}).get("core") not in (None, here)
                       or ((r.get("engine") or {}).get("core") is None and r.get("engine"))}
-            # A REBUILD of the same version is not a different engine. The stamp is the build id
-            # (a fingerprint of the .so bytes), which is what makes two libraries distinguishable
-            # -- but it also changes on every rebuild, and a staged campaign rebuilds libgpap on
-            # each fresh VM. Warning "delete the file" there would discard a whole sweep for
-            # nothing, so a same-version rebuild is a note and only a VERSION change is loud.
+            # A REBUILD of the same version is not a different engine: the stamp is the build id
+            # and a staged campaign rebuilds per VM, so only a VERSION change is loud.
             ver = lambda c: c.split("+", 1)[0]          # noqa: E731 -- "libgpap 0.3.0"
             rebuilt = sorted(c for c in others if ver(c) == ver(here))
             changed = sorted(c for c in others if ver(c) != ver(here))
@@ -577,12 +502,11 @@ def main(argv=None):
 
 
 def _drop_cnf(row, args):
-    """Delete the CNF this cell generated (unless --keep-cnf). A full circuit matrix is tens of
-    GB of intermediate DIMACS; on a Colab disk that is the difference between finishing and
-    dying at 80%. The path stays in the row for provenance."""
+    """Delete the CNF this cell generated (unless --keep-cnf) — a full circuit matrix is tens of
+    GB of intermediate DIMACS. The path stays in the row for provenance."""
     p = row.get("cnf_path")
     if args.keep_cnf or not p or p == row.get("name") or not row.get("encode_s"):
-        return                                     # not ours to delete (plain-CNF input)
+        return
     try:
         os.remove(p)
     except OSError:
@@ -590,14 +514,9 @@ def _drop_cnf(row, args):
 
 
 def _cpu_info():
-    """Host CPU provenance — REQUIRED to quote any GPAP/CMSGen ratio.
-
-    CMSGen is single-core CPU, so the ratio moves with the HOST as much as with the GPU. The
-    same instance set has been measured at very different ratios on two machines purely because
-    their CPUs differ — CMSGen's own propagation and decision counters confirm the slower host is
-    the cause. A sweep that records the GPU but not the CPU cannot tell "our GPU got faster" from
-    "their CPU got slower", and a reviewer reading a large ratio without the CPU alongside would
-    be right to call it a rigged baseline (docs/BENCHMARKING.md)."""
+    """Host CPU provenance, required to quote any GPAP/CMSGen ratio: CMSGen is single-core CPU,
+    so the ratio moves with the host as much as with the GPU and a sweep recording only the GPU
+    cannot tell "our GPU got faster" from "their CPU got slower" (docs/BENCHMARKING.md)."""
     info = {"count": os.cpu_count()}
     try:
         with open("/proc/cpuinfo") as fh:
@@ -627,17 +546,14 @@ def _gpu_info(device):
             "cuda": torch.version.cuda}
 
 
-# ------------------------------------------------------------------ the quality-pass metrics
-# Both are computed OFF the throughput timing path (the timed run is collect=False): folding
-# reconstruction/dedup into the timed run understates GPU throughput up to 10x, measured. They
-# live here, in the suite driver, because the SUITE is what reports them — the library samples.
+# The quality-pass metrics, computed OFF the throughput timing path (the timed run is
+# collect=False): folding reconstruction/dedup into it understates GPU throughput by up to an
+# order of magnitude. They live in the suite driver because the SUITE reports them.
 
 
 def distinct_projections(models, support):
-    """Count DISTINCT support-projections among `models` (support = 1-based vars). Returns
-    (n_distinct, n_models). This is the "unique solutions" verification metric: it confirms the
-    sampler emits genuinely distinct solutions rather than re-emitting one. Run on the SAME
-    collected set for GPAP and CMSGen, so the distinct COUNTS are directly comparable."""
+    """Count DISTINCT support-projections among `models` (support = 1-based vars); returns
+    (n_distinct, n_models), on the same collected set for GPAP and CMSGen so they compare."""
     if not models:
         return 0, 0
     seen = set()
@@ -648,13 +564,9 @@ def distinct_projections(models, support):
 
 
 def two_wise_coverage(models, support):
-    """% of sampling-var pairs whose all 4 (±,±) joint polarities appear in the sample — the
-    combinatorial-testing COVERAGE metric the CMSGen paper reports (does the sample spread over
-    the space?). NOT a uniformity test; opt-in (`--twise`) for paper comparisons.
-
-    Vectorised: one (S,n)x(n,S) matmul gives the 11-counts per pair; the 10/01/00 counts follow
-    from the column sums (the old per-pair Python loop was O(S^2 n) and dominated the quality
-    pass on wide supports). support: 1-based vars."""
+    """% of sampling-var pairs (1-based) whose all 4 (±,±) joint polarities appear in the sample
+    — the combinatorial-testing COVERAGE metric the CMSGen paper reports, NOT a uniformity test;
+    opt-in via `--twise`. One matmul gives the 11-counts, the rest follow from column sums."""
     import numpy as np
 
     S = len(support)
@@ -680,10 +592,9 @@ def two_wise_coverage(models, support):
 
 
 def _run_one(path0, row, args, device, portfolio, mine, quality, sample_file):
-    """One (instance, encoder) cell: convert -> optional rejection baseline -> GPAP (x seeds)
-    -> optional CMSGen. Returns the result row. Raises only on unexpected failures (the caller
-    turns those into an error row); expected 'cannot run this instance' conditions (packed
-    envelope, conversion failure) come back as a `skipped` row."""
+    """One (instance, encoder) cell: convert -> optional rejection baseline -> GPAP (x seeds) ->
+    optional CMSGen, returning the row. Raises only on unexpected failures (the caller turns
+    those into an error row); "cannot run this instance" comes back as a `skipped` row."""
     from gpap.cli import _convert_circuit
     name = row["name"]
     path = path0
@@ -691,7 +602,7 @@ def _run_one(path0, row, args, device, portfolio, mine, quality, sample_file):
     if path0.endswith(CIRCUIT_EXTS):
         cnf = os.path.join(args.scratch, f"{os.path.splitext(name)[0]}-c{args.cycles}"
                            f"-{row['enc_key'].replace(':', '_')}-{args.target}.cnf")
-        conv = argparse.Namespace(**vars(args))    # per-encoder view of the conversion flags
+        conv = argparse.Namespace(**vars(args))
         conv.encoder, conv.abc_opt = row["encoder"], row["abc_opt"]
         _t0 = time.perf_counter()
         try:
@@ -701,19 +612,15 @@ def _run_one(path0, row, args, device, portfolio, mine, quality, sample_file):
             return row
         row["encode_s"] = time.perf_counter() - _t0
         if args.sim_baseline:
-            # The rejection-sampling rival at the SAME cycles/seed/pin/target (simulate.py).
             from gpap.circuits.simulate import sim_baseline
             sim = sim_baseline(path0, args.cycles, args.seed, pin_outputs=args.pin_outputs,
                                target_mode=args.target)
         path = cnf
     row["cnf_path"] = path
 
-    # Packed-envelope pre-check (cheap, header only): the sum-trick word cannot represent every
-    # formula — 2N bounds its literal-SUM field and the max clause length bounds its COUNT field
-    # (gpap.engine.packed_envelope). The var count is readable from the DIMACS header without a
-    # parse, and it is the condition a real instance actually hits; the clause-length half is
-    # caught below by the engine's own raise. Either way the CELL is skipped with a reason
-    # recorded — a suite sweep must not die on one oversized unroll.
+    # Packed-envelope pre-check from the DIMACS header alone: 2N bounds the packed word's
+    # literal-SUM field (gpap.engine.packed_envelope); the clause-length half is caught below by
+    # the engine's own raise. Either way the CELL is skipped with a reason, never raised.
     from gpap.engine import packed_envelope
     nv_hdr, m_hdr = _dimacs_header(path)
     if nv_hdr:
@@ -730,7 +637,7 @@ def _run_one(path0, row, args, device, portfolio, mine, quality, sample_file):
             return row
 
     # --seeds: one full timed run per seed; the ROW is the median-throughput run (a real,
-    # self-consistent run — not a per-metric mix), the others land in the JSON as per_seed.
+    # self-consistent one, not a per-metric mix), the others land in the JSON as per_seed.
     runs = []
     for s in (args.seeds or [args.seed]):
         try:
@@ -753,12 +660,9 @@ def _run_one(path0, row, args, device, portfolio, mine, quality, sample_file):
     spread = None
     if len(runs) > 1 and g["samples_per_s"]:
         spread = (runs[-1]["samples_per_s"] - runs[0]["samples_per_s"]) / (2 * g["samples_per_s"])
-    sup1 = g["sup1"]                       # metadata from the pipeline's single parse
-    # The soundness verdict is folded over EVERY seed, not read off the median-throughput run:
-    # `per_seed` carries no verdict, so an UNSOUND on any other seed used to vanish from the row
-    # entirely and verify_artifact's gate -- the one check that is never waived -- passed over it.
-    # UNSOUND dominates (merge_sound_check); "off" stays None-valued so a run that never checked
-    # is not published as a clean zero.
+    sup1 = g["sup1"]
+    # The soundness verdict folds over EVERY seed, since `per_seed` carries none. UNSOUND
+    # dominates (merge_sound_check); "off" stays None so an unchecked run is not a clean zero.
     sound = merge_sound_check(*(sound_verdict(r) for r in runs))
     checked = sum(int(r.get("sound_rows_checked") or 0) for r in runs)
     unsound = sum(int(r.get("unsound_rows") or 0) for r in runs)
@@ -768,11 +672,9 @@ def _run_one(path0, row, args, device, portfolio, mine, quality, sample_file):
         "n_models": g["n_models"], "wall_timed_s": g["wall_timed_s"],
         "wall_total_s": g["wall_total_s"], "chunk_capped": g.get("chunk_capped"),
         "sim_baseline": sim,
-        # "ok" | "UNSOUND" | "off" — see gpap.sampling.pipeline. NOT a bool: "off" (the check
-        # was not run) must not read as either verdict.
+        # "ok" | "UNSOUND" | "off" (gpap.sampling.pipeline). Not a bool: "off" is neither
+        # verdict; `sound_rows_checked` is the evidence a verdict is a statement about.
         "succ": g["success_rate"], "sound_check": sound,
-        # `sound_rows_checked` is the EVIDENCE: a verdict is a statement ABOUT some number of
-        # rows, and "ok" over zero checked rows is not a pass.
         "unsound_rows": unsound if sound != "off" else None,
         "sound_rows_checked": checked if sound != "off" else None,
         "cpu_sound": g.get("cpu_sound"),
@@ -792,7 +694,6 @@ def _run_one(path0, row, args, device, portfolio, mine, quality, sample_file):
         row["per_seed"] = [{"seed": r["seed"], "sps": r["samples_per_s"],
                             "sps_e2e": r.get("sps_e2e_total"), "succ": r["success_rate"],
                             "n_models": r["n_models"], "wall_timed_s": r["wall_timed_s"],
-                            # so the row above can be traced back to WHICH seed failed
                             "sound_check": sound_verdict(r),
                             "unsound_rows": r.get("unsound_rows")}
                            for r in runs]
@@ -806,12 +707,10 @@ def _run_one(path0, row, args, device, portfolio, mine, quality, sample_file):
                             max_chunks=args.max_chunks, time_limit=args.time_limit)
         row["gpap_plain_sps"] = plain["samples_per_s"]
 
-    # ---- CMSGen (same per-instance wall budget as GPAP's --time-limit) ---------------------
     if args.cmsgen:
         patched = cmsgen_supports_nowrite(args.cmsgen)
-        # The TIMED run: emission-free when the binary supports it (like GPAP's timed run). On a
-        # stock binary it is the samplefile run, so keep the models the quality pass needs from
-        # it (a patched build gets them from the separate write run below instead).
+        # The TIMED run: emission-free when the binary supports it. On a stock binary it is the
+        # samplefile run, so keep the quality pass's models from it.
         timed = cmsgen_run(path, args.cmsgen, args.n_time, args.scratch,
                            keep=(0 if patched else (args.n_cov or 1)),
                            timeout=args.time_limit, write=not patched,
@@ -822,9 +721,8 @@ def _run_one(path0, row, args, device, portfolio, mine, quality, sample_file):
         row["cms_sps_e2e"] = timed.get("samples_per_s_e2e")     # over its whole subprocess wall
         row["cms_n_samples"] = timed["n_samples"]
         row["cms_timed_out"] = timed.get("timed_out")
-        # True = the count is CMSGen's own final number, not the last --statsevery multiple
-        # before a kill. A False here means `cms_n_samples` is a LOWER BOUND, so it must never
-        # be published as an exact zero (verify_artifact fails the stage on it).
+        # True = CMSGen's own final count, not the last --statsevery multiple before a kill;
+        # False makes `cms_n_samples` a LOWER BOUND, never publishable as an exact zero.
         row["cms_count_exact"] = timed.get("count_exact")
         row["cms_budget_stop"] = timed.get("budget_stop")
         row["cms_wall_s"] = timed.get("wall_s")
@@ -835,27 +733,23 @@ def _run_one(path0, row, args, device, portfolio, mine, quality, sample_file):
         row["cms_conflicts"] = timed.get("conflicts")
         if timed.get("error"):
             row["cms_error"] = timed["error"]
-        # A samplefile run when the quality pass needs models (or --cmsgen-both): its rate is the
-        # WITH-EMISSION number — reported separately, never used for the headline ratio.
+        # A samplefile run when the quality pass needs models (or --cmsgen-both): a
+        # WITH-EMISSION rate, reported separately, never the headline ratio.
         if patched and (quality or args.cmsgen_both):
             wr = cmsgen_run(path, args.cmsgen, args.n_time, args.scratch,
                             keep=(args.n_cov or 1), timeout=args.time_limit, write=True,
                             seed=args.cmsgen_seed)
             cmodels = wr.get("models") or []
             row["cms_sps_write"] = wr["samples_per_s"]
-            # >1 = how much throughput CMSGen loses by emitting its samples (the handicap every
-            # published GPAP-vs-stock-CMSGen ratio silently contained).
+            # >1 = how much throughput CMSGen loses by emitting its samples.
             row["cms_write_penalty"] = (timed["samples_per_s"] / wr["samples_per_s"]
                                         if wr["samples_per_s"] else None)
         elif not patched:
-            row["cms_sps_write"] = timed["samples_per_s"]   # stock: the timed run IS write-mode
+            row["cms_sps_write"] = timed["samples_per_s"]
         gsps, crate = g["samples_per_s"], row["cms_sps"]
         ce2e = row.get("cms_sps_e2e") or 0.0
-        # The two ratios pair LIKE WITH LIKE: steady state against steady state, and end-to-end
-        # against end-to-end. Both sides' preparation is either in or out; charging GPAP for its
-        # parse while CMSGen's rate was scored on a wall containing its own parse (the earlier
-        # `ratio_e2e`) moved only one side of the fraction.
-        # ratio: inf = GPAP-only, 0 = CMSGen-only, None = neither produced in the budget
+        # The two ratios pair LIKE WITH LIKE (steady state to steady state, e2e to e2e), so both
+        # sides' preparation is either in or out. inf = GPAP-only, 0 = CMSGen-only, None = both.
         row["ratio"] = (gsps / crate) if crate else (float("inf") if gsps else None)
         row["ratio_e2e"] = ((((g.get("sps_e2e_total") or 0) / ce2e) if ce2e
                              else (float("inf") if gsps else None)))
@@ -868,17 +762,10 @@ def _run_one(path0, row, args, device, portfolio, mine, quality, sample_file):
 
 
 def _format_header(args, multi_enc, has_circuits, quality):
-    """The table header. It lives beside `_format_row`, in the same optional-column order,
-    because the only thing that makes either of them right is that the two agree.
-
-    Widths are sized for the range the columns actually reach: rates 6e7 samples/s, sols 1e7 on
-    shallow circuits (plus the `<` chunk-capped marker), M 1e6 on a b14-c25 tseitin unroll. A
-    value that overflows its field does not error — it glues itself to the neighbour on its
-    left, and the table still looks like a table. That has shipped three times (`rej/s` under a
-    9-digit accepted/s; `uniq/s~` under an 8-digit unique rate; and the no-circuit branch left
-    at the pre-widening `rej/s` width, which shifted every column to its right by 4), so the
-    range above is not a guideline: it is what tests/test_benchmark_harness.py::TestTableAlignment
-    renders, and widening a value means widening its label here in the same edit."""
+    """The table header, beside `_format_row` and in the same optional-column order: the only
+    thing that makes either right is that the two agree. An overflowing value glues itself to its
+    left neighbour rather than erroring, so widening a value means widening its label here in the
+    same edit (tests/test_benchmark_harness.py::TestTableAlignment)."""
     hdr = f"{'instance':<24}"
     if multi_enc:
         hdr += f"{'enc':>10}"
@@ -909,8 +796,8 @@ def _format_row(r, args, multi_enc, has_circuits, quality):
         line += f"{(r.get('enc_key') or '—'):>10}"
     dps = f"{r['decisions_per_s']:.1e}" if r.get("decisions_per_s") else "—"
     ips = f"{r['implications_per_s']:.1e}" if r.get("implications_per_s") else "—"
-    # '+' after succ% = entailed-clause mining ran; '<' after sols = a safety valve
-    # (--time-limit / zero-progress) stopped the run before it delivered --n-time samples.
+    # '+' after succ% = mining ran; '<' after sols = a safety valve (--time-limit /
+    # zero-progress) stopped the run short of --n-time samples.
     mn = "+" if r.get("mined") else " "
     sols_s = f"{r['n_models']:,}" + ("<" if r.get("chunk_capped") else "")
     line += (f"{r['nv']:>7}{r['M']:>8}{r['support']:>6}"
@@ -935,13 +822,12 @@ def _format_row(r, args, multi_enc, has_circuits, quality):
             amp = r.get("amplification") or 0.0
             amps = f"{amp:,.0f}x" if amp < 1e6 else f"{amp:.0e}x"
             line += f"{sim['p_accept']:>9.1e}{sim['accepted_per_s']:>15,.0f}{amps:>9}"
-        else:                                      # no hit seen: rejection is unusable here
+        else:
             line += f"{'<' + format(sim['p_accept_lt'], '.0e'):>9}{'~0':>15}{'inf':>9}"
     # kernel provenance: w/s = wave/scalar propagate, 16 or 8 = the packed split's SHIFT
     krn = f"{eng.get('mode', '?')[0]}{eng.get('shift', '')}" if eng else "—"
-    # Three outcomes, three glyphs: "-" is "not checked", which is neither OK nor BAD.
-    # The verdict (legacy `gpu_sound` rows included) comes from the ONE definition in
-    # gpap.sampling.pipeline, which eval/artifact/paper_tables.py reads the same rows with.
+    # Three outcomes, three glyphs: "-" is "not checked", neither OK nor BAD; the verdict comes
+    # from the one reader in gpap.sampling.pipeline (legacy `gpu_sound` rows included).
     _sc = sound_verdict(r)
     snd = ("BAD" if _sc == "UNSOUND" or r.get("cpu_sound") is False else
            "OK" if _sc == "ok" else "-")
@@ -993,8 +879,8 @@ def _print_summaries(rows, args, enc_order, np):
                   f"vs CMSGen {np.mean([r['twise_cms'] for r in rows if r.get('twise_cms') is not None]):.1f}% "
                   f"(Δ {np.mean(dq):+.1f}pp)")
     if enc_order:
-        # Paired encoder A/B: only instances that produced a row under EVERY encoder count, and
-        # the BASE is the first --encoders token (the run order), not an alphabetical accident.
+        # Paired encoder A/B: only instances with a row under EVERY encoder count, and the BASE
+        # is the first --encoders token (run order), not an alphabetical accident.
         by_inst = {}
         for r in rows:
             by_inst.setdefault(r["name"], {})[r.get("enc_key")] = r

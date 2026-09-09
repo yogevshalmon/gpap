@@ -1,37 +1,25 @@
 #!/usr/bin/env python3
-"""Which instances is Barbarik's CM_test actually able to say anything about?
+"""Which instances is Barbarik's CM_test able to say anything about?
 
-Two things have to hold before a verdict on an instance means anything, and NEITHER is about the
-sampler under test. Both are checked here so the exclusion list is re-derived from the instances
-rather than chosen after seeing which rows were inconvenient.
+Two things must hold before a verdict means anything, and neither is about the sampler under
+test. Both are checked here so the exclusion list is re-derived from the instances rather than
+chosen after seeing which rows were inconvenient.
 
-**1. The trusted reference must be able to sample it.** CM_test draws one sample per round from
-SPUR. An instance SPUR cannot compile is outside the TEST's reach; running it just hangs.
+1. The trusted reference must be able to sample it. CM_test draws one sample per round from
+   SPUR, so an instance SPUR cannot compile is outside the test's reach.
 
-**2. The declared sampling set must be an INDEPENDENT support.** This is the one that bites, and
-it is invisible unless you look for it. CM_test's kernel pins every declared indVar to sigma1's or
-sigma2's values, so the two buckets hold (extensions of sigma1) and (extensions of sigma2) full
-models, times the chain formula's designed ratio. SPUR is uniform over MODELS. So when a
-projection's extension count varies across projections, SPUR's own share of a bucket is off by
-exactly that factor — and CM_test **rejects the trusted reference itself**.
+2. The declared sampling set must be an independent support. CM_test's kernel pins every declared
+   indVar to sigma1's or sigma2's values, so the two buckets hold the extensions of sigma1 and of
+   sigma2 times the chain formula's designed ratio — while SPUR is uniform over MODELS. When the
+   extension count varies across projections, SPUR's share of a bucket is off by exactly that
+   factor and CM_test rejects the trusted reference itself. Measured, the correspondence is
+   exact: every constant-spread instance Accepts and every varying-spread one Rejects. A Reject
+   there is a statement about the instance, so such instances are dropped from a uniformity
+   table exactly as a vacuous pin is dropped from a throughput table
+   (docs/findings/UNIFORMITY_FINDINGS.md §4b).
 
-Measured on benchmarks/sampling (2026-08-28), the correspondence is exact:
-
-    27.sk_3_32           extensions per projection 2,2,2,...        spread 1.0x   SPUR Accept
-    53.sk_4_32           extensions per projection 2,2,2,...        spread 1.0x   SPUR Accept
-    GuidanceService2     constant                                   spread 1.0x   SPUR Accept
-    ActivityService      60129542144 .. 240786604032                spread 4.0x   SPUR REJECT
-    IssueServiceImpl     841813590016 .. 5568425099264              spread 6.6x   SPUR REJECT
-    PhaseService         30064771072 .. 656458907648                spread 21.8x  SPUR REJECT
-
-Every constant-spread instance Accepts; every varying-spread instance Rejects — and it rejects the
-REFERENCE, so a Reject there is a statement about the instance, not about GPAP or CMSGen. Such
-instances must be dropped from a uniformity table, exactly as a vacuous pin is dropped from a
-throughput table.
-
-(The spread is estimated from a sample of projections, so it is a LOWER bound on the true spread:
-"1.0x over k projections" is evidence of independence, not proof. It is enough to separate the two
-groups, and the SPUR control is the actual gate.)
+The spread is estimated from a sample of projections, so it is a lower bound: constant spread
+over k projections is evidence of independence, not proof, and the SPUR control is the gate.
 
 Usage:
   PYTHONPATH=. .venv/bin/python eval/uniformity/barbarik_screen.py <cnf> [<cnf> ...] \

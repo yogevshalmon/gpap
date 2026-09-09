@@ -1,27 +1,18 @@
 #!/usr/bin/env bash
 # Package the experiment data as a self-describing artifact archive.
 #
-# The archive is the evidence behind the paper's numbers, so it carries three things a bare `zip`
-# of a results directory does not:
-#   * a MANIFEST with the commit, host, per-file sizes and SHA-256 of every JSON, so a number can
-#     be traced to the exact bytes it came from;
-#   * the VERIFICATION output (eval/artifact/verify_artifact.py), so the caveats travel WITH the data
-#     rather than living only in someone's memory;
-#   * the regeneration commands, so every table can be rebuilt from the JSONs alone.
+# The archive is the evidence behind the paper's numbers, so beyond the JSONs it carries a
+# MANIFEST (commit, host, per-file size and SHA-256, so a number traces to the exact bytes), the
+# VERIFICATION output, so the caveats travel with the data, and the regeneration commands.
 #
 #   eval/artifact/make_artifact.sh [OUT_DIR]
 #
-# The data lives OUTSIDE the repo (it is ~9 MB compressed and much larger raw), in
-# `$GPAP_RESULTS` — a sibling directory, default `../gpap-results`. Each dataset is looked up in
-# the already-organised archive layout first and in the raw `.experiments/` run directories
-# second, so this works both straight after a sweep and long after the results were moved out.
+# The data lives outside the repo, in `$GPAP_RESULTS` (default `../gpap-results`). Each dataset
+# is looked up in the archive layout first and in the raw `.experiments/` run directories second,
+# so this works straight after a sweep and long after the results were moved out.
 set -uo pipefail
 
-# This file lives in eval/artifact/, so the repo root is TWO levels up. It was `..` — the same
-# off-by-one the eval/ reorganisation left in eleven other files, missed here because nothing
-# had run the packager since. With it wrong, $RESULTS pointed inside the repo, every dataset
-# came back "no source found", and `cd "$REPO_ROOT"` landed in eval/ so the table copies and
-# the verifier path were wrong too.
+# This file lives in eval/artifact/, so the repo root is two levels up.
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 cd "$REPO_ROOT"
 PY="${PYTHON:-$REPO_ROOT/.venv/bin/python}"
@@ -32,10 +23,9 @@ RESULTS="${GPAP_RESULTS:-$(cd "$REPO_ROOT/.." && pwd)/gpap-results}"
 OUT="${1:-$RESULTS}"
 NAME="gpap_experiments_l4_${STAMP}"
 FINAL="$OUT/$NAME"
-# Stage into a SEPARATE directory and swap at the end. Rebuilding on the same day as a previous
-# run makes $FINAL both the destination AND (via $PRIOR below) the SOURCE of the data — so a
-# `rm -rf "$FINAL"` up front deletes the results it is about to copy from. Found before it fired;
-# a re-run is meant to be safe, and losing the data would mean re-renting the GPUs.
+# Stage into a separate directory and swap at the end: rebuilding on the same day makes $FINAL
+# both the destination and (via $PRIOR) the source, so deleting it up front would destroy the
+# results it is about to copy.
 STAGE="$OUT/.staging_$NAME.$$"
 mkdir -p "$OUT"
 rm -rf "$STAGE"; mkdir -p "$STAGE"
@@ -44,14 +34,10 @@ echo "results root: $RESULTS"
 echo "output      : $OUT"
 
 # --- the data ---------------------------------------------------------------------------------
-# A CAMPAIGN is one dated directory holding every arm measured together (the layout since
-# 2026-08-23). When one is given — or found — it is the ONLY source: mixing arms across campaigns
-# is how a table ends up describing two different protocols at once.
-#
-# ⚠️ This used to prefer `$PRIOR`, the most recent already-archived copy, ahead of any fresh run
-# directory. With an August archive on disk that silently packaged 20-day-old data for EVERY arm
-# — including rival rows measured under the old fixed-5-GiB batch grant — while printing `[ok]`
-# for each one. A packager that ships the wrong data quietly is worse than one that fails.
+# A campaign is one dated directory holding every arm measured together. When one is given or
+# found it is the ONLY source: mixing arms across campaigns is how a table ends up describing two
+# different protocols at once. Do not prefer an already-archived copy over a fresh run directory
+# — a packager that ships the wrong data quietly is worse than one that fails.
 CAMPAIGN="${GPAP_CAMPAIGN:-}"
 if [ -z "$CAMPAIGN" ]; then
     CAMPAIGN="$(ls -d "$RESULTS"/l4_campaign_* "$REPO_ROOT"/.experiments/l4_campaign_* \
@@ -59,13 +45,12 @@ if [ -z "$CAMPAIGN" ]; then
 fi
 [ -n "$CAMPAIGN" ] && echo "campaign    : $CAMPAIGN" || echo "campaign    : none found (legacy layout)"
 
-# How stale a source may be before the packager refuses. A sweep is re-run precisely because the
-# protocol changed, so silently shipping the previous one defeats the point.
+# How stale a source may be before the packager refuses: a sweep is re-run precisely because
+# the protocol changed.
 MAX_AGE_DAYS="${GPAP_ARTIFACT_MAX_AGE_DAYS:-14}"
 STALE=0
-# Datasets whose age is the POINT: a prior campaign kept for comparison, or a reference sweep on
-# another card. Named explicitly rather than exempted by a blanket flag, so adding a stale arm
-# stays a deliberate act.
+# Datasets whose age is the point: a prior campaign kept for comparison, or a reference sweep on
+# another card. Named explicitly rather than exempted by a flag, so it stays a deliberate act.
 ARCHIVAL=" uniformity_prior_campaign gpap_vs_cmsgen_4080_reference "
 
 # find_src <dest-name> <candidate...> -> first candidate that exists
@@ -102,8 +87,7 @@ copy uniformity_l4              "$PRIOR/uniformity_l4"              "$REPO_ROOT/
 copy uniformity_prior_campaign  "$PRIOR/uniformity_prior_campaign"  "$REPO_ROOT/.experiments/fuzz"
 copy gpap_vs_cmsgen_4080_reference "$PRIOR/gpap_vs_cmsgen_4080_reference" \
      "$REPO_ROOT/.experiments/full_eval/nvidia-geforce-rtx-4080-laptop-gpu"
-# The WAVE-vs-SCALAR kernel A/B (docs/paper/KERNEL_AB.md + kernel_ab.tex are generated from it).
-# It had a paper table but was never packaged, so the archive could not regenerate that table.
+# The WAVE-vs-SCALAR kernel A/B, which docs/paper/KERNEL_AB.md and kernel_ab.tex generate from.
 copy kernel_ab_l4               "$PRIOR/kernel_ab_l4"               "$REPO_ROOT/.experiments/kernel_ab_l4"
 
 # The uniformity-PRICE arm: the same matrix with --allow-soft (eval/colab/colab_cmsgen_soft_l4.sh).
@@ -126,8 +110,7 @@ done
 cp -f "$REPO_ROOT/docs/findings/L4_EVAL_FINDINGS.md" "$STAGE/" 2>/dev/null || true
 
 # --- verification, captured INTO the archive ---------------------------------------------------
-# Run against the STAGED copy, so the verdict describes the bytes actually shipped rather than
-# whatever happens to be in a run directory that may have moved since.
+# Run against the staged copy, so the verdict describes the bytes actually shipped.
 echo "verifying ..."
 VERIFY_OK=1
 $PY eval/artifact/verify_artifact.py "$STAGE/gpap_vs_cmsgen_l4" \
@@ -136,9 +119,8 @@ $PY eval/artifact/verify_artifact.py "$STAGE/gpap_vs_cmsgen_l4" \
     --uniformity "$STAGE/uniformity_l4"/*.json "$STAGE/uniformity_prior_campaign/round2.json" \
     > "$STAGE/VERIFICATION.txt" 2>&1 || VERIFY_OK=0
 VERDICT="$(tail -1 "$STAGE/VERIFICATION.txt")"
-# A FAILING verifier is a refusal, not a footnote: the exit code used to be discarded here, so
-# an artifact whose own checker said "NOT publishable" was tarred and stamped anyway, with the
-# verdict buried in a file nobody is forced to read. Same rule as the STALE refusal above.
+# A failing verifier is a refusal, not a footnote: never discard its exit code, or an artifact
+# its own checker calls unpublishable ships with the verdict buried in a file nobody reads.
 if [ "$VERIFY_OK" != 1 ] && [ "${GPAP_ARTIFACT_ALLOW_FAIL:-0}" != "1" ]; then
     echo
     grep '^  FAIL' "$STAGE/VERIFICATION.txt" >&2 || tail -25 "$STAGE/VERIFICATION.txt" >&2

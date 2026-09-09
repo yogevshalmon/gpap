@@ -1,28 +1,17 @@
 #!/usr/bin/env bash
 # The UNIFORMITY-PRICE arm: the entire GPAP-vs-CMSGen matrix re-run with `--allow-soft`.
 #
-# What this measures, and why it needs a whole second sweep.
-#
-# `soft` (soft global lookahead) is Barbarik-REJECTED on 64 of 65 circuit instances, so it was
-# removed from CIRCUIT_PORTFOLIO and is now opt-in. The shipped sampler — and every
-# number in `eval/colab/colab_cmsgen_l4.sh`'s output — therefore already runs WITHOUT it (`allow_soft:
-# false` is recorded in each of those JSONs' `args`). What we could not previously state is the
-# PRICE: how much throughput, and how many instances, the uniformity guarantee costs us in the
-# head-to-head we actually publish.
-#
-# `eval/profile_soft_portfolio.py` answers a narrower version of that question (GPAP vs GPAP, 19
-# sequential circuits, 0.42x geomean). It cannot answer this one, because "we gave up 2.4x" and
-# "we gave up our lead over CMSGen" are different claims, and only the second one matters to a
-# reader of the comparison table.
-#
-# So: same protocol, same budgets, same encoders, same targets, same instances, same code path
-# (`EXTRA_ARGS` is injected into run_full_eval.sh's single `bench` function) — one bit changed.
+# `soft` is Barbarik-rejected on nearly every circuit instance, so it is out of the default
+# portfolio and opt-in: every published number already runs without it. This sweep states the
+# price — how much throughput, and how many instances, the uniformity guarantee costs in the
+# head-to-head we publish. (`eval/profile_soft_portfolio.py` answers the narrower GPAP-vs-GPAP
+# version.) Same protocol, budgets, encoders, targets, instances and code path, one bit changed.
 # Pair the two output directories per (stage, instance, encoder) with:
 #
 #     eval/artifact/soft_price_tables.py --safe <no-soft dir> --soft <this dir>
 #
-# Ordered rare-first for the same reason as the safe arm: a rented VM dies at ~1 h, so the stages
-# most likely to survive to publication must run first.
+# Rare-first, like the safe arm: a rented VM dies within the hour, so the stages most likely to
+# reach publication run first.
 #
 #   bash eval/colab/colab_cmsgen_soft_l4.sh                 # full matrix
 #   TARGETS=rare CYCLES=25 bash eval/colab/colab_cmsgen_soft_l4.sh
@@ -55,14 +44,10 @@ fi
 
 echo "UNIFORMITY-PRICE ARM: EXTRA_ARGS='$EXTRA_ARGS' -> $OUT"
 
-# TARGET-MAJOR order: every family at `rare` first, then every family at `random`.
-#
-# The stage-major order (all of seq, then all of comb, ...) spends the first ~2 h of a ~5 h sweep
-# on sequential RANDOM pins before touching any other family's rare stage — and a rented VM can
-# take the budget away at any point. `rare` is the regime we publish, and measured here `soft`
-# never once won the bandit at random pins (0/8 cells), so the random half is also the half that
-# carries least information about what `soft` is worth. Rare-first means a truncated run still
-# answers the question.
+# Target-major order: every family at `rare` first, then every family at `random`. Stage-major
+# order would spend the first hours on random pins before touching any family's rare stage, and
+# a rented VM can take the budget away at any point. `rare` is the regime we publish, and `soft`
+# never won the bandit at random pins, so a truncated run still answers the question.
 for t in rare random; do
     for stage in seq comb epfl sk hwmcc; do
         echo; echo "########## STAGE $stage TARGET $t  $(date -Is)"

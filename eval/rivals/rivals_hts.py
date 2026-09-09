@@ -1,31 +1,14 @@
 #!/usr/bin/env python3
 """Head-to-head: HTS ("High-Throughput SAT Sampling", arXiv 2502.08673 — the strongest public
-member of the Berkeley gradient-descent GPU-sampler family, same framework as DiffSampler
-DAC'24) vs GPAP, on IDENTICAL CNF files and the SAME GPU.
+member of the Berkeley gradient-descent GPU-sampler family) vs GPAP, on IDENTICAL CNF files and
+the SAME GPU.
 
-Protocol (their metric): UNIQUE solutions per second. HTS reports num_unique_solutions /
-model_runtime where model_runtime is the gradient-descent loop ONLY (their `timer` wraps
-run_back_prop — model build/transform excluded), i.e. their steady-state number. GPAP's
-comparable figure is unique_sps_est = timed samples/s x distinct fraction (dedup measured off
-the timing path); GPAP's rate additionally includes construction+simplify (sps_e2e_total is the
-stricter e2e). Solution-uniqueness caveat: HTS counts unique FULL assignments, GPAP distinct
-SUPPORT projections — identical on deterministic-circuit Tseitin CNFs (internal vars are
-functions of the inputs), which is why the shared instances here are our circuit unrolls plus
-their own s15850a/prod circuit CNFs (`c ind` present). Their timer is emission-free — the
-unique-solution dedup and the results CSV both land after it stops — matching CMSGen's
-`--nowrite` and our `collect=False` timed run (checked by eval/rivals/check_emission_symmetry.py).
-
-Setup (once): eval/rivals/rivals_setup.sh — clones
-    https://github.com/arashardakani/High-Throughput-SAT-Sampler into
-    <repo>/.gpap/src/High-Throughput-SAT-Sampler at the PINNED evaluated commit.
-Usage:
-  PYTHONPATH=. .venv/bin/python eval/rivals/rivals_hts.py '.experiments/rival_cnfs/*.cnf' \
-      [--steps 10] [--batch 100 1000] [--gpap-n 50000] [--output out.json]
-
-HTS quirks handled here: dataset paths are os.path.join'ed against ITS src/ dir (absolute paths
-pass through); ../models + ../results are cwd-relative so it must run from a repo-root child
-dir; results land in src/results/<params>.csv (tab-separated); zero console output by design.
-"""
+Protocol, their metric: UNIQUE solutions per second, num_unique_solutions / model_runtime, whose
+clock is the gradient loop ONLY. GPAP's comparable figure is unique_sps_est = timed samples/s x
+the distinct fraction (dedup measured off the timing path), and its rate additionally includes
+construction + simplify. HTS counts unique FULL assignments, GPAP distinct SUPPORT projections,
+identical on deterministic-circuit Tseitin CNFs. Their timer is emission-free, matching CMSGen's
+`--nowrite` and our `collect=False` run (eval/rivals/check_emission_symmetry.py)."""
 import argparse
 import glob
 import json
@@ -44,14 +27,8 @@ from eval.rivals.rival_common import (cached_gpap, fit_batch,  # noqa: E402
                                       run_at_batch)
 
 HTS_DEFAULT = str(paths.src_dir() / "High-Throughput-SAT-Sampler")
-# Per-SUBPROCESS wall cap for the rival, default 300 s = 5x the 60 s sampling budget GPAP gets
-# per instance. Deliberately GENEROUS and not symmetric: the rival's wall includes building its
-# PyTorch model, which its OWN metric (unique / model_runtime) excludes, so a tight cap would
-# truncate runs it would have completed. MEASURED on this suite: DEMOTIC median 3.7-15.3 s
-# (1/38 runs over 60 s), Recurrent-CircuitSAT median ~165 s with a 665 s tail (18/18 over 60 s,
-# 5/18 over 300 s) — a 60 s cap would have produced ZERO valid Recurrent measurements.
-# A timed-out run is reported as an error row with the reason, never as a zero that would enter
-# a geomean as if the rival had genuinely produced nothing.
+# Per-SUBPROCESS wall cap for the rival, 5x the sampling budget GPAP gets: not symmetric, since
+# the rival's wall includes the model build its OWN metric excludes.
 DEFAULT_TIMEOUT = 300.0
 
 
@@ -89,8 +66,7 @@ def run_hts(hts_root, cnf, steps, batch, lr="10e0", timeout=DEFAULT_TIMEOUT):
 
 
 def n_clauses(cnf):
-    """Clause count from the DIMACS header — the work unit HTS's memory scales with (measured
-    8.4 B per clause-row: 11.30 GiB at batch 100k on a 14,505-clause CNF)."""
+    """Clause count from the DIMACS header — the work unit HTS's memory scales with."""
     for line in open(cnf):
         if line.startswith("p cnf"):
             return int(line.split()[3])
@@ -99,25 +75,19 @@ def n_clauses(cnf):
 
 def run_gpap(cnf, n_time, device, time_limit=60.0, n_cov=1000):
     """`n_cov` is the OFF-timing quality pass: it COLLECTS models to host RAM and rebuilds them
-    in Python, which on a deep unroll costs more wall than the timed run itself (measured 26 s of
-    a 34 s instance on s1196-c25). It only feeds distinct_frac, which is ~1.0 on every non-tiny
-    space — so keep it small here; this harness is about the rival comparison, not coverage."""
+    in Python, costing more than the timed run on a deep unroll and feeding only distinct_frac."""
     from gpap.sampling.pipeline import CIRCUIT_PORTFOLIO, sample_file
-    # verify_sound: see rivals_recurrent — the row records `sound_check`, so it must run the
-    # check, and the check's wall is excluded from every rate.
+    # verify_sound: the row records `sound_check`, so the check runs; its wall leaves every rate.
     g = sample_file(cnf, device, n_time=n_time, n_cov=n_cov, configs=CIRCUIT_PORTFOLIO,
                     time_limit=time_limit, seed=5, verify_sound=True)
     return {"sps": g["samples_per_s"], "sps_e2e": g.get("sps_e2e_total"),
             "unique_per_s_est": g.get("unique_sps_est"),
-            # None means NOT MEASURED (the off-timing coverage run collected nothing on a
-            # very-low-success instance), never "produced nothing" — `n_models` is the second.
+            # None means NOT MEASURED, never "produced nothing" — `n_models` is that question.
             "unique_est_status": g.get("unique_est_status"), "success": g["success_rate"],
             "n_models": g["n_models"], "distinct_frac": (g["n_distinct"] / len(g["models"])
                                                          if g.get("models") else None),
             "wall_total_s": g["wall_total_s"],
-            # engine provenance, same as the CMSGen sweeps: sound_check is the on-device model
-            # check; dec/s + impl/s let the zero-search screen run on rival rows (a seed-1 b13
-            # cell was a FREE HYPERCUBE and carried a 4.7e9x ratio nothing had flagged)
+            # engine provenance, as on the CMSGen sweeps: dec/s + impl/s let the zero-search screen run
             "sound_check": g.get("sound_check"),
             "decisions_per_s": g.get("decisions_per_s"),
             "implications_per_s": g.get("implications_per_s")}

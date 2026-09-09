@@ -1,9 +1,9 @@
 # The GPAP Python API — a map
 
-One page: what the tiers are, which one to use, and the conventions that hold everywhere.
-The reference documentation is the docstrings themselves (every public module, class and method
-carries one); this page is the map that tells you where to look. C++ consumers get the same
-map in [`cpp/README.md`](../cpp/README.md) — the two APIs are faces of one engine, `libgpap`.
+What the tiers are, which one to use, and the conventions that hold everywhere. The reference
+documentation is the docstrings (every public module, class and method carries one); this page
+says where to look. C++ consumers get the same map in [`cpp/README.md`](../cpp/README.md) — the
+two APIs are faces of one engine, `libgpap`.
 
 ## The tiers
 
@@ -25,27 +25,24 @@ gpap.sample(path, n)                       tier 0 — one call, samples out
       └── libgpap (cpp/) — the ONE implementation; C++ callers enter at <gpap/gpap.hpp>
 ```
 
-**Use the lowest-numbered tier that answers your question.** Sampling: `gpap.sample()` or the
-pipeline. Checking assumption sets: `AssumptionChecker`. Combinatorial probing (failed
-literals, entailed clauses, backbones, lookahead): `LiteralProbe` — `gpap.mining` is a worked
-example of an application built on it. Building a NEW application
-(your own decide/propagate loop, a different readout): `BCPEngine`, the tier the one-call faces
-are themselves written on. Tier 3 is private: its surface tracks the C ABI, not a compatibility
-promise.
+Use the lowest-numbered tier that answers your question. Sampling: `gpap.sample()` or the
+pipeline. Checking assumption sets: `AssumptionChecker`. Combinatorial probing (failed literals,
+entailed clauses, backbones, lookahead): `LiteralProbe`; `gpap.mining` is a worked application
+on it. A new application (your own decide/propagate loop, a different readout): `BCPEngine`,
+the tier the one-call faces are written on. Tier 3 is private: its surface tracks the C ABI.
 
 ## Conventions that hold on every public surface
 
-- **Literals are DIMACS**: `+v` TRUE, `-v` FALSE, 1-based, exactly the numbers in the file.
-  The internal 2N index scheme (`+v -> 2(v-1)`, `-v -> 2(v-1)+1`) appears only on `BCPEngine`'s
-  raw `apply_and_propagate`, which is documented where it happens.
-- **Nobody names K.** Every face sizes its own batches from the formula and the GPU
+- **Literals are DIMACS**: `+v` true, `-v` false, 1-based, exactly the numbers in the file. The
+  internal 2N index scheme (`+v -> 2(v-1)`, `-v -> 2(v-1)+1`) appears only on `BCPEngine`'s raw
+  `apply_and_propagate`, where it is documented.
+- **Nobody names K.** Every face sizes its batches from the formula and the GPU
   (`gpap.engine.calibrate`, binding the model in `cpp/src/calibrate.cpp`). Overrides exist for
   measurement (`k_cap`, `pin_batch`, `chunk`), not for normal use.
 - **CUDA + a built `libgpap` are required** (`scripts/build_core.sh`; verify with `gpap info`).
   There is no CPU execution path. `gpap.engine.core_available()` is the programmatic check.
 - **Return types**: the sampling stack and `AssumptionChecker` speak torch (tensors on the
   formula's device); `LiteralProbe` and everything below `BCPEngine`'s accessors speak numpy.
-  A face states its choice in its docstring.
 - **Errors**: out-of-envelope formulas raise `ValueError` at construction; a missing library
   raises with the build instructions; out-of-range literals raise before any GPU work.
 - **`__all__` is the contract.** What `gpap`, `gpap.engine` and `gpap.sampling` export is the
@@ -67,8 +64,8 @@ Everything else is readout. Hot paths use the selection API (`make_pair_mask` +
 row state); the tensor-shaped accessors (`assignment`, `conflict`, `active`) are copies for
 tests and off-hot-path consumers.
 
-Correctness story: BCP fixpoints are confluent, so kernel/chunking choices can change speed but
-never answers on surviving rows (a conflicted row's non-`conflict` fields are snapshots — see
+BCP fixpoints are confluent, so kernel and chunking choices change speed but never answers on
+surviving rows (a conflicted row's non-`conflict` fields are snapshots — see
 `AssumptionChecker.check_assumptions`). The kernels are A/B'd against a pure-Python reference
 BCP (`tests/reference_bcp.py`), the formula builder against `tests/reference_formula.py`, and
 every emitted model is externally verifiable.
@@ -82,8 +79,6 @@ every emitted model is externally verifiable.
 | entailed-clause mining | [`examples/mine_clauses.py`](../examples/mine_clauses.py), `gpap mine` |
 | C++ | [`cpp/examples/`](../cpp/examples/) (tier 1 + raw C ABI) |
 
-## Deep material
-
 How the engine works: [`ENGINE.md`](ENGINE.md). Measurement protocol:
-[`BENCHMARKING.md`](BENCHMARKING.md). Settled experimental results:
-[`findings/INSIGHTS.md`](findings/INSIGHTS.md). The whole documentation tree: [`README.md`](README.md).
+[`BENCHMARKING.md`](BENCHMARKING.md). Settled results: [`findings/INSIGHTS.md`](findings/INSIGHTS.md).
+The documentation tree: [`README.md`](README.md).

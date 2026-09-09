@@ -1,18 +1,16 @@
-"""GPAP — GPU-parallel BCP (Boolean Constraint Propagation) and CircuitSAT sampling.
+"""GPAP — GPU-parallel (partial) assignment propagation and CircuitSAT sampling.
 
-The reusable primitive is `gpap.engine` (K-parallel sum-trick BCP over independent assumption
-sets, with fused Triton trajectory kernels); the flagship application is `gpap.sampling`
-(guaranteed-valid SAT solution sampling, GPU-parallel CMSGen). `gpap.circuits` converts
-sequential/combinational `.bench` circuits into unrolled projected-sampling CNFs.
+The reusable primitive is `gpap.engine`: K-parallel sum-trick BCP over independent partial
+assignments, with fused trajectory kernels. The flagship application is `gpap.sampling`,
+guaranteed-valid SAT solution sampling. `gpap.circuits` converts sequential and combinational
+circuits into unrolled projected-sampling CNFs.
 """
 import os
 
-# CUDA expandable-segments allocation must be configured BEFORE torch initializes its CUDA
-# allocator. The sampler's hot loop churns variable-sized temporaries every round, which
-# fragments the default caching allocator badly (measured: peak reserved 6.5 GB vs 2.5 GB live,
-# growing ~K^2.3); one growable virtual segment makes reserved track allocated and linear in K
-# (~2.3x more usable K for the same VRAM). setdefault so an explicit user setting wins.
-# Importing gpap before any CUDA use guarantees the ordering.
+# Expandable-segments allocation must be configured before torch initializes its CUDA
+# allocator: the sampler's hot loop churns variable-sized temporaries, which fragments the
+# default caching allocator badly and costs usable K. setdefault so an explicit user setting
+# wins; importing gpap before any CUDA use guarantees the ordering.
 os.environ.setdefault("PYTORCH_CUDA_ALLOC_CONF", "expandable_segments:True")
 del os                     # not part of the package namespace (`__all__` is the contract)
 
@@ -23,16 +21,14 @@ __all__ = ["sample", "sample_clauses", "sample_circuit", "MAX_SAMPLES", "__versi
 
 
 # ---------------------------------------------------------------------------- the top-level API
-# THE contract of these three: you ask for n samples, you get n samples. Nothing here mentions a
-# batch size, a portfolio or a memory model — the pipeline sizes all of it to the GPU and the
-# formula. `samples` is a numpy (rows, S) uint8 bit matrix, one column per SUPPORT variable
-# (`info["cols"]` names them), which is both the cheap artifact and the one people want: it is
-# GPU-projected, so only those bits cross the bus, ~10x cheaper than rebuilding full N-variable
-# assignments on the host. Pass full_models=True for the old list[list[DIMACS literal]] form.
-#: Default ceiling on rows RETURNED. It bounds what the caller gets, on both return shapes; the
-#: PEAK host RAM of the `full_models=True` path is bounded separately, by the coverage run's own
-#: batch and chunk caps (`pipeline.sample_clauses`'s `cov_k_cap` / `cov_chunks`), because a chunk
-#: is the smallest unit of work and is never abandoned half-written.
+# The contract of these three: ask for n samples, get n samples. Nothing here names a batch size,
+# a portfolio or a memory model — the pipeline sizes those to the GPU and the formula. `samples`
+# is a numpy (rows, S) uint8 matrix, one column per support variable (`info["cols"]` names them),
+# projected on the GPU so only those bits cross the bus. full_models=True returns full DIMACS
+# models instead.
+#: Default ceiling on rows returned, on both return shapes. Peak host RAM of the
+#: `full_models=True` path is bounded separately by the coverage run's own batch and chunk caps,
+#: since a chunk is never abandoned half-written.
 MAX_SAMPLES = 100_000
 
 
@@ -40,16 +36,12 @@ def sample(path, n=50_000, *, device=None, seed=5, max_samples=MAX_SAMPLES,
            full_models=False, **kw):
     """Sample `n` guaranteed-valid models from a DIMACS CNF file. Returns (samples, info).
 
-    Thin wrapper over gpap.sampling.pipeline.sample_file (the full e2e flow: parse, simplify,
-    warmup, entailed-clause mining, contract-timed run). `info` is the pipeline's rich dict
-    (rates, phases, mining stats, soundness).
-
-    `samples` is a numpy (rows, S) uint8 matrix of support projections, rows <= min(n,
-    `max_samples`); `info["cols"]` gives each column's original DIMACS variable. Collecting them
-    happens OFF the timing path, so `info["samples_per_s"]` is unaffected. `full_models=True`
-    switches to the coverage pass's full DIMACS models instead (list[list[int]], the historical
-    return) — more informative, considerably more expensive, and bounded by the SAME
-    `min(n, max_samples)`."""
+    Thin wrapper over gpap.sampling.pipeline.sample_file (parse, simplify, warmup, mining, timed
+    run); `info` is that pipeline's dict of rates, phases, mining stats and soundness. `samples`
+    is a numpy (rows, S) uint8 matrix of support projections, at most min(n, `max_samples`) rows,
+    with `info["cols"]` naming each column's DIMACS variable. Collection is off the timing path,
+    so `info["samples_per_s"]` is unaffected. `full_models=True` returns the coverage pass's full
+    DIMACS models instead: more informative, considerably more expensive, same row bound."""
     from gpap.sampling.pipeline import sample_file
     return _samples(sample_file, (path, _resolve_device(device)), n, seed, max_samples,
                     full_models, kw)
@@ -84,9 +76,9 @@ def sample_circuit(circuit_path, cycles=25, n=50_000, *, pin_outputs=None, seed=
         from gpap.circuits.bench import parse_bench, build_cnf
         circ = parse_bench(circuit_path)
         b, support, _target, labels = build_cnf(circ, cycles, seed, pin_outputs=pin_outputs)
-    # The labels exist right here, so name the columns rather than making the caller re-derive
-    # which CNF variable is which input at which cycle. `sample_file` recovers the same map by
-    # re-parsing the CNF's `c wire` comments; this path never writes a file.
+    # Name the columns here rather than making the caller re-derive which CNF variable is which
+    # input at which cycle: `sample_file` recovers the same map from the CNF's `c wire`
+    # comments, and this path never writes a file.
     kw.setdefault("_wire_map", dict(zip(support, labels)))
     return sample_clauses(b.nv, b.clauses, n, support=[v - 1 for v in support],
                           device=device, seed=seed, **kw)
@@ -95,19 +87,16 @@ def sample_circuit(circuit_path, cycles=25, n=50_000, *, pin_outputs=None, seed=
 def _samples(fn, args, n, seed, max_samples, full_models, kw):
     """Run a pipeline entry point and hand back (samples, info).
 
-    `full_models` picks WHICH pass collects: `n_cov` reconstructs full DIMACS models on the host,
-    `out_cap` projects support bits on the GPU. A caller may still set either explicitly — an
-    explicit value always wins, since that is how the benchmark driver asks for a small coverage
-    sample alongside a large timed run."""
+    `full_models` picks which pass collects: `n_cov` reconstructs full DIMACS models on the host,
+    `out_cap` projects support bits on the GPU. An explicitly passed value always wins, which is
+    how the benchmark driver asks for a small coverage sample beside a large timed run."""
     key = "n_cov" if full_models else "out_cap"
     kw.setdefault(key, max(0, min(int(n), int(max_samples))))
     info = fn(*args, n_time=n, seed=seed, **kw)
     if full_models:
-        # TRUNCATE to what was asked for. A chunk is the smallest unit of work, so the coverage
-        # run overshoots its target by up to one batch — `n=50, max_samples=10` came back with
-        # 2,048 full models, while the bit path (capped in the pipeline) honoured the same
-        # numbers exactly. One ceiling, both shapes: the cap is `kw[key]`, so an explicitly
-        # passed `n_cov` still wins, exactly as it does for `out_cap`.
+        # Truncate to what was asked for: a chunk is the smallest unit of work, so the coverage
+        # run overshoots its target by up to one batch. One ceiling for both shapes, and an
+        # explicitly passed `n_cov` still wins.
         return info.pop("models")[:int(kw[key])], info
     info.pop("models", None)
     s, cols = info.get("samples"), info.get("cols")

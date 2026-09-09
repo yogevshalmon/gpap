@@ -32,11 +32,9 @@ else
 fi
 BIN_DIR="$PREFIX/bin"
 
-# An already-built binary is reused — EXCEPT when it predates a flag the harness now depends on.
-# The binary is cached across VMs in the Colab sweeps, so a stale one would silently reintroduce
-# the floored sample counts (docs/findings/RIVAL_FAIRNESS_FINDINGS.md §7): a run killed on its
-# budget reports the last --statsevery multiple, which read as a clean 0 on 81 cells of the
-# 2026-08-23 campaign. Rebuild rather than reuse.
+# An already-built binary is reused, except when it predates a flag the harness depends on. The
+# binary is cached across VMs, so a stale one would silently reintroduce floored sample counts
+# (docs/findings/RIVAL_FAIRNESS_FINDINGS.md §7). Rebuild rather than reuse.
 if [ -x "$BIN" ] && [ "${GPAP_CMSGEN_FORCE:-0}" != "1" ]; then
     if [ "$STOCK" != "1" ] && ! "$BIN" --help 2>&1 | grep -q -- --maxtime; then
         echo "cmsgen at $BIN predates --maxtime (its counts would be floored) — rebuilding"
@@ -58,8 +56,8 @@ cd "$SRC"
 [ -d .git ] || git init -q .
 git remote add origin "$CMSGEN_REPO" 2>/dev/null || git remote set-url origin "$CMSGEN_REPO"
 echo "fetching cmsgen ..."
-# The pinned commit is a merge on master; a depth-1 fetch of the SHA works on GitHub, but fall
-# back to the branch tip if the server refuses SHA fetches (older git / mirrors).
+# A depth-1 fetch of the pinned SHA works on GitHub; fall back to the branch tip where the
+# server refuses SHA fetches.
 git fetch -q --depth 1 origin "$CMSGEN_COMMIT" 2>/dev/null || git fetch -q --depth 1 origin master
 git checkout -q FETCH_HEAD 2>/dev/null || git checkout -q origin/master
 git checkout -q -- .                       # drop any previously applied patch (idempotent)

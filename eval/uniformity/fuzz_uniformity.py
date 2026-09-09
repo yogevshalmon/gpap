@@ -1,45 +1,30 @@
 #!/usr/bin/env python3
-"""Fuzz sampling uniformity against an EXACT oracle, GPAP vs CMSGen on identical instances.
+"""Fuzz sampling uniformity against an exact oracle, GPAP vs CMSGen on identical instances.
 
-The problem with uniformity claims on real instances is that nobody knows the true distribution:
-|S| is astronomical, so every statistic is either a gross-skew heuristic (the `--uniformity fast`
-l2_ratio) or a conditional-sampling certificate at parameters coarse enough to be cheap (Barbarik
-— see `eval/uniformity/barbarik_gpap.py`, and the note on its sensitivity below). This harness takes the
-other route: GENERATE small formulas whose entire solution set can be enumerated by brute force,
-so the target distribution is known exactly and a chi-square goodness-of-fit test has real power.
+On real instances nobody knows the true distribution, so every statistic is either a gross-skew
+heuristic or a conditional-sampling certificate at coarse parameters (Barbarik,
+eval/uniformity/barbarik_gpap.py). This harness generates small formulas whose whole solution set
+can be enumerated by brute force, so the target is known exactly and a chi-square test has power.
 
-Two generators, both chosen so that "uniform over the support projections" is UNAMBIGUOUS:
+Two generators, both chosen so "uniform over the support projections" is unambiguous:
+  cnf      random k-CNF, support = every variable, so the projection is the identity.
+  circuit  a random combinational gate DAG over k inputs, Tseitin-encoded, outputs pinned to a
+           producible pattern. The support is the inputs, an independent support by construction,
+           so each projection has exactly one extension. This is the circuit-sampling regime in
+           miniature: an unrolled sequential circuit is a combinational one over |PI| x T inputs.
+Independence is what makes the comparison meaningful: CMSGen samples full models and we project,
+while GPAP decides the support first, and on a non-independent support those target different
+distributions. The oracle is solver-free (exhaustive evaluation), so a bug in our BCP, our Tseitin
+encoder or pysat cannot hide a bug in the sampler.
 
-  cnf      random k-CNF, support = every variable. Projection is the identity, so uniform-over-
-           models and uniform-over-projections are the same distribution.
-  circuit  a random combinational gate DAG (AND/OR/XOR with random inversions) over k inputs,
-           Tseitin-encoded, with its outputs PINNED to a pattern that some input vector produces.
-           The support is the inputs, which is an INDEPENDENT support by construction (every gate
-           var is functionally determined), so again each projection has exactly one extension.
-           This is the flagship circuit-sampling regime in miniature — an unrolled sequential
-           circuit is just a combinational one over |PI|x T inputs.
+Checked per (instance, sampler, config, seed):
+  SOUNDNESS   every emitted row must be in the enumerated solution set; a miss is a hard failure.
+  UNIFORMITY  chi-square goodness-of-fit + total variation against uniform over all |S| solutions
+              (eval/uniformity/metrics.py, mode "exact"), seeds combined by Fisher's method.
 
-Why the independence matters: CMSGen samples full models and we project, while GPAP decides the
-support first. On a NON-independent support those two target different distributions (projections
-would be weighted by their extension count), and the comparison would be meaningless. Both
-generators sidestep that by construction.
-
-The oracle is deliberately solver-free — exhaustive evaluation over all 2^n assignments (cnf) or
-all 2^k input vectors (circuit) — so a bug in our BCP, our Tseitin encoder or pysat cannot hide a
-bug in the sampler.
-
-Two things are checked per (instance, sampler, config, seed):
-  SOUNDNESS  every emitted row must be in the enumerated solution set. A miss is a hard failure,
-             and a far more serious one than skew.
-  UNIFORMITY chi-square GOF + total variation against uniform over all |S| solutions
-             (eval/uniformity/metrics.py `uniformity_stats`, mode "exact"). Independent seeds are
-             combined with Fisher's method, because a single p=0.01 is noise, not a finding.
-
-Sensitivity note, and the reason this exists alongside Barbarik: at the CMSGen paper's own
-parameters (eps 0.3, eta 1.8, delta 0.1) Barbarik only rejects samplers that are ~1.8-far in L1.
-The instance-dependent skew we have actually measured (TV~0.17, on BOTH GPAP and CMSGen) is two
-orders of magnitude inside that, so Barbarik accepts it by design. Barbarik is the standard
-certificate; this is the sensitive test.
+This is the sensitive test and Barbarik is the standard certificate: at the CMSGen paper's
+parameters Barbarik only rejects samplers ~1.8-far in L1, while the instance-dependent skew
+measured here (TV about 0.17, on both samplers) sits far inside that band.
 
   PYTHONPATH=. .venv/bin/python eval/uniformity/fuzz_uniformity.py --count 40 \
       --cmsgen .gpap/bin/cmsgen --out .experiments/fuzz_uniformity.json
@@ -62,20 +47,18 @@ sys.path.insert(0, REPO_ROOT)
 
 from eval.uniformity.metrics import chi2_sf, uniformity_stats  # noqa: E402
 
-# Configs are (random_var, B, lookahead) exactly as gpap.sampling.pipeline defines them. All three
-# CIRCUIT_PORTFOLIO members are swept by default: the bandit picks one per instance in production,
-# so a uniformity claim that only holds for one of them is not a claim about the tool. "soft" is
-# the one to watch — it biases polarity by conflict risk, which is a deliberate trade of
-# distribution for success rate, and nothing had ever measured what it costs.
+# Configs are (random_var, B, lookahead) as gpap.sampling.pipeline defines them. Every portfolio
+# member is swept: the bandit picks one per instance, so a claim holding for only one of them is
+# not a claim about the tool. "soft" biases polarity by conflict risk, trading distribution for
+# success rate.
 CONFIGS = {
     "b8": (True, 8, False),
     "b1": (True, 1, False),
     "soft": (True, 8, "soft"),
-    # B sweep. B is the number of variables decided per propagation round, and it turns out to be
-    # a uniformity knob: at B >= N a chunk assigns every variable a uniform random polarity in one
-    # round and then propagates, which — because GPAP DISCARDS conflicted trajectories instead of
-    # backtracking out of them — is exactly rejection sampling, hence exactly uniform. Small B
-    # interleaves propagation with the decisions and weights solutions by their attraction basin.
+    # B, the variables decided per propagation round, is a uniformity knob: at B >= N a chunk
+    # draws every polarity uniformly in one round and then propagates, which is exactly rejection
+    # sampling (conflicted trajectories are discarded, not backtracked) and so exactly uniform.
+    # Small B interleaves propagation with decisions and weights solutions by their basin.
     "b2": (True, 2, False), "b4": (True, 4, False), "b16": (True, 16, False),
     "b32": (True, 32, False), "b64": (True, 64, False), "b256": (True, 256, False),
 }
@@ -274,11 +257,9 @@ def gen_circuit(rng, s_window, k_range=(10, 15), gate_range=(10, 40),
     return Instance("", "circuit", k + g, clauses, list(range(1, k + 1)), sols,
                     {"inputs": k, "gates": g, "outputs": n_out, "target": target,
                      "p_accept": round(float(accept.mean()), 6),
-                     # The pin constrained NOTHING: the chosen outputs are constant over every
-                     # input, so "sampling" is a free hypercube. Same degeneracy as b02/b05/b07/
-                     # s526 at T=25 (CLAUDE.md). Kept — a sampler that cannot be uniform on a free
-                     # hypercube is badly broken — but reported separately, never as evidence
-                     # about CONSTRAINED sampling.
+                     # The pin constrained nothing: the outputs are constant over every input,
+                     # so "sampling" is a free hypercube (the vacuous-pin degeneracy). Kept, but
+                     # reported apart — it is not evidence about constrained sampling.
                      "vacuous": bool(accept.all()), **_degeneracy(sols)})
 
 
@@ -356,10 +337,8 @@ def sample_pipeline(inst: Instance, path, n: int, seed: int, portfolio_name: str
     from gpap.sampling.pipeline import portfolio as _portfolio
     from gpap.sampling.pipeline import sample_file
     t0 = time.perf_counter()
-    # ASK FOR `n`, the same sample size every other arm is scored at. `out_cap` can only deliver
-    # `min(out_cap, n_models)` rows, so a smaller `n_time` silently capped this arm's sample —
-    # and TV shrinks like sqrt(|S|/n), so a pipeline scored at 5,000 rows against CMSGen's 100|S|
-    # read ~6x worse with zero real skew. Sample size is not a free knob in a TV comparison.
+    # Ask for `n`, the size every other arm is scored at: TV shrinks like sqrt(|S|/n), so a
+    # short arm reads as a skewed one. Sample size is not a free knob in a TV comparison.
     info = sample_file(path, torch.device(device), n_time=n, out_cap=n, seed=seed,
                        configs=_portfolio(portfolio_name, allow_soft=allow_soft),
                        n_cov=0, time_limit=120.0)
@@ -427,9 +406,8 @@ def sample_cmsgen(inst: Instance, path, n: int, seed: int, cmsgen_bin, scratch):
                 lits = lits[:-1]
             if not lits:
                 continue
-            # A variable absent from the line would silently read as FALSE below and MANUFACTURE
-            # skew, so require the full assignment CMSGen documents itself as writing rather than
-            # trusting it. Cheap, and the failure it guards against is invisible otherwise.
+            # A variable absent from the line would read as FALSE below and manufacture skew,
+            # so require the full assignment rather than trusting it.
             if len({abs(x) for x in lits}) != inst.nv:
                 raise RuntimeError(f"cmsgen line covers {len({abs(x) for x in lits})} of "
                                    f"{inst.nv} vars — the projection would be wrong")
@@ -592,11 +570,9 @@ def main(argv=None):
 
     # ------------------------------------------------------------------ summary
     names = list(rows[0]["samplers"]) if rows else []
-    # SCREEN FIRST, THEN AGGREGATE (the paper's rule, CLAUDE.md ground rules). On a full-subcube
-    # instance the emitted bits come from the don't-care FILLER rather than from the config under
-    # test — two different configs return bit-identical statistics there — so such a cell is
-    # evidence about neither sampler and must not sit inside a headline median. It is the same
-    # screen the vacuous pins get, found per instance rather than by name.
+    # Screen first, then aggregate. On a full-subcube instance the emitted bits come from the
+    # don't-care filler rather than the config under test, so the cell is evidence about neither
+    # sampler; the vacuous-pin screen, found per instance rather than by name.
     deg = [r for r in rows if (r.get("meta") or {}).get("subcube")]
     con = [r for r in rows if not (r.get("meta") or {}).get("subcube")]
     print("\n=== summary ===")
@@ -611,9 +587,8 @@ def main(argv=None):
         vs = [r["samplers"][name]["verdict"] for r in con]
         tvs = [r["samplers"][name]["tv_median"] for r in con
                if r["samplers"][name]["tv_median"] is not None]
-        # Realised sample size as a fraction of what this arm was ASKED for. TV falls like
-        # sqrt(|S|/n), so arms scored at different n are NOT comparable and a short arm reads as
-        # a skewed one — print it beside the TV instead of leaving it invisible.
+        # Realised sample size over what this arm asked for. Arms scored at different n are not
+        # comparable, so print it beside the TV rather than leaving it invisible.
         got = [r["samplers"][name]["emitted"] / (r["n"] * len(seeds)) for r in con if r["n"]]
         nfrac = f"  n {min(got):.0%}-{max(got):.0%}" if got else ""
         if not tvs:
@@ -630,10 +605,9 @@ def main(argv=None):
             vs = [r["samplers"][name]["verdict"] for r in deg]
             print(f"    {name:<12} ok {vs.count('ok'):>3}/{len(vs)}  skew {vs.count('SKEW'):>3}  "
                   f"unsound {vs.count('UNSOUND'):>3}")
-    # Controls. The negative control is a genuine PASS/FAIL gate on the statistics; the positive
-    # controls are not — they measure the test's POWER at this n, which is the number a reader
-    # needs to interpret every "ok" above ("ok" means "no skew detectable at this sensitivity",
-    # never "uniform").
+    # The negative control is a pass/fail gate on the statistics; the positive controls measure
+    # the test's power at this n, which is what makes "ok" readable ("no skew detectable at this
+    # sensitivity", never "uniform").
     ctl_ok = True
     for name in [n for n in names if n.startswith("ctl:")]:
         vs = [r["samplers"][name]["verdict"] for r in rows]
@@ -650,9 +624,8 @@ def main(argv=None):
     if not ctl_ok:
         print("  !! the negative control was flagged — treat every verdict above as unvalidated")
     if args.cmsgen and "cmsgen" in names:
-        # The question that actually matters: does GPAP skew where CMSGen does NOT? Shared skew is
-        # a property of the algorithm class (random var + random polarity + propagate, no
-        # backtracking to re-balance), which both tools implement.
+        # The question that matters: does GPAP skew where CMSGen does not? Shared skew is a
+        # property of the algorithm class, which both tools implement.
         for name in names:
             if name == "cmsgen" or name.startswith("ctl:"):
                 continue
@@ -670,9 +643,8 @@ def main(argv=None):
         with open(args.out, "w") as f:
             json.dump({"schema": 1, "args": vars(args), "rows": rows}, f, indent=1)
         print(f"\nwrote {args.out}")
-    # Non-zero on an UNSOUND emission — and on a FLAGGED NEGATIVE CONTROL, which is worse: it
-    # means the statistics themselves are broken, so every verdict in the output is unvalidated.
-    # Exiting 0 there let a campaign script print its DONE marker over exactly that state.
+    # Non-zero on an unsound emission, and on a flagged negative control: that means the
+    # statistics themselves are broken, so every verdict in the output is unvalidated.
     return 1 if (not ctl_ok or any(v in ("UNSOUND",) for _, _, v, _ in flags)) else 0
 
 

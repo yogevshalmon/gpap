@@ -1,20 +1,12 @@
 #!/usr/bin/env python3
-"""Generate the deck's full-results appendix straight from the experiment JSONs.
+"""Generate the deck's full-results appendix straight from the experiment JSONs, so numbers on
+slides are never transcribed by hand (`docs/slides/gpap_overview.tex` \\input's the output).
 
-`docs/slides/gpap_overview.tex` \\input's the file this writes. Numbers on slides are therefore
-never transcribed by hand — the failure mode that put an inflated 47.7x on the headline slide
-(it silently included the vacuous-pin instances) and would have put it on the appendix too.
+    eval/artifact/slide_tables.py --cmsgen <results-dir> --rivals DIR --out FILE.tex
 
-    eval/artifact/slide_tables.py --cmsgen <results-dir> \\
-        --rivals .experiments/l4_rivals --out docs/slides/l4_results.tex
-
-Everything it prints is derived, and the aggregation rules live in `eval/artifact/paper_tables.py` — this
-module IMPORTS them rather than restating them. That is deliberate: the two files each had their
-own copy of "best encoder per instance, drop vacuous pins, exclude infinite ratios", and the
-moment the paper generator learned to count GPAP's own zeros and to exclude zero-search cells,
-the slide generator would have gone on quoting the old, flattering numbers. A deck that disagrees
-with the paper is worse than a deck with no numbers on it.
-"""
+Every aggregation rule lives in `eval/artifact/paper_tables.py` and is IMPORTED here, never
+restated: a private copy drifts the moment the paper changes a screen, and a deck that disagrees
+with the paper is worse than a deck with no numbers on it."""
 import argparse
 import json
 import os
@@ -59,12 +51,10 @@ def fmt(x, suffix=r"$\times$"):
 
 
 def cms_stage(d, stem, enc):
-    """Thin adapter over paper_tables.cms_family — the slide's `gm` IS the paper's headline.
-
-    Keyed by (family, encoder) exactly as the paper is: there is no best-of-encoders rule to
-    reproduce, because selecting the encoder by the published ratio would let CMSGen's number
-    choose which of our runs the deck shows."""
-    return cms_family(d, stem, enc)     # the paper's `gm` already applies every exclusion
+    """Thin adapter over paper_tables.cms_family — the slide's `gm` IS the paper's headline,
+    keyed by (family, encoder) exactly as the paper is. There is no best-of-encoders rule to
+    reproduce: that would let CMSGen's number choose which of our runs the deck shows."""
+    return cms_family(d, stem, enc)
 
 
 def rival_stage(d, stem, key):
@@ -113,8 +103,8 @@ def main():
     a(r"    family & targets & enc & inst & $n$ & \textbf{GPAP$/$CMSGen} & wins & C$=$0 & G$=$0 "
       r"& both & free & vac \\")
     a(r"    \midrule")
-    # A stage that ran out of budget mid-family must not look like a complete one. The family's
-    # own maximum instance count is the expected size; anything short of it is marked.
+    # A stage that ran out of budget mid-family must not look complete: the family's own maximum
+    # instance count is the expected size.
     expected = {}
     for (stem, _e), v in cms.items():
         if v:
@@ -182,9 +172,7 @@ def main():
                 if not v:
                     continue
                 tgtx = r"\keyw{rare}" if tgt == "rare" else tgt
-                # The published sampling ratio, taken from the SAME source as the first appendix
-                # frame — so the two tables cannot disagree. Read across the row: a flat engine
-                # advantage, divided by how much propagation each sample wastes, gives this one.
+                # The published sampling ratio, from the SAME source as the first appendix frame.
                 cv = cms.get((stem, enc))
                 net = fmt(cv["gm"]) if cv and cv.get("gm") else "---"
                 a(f"    {label} & {tgtx} & {(enc or '---').replace('_', chr(92) + '_')} & "
@@ -194,10 +182,8 @@ def main():
         a(r"    \bottomrule")
         a(r"  \end{tabular}")
         a(r"  \\[0.7em]")
-        # Quote the spread over families carrying at least three instances — the same set
-        # eval/artifact/paper_tables.py and the main deck use. Including the n=1/n=2 HWMCC rows widens it
-        # to 1.49x, and a deck that prints two different numbers for one claim is exactly the
-        # failure this generator exists to prevent.
+        # Quote the spread over families carrying at least three instances, the same set
+        # paper_tables uses, so one claim never gets two numbers.
         rates = [v["gpap"] for v in prop.values() if v and v["n"] >= 3]
         # a partial sweep can leave every prop row under n=3 — no spread claim then, not a crash
         spread = (max(rates) / min(rates)) if rates else float("nan")
@@ -245,11 +231,7 @@ def main():
     a(r"\end{frame}")
     a("")
     # ---------------------------------------------------------------- frame 4: uniformity
-    # The aggregation is paper_tables.uniformity — IMPORTED, like every other rule on the deck.
-    # This frame restated it once (its own tv-median and skew counts), which meant the one screen
-    # the paper applies (full-subcube instances, where the don't-care filler and not the config
-    # draws the bits) would have been missing HERE and the deck's medians would quietly disagree
-    # with Table 4 over the same JSON.
+    # paper_tables.uniformity, IMPORTED, so the paper's full-subcube screen applies here too.
     uni, uni_args = (uniformity([args.uniformity])
                      if args.uniformity and os.path.isfile(args.uniformity) else (None, {}))
     if uni:
@@ -307,9 +289,8 @@ def main():
         a("")
 
     # ---------------------------------------------------------------- frame 5: Barbarik
-    # The aggregation is paper_tables.barbarik — the eligibility rule (bucket on the negative
-    # CONTROL's verdict, never on the screen) is imported, not restated, so the deck cannot
-    # quote a cell Table 4b refuses to.
+    # paper_tables.barbarik: the eligibility rule (bucket on the negative CONTROL's verdict) is
+    # imported, so the deck cannot quote a cell Table 4b refuses to.
     barb = barbarik(args.barbarik) if args.barbarik else None
     if barb:
         p = barb["params"]
