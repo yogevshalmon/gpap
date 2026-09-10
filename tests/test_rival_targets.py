@@ -1303,3 +1303,54 @@ def test_the_recurrent_warmup_run_is_capped_far_below_the_measurement_timeout(tm
     warm = [t for b, t in seen if b == 256][0]
     assert warm == rr.WARMUP_TIMEOUT_S <= 60.0, f"warmup not capped: {warm}"
     assert all(t == 1200.0 for b, t in seen if b != 256), "a measured rung lost its full timeout"
+
+
+def test_a_recorded_failure_is_only_honoured_when_asked_for():
+    """The artifact's second shortcut, and the one that can only be unfair to the RIVAL.
+
+    28 of the campaign's cells are recorded as "the rival did not initialize inside its 1,200 s
+    budget", and re-deriving them costs that budget each — half the wall of a full reproduction,
+    for rows that say "no measurement". `eval/artifact/reproduce.sh` therefore pins them, and
+    this fixes what that is allowed to mean:
+
+      * a recorded failure is NEVER a grant — `lookup_grant` must keep returning None for it, or
+        a pinned batch would be invented out of an entry that has none;
+      * honouring it is opt-in at the harness (the frozen driver re-measures), because a failure
+        is "did not settle ON THAT CARD" and a faster card might settle;
+      * and the entry it produces must carry `not_remeasured`, which is what stops
+        `compare_campaign.py` counting the cell as agreement.
+    """
+    from eval.rivals.rival_common import (grant_key, lookup_grant,  # noqa: PLC0415
+                                          lookup_recorded_failure)
+
+    grants = {"_path": "/tmp/g.json", "recurrent": {
+        grant_key("b17", "rare", 25, "abc"): {"batch": None, "error": "did not initialize: ..."},
+        grant_key("b03", "rare", 25, "abc"): {"batch": 300_000, "start_point": 4},
+    }}
+    assert lookup_grant(grants, "recurrent", "b17", "rare", 25) is None, \
+        "a recorded failure must never be read as a batch grant"
+    fail = lookup_recorded_failure(grants, "recurrent", "b17", "rare", 25)
+    assert fail["not_remeasured"] and "NOT re-measured" in fail["grant_source"]
+    assert fail["error"].startswith("did not initialize")
+    # a cell that HAS a grant is not a failure, and an unrecorded cell is neither
+    assert lookup_recorded_failure(grants, "recurrent", "b03", "rare", 25) is None
+    assert lookup_recorded_failure(grants, "recurrent", "b99", "rare", 25) is None
+    assert lookup_recorded_failure({}, "recurrent", "b17", "rare", 25) is None
+
+
+def test_a_pinned_failure_is_itself_a_rival_failure_row():
+    """AND WHAT THE TABLES THEN SEE. Both harnesses write the lookup's dict straight out
+    (`dict(pinned_fail)`), so the row's shape has exactly one definition and this classifies the
+    very object they write: a rival failure — never a zero, never a win — carrying the provenance
+    that says it was not measured here."""
+    from eval.artifact.paper_tables import rival_cells  # noqa: PLC0415
+    from eval.rivals.rival_common import grant_key, lookup_recorded_failure  # noqa: PLC0415
+
+    grants = {"_path": "g.json", "recurrent": {
+        grant_key("b17", "rare", 25, "abc"):
+            {"batch": None, "error": "did not initialize inside 1200 s"}}}
+    row = lookup_recorded_failure(grants, "recurrent", "b17", "rare", 25, "abc")
+    cell = {"name": "b17", "variant": "abc", "cycles": 25, "rcs": row,
+            "gpap": {"unique_per_s_est": 1e6, "n_models": 10, "sps": 1e6}}
+    (_, _, bucket, _, _), = rival_cells([cell], "rcs")
+    assert bucket == "error", "a pinned failure must classify as a rival failure, not a zero"

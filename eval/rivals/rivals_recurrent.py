@@ -48,7 +48,7 @@ from eval.rivals.rival_common import (BATCH_LADDER, CACHE_MISS, VARIANTS, cache_
                                       space_from_distinct, unsat_at_depth,
                                       resolve_steps, rival_commit, rival_vram_budget,
                                       run_at_batch, variant_note, grant_source, load_grants,
-                                      lookup_grant, pinned_ladder)
+                                      lookup_grant, lookup_recorded_failure, pinned_ladder)
 from eval.rivals.unroll_to_bench import and_tree                      # noqa: E402
 
 from gpap import paths
@@ -687,6 +687,12 @@ def main():
                     help="total wall for the start_point initialization search per instance "
                          "(s); it BOUNDS the search and is in no published rate. A cell that "
                          "does not initialize inside it is an error row naming the budget")
+    ap.add_argument("--honour-recorded-failures", action="store_true",
+                    help="with --grants: accept a cell the grants file records as a rival "
+                         "FAILURE instead of re-deriving it, which costs the full "
+                         "--init-budget per cell. OFF by default: a failure is 'did not settle "
+                         "on THAT card', so honouring it can only be unfair to the rival. The "
+                         "row records `not_remeasured` and the comparator refuses to score it.")
     ap.add_argument("--grants", default=None, metavar="FILE",
                     help="a grants file (eval/rivals/extract_grants.py): pin each cell's batch "
                          "rung and start_point to the values a previous campaign measured — "
@@ -831,7 +837,13 @@ def main():
         # granted rung), so a reproduction pays neither; a recorded FAILURE has no grant.
         grant = lookup_grant(grants, "recurrent", name, "rare" if args.rare else "table",
                              args.cycles, variant)
-        if grant and grant.get("start_point") is not None:
+        pinned_fail = (lookup_recorded_failure(grants, "recurrent", name,
+                                               "rare" if args.rare else "table", args.cycles,
+                                               variant) if args.honour_recorded_failures else None)
+        if pinned_fail:
+            # The reviewer's shortcut: the recorded outcome stands, unmeasured, and says so.
+            sp, why, sp_src = None, pinned_fail["error"], pinned_fail["grant_source"]
+        elif grant and grant.get("start_point") is not None:
             sp, why, sp_src = int(grant["start_point"]), None, grant["source"]
         else:
             sp, why = probe_start_point(args.rival, rival_file, key, args.cycles,
@@ -841,7 +853,8 @@ def main():
         if sp is None:
             # `why` is one of two rival outcomes under a stated rule, recorded verbatim, never
             # as a zero.
-            rcs = {"error": why}
+            # A pinned failure IS the row (`lookup_recorded_failure`), `not_remeasured` and all.
+            rcs = dict(pinned_fail) if pinned_fail else {"error": why}
         else:
             batch = pick_batch(rival_file, args.cycles)
             rcs = run_recurrent_once(args.rival, rival_file, key, args.cycles, steps,

@@ -36,6 +36,7 @@ from eval.rivals.rival_common import (BATCH_LADDER, VARIANTS, _available_bytes, 
                                       rival_commit,
                                       RIVAL_SEED, rival_vram_budget, resolve_lr, resolve_steps,
                                       run_at_batch, grant_source, load_grants, lookup_grant,
+                                      lookup_recorded_failure,
                                       pinned_ladder, variant_note)
 from eval.rivals.rivals_recurrent import (GPAP_ENCODER, GPAP_PORTFOLIO,   # noqa: E402
                                           UNIQUE_ROWS, _cms_cols, build_arm_cnf,
@@ -236,6 +237,11 @@ def main():
     ap.add_argument("--batch", type=int, default=None,
                     help="pin ONE batch rung for every instance (default: the largest rung of "
                          "the ladder that completes, walked down from the top)")
+    ap.add_argument("--honour-recorded-failures", action="store_true",
+                    help="with --grants: accept a cell the grants file records as a rival "
+                         "FAILURE instead of re-deriving it. OFF by default — a recorded "
+                         "failure is 'did not settle on THAT card' and honouring it can only "
+                         "be unfair to the rival; the row records `not_remeasured`.")
     ap.add_argument("--grants", default=None, metavar="FILE",
                     help="a grants file (eval/rivals/extract_grants.py): pin each cell's batch "
                          "rung to the value a previous campaign measured — no ladder walk; a "
@@ -401,9 +407,17 @@ def main():
         grant = ({"batch": args.batch, "start_point": None, "source": "pinned by --batch"}
                  if args.batch else
                  lookup_grant(grants, "demotic", name, args.mode, T_rival, variant))
-        dem = run_demotic_ladder(args.demotic, rival_file, key, steps=steps, batch=batch,
-                                 circuit_type=circuit_type, T=T_rival, timeout=args.timeout,
-                                 lr=lr, grant=grant)
+        pinned_fail = (lookup_recorded_failure(grants, "demotic", name, args.mode, T_rival,
+                                               variant)
+                       if args.honour_recorded_failures and not args.batch else None)
+        if pinned_fail:
+            # The reviewer's shortcut: the recorded outcome stands, unmeasured, and says so.
+            # The lookup returns the ROW, so its shape has one definition, over in rival_common.
+            dem = dict(pinned_fail)
+        else:
+            dem = run_demotic_ladder(args.demotic, rival_file, key, steps=steps, batch=batch,
+                                     circuit_type=circuit_type, T=T_rival, timeout=args.timeout,
+                                     lr=lr, grant=grant)
         dem["renamed_wires"] = renamed
         dem["steps_source"] = steps_src
         dem["lr"], dem["lr_source"] = lr, lr_src
