@@ -431,6 +431,30 @@ def lookup_grant(grants, tool, name, mode, cycles, variant="abc"):
             "source": f"pinned from {os.path.basename(grants.get('_path') or 'grants')}"}
 
 
+def lookup_recorded_failure(grants, tool, name, mode, cycles, variant="abc"):
+    """The recorded FAILURE for one cell, or None. Opt-in (`--honour-recorded-failures`), never
+    the harness default, because it asserts a rival outcome instead of measuring it.
+
+    Why it exists: re-deriving the campaign's 28 recorded failures costs each one the full
+    initialization budget, 9.3 h of a 19 h reproduction, to produce rows that say "no
+    measurement". An artifact reviewer may reasonably decline to pay that.
+
+    Why it is NOT the default: a failure is "did not settle inside 1,200 s ON THAT CARD", and a
+    faster card might settle. Honouring it can therefore only be unfair to the RIVAL, which is
+    exactly why the row records `not re-measured` and the comparator refuses to count such a
+    cell as agreement."""
+    if not grants:
+        return None
+    e = (grants.get(tool) or {}).get(grant_key(name, mode, cycles, variant))
+    if not e or e.get("batch") or not e.get("error"):
+        return None
+    return {"error": e["error"],
+            "grant_source": f"recorded failure pinned from "
+                            f"{os.path.basename(grants.get('_path') or 'grants')}; "
+                            f"NOT re-measured on this card",
+            "not_remeasured": True}
+
+
 def grant_source(pinned, result, source):
     """What the row says about HOW the rung was reached — a pin honoured, a pin this card could
     not finish on (walked down from it), or the plain walk from the ladder top."""

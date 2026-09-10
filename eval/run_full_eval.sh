@@ -201,6 +201,13 @@ stage_rivals() {
     local grants="${RIVAL_GRANTS:-eval/rivals/grants/l4_protocol_20260904.json}"
     GRANT_ARGS=()
     [ "$grants" != "none" ] && [ -f "$grants" ] && GRANT_ARGS=(--grants "$grants")
+    # RIVAL_HONOUR_FAILURES=1 accepts a cell the grants file records as a rival FAILURE instead
+    # of re-deriving it, which costs the full init budget each (9.3 h of a 19 h campaign). OFF
+    # here: this driver runs the frozen protocol, where a failure is measured on the card in
+    # front of it. The artifact's reproduce.sh turns it on and says so in every row
+    # (`not_remeasured`) — see ARTIFACT.md.
+    [ "${RIVAL_HONOUR_FAILURES:-0}" = "1" ] && [ ${#GRANT_ARGS[@]} -gt 0 ] \
+        && GRANT_ARGS+=(--honour-recorded-failures)
     # The CMSGen arm rides on every rival row: the patched binary on the very CNF the GPAP arm
     # sampled, same n and budget. Without it the rows carry no CMSGen columns and there is no
     # Table 1 — a warning was printed above; that is not a campaign.
