@@ -144,6 +144,68 @@ def test_vram_budget_cap_reporter_matches_the_env(monkeypatch):
         assert vram_budget_cap() == 0
 
 
+#: Values that read differently under two plausible parsers. `1e3` and `1024abc` are C's
+#: longest-numeric-PREFIX rule; `1_000` is Python's int(); the huge ones overflow a MiB -> bytes
+#: shift. Each is a way for one side of a comparison to be capped and the other not.
+CAP_GRAMMAR_CASES = [("", 0), ("   ", 0), ("0", 0), ("-1", 0), ("bogus", 0),
+                     ("1e3", 0), ("1024.5", 0), ("1024abc", 0), ("1_000", 0), ("0x400", 0),
+                     ("2048", 2048), (" 2048 ", 2048), ("+2048", 2048),
+                     ("17592186045440", 0), ("99999999999999999999", 0)]
+
+
+@pytest.mark.parametrize(("value", "want_mib"), CAP_GRAMMAR_CASES)
+def test_the_cap_grammar_is_one_grammar(monkeypatch, value, want_mib):
+    """THE FAILURE THIS FORBIDS: C and Python disagreeing about a string. The engine clamps in
+    C++ (`env_budget_cap`) and the rival harness plus `gpap info` read the same variable in
+    Python, so a value one accepts and the other rejects caps ONE SIDE of a head-to-head — the
+    inflation the cap exists to prevent, arrived at from the opposite direction.
+
+    Asserted against the CORE, not only against the Python mirror: the reporter agreeing with
+    itself is what the test above proves, and it is not the same claim."""
+    from gpap.engine import _core
+    from gpap.engine.calibrate import vram_budget_cap_mib
+    monkeypatch.setenv("GPAP_VRAM_BUDGET_MIB", value)
+    assert vram_budget_cap_mib() == want_mib
+    if not _core.available() or not torch.cuda.is_available():
+        return
+    # The core exposes the clamp only through its effect, so compare the budget it reports with
+    # the whole of free memory: a cap below that must bind at exactly the cap.
+    monkeypatch.delenv("GPAP_VRAM_BUDGET_MIB", raising=False)
+    uncapped = _core.mem_available(0, 1.0)
+    monkeypatch.setenv("GPAP_VRAM_BUDGET_MIB", value)
+    got = _core.mem_available(0, 1.0)
+    if want_mib and (want_mib << 20) < uncapped:
+        assert got == want_mib << 20, f"the core parsed {value!r} differently"
+    else:
+        assert got == uncapped, f"the core capped on {value!r} where Python read no cap"
+
+
+@pytest.mark.gpu
+@pytest.mark.parametrize("cap_mib", [None, 2048, 4096])
+def test_both_sides_of_a_head_to_head_get_the_same_budget(monkeypatch, cap_mib):
+    """THE POINT OF THE CAP: the rival and the engine are handed the SAME bytes of the SAME card,
+    so one GPAP_VRAM_BUDGET_MIB reproduces both sides of a comparison at once.
+
+    They used to be two implementations of one idea — ours `(free - reserve) x 0.80`, the
+    rival's `free x 0.80` — which differed by the driver reserve, 3.4% on the reference card. A
+    single cap could then reproduce our budget or theirs, never both, and the artifact capped
+    the rival 614 MiB below what the published campaign had granted it. `rival_vram_budget` now
+    calls `gpu_mem_available`, so there is one number and nothing to keep in step."""
+    from eval.rivals.rival_common import rival_vram_budget
+    from gpap.engine.calibrate import gpu_mem_available
+    if not torch.cuda.is_available():
+        pytest.skip("no CUDA device")
+    if cap_mib is None:
+        monkeypatch.delenv("GPAP_VRAM_BUDGET_MIB", raising=False)
+    else:
+        monkeypatch.setenv("GPAP_VRAM_BUDGET_MIB", str(cap_mib))
+    ours = gpu_mem_available(torch.device("cuda", 0))
+    theirs = rival_vram_budget()
+    assert ours == theirs, f"the two sides were sized apart: {ours:,} vs {theirs:,}"
+    if cap_mib is not None:
+        assert theirs <= cap_mib << 20, "the cap did not reach the rival's budget"
+
+
 @pytest.mark.gpu
 def test_the_vram_cap_actually_moves_the_sampler_batch(monkeypatch):
     """The cap has to reach K, not merely `mem_available`. Cheap to leave unproven and easy to

@@ -156,8 +156,9 @@ split per formula (16|16 for 2N ≤ 65535; 8|24 "wide" for 2N ≤ 0xFFFFFF with 
   flags), verified against measured VRAM. Runtime memory probes are unreliable; do not resurrect
   one.
 - **`GPAP_VRAM_BUDGET_MIB` caps the budget, clamped once inside `gpap_mem_available`** so every
-  consumer sees it, C++ callers included; `rival_vram_budget` mirrors it. Unset = today's
-  behaviour. It exists because a cross-card reproduction can flatter us in both directions: K is
+  consumer sees it, C++ callers included. THE RIVALS ARE SIZED BY THE SAME CALL
+  (`rival_vram_budget` -> `gpu_mem_available`), so one cap covers both sides of a head-to-head
+  and there is no second memory model to keep in step. Unset = today's behaviour. It exists because a cross-card reproduction can flatter us in both directions: K is
   VRAM-bound below the cap on large formulas, so a bigger card grows OURS while a rival pinned by
   a grants file stays fixed; and a smaller card walks the rival's rung down. A ceiling, never a
   floor. `eval/artifact/reproduce.sh --vram-cap l4` is the reproduction default;
