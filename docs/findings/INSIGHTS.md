@@ -336,6 +336,15 @@ VRAM-bound below the batch cap, so a larger card grows OUR K while the rival sta
 `GPAP_VRAM_BUDGET_MIB` (clamped once, in `gpap_mem_available`) holds the engine to the recorded
 card's budget, and `compare_campaign.py` counts every walked-down grant.
 
+**A GATE THAT CANNOT FAIL IS NOT A GATE (2026-09-10;
+[ARTIFACT_FINDINGS.md](ARTIFACT_FINDINGS.md) §8).** Reviewing the artifact layer turned up the
+same shape four times: a check whose absence read as a pass. A deterministic field missing on one
+side was "not a mismatch"; a soundness verdict of `off` satisfied the safety tier though `off`
+also means never-reached; a completion marker printed after a driver that had died; a pinned
+rival cell counted as agreeing with the row it was copied from. None of it changed a published
+number, and all of it would have let a truncated reproduction certify itself. The rule: state
+what the tool verified, in the number it prints, and make silence fail.
+
 **A reproduction is asked for verdicts, not rates (2026-09-09).** Rates are a property of the
 card, so `compare_campaign.py` asserts only what must survive the hardware — the same formula per
 cell, soundness re-derived on the reviewer's machine, and the same per-cell winner — and prints

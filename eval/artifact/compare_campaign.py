@@ -26,11 +26,19 @@ Rates are printed as fresh/reference per stage — the card's speed factor, evid
 hardware — and never asserted.
 
 TWO WAYS A CELL CARRIES NO EVIDENCE, both counted rather than folded into agreement:
-`not_remeasured` (the reviewer pinned a recorded rival failure with --honour-recorded-failures)
-and a walked-down grant (this card could not run the rival at its recorded batch, so the rival
-was handicapped here and our ratio on that cell is inflated).
+`not_remeasured` (the reviewer pinned a recorded rival failure with --honour-recorded-failures,
+so the fresh row is a verbatim copy of the reference's and agreeing with it is a tautology) and
+a walked-down grant (this card could not run the rival at its recorded batch, so the rival was
+handicapped here and our ratio on that cell is inflated).
 
-Exit code is non-zero only for a deterministic mismatch or a soundness failure.
+WHAT THIS TOOL MUST NEVER DO IS PASS A RUN IT DID NOT VERIFY. Three rules earn their keep:
+a field recorded on one side and absent on the other is a MISMATCH, not a skip; a row that
+emitted models and carries no soundness verdict FAILS, because "off" also covers
+requested-but-never-reached and silence must not read as evidence; and `--expect-cells` fails a
+tier that compared fewer cells than it set out to run, which is what a truncated campaign looks
+like from here.
+
+Exit code is non-zero for a deterministic mismatch, a soundness failure, or a short run.
 """
 import argparse
 import json
@@ -89,15 +97,33 @@ def compare_stage(stem, key, ref_rows, new_rows, report):
     shared = sorted(set(ref) & set(new))
     report["cells"][stem] = {"reference": len(ref), "fresh": len(new), "shared": len(shared),
                              "missing": sorted(f"{n}|{v}" for n, v in set(ref) - set(new))}
+    # Every per-stage slot is filled up front: `main` indexes them unconditionally, and a stage
+    # that returns early here used to crash the report it was about to print.
+    report["safety"][stem] = {"sound_ok": 0, "sim_ok": 0, "rows": len(new), "delivered": 0}
+    report["grants"][stem] = {"honoured": 0, "walked_down": [], "not_remeasured": []}
+    if not new:
+        report["hard"].append(f"{stem}: the fresh run wrote this stage with ZERO rows — it was "
+                              f"attempted and produced nothing")
+        return
     if not shared:
-        report["notes"].append(f"{stem}: no shared cells — nothing to compare")
+        report["hard"].append(f"{stem}: not one of the fresh run's {len(new)} cells appears in "
+                              f"the reference — nothing could be compared")
         return
 
     # 1. deterministic
     for cell in shared:
         for label, read in DETERMINISTIC:
             a, b = read(ref[cell]), read(new[cell])
-            if a is None or b is None:           # one side never recorded it: not a mismatch
+            if a is None and b is None:          # neither side records it: nothing to compare
+                continue
+            if a is None or b is None:
+                # NOT a skip. A field one campaign recorded and the other did not means one of
+                # the two rows was never built — a GPAP error row against a measured one, most
+                # often an envelope refusal or an OOM. Silence here used to read as agreement.
+                report["hard"].append(
+                    f"{stem} {cell[0]}: {label} is recorded "
+                    f"{'only in the reference' if b is None else 'only in the fresh run'} "
+                    f"({a!r} vs {b!r}) — one of the two rows carries no measurement")
                 continue
             if a != b:
                 report["hard"].append(
@@ -106,6 +132,7 @@ def compare_stage(stem, key, ref_rows, new_rows, report):
                     f"scripts/build_abc.sh)")
 
     # 2. safety, in the fresh run alone
+    delivered = 0
     for cell in sorted(new):
         g = new[cell].get("gpap") or {}
         if g.get("sound_check") == "UNSOUND":
@@ -114,19 +141,47 @@ def compare_stage(stem, key, ref_rows, new_rows, report):
         if g.get("sim_check") == "BAD":
             report["hard"].append(f"{stem} {cell[0]}: sim_check BAD — a kept sample does not "
                                  f"reproduce the pinned outputs through the original circuit")
+        if not (g.get("n_models") or 0):
+            continue                             # nothing was emitted, so there is nothing to check
+        delivered += 1
+        # A cell that DELIVERED models and reports no verdict is not a pass. `off` covers
+        # "requested but never reached" as well as "never requested" (CLAUDE.md), and the
+        # artifact runs every tier under VERIFY_SOUND=1, so `off` here means the evidence the
+        # gate is about to summarise was never produced.
+        for field, want in (("sound_check", "the on-device soundness re-check"),
+                            ("sim_check", "the replay through the original circuit")):
+            if g.get(field) != "ok":
+                report["hard"].append(
+                    f"{stem} {cell[0]}: {g.get('n_models'):,} models emitted but {field} is "
+                    f"{g.get(field)!r} — {want} did not run. Re-run with VERIFY_SOUND=1")
     checked = sum(1 for c in new if (new[c].get("gpap") or {}).get("sound_check") == "ok")
     simmed = sum(1 for c in new if (new[c].get("gpap") or {}).get("sim_check") == "ok")
-    report["safety"][stem] = {"sound_ok": checked, "sim_ok": simmed, "rows": len(new)}
+    report["safety"][stem] = {"sound_ok": checked, "sim_ok": simmed, "rows": len(new),
+                              "delivered": delivered}
 
-    # 3. structure: the two tables' own classifiers, on both campaigns
+    # 3. structure: the two tables' own classifiers, on both campaigns.
+    # A cell whose rival side was PINNED rather than measured is dropped from the rival
+    # comparison: its fresh row is a verbatim copy of the reference's, so it would agree by
+    # construction and pad the count with cells that carry no evidence. Its CMSGen comparison
+    # survives — that arm really ran.
+    tautological = {c for c in shared if ((new[c].get(key) or {}).get("not_remeasured"))}
     for label, classify in (("vs_cmsgen", rival_cms_cells), ("vs_rival", rival_cells)):
-        a = winners(classify([ref[c] for c in shared], key))
-        b = winners(classify([new[c] for c in shared], key))
+        scored = [c for c in shared if not (label == "vs_rival" and c in tautological)]
+        a = winners(classify([ref[c] for c in scored], key))
+        b = winners(classify([new[c] for c in scored], key))
         both = sorted(set(a) & set(b))
         agree = [c for c in both if a[c] == b[c]]
         flips = [(c, a[c], b[c]) for c in both if a[c] != b[c]]
+        # OUR arm scoring in the reference and delivering nothing here is the one flip worth
+        # naming on its own. It is not asserted: the tiers give every cell the same 60 s, so a
+        # much slower card can genuinely reach zero on a marginal instance. It is also what a
+        # broken build looks like, so it is never folded into the flip count silently.
+        report["regressed"].extend(
+            f"{stem} {c[0]} ({label})" for c, x, y in flips
+            if x in ("us", "them") and y in ("gpap0", "gpap_error"))
         report["structure"].setdefault(stem, {})[label] = {
             "cells": len(both), "agree": len(agree),
+            "pinned_out": len(tautological) if label == "vs_rival" else 0,
             "differ": [f"{c[0]}: {x} -> {y}" for c, x, y in flips]}
 
     # 4. rates, reported only
@@ -153,6 +208,11 @@ def compare_stage(stem, key, ref_rows, new_rows, report):
                 walked.append(f"{cell[0]}: {rv_ref['batch']:,} -> {rv_new['batch']:,}")
     report["grants"][stem] = {"honoured": same, "walked_down": walked,
                               "not_remeasured": sorted(pinned_fail)}
+    # What the fresh run granted ITSELF, which the reference (measured before the cap existed)
+    # does not record. An uncapped reproduction on a bigger card sizes a larger K than the
+    # published one while the rival stays pinned, so the absence of a cap is worth saying.
+    report["caps"][stem] = sorted({r.get("vram_cap_mib") for r in new.values()
+                                   if r.get("vram_cap_mib")})
 
 
 def main():
@@ -161,11 +221,16 @@ def main():
     ap.add_argument("reference", help="the frozen campaign's rows (e.g. $GPAP_RESULTS/paper/data)")
     ap.add_argument("fresh", help="the re-measured campaign's directory")
     ap.add_argument("--json", metavar="FILE", default=None, help="also write the report as JSON")
+    ap.add_argument("--expect-cells", type=int, default=0, metavar="N",
+                    help="the number of cells the tier set out to run. Fewer compared than this "
+                         "FAILS: a campaign truncated half way — a reclaimed VM, an OOM, a "
+                         "missing benchmark set — otherwise reaches this gate looking like a "
+                         "clean pass over whatever it managed to finish")
     args = ap.parse_args()
 
     report = {"reference": os.path.abspath(args.reference), "fresh": os.path.abspath(args.fresh),
               "hard": [], "notes": [], "cells": {}, "safety": {}, "structure": {}, "rates": {},
-              "grants": {}}
+              "grants": {}, "caps": {}, "regressed": []}
     ran = 0
     for stem, key, _tool, _task in RIVALS:
         ref = rows_of(os.path.join(args.reference, f"rivals_{stem}.json"))
@@ -197,7 +262,8 @@ def main():
         for label, v in sorted(report["structure"].get(stem, {}).items()):
             verdict = "AGREES" if v["agree"] == v["cells"] else "differs"
             print(f"   {label:<9}: {v['agree']}/{v['cells']} cells reach the same verdict "
-                  f"({verdict})")
+                  f"({verdict})"
+                  + (f", {v['pinned_out']} pinned not scored" if v.get("pinned_out") else ""))
             for d in v["differ"][:6]:
                 print(f"                {d}")
         r = report["rates"].get(stem, {})
@@ -215,7 +281,21 @@ def main():
 
     walked = sum(len(g["walked_down"]) for g in report["grants"].values())
     pinned = sum(len(g["not_remeasured"]) for g in report["grants"].values())
+    compared = sum(c["shared"] for c in report["cells"].values())
+    if args.expect_cells and compared < args.expect_cells:
+        report["hard"].append(
+            f"the tier set out to run {args.expect_cells} cells and only {compared} could be "
+            f"compared — the campaign did not finish, so nothing above is a verdict about it")
     print("\n" + "=" * 78)
+    caps = sorted({m for v in report["caps"].values() for m in v})
+    if caps:
+        print(f"VRAM budget capped at {', '.join(f'{m:,} MiB' for m in caps)} — the reference "
+              f"card's allowance.")
+    elif report["cells"]:
+        print("WARNING: the fresh rows record no VRAM cap. K is memory-bound below the batch cap\n"
+              "         on large formulas, so on a card bigger than the reference L4 our batch\n"
+              "         grew while the rival stayed pinned to its recorded one. Re-run with\n"
+              "         reproduce.sh --vram-cap l4 to compare like with like.")
     if walked:
         print(f"WARNING: {walked} cells could not run the rival at its recorded batch on this "
               f"card.\n         The rival was handicapped there and our ratio on those cells is "
@@ -227,13 +307,30 @@ def main():
               f"re-measured\n      (--honour-recorded-failures). They are evidence in no "
               f"direction; drop the flag\n      to re-derive them at the full initialization "
               f"budget.")
+    flips = sum(v["cells"] - v["agree"] for st in report["structure"].values()
+                for v in st.values())
+    scored = sum(v["cells"] for st in report["structure"].values() for v in st.values())
+    if report["regressed"]:
+        print(f"WARNING: {len(report['regressed'])} cells scored in the reference and delivered "
+              f"NOTHING here:\n         " + ", ".join(report["regressed"][:8])
+              + ("  ..." if len(report["regressed"]) > 8 else "")
+              + "\n         Every tier gives a cell the same 60 s, so a much slower card can "
+                "reach zero\n         on a marginal instance — but so does a broken build. "
+                "Check `gpap info` first.")
     for note in report["notes"]:
         print(f"NOTE: {note}")
     for h in report["hard"]:
         print(f"FAIL: {h}")
     ok = not report["hard"]
-    print(("\nPASS — same formulas, sound samples, same verdicts." if ok else
-           f"\nFAILED — {len(report['hard'])} deterministic or soundness failures above."))
+    # The headline says what was actually established. It used to claim "same verdicts"
+    # unconditionally, which was true of the run it was written for and false of any run whose
+    # structure section was full of flips.
+    verdicts = ("same verdicts" if not flips else
+                f"{scored - flips} of {scored} verdicts unchanged, {flips} DIFFER (above)")
+    print((f"\nPASS — {compared} cells compared: same formulas, sound samples, {verdicts}."
+           if ok else
+           f"\nFAILED — {len(report['hard'])} deterministic, soundness or coverage failures "
+           f"above."))
     if args.json:
         with open(args.json, "w") as f:
             json.dump(report, f, indent=1)
