@@ -231,12 +231,35 @@ def test_the_vram_cap_actually_moves_the_sampler_batch(monkeypatch):
 
 
 def test_rival_budget_honours_the_same_ceiling(monkeypatch):
-    """BOTH sides or neither: capping only ours would hand the rival the whole card."""
-    from eval.rivals.rival_common import rival_vram_budget
-    monkeypatch.setenv("GPAP_VRAM_BUDGET_MIB", "1024")
-    assert rival_vram_budget() <= (1024 << 20)
+    """BOTH sides or neither: capping only ours would hand the rival the whole card.
+
+    BOTH BRANCHES, because they carry the ceiling by different routes — the CUDA one through
+    the core inside `gpap_mem_available`, the no-CUDA fallback on its own — so a test that only
+    exercises whichever branch this machine takes proves nothing about the other. That is not
+    hypothetical: the fallback shipped uncapped and stayed green on every box with a card until
+    the first CPU-only CI run. Hence the forced-fallback half below, which fails on either kind
+    of machine."""
+    from eval.rivals.rival_common import RIVAL_VRAM_FALLBACK, rival_vram_budget
     monkeypatch.delenv("GPAP_VRAM_BUDGET_MIB", raising=False)
     assert rival_vram_budget() > (1024 << 20) or not torch.cuda.is_available()
+    monkeypatch.setenv("GPAP_VRAM_BUDGET_MIB", "1024")
+    assert rival_vram_budget() <= (1024 << 20)
+
+    # the no-CUDA fallback, forced: the ceiling binds it, and it is the CEILING doing it
+    monkeypatch.setattr(torch.cuda, "is_available", lambda: False)
+    assert rival_vram_budget() == 1024 << 20
+    monkeypatch.delenv("GPAP_VRAM_BUDGET_MIB", raising=False)
+    assert rival_vram_budget() == RIVAL_VRAM_FALLBACK
+
+
+def test_the_cpu_placeholder_budget_is_capped_too(monkeypatch):
+    """Our side's own no-CUDA branch. It is a placeholder — the engine has no CPU path — but an
+    uncapped one makes the two sides diverge on exactly the machines that cannot notice."""
+    from gpap.engine.calibrate import gpu_mem_available
+    monkeypatch.delenv("GPAP_VRAM_BUDGET_MIB", raising=False)
+    uncapped = gpu_mem_available(torch.device("cpu"))
+    monkeypatch.setenv("GPAP_VRAM_BUDGET_MIB", "1024")
+    assert gpu_mem_available(torch.device("cpu")) == 1024 << 20 < uncapped
 
 
 # ---------------------------------------------------------------- the batch-size API

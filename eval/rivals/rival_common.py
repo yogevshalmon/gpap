@@ -354,9 +354,9 @@ def rival_vram_budget(fraction: float = None) -> int:
     both sides at once. There is now nothing to keep in step: change the model in
     cpp/src/calibrate.cpp and both sides move.
 
-    Falls back to 5 GiB when no CUDA device is visible, so a CPU-only smoke run still picks a
-    sane batch. `GPAP_RIVAL_VRAM_FRACTION` still overrides the fraction for reproducing an older
-    sweep; it feeds the same function."""
+    Falls back to 5 GiB, still under the ceiling, when no CUDA device is visible, so a CPU-only
+    smoke run still picks a sane batch. `GPAP_RIVAL_VRAM_FRACTION` still overrides the fraction
+    for reproducing an older sweep; it feeds the same function."""
     if fraction is None:
         fraction = float(os.environ.get("GPAP_RIVAL_VRAM_FRACTION", RIVAL_VRAM_FRACTION))
     try:
@@ -365,6 +365,13 @@ def rival_vram_budget(fraction: float = None) -> int:
         from gpap.engine.calibrate import gpu_mem_available
         if torch.cuda.is_available():
             return gpu_mem_available(torch.device("cuda", 0), fraction)
+        # No card to measure means no core call to carry the ceiling, so this branch applies it
+        # itself — the same reader, not a second one. It was missed once because the branch a
+        # developer box takes is not the branch CI takes: with the clamp only inside
+        # `gpap_mem_available`, a cap on a CPU-only machine bounded our side and left the rival
+        # at the full fallback, which is exactly the asymmetry the cap exists to remove.
+        cap = _vram_cap_mib() << 20
+        return min(RIVAL_VRAM_FALLBACK, cap) if cap else RIVAL_VRAM_FALLBACK
     except Exception:                                   # noqa: BLE001 — sizing must never be fatal
         pass
     return RIVAL_VRAM_FALLBACK

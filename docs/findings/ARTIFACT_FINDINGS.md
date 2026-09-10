@@ -252,3 +252,14 @@ the two sides 3.4% apart and could not reproduce both. Folded into `gpap_mem_ava
 the sampling layer, the ABC fingerprint and the GPU name — so an uncapped run and a capped one
 shared cache entries, and `--vram-cap l4` could serve numbers measured with the cap off while
 printing the cap in its own provenance. The cap is part of the key now.
+
+**The branch the developer's box takes is not the branch CI takes (2026-09-10).** Folding the
+two budgets into `gpap_mem_available` moved the clamp into the core — and left the two no-CUDA
+branches behind it uncapped: the rival's 5 GiB fallback, and our own 8 GB CPU placeholder. Both
+are placeholders on a machine that cannot run a comparison, but the asymmetry is the one the cap
+exists to remove, and the new-in-the-same-commit test could not see it: on any box with a card
+it took the CUDA branch and passed. CPU-only CI found it on the first run. Both branches now
+read the ceiling through the same reader, and the test forces the fallback
+(`monkeypatch.setattr(torch.cuda, "is_available", ...)`) so it fails on either kind of machine.
+The general form is the older lesson in one more disguise: a test proves nothing about a branch
+it did not take, and "which branch" can be a property of the hardware rather than of the input.

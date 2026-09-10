@@ -42,10 +42,14 @@ def gpu_mem_available(device: torch.device, fraction: float = 0.80) -> int:
     """Bytes available for new allocations on `device` (free VRAM minus a driver reserve).
 
     `fraction` is the only headroom in the sizing path, covering readout transients and whatever
-    else shares the card. `GPAP_VRAM_BUDGET_MIB` caps the answer (see `vram_budget_cap`); the
-    clamp lives in the core, so every consumer of the model sees it, C++ callers included."""
+    else shares the card. `GPAP_VRAM_BUDGET_MIB` caps the answer (see `vram_budget_cap`) on BOTH
+    branches: the core applies it inside `gpap_mem_available` for a real device, and it is
+    applied here for the CPU placeholder, which never reaches the core. A ceiling that holds
+    only on the branch a given machine happens to take is not a ceiling."""
     if device.type != "cuda":
-        return int(8e9)                      # conservative fallback for a CPU device
+        placeholder = int(8e9)               # conservative fallback for a CPU device
+        cap = vram_budget_cap()
+        return min(placeholder, cap) if cap else placeholder
     return _core.mem_available(device.index or 0, fraction)
 
 
