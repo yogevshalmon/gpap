@@ -1354,3 +1354,39 @@ def test_a_pinned_failure_is_itself_a_rival_failure_row():
             "gpap": {"unique_per_s_est": 1e6, "n_models": 10, "sps": 1e6}}
     (_, _, bucket, _, _), = rival_cells([cell], "rcs")
     assert bucket == "error", "a pinned failure must classify as a rival failure, not a zero"
+
+
+def test_honouring_a_recorded_failure_stays_opt_in_and_settings_bound():
+    """THE TWO PROPERTIES THE SHORTCUT'S FAIRNESS RESTS ON, neither of which any other test
+    touched: the flag is off unless asked for, and a pin is only honoured under the settings
+    that produced it.
+
+    The default is read out of the SOURCE because both harnesses build their parser inside
+    `main()`, which cannot be reached without running a campaign. That is precise about the one
+    regression that matters — `action="store_true"` becoming `default=True`, which would make
+    every reproduction stop measuring the rival while the whole suite stayed green.
+    """
+    from tests.conftest import REPO_ROOT  # noqa: PLC0415
+
+    for mod in ("rivals_recurrent.py", "rivals_demotic.py"):
+        path = os.path.join(REPO_ROOT, "eval", "rivals", mod)
+        with open(path) as fh:
+            tree = ast.parse(fh.read())
+        calls = [n for n in ast.walk(tree)
+                 if isinstance(n, ast.Call) and getattr(n.func, "attr", "") == "add_argument"
+                 and n.args and getattr(n.args[0], "value", None) == "--honour-recorded-failures"]
+        assert len(calls) == 1, f"{mod}: the flag is declared {len(calls)} times"
+        kw = {k.arg: k.value for k in calls[0].keywords}
+        assert getattr(kw.get("action"), "value", None) == "store_true", \
+            f"{mod}: the flag must be store_true, i.e. OFF unless the operator asks"
+        assert "default" not in kw, f"{mod}: a default on this flag turns the shortcut on"
+
+    # ...and the pin is bound to the settings it was measured under. `settled_error` is the same
+    # predicate `--retry-errors` uses, so a raised --init-budget invalidates the recorded row
+    # rather than replaying it: the operator asking for more time must GET more time.
+    from eval.rivals.rivals_recurrent import settled_error  # noqa: PLC0415
+
+    recorded = ("did not initialize: the start_point search reached sp=1 and exhausted its "
+                "1200s initialization budget")
+    assert settled_error(recorded, 1200, 1200) is True
+    assert settled_error(recorded, 3600, 1200) is False
