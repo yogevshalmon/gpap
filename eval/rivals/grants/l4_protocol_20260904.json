@@ -1,7 +1,7 @@
 {
  "generated": "2026-09-07 04:53",
  "campaign": "l4_protocol_20260904",
- "rule": "batch = the largest rung of the ladder the rival ran to completion, walked down from the top and rejected only on feasibility; start_point = where Recurrent's initialization settled. Read off the campaign rows, never recomputed. An entry without a batch is a recorded rival failure and is re-measured, not pinned.",
+ "rule": "batch = the largest rung of the ladder the rival ran to completion, walked down from the top and rejected only on feasibility; start_point = where Recurrent's initialization settled. Read off the campaign rows, never recomputed. An entry without a batch is a recorded rival failure: the campaign driver re-measures it, and only the artifact's reproduction may pin it (--honour-recorded-failures), marking every row it does that to.",
  "ladder": [
   1000,
   3000,

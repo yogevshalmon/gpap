@@ -840,6 +840,15 @@ def main():
         pinned_fail = (lookup_recorded_failure(grants, "recurrent", name,
                                                "rare" if args.rare else "table", args.cycles,
                                                variant) if args.honour_recorded_failures else None)
+        # A PIN IS ONLY VALID UNDER THE SETTINGS THAT PRODUCED IT. `settled_error` is the same
+        # predicate `--retry-errors` uses: a recorded "did not initialize inside 1200 s" is a
+        # finished measurement only while the budget still IS 1200 s. Raise --init-budget and the
+        # operator is asking to give the rival more time; replaying the old failure would answer
+        # a question nobody asked, and silently.
+        if pinned_fail and not settled_error(pinned_fail["error"], args.init_budget, args.timeout):
+            print(f"{name:<10}{variant:>6}  recorded failure NOT honoured — it was measured "
+                  f"under different settings; re-deriving", flush=True)
+            pinned_fail = None
         if pinned_fail:
             # The reviewer's shortcut: the recorded outcome stands, unmeasured, and says so.
             sp, why, sp_src = None, pinned_fail["error"], pinned_fail["grant_source"]

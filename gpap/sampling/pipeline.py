@@ -10,8 +10,9 @@ are reported via `chunk_capped` and the CLI's '<' marker. `samples_per_s` is the
 config's steady-state rate (`best_rate_sps`); `sps_e2e_total` is the end-to-end rate including
 construction, simplification and mining, which is what a CMSGen comparison must charge.
 
-This module also owns `sound_verdict` / `merge_sound_check`, the tri-state readers for the
-`sound_check` key it writes; every consumer imports them from here.
+This module re-exports `sound_verdict` / `merge_sound_check`, the tri-state readers for the
+`sound_check` key it writes; every consumer imports them from here, and they are DEFINED in
+`gpap/verdict.py` so that a table generator can read a recorded row without a CUDA wheel.
 """
 import logging
 import os

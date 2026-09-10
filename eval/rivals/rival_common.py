@@ -411,7 +411,9 @@ BATCH_LADDER = (1_000, 3_000, 10_000, 30_000, 100_000, 300_000, 1_000_000, 3_000
 # THE GRANT IS PART OF THE RECORD (protocol v1.0). A campaign's rows say which rung each rival
 # was granted and which `start_point` Recurrent settled on; `eval/rivals/extract_grants.py`
 # writes them per campaign and `--grants FILE` PINS them — no walk, no probe, one run at the
-# recorded rung. A cell recorded as a rival FAILURE is never pinned: it is re-measured.
+# recorded rung. A cell recorded as a rival FAILURE is re-measured by default; the artifact's
+# reproduction may pin it instead, opt-in per harness (`--honour-recorded-failures`,
+# `lookup_recorded_failure`), and every row that took that shortcut says so.
 
 def grant_key(name, mode, cycles, variant="abc"):
     """One cell: circuit | task | unroll depth | circuit variant."""
@@ -462,7 +464,12 @@ def lookup_recorded_failure(grants, tool, name, mode, cycles, variant="abc"):
     Why it is NOT the default: a failure is "did not settle inside 1,200 s ON THAT CARD", and a
     faster card might settle. Honouring it can therefore only be unfair to the RIVAL, which is
     exactly why the row records `not re-measured` and the comparator refuses to count such a
-    cell as agreement."""
+    cell as agreement.
+
+    The CALLER must also check that the recorded failure was produced under the settings in
+    force now — `rivals_recurrent.settled_error` — because a run that raised the initialization
+    budget is asking to give the rival more time, and replaying the old failure would answer a
+    different question under the new flag."""
     if not grants:
         return None
     e = (grants.get(tool) or {}).get(grant_key(name, mode, cycles, variant))
