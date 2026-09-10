@@ -26,7 +26,7 @@ import os
 import sys
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
-from gpap.sampling.pipeline import sound_verdict                       # noqa: E402
+from gpap.verdict import sound_verdict                        # noqa: E402
 from eval.artifact.paper_tables import (CMS_FAMILIES, cms_arm_ran,          # noqa: E402
                                         sound_failed, sound_unchecked)
 

@@ -27,7 +27,7 @@ import sys
 import time
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
-from gpap.sampling.pipeline import sound_verdict          # noqa: E402 — after sys.path
+from gpap.verdict import sound_verdict           # noqa: E402 — a stdlib-only leaf
 from eval.rivals.rival_common import space_from_distinct  # noqa: E402 — after sys.path
 
 VACUOUS_PINS = {"b02", "b05", "b07", "s526"}

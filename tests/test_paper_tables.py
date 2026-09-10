@@ -15,7 +15,8 @@ from pathlib import Path
 
 import pytest
 
-sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+_REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+sys.path.insert(0, _REPO_ROOT)
 from eval.artifact.paper_tables import (cms_family, encoders_in, prop_rates,  # noqa: E402
                                         rival_family, tiny_space, vacuous_pin,
                                         zero_search)
@@ -1481,3 +1482,32 @@ def test_a_rival_that_found_a_handful_of_solutions_is_scored_and_disclosed(tmp_p
     (nm, n_uniq, x), = v["thin_cells"]
     assert (nm, n_uniq) == ("c880", 1) and x == pytest.approx(8.45e6 / 1.2)
     assert "rival_thin" not in v and "thin" in v
+
+
+def test_the_table_generators_import_without_torch_or_numpy():
+    """TIER 1 OF THE ARTIFACT IS CPU-ONLY, and this is what makes that true.
+
+    A reviewer regenerating every table from the frozen JSONs must not need a CUDA wheel: the
+    generators are pure JSON readers. They reach the soundness verdict through `gpap.verdict`, a
+    stdlib-only leaf, precisely because `gpap.sampling.pipeline` — and indeed any module under
+    `gpap.sampling`, whose package `__init__` builds the sampler — drags torch and numpy in.
+    Asserting it in a SUBPROCESS with those modules blocked, because this interpreter has them
+    installed and would import them happily either way (the check would then prove nothing)."""
+    import subprocess
+    import sys
+
+    probe = (
+        "import sys\n"
+        "class B:\n"
+        "    def find_spec(self, n, p=None, t=None):\n"
+        "        if n.split('.')[0] in ('torch', 'numpy', 'triton', 'matplotlib'):\n"
+        "            raise ImportError(n + ' is blocked')\n"
+        "sys.meta_path.insert(0, B())\n"
+        f"sys.path.insert(0, {_REPO_ROOT!r})\n"
+        "import eval.artifact.paper_tables, eval.artifact.verify_artifact\n"
+        "print('ok')\n"
+    )
+    out = subprocess.run([sys.executable, "-c", probe], capture_output=True, text=True,
+                         cwd=_REPO_ROOT, timeout=120)
+    assert out.returncode == 0 and out.stdout.strip() == "ok", \
+        f"a table generator pulls in a GPU dependency:\n{out.stderr[-2000:]}"
