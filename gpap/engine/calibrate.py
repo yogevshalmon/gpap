@@ -49,16 +49,32 @@ def gpu_mem_available(device: torch.device, fraction: float = 0.80) -> int:
     return _core.mem_available(device.index or 0, fraction)
 
 
+#: The `GPAP_VRAM_BUDGET_MIB` grammar, mirroring `env_budget_cap` in cpp/src/calibrate.cpp
+#: character for character: optional blanks, an optional '+', digits, nothing else. It is narrow
+#: on purpose. C's strtoll takes the longest numeric PREFIX, so a shared value like "1e3" parsed
+#: as 1 there and as nothing in Python — the engine capped to 1 MiB while the rival ran uncapped,
+#: which is the two-sides-capped-apart failure the cap exists to prevent. Outside the grammar,
+#: and past what the shift can hold, the answer is NO CAP rather than a small one.
+_CAP_GRAMMAR = __import__("re").compile(r"^[ \t]*\+?([0-9]+)[ \t]*$")
+_CAP_MAX_MIB = ((1 << 63) - 1) >> 20
+
+
+def vram_budget_cap_mib() -> int:
+    """The ceiling in MiB, or 0 for "no cap". Gated against the C reader by tests/test_k_cap.py:
+    a divergence here caps one side of a comparison and not the other."""
+    import os
+    m = _CAP_GRAMMAR.match(os.environ.get("GPAP_VRAM_BUDGET_MIB") or "")
+    if not m:
+        return 0
+    mib = int(m.group(1))
+    return mib if 0 < mib <= _CAP_MAX_MIB else 0
+
+
 def vram_budget_cap() -> int:
     """The `GPAP_VRAM_BUDGET_MIB` ceiling in bytes, or 0 when unset — read here only to REPORT
     it (`gpap info`, a result row's provenance). The clamp itself is applied once, in
     `gpap_mem_available`; do not re-apply it in a caller."""
-    import os
-    try:
-        mib = int(os.environ.get("GPAP_VRAM_BUDGET_MIB") or 0)
-    except ValueError:
-        return 0
-    return mib << 20 if mib > 0 else 0
+    return vram_budget_cap_mib() << 20
 
 
 def compute_k_safe(num_long: int, N: int, gpu_mem_bytes: float,

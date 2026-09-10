@@ -179,6 +179,11 @@ def gpap_cache_key(sampled_file: str, task: dict) -> str:
     env["sampling_py"] = _sampling_layer_id()
     # ...AND THE ENCODER BINARY: the CNF is a function of `abc` as much as of the .bench bytes.
     env["abc"] = _abc_fingerprint()
+    # ...AND THE VRAM CEILING, which decides K and therefore the rate this key stands for. Without
+    # it an uncapped run and a capped one shared a cache entry, so `reproduce.sh --vram-cap l4`
+    # could serve numbers measured with the cap OFF while printing the cap in its provenance —
+    # the grown-K inflation the cap exists to prevent, wearing the cap's own label.
+    env["vram_cap_mib"] = int(_vram_cap_mib())
     try:
         import torch
         env["gpu"] = torch.cuda.get_device_name(0) if torch.cuda.is_available() else "cpu"
@@ -249,13 +254,25 @@ def cached_gpap(cache_dir, sampled_file, task, compute):
     return value, False
 
 
+def _vram_cap_mib() -> int:
+    """The GPAP_VRAM_BUDGET_MIB ceiling in MiB, 0 for none — for RECORDING it in a row and in the
+    cache key. The clamp itself is the core's, inside gpap_mem_available. Imported lazily because
+    the table generators import this module for `space_from_distinct` and must stay free of torch
+    and the engine (docs/findings/ARTIFACT_FINDINGS.md §7); every caller of this one is a rival
+    harness, which has libgpap loaded anyway."""
+    from gpap.engine.calibrate import vram_budget_cap_mib
+    return vram_budget_cap_mib()
+
+
 # ------------------------------------------------------------------ the parallelism grant
 # Measured: each rival scores in near-PROPORTION to the batch it is handed, over the whole range
 # we can run, while `model_runtime` barely moves (docs/findings/RIVAL_FAIRNESS_FINDINGS.md). The
 # batch is not a detail of their setup: it IS the parallelism grant, the knob K is for us, and
-# GPAP sizes K at 0.80 of FREE VRAM. A constant instead gives the two sides different fractions
-# of the machine, and a different fraction on every card. Override with
-# GPAP_RIVAL_VRAM_FRACTION (or an explicit budget) when reproducing an older sweep.
+# GPAP sizes K against `gpap_mem_available`. The rival is sized against THE SAME CALL, so the two
+# sides get the same bytes of the same card and one GPAP_VRAM_BUDGET_MIB reproduces both. A
+# constant instead gives the two sides different fractions of the machine, and a different
+# fraction on every card. Override with GPAP_RIVAL_VRAM_FRACTION (or an explicit budget) when
+# reproducing an older sweep.
 
 # ---------------------------------------------------------------- oversize pre-check
 # THE RIVAL PATH CANNOT USE abc:fast: a circuit-level rival consumes .bench and unrolls it
@@ -323,31 +340,34 @@ def oversize_reason(bench_file, T, limit=MAX_UNROLLED_GATES, avail_bytes=None,
 
 
 RIVAL_VRAM_FRACTION = 0.80
+RIVAL_VRAM_FALLBACK = 5 << 30                           # no CUDA visible: a sane batch, not zero
 
 
 def rival_vram_budget(fraction: float = None) -> int:
-    """Bytes of GPU memory a rival's autograd graph may occupy: the same share of the same card
-    GPAP grants itself. Falls back to the historical 5 GiB when no CUDA device is visible, so a
-    CPU-only smoke run still picks a sane batch.
+    """Bytes of GPU memory a rival's autograd graph may occupy — THE SAME NUMBER, from the same
+    function, that the engine grants itself: `gpap_mem_available`, i.e. (free - the driver
+    reserve) x fraction, then capped by GPAP_VRAM_BUDGET_MIB.
 
-    `GPAP_VRAM_BUDGET_MIB` caps it, the same ceiling the core applies to GPAP's own budget
-    (`gpap.engine.calibrate.vram_budget_cap`): a reproduction on a larger card must hand BOTH
-    sides the recorded card's allowance, or it compares a grown K against a pinned batch."""
+    IT IS ONE BUDGET ON PURPOSE. This used to be a second implementation — `free x 0.80` with no
+    reserve — which read 3.4% higher than ours on the same card, so "the same share of the same
+    card" was true of the fraction and false of the bytes, and a single cap could not reproduce
+    both sides at once. There is now nothing to keep in step: change the model in
+    cpp/src/calibrate.cpp and both sides move.
+
+    Falls back to 5 GiB when no CUDA device is visible, so a CPU-only smoke run still picks a
+    sane batch. `GPAP_RIVAL_VRAM_FRACTION` still overrides the fraction for reproducing an older
+    sweep; it feeds the same function."""
     if fraction is None:
         fraction = float(os.environ.get("GPAP_RIVAL_VRAM_FRACTION", RIVAL_VRAM_FRACTION))
-    budget = 5 << 30
     try:
         import torch
+
+        from gpap.engine.calibrate import gpu_mem_available
         if torch.cuda.is_available():
-            free, _total = torch.cuda.mem_get_info()
-            budget = int(free * fraction)
+            return gpu_mem_available(torch.device("cuda", 0), fraction)
     except Exception:                                   # noqa: BLE001 — sizing must never be fatal
         pass
-    try:
-        cap = int(os.environ.get("GPAP_VRAM_BUDGET_MIB") or 0) << 20
-    except ValueError:
-        cap = 0
-    return min(budget, cap) if cap > 0 else budget
+    return RIVAL_VRAM_FALLBACK
 
 
 # ---------------------------------------------------------------- the instance sets
@@ -477,8 +497,9 @@ def fit_batch(work_units, tool, budget_bytes=None, ladder=BATCH_LADDER):
     """The largest ladder rung that fits the rival inside its share of the card.
 
     `work_units` is gates x frames for the circuit rivals, clauses for HTS. THE RULE: each rival
-    gets the batch that fits in 0.80 of free VRAM — the same fraction, by the same rule, that
-    GPAP sizes its own K with (gpap.engine.calibrate.gpu_mem_available). Their own "defaults"
+    gets the batch that fits the budget `gpap_mem_available` reports — not the same rule as the
+    one GPAP sizes K with, the SAME CALL, so neither side can be granted a different share of
+    the card and one GPAP_VRAM_BUDGET_MIB reproduces both. Their own "defaults"
     cannot serve as that rule: all three argparse defaults are `--batch_size 10`, a placeholder,
     and their demo scripts are per-instance one-liners with a 1000x spread on comparably tiny
     circuits, which transplanted here would inflate OUR ratios by the same factor."""
@@ -695,10 +716,7 @@ def host_provenance(device):
     except Exception:                       # noqa: BLE001 — provenance must never break a sweep
         gpu = {"name": str(device)}
     out = {"cpu": _cpu_info(), "gpu": gpu}
-    try:
-        cap = int(os.environ.get("GPAP_VRAM_BUDGET_MIB") or 0)
-    except ValueError:
-        cap = 0
+    cap = _vram_cap_mib()
     if cap > 0:
         out["vram_cap_mib"] = cap
     return out

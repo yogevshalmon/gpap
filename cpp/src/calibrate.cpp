@@ -38,14 +38,32 @@ constexpr int32_t kTrailSlack = 32;
  * memory-bound on large formulas, so the same run on a larger card sizes a larger batch, and a
  * head-to-head whose rival is pinned to a recorded batch would then be measuring two different
  * grants. Capping the budget to the recorded card's makes both sides identical on any card at
- * least that large. It is a CEILING, never a floor: a smaller card still reports less. */
+ * least that large. It is a CEILING, never a floor: a smaller card still reports less.
+ *
+ * ONE CAP COVERS BOTH SIDES because this function is the only budget either side has: the rival
+ * harnesses size their batch through eval/rivals/rival_common.rival_vram_budget, which calls
+ * straight into here. Set the cap once and the comparison is capped, not half of it. */
+/* The grammar is deliberately narrow and is mirrored exactly by gpap.engine.calibrate: optional
+ * surrounding blanks, an optional '+', then digits and nothing else. strtoll's own rule — take
+ * the longest numeric PREFIX — is what a shared parser must not have here: "1e3" would cap the
+ * engine to 1 MiB while Python's int() rejected the same string and left the rival uncapped, so
+ * the two sides of a fairness comparison would be capped apart by a typo. Anything outside the
+ * grammar, and anything that would overflow the shift, means NO CAP rather than a small one. */
 int64_t env_budget_cap() {
     const char *e = std::getenv("GPAP_VRAM_BUDGET_MIB");
-    if (!e || !*e) return 0;
-    char *end = nullptr;
-    const long long mib = std::strtoll(e, &end, 10);
-    if (end == e || mib <= 0) return 0;               /* unparsable or non-positive: no cap */
-    return (int64_t)mib << 20;
+    if (!e) return 0;
+    while (*e == ' ' || *e == '\t') ++e;
+    if (*e == '+') ++e;
+    if (!*e) return 0;
+    int64_t mib = 0;
+    for (; *e >= '0' && *e <= '9'; ++e) {
+        if (mib > (INT64_MAX >> 20) / 10) return 0;   /* far past any real budget: no cap */
+        mib = mib * 10 + (*e - '0');
+    }
+    while (*e == ' ' || *e == '\t') ++e;
+    if (*e) return 0;                                 /* trailing junk: no cap, never a prefix */
+    if (mib <= 0 || mib > (INT64_MAX >> 20)) return 0;
+    return mib << 20;
 }
 }  // namespace
 
