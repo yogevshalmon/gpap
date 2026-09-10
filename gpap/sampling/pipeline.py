@@ -25,6 +25,11 @@ import torch
 from gpap.engine.calibrate import resolve_k_cap
 from gpap.mining import mine_entailed
 from gpap.sampling.sampler import GPUSampler
+# THE soundness reader and fold, re-exported: they live in a stdlib-only leaf module so that a
+# table generator on a GPU-less box can read a recorded row without importing the sampler, while
+# every consumer keeps importing them from here (`__all__` below is the contract).
+from gpap.verdict import (SOUND_BAD, SOUND_OFF, SOUND_OK,  # noqa: F401
+                          merge_sound_check, sound_verdict)
 
 log = logging.getLogger(__name__)
 
@@ -33,32 +38,6 @@ __all__ = ["sample_file", "sample_clauses",
            "Lookahead", "DEFAULT_PORTFOLIO", "CIRCUIT_PORTFOLIO", "SINGLE_PORTFOLIOS",
            "SOFT_CONFIG", "soft_warning", "describe_config",
            "sound_verdict", "merge_sound_check", "SOUND_OK", "SOUND_BAD", "SOUND_OFF"]
-
-
-# --------------------------------------------------------------- the soundness verdict, once
-# The verdict is a tri-state ("ok" / "UNSOUND" / "off") and recorded rows carry two schemas, so
-# the reader lives beside the writer and every consumer imports it from here.
-SOUND_OK, SOUND_BAD, SOUND_OFF = "ok", "UNSOUND", "off"
-
-
-def sound_verdict(row) -> str:
-    """The tri-state verdict of one recorded row, legacy schema included: a row with only
-    `gpu_sound: bool` always checked, so the bool is a verdict; neither key means "off"."""
-    verdict = row.get("sound_check")
-    if verdict in (SOUND_OK, SOUND_BAD, SOUND_OFF):
-        return verdict
-    if "gpu_sound" in row:                       # legacy: the check was unconditional
-        return SOUND_OK if row["gpu_sound"] else SOUND_BAD
-    return SOUND_OFF
-
-
-def merge_sound_check(*verdicts) -> str:
-    """Fold several verdicts into one: UNSOUND dominates, then "ok", then "off". Any other
-    order publishes an "ok" beside a non-zero `unsound_rows`."""
-    seen = [v for v in verdicts if v]
-    if SOUND_BAD in seen:
-        return SOUND_BAD
-    return SOUND_OK if SOUND_OK in seen else SOUND_OFF
 
 
 def _support_literals(support):
