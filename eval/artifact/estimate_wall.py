@@ -75,6 +75,10 @@ BENCH_DIRS = [os.path.join(REPO, "benchmarks", "circuits", "bench", d) for d in 
 #: this at the reference card, under the artifact's default (failures honoured). Mechanical and
 #: about the clock alone — it cannot select for cells we win, which a hand-picked list could.
 SUBSET_MINUTES = 10.0
+#: The per-seed wall the rival harnesses give our arm (`--gpap-time-limit`, default 60 s in
+#: rivals_recurrent.py / rivals_demotic.py). It is what a seed costs when it delivers nothing,
+#: and the rows record no wall of their own to read it from.
+GPAP_SEED_LIMIT_S = 60.0
 
 
 def gate_count(name):
@@ -103,6 +107,13 @@ def cell_cost(row, rival_key, mode):
         n = s.get("n_models") or 0
         if rate and n:
             ours += n / rate
+        elif g.get("encoder"):
+            # A SEED THAT DELIVERED NOTHING IS NOT A FREE SEED: it ran to the harness's per-seed
+            # wall and stopped. Pricing it at zero made every hard cell look free, and the tiers
+            # are full of them (11 cells of the campaign, 7 of which spent three full seeds).
+            # The condition is `encoder`, i.e. the cell was built at all — a GPAP error row
+            # never reached the sampler and really did cost nothing here.
+            ours += GPAP_SEED_LIMIT_S
         ours += float(s.get("distinct_s") or 0.0)
     failed = bool(rv.get("error"))
     rival = float(rv.get("wall_s") or 0.0)          # a failure records no successful run
@@ -215,6 +226,10 @@ def main():
         os.path.dirname(os.path.abspath(__file__)), "subset.json"),
                     help="write the subset selection (with the walls that produced it)")
     ap.add_argument("--json", action="store_true", help="machine-readable, for reproduce.sh")
+    ap.add_argument("--cells-only", action="store_true",
+                    help="print just the cell count of --tier and exit. reproduce.sh passes it "
+                         "to compare_campaign.py --expect-cells, so a tier that stops early "
+                         "cannot reach the gate looking complete")
     args = ap.parse_args()
 
     data = os.path.abspath(args.data_dir)
@@ -241,6 +256,11 @@ def main():
                        "per_stage": {k: v * args.scale for k, v in per.items()},
                        "instances": cells}
 
+    if args.cells_only:
+        if args.tier == "all":
+            sys.exit("--cells-only needs one --tier")
+        print(tiers[args.tier]["cells"])
+        return
     if args.json:
         print(json.dumps({"reference_gpu": gpu, "mode": args.mode, "overhead": args.overhead,
                           "overhead_per_cell_s": args.overhead_per_cell,
@@ -279,8 +299,9 @@ def main():
     if args.write_subset:
         payload = {
             "rule": f"a sequential instance is kept when its two T=25 tasks together cost "
-                    f"<= {SUBSET_MINUTES:.0f} min on {gpu} with recorded rival failures pinned "
-                    f"(--mode honour). Mechanical and about the clock alone: it cannot select "
+                    f"<= {SUBSET_MINUTES:.0f} min on {gpu} with recorded rival failures "
+                    f"{'pinned' if args.mode == 'honour' else 're-measured'} (--mode "
+                    f"{args.mode}). Mechanical and about the clock alone: it cannot select "
                     f"for cells we win. Regenerate with eval/artifact/estimate_wall.py "
                     f"--write-subset.",
             "reference_gpu": gpu, "minutes": SUBSET_MINUTES,

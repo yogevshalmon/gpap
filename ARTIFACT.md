@@ -108,12 +108,13 @@ below for whatever card and settings you ask about, and `reproduce.sh check` run
 |---|---|---|---|
 | `tables` | — | ~1 min, CPU only | every published table and figure |
 | `smoke` | 4 | ~3 min | one cell per stage, everything else exactly as the real tiers run it |
-| `subset` | 66 | ~2.4 h (measured 2 h 50 on a VM reclaimed hourly) | all 22 ISCAS-85 cells and 22 of the 30 sequential instances, T=25 |
-| `full` | 142 | ~11.4 h | every cell, T=25 and T=50 |
-| `full --remeasure-failures` | 142 | ~21.7 h | the same, re-deriving every recorded rival failure |
+| `subset` | 66 | ~2.6 h (measured 2 h 50 on a rented L4) | all 22 ISCAS-85 cells and 22 of the 30 sequential instances, T=25 |
+| `full` | 142 | ~12.2 h | every cell, T=25 and T=50 |
+| `full --remeasure-failures` | 142 | ~22.4 h | the same, re-deriving every recorded rival failure |
 
 The `subset` row is the one that has been run end to end (`docs/findings/ARTIFACT_FINDINGS.md`
-§5): 66/66 cells agreed with the published campaign, and the estimate was within 1% of the wall
+§5): every cell agreed with the published campaign — 66/66 against CMSGen, 58/58 of the
+cells whose rival side was measured rather than pinned — and the estimate was within 1% of the wall
 the work itself took.
 
 The estimate is the recorded per-cell walls plus a measured overhead the rows do not carry
