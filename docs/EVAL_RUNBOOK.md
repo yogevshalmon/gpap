@@ -201,6 +201,15 @@ table is generated from them; [paper/README.md](paper/README.md) has the exact c
 `soft_price_tables.py` (which import it), `verify_artifact.py` (the publishability gate) and
 `make_artifact.sh`. The map of claims to files is [../ARTIFACT.md](../ARTIFACT.md).
 
+**Reproducing this campaign is `eval/artifact/reproduce.sh`, not this driver.** It is the
+artifact's single entry point — `check` / `setup` / `tables` / `smoke` / `subset` / `full` — and
+it invokes this script for every measurement, so a tier cannot drift from the protocol. What it
+adds is a cell set, an estimate of what that costs (`estimate_wall.py`, read off the recorded
+rows), two documented shortcuts that this driver does not take (the recorded rival failures are
+pinned rather than re-derived, and the engine's memory budget is capped to the reference card's)
+and the cross-card gate `compare_campaign.py`. Evidence:
+[findings/ARTIFACT_FINDINGS.md](findings/ARTIFACT_FINDINGS.md).
+
 The other campaigns: the kernel A/B (`eval/kernel_ab.py`,
 [findings/KERNEL_AB_FINDINGS.md](findings/KERNEL_AB_FINDINGS.md)); the Barbarik certificate and the
 exact-oracle TV fuzz (`eval/uniformity/`,

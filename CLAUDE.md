@@ -64,6 +64,8 @@ gpap/
     calibrate.py           # K sizing, VRAM model, gpu_mem_available
     checker.py             # AssumptionChecker (marshalling; the loop is cpp/src/check.cpp)
     probe.py               # LiteralProbe (the sweep is cpp/src/probe.cpp)
+  verdict.py               # sound_verdict / merge_sound_check: a stdlib-only leaf so the table
+                           #   generators read a row without importing torch (pipeline re-exports)
   sampling/                # THE FLAGSHIP
     sampler.py             # GPUSampler: marshalling over gpap_sampler_*, ELS reconstruction, projection fill
     pipeline.py            # sample_file / sample_clauses: the e2e flow, portfolios (SamplingConfig),
@@ -80,7 +82,9 @@ eval/                      # the experiment layer (raw data lives OUTSIDE the re
                            #   + check_emission_symmetry.py + extract_grants.py + grants/
   uniformity/              # barbarik_gpap.py / _screen.py / _table.py, fuzz_uniformity.py, metrics.py
   artifact/                # paper_tables.py (THE table generator; every rule lives there once),
-                           #   verify_artifact.py (publishability gate), slide/soft tables, make_artifact.sh
+                           #   verify_artifact.py (publishability gate), slide/soft tables,
+                           #   reproduce.sh (THE artifact entry point), estimate_wall.py,
+                           #   compare_campaign.py (the cross-card gate), subset.json, make_artifact.sh
   colab/                   # cross-GPU drivers + colab_supervisor.py (survives the ~1 h VM lifetime)
 scripts/                   # build_core.sh, build_abc.sh, build_cmsgen.sh (+ cmsgen_gpap_eval.patch),
                            #   fetch_benchmarks.sh, perf_ab_trees.py
@@ -151,6 +155,13 @@ split per formula (16|16 for 2N ≤ 65535; 8|24 "wide" for 2N ≤ 0xFFFFFF with 
   the engine's exact per-chunk allocation list (4·M_long packed words, the bitmap, the trail,
   flags), verified against measured VRAM. Runtime memory probes are unreliable; do not resurrect
   one.
+- **`GPAP_VRAM_BUDGET_MIB` caps the budget, clamped once inside `gpap_mem_available`** so every
+  consumer sees it, C++ callers included; `rival_vram_budget` mirrors it. Unset = today's
+  behaviour. It exists because a cross-card reproduction can flatter us in both directions: K is
+  VRAM-bound below the cap on large formulas, so a bigger card grows OURS while a rival pinned by
+  a grants file stays fixed; and a smaller card walks the rival's rung down. A ceiling, never a
+  floor. `eval/artifact/reproduce.sh --vram-cap l4` is the reproduction default;
+  docs/findings/ARTIFACT_FINDINGS.md.
 - **The cap is one constant on every GPU**: `kBatchCap = 262,144` (`cpp/src/calibrate.cpp`,
   `engine.calibrate.K_CAP`, `--k-cap auto`). It is a saturation limit, not a safety one, and it is
   hygiene, not a throughput lever: success is machine-independent and the work rate tracks SM
@@ -307,6 +318,13 @@ SPUR reference). The rules (docs/findings/UNIFORMITY_FINDINGS.md §4b):
   docs/findings/RIVAL_FAIRNESS_FINDINGS.md §7.
 
 ## The paper protocol: v1.0, frozen 2026-09-06
+
+**Reproducing it is `eval/artifact/reproduce.sh`** (check/setup/tables/smoke/subset/full), which
+invokes `run_full_eval.sh` for every measurement and adds only a cell set, an estimate
+(`estimate_wall.py`, read off the recorded rows), the cross-card gate `compare_campaign.py`, and
+two shortcuts the frozen driver does not take: recorded rival failures pinned rather than
+re-derived (`--remeasure-failures` restores) and the memory cap above. ARTIFACT.md is the guide;
+docs/findings/ARTIFACT_FINDINGS.md the evidence.
 
 `docs/EVAL_RUNBOOK.md` §0 is the statement; RIVAL_FAIRNESS_FINDINGS.md §17 the record and the
 considered-not-adopted list; §17b the presentation revision of 2026-09-07. In one line: the

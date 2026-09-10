@@ -22,6 +22,7 @@ The deep write-ups, by topic:
 | what `--out` cost (2026-08-27) | [CLI_DELIVERY_FINDINGS.md](CLI_DELIVERY_FINDINGS.md) |
 | the sampler's log (historical) | [GPU_SAMPLING_FINDINGS.md](GPU_SAMPLING_FINDINGS.md) |
 | GPU inprocessing for CDCL — retired | [ELS_INPROCESSING_FINDINGS.md](ELS_INPROCESSING_FINDINGS.md) |
+| reproducing the campaign (2026-09-09) | [ARTIFACT_FINDINGS.md](ARTIFACT_FINDINGS.md) |
 
 ## Engine & memory model
 
@@ -326,6 +327,27 @@ hash, modexp and tire are CMSGen-only, the service family loses e2e. A reference
 headline.
 
 ## Measurement methodology (the traps that actually bit)
+
+**A reproduction on another card can only flatter us, in two directions, and both are now
+counted (2026-09-09; [ARTIFACT_FINDINGS.md](ARTIFACT_FINDINGS.md)).** All 92 pinned
+Recurrent-CircuitSAT rungs sit at the reference L4's memory ceiling, so a card under 24 GB walks
+them down and hands the rival less parallelism than the paper did; and 63 of 141 GPAP rows are
+VRAM-bound below the batch cap, so a larger card grows OUR K while the rival stays pinned.
+`GPAP_VRAM_BUDGET_MIB` (clamped once, in `gpap_mem_available`) holds the engine to the recorded
+card's budget, and `compare_campaign.py` counts every walked-down grant.
+
+**A reproduction is asked for verdicts, not rates (2026-09-09).** Rates are a property of the
+card, so `compare_campaign.py` asserts only what must survive the hardware — the same formula per
+cell, soundness re-derived on the reviewer's machine, and the same per-cell winner — and prints
+the rate ratio as the card's speed factor. Demonstrated cross-card on the smoke tier: verdicts
+identical, GPAP x1.07, CMSGen x1.85 (the host CPU), the rival x0.64 exactly where its grant was
+walked down.
+
+**What the result rows do not time is a per-cell CONSTANT, not a fraction (2026-09-09).**
+Start-up, the ABC pass (0.31 ms per gate, a minute on b19), the equivalence check and the
+soundness replay are unrecorded, and on the cheapest cells they are four times the recorded
+wall. `estimate_wall.py` models overhead as constant + per-gate + fraction, because a
+percentage-only model underestimates precisely the tiers made of many cheap cells.
 
 **Protocol v1.0 frozen (2026-09-06; [EVAL_RUNBOOK.md](../EVAL_RUNBOOK.md) §0,
 RIVAL_FAIRNESS_FINDINGS.md §17).** Publish only quantities each tool defines for itself, every tool
