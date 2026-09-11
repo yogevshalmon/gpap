@@ -1,0 +1,4 @@
+# Brand assets are binary: never diffed, never line-ending-converted (INTEGRATION.md §8).
+*.gif  binary
+*.png  binary
+*.ico  binary
