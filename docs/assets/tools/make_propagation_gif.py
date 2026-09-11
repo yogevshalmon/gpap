@@ -5,17 +5,19 @@ its L-shaped highlight and shadowed bottom edge, the bunch is staggered the way 
 grape is, and the stem curls into a leaf between the top berries.
 
   1. THE FORMULA, drawn as the grape: every row of the bunch is a clause, every berry a literal.
-     A decision fires and propagation walks the clauses one at a time — the sequential CPU
-     picture — until the assignment is complete.
+     What plays is an actual BCP trace. A DECISION lights one literal (gold flash). Its negation
+     KNOCKS OUT that literal wherever it occurs — the berry shrinks and darkens, `sat_count -= 1`.
+     A clause down to one survivor FORCES it (white flash): unit propagation. Fixpoint, next
+     decision. It ends with every clause satisfied by exactly one lit literal and most of the
+     formula never touched — which is what "partial assignment" means.
   2. THE FOLD: under one assignment, a clause's whole state is one packed word. Each clause row
-     collapses into a single cell, and the cells line up as that assignment's row.
+     collapses onto its lit literal, and the words line up as that assignment's row.
   3. THE BATCH: the engine's state is exactly that matrix — one row per partial assignment, one
      column per clause. The die grows a row at a time, and every row propagates in the same
      launch, each in its own order.
 
-A berry asleep is unassigned; awake, it has been reached by propagation; the one-frame flash is
-the moment it wakes. One scale throughout, 6x the 8px cell (kit rules 1 and 2), at the kit's own
-50-70 ms frame cadence.
+One scale throughout, 6x the 8px cell (a knocked-out literal sits at 5x; kit rules 1 and 2), at
+the kit's own 50-140 ms frame cadence.
 """
 import random
 from pathlib import Path
@@ -27,6 +29,7 @@ ROOT = Path(__file__).resolve().parents[3]
 DIE     = (0x2C, 0x12, 0x5A)
 OUTLINE = (0x18, 0x0A, 0x2E)
 GOLD    = (0xE4, 0xC4, 0x70)
+GOLD_HI, GOLD_LO = (0xF6, 0xE3, 0xA4), (0xB4, 0x94, 0x48)
 CREAM   = (0xF5, 0xF0, 0xE8)
 EYE     = (0x1E, 0x0C, 0x3C)
 # The mark's cell ramp, with a near-white above it for highlights and the shadow shade below.
@@ -42,6 +45,23 @@ K = 5                           # partial assignments = rows of the state
 
 U = 6                           # 6x: one cell pixel is six on screen
 SIZE, PITCH, GROW = CELL * U, CELL * U + U, 46      # rows of the bunch nest, so a shorter pitch
+OUT_SIZE = CELL * (U - 1)                            # a knocked-out literal, one step smaller
+
+# Act 1's script — a real unit-propagation trace over clauses A..E = 0..4. Occurrence lists
+# are what a decision touches: `out` is the negated literal falsified in another clause.
+TRACE = [
+    ("decide", 0, 0),     # A0 := T                          A satisfied
+    ("out", 2, 3),        #   ~A0 occurs in C: C3 is out
+    ("out", 4, 0),        #   ~A0 occurs in E: E0 is out     E has one survivor...
+    ("force", 4, 1),      #   ...so E1 := T                  E satisfied
+    ("out", 3, 0),        #   ~E1 occurs in D: D0 is out
+    ("out", 1, 1),        #   ~E1 occurs in B: B1 is out     fixpoint
+    ("decide", 1, 3),     # B3 := T                          B satisfied
+    ("out", 3, 2),        #   ~B3 occurs in D: D2 is out     D has one survivor...
+    ("force", 3, 1),      #   ...so D1 := T                  D satisfied
+    ("out", 2, 1),        #   ~D1 occurs in C: C1 is out     fixpoint
+    ("decide", 2, 0),     # C0 := T                          C satisfied — every clause is
+]
 
 MONO  = "/usr/share/fonts/truetype/dejavu/DejaVuSansMono.ttf"
 MONOB = "/usr/share/fonts/truetype/dejavu/DejaVuSansMono-Bold.ttf"
@@ -54,9 +74,8 @@ STEM = [(-1, -6, STEM_HI), (0, -6, STEM_HI), (-1, -5, STEM_HI), (0, -5, STEM_HI)
         (2, -5, LEAF_HI), (3, -5, LEAF_LO)]
 
 
-def berry(shade, eyes):
+def berry(body, hi, lo, eyes, size=SIZE):
     """The kit's cell: rounded footprint, L highlight top-left, shadow along the bottom edge."""
-    body, hi, lo = RAMP[shade], RAMP[shade - 1], RAMP[shade + 1]
     t = Image.new("RGBA", (CELL, CELL), (0, 0, 0, 0))
     p = t.load()
     for y in range(CELL):
@@ -74,25 +93,41 @@ def berry(shade, eyes):
     elif eyes == "closed":
         for x in (1, 2, 5, 6):
             p[x, 4] = (*EYE, 255)
-    return t.resize((SIZE, SIZE), Image.NEAREST)
+    return t.resize((size, size), Image.NEAREST)
 
 
-ASLEEP = berry(5, "closed")
-AWAKE  = berry(2, "open")
-FLASH  = berry(1, "open")            # the wake frame
-HALO = Image.new("RGBA", (SIZE + 2 * U, SIZE + 2 * U), (0, 0, 0, 0))
-HALO.paste(Image.new("RGBA", (SIZE, SIZE), (*OUTLINE, 255)), (U, U), ASLEEP)
-HALO = HALO.resize((CELL + 2, CELL + 2), Image.NEAREST).resize((SIZE + 2 * U, SIZE + 2 * U),
-                                                              Image.NEAREST)
+ASLEEP    = berry(RAMP[5], RAMP[4], RAMP[6], "closed")           # unassigned
+AWAKE     = berry(RAMP[2], RAMP[1], RAMP[3], "open")             # true
+FLASH     = berry(RAMP[1], RAMP[0], RAMP[2], "open")             # the frame it is forced
+DECIDE    = berry(GOLD, GOLD_HI, GOLD_LO, "open")                # the frame it is decided
+OUT_FLASH = berry(RAMP[6], RAMP[5], OUTLINE, "closed")           # the frame it is knocked out
+OUT       = berry(RAMP[6], RAMP[5], OUTLINE, "closed", OUT_SIZE)  # falsified: smaller, darker
+
+
+def halo_for(tile):
+    """The berry's footprint in the outline colour, one cell pixel larger all round."""
+    u = tile.width // CELL
+    small = tile.resize((CELL, CELL), Image.NEAREST)
+    h = Image.new("RGBA", (CELL + 2, CELL + 2), (0, 0, 0, 0))
+    for y in range(CELL):
+        for x in range(CELL):
+            if small.getpixel((x, y))[3]:
+                h.putpixel((x + 1, y + 1), (*OUTLINE, 255))
+    return h.resize(((CELL + 2) * u, (CELL + 2) * u), Image.NEAREST)
+
+
+HALOS = {t.width: halo_for(t) for t in (ASLEEP, OUT)}
 
 
 def blit(canvas, x, y, tile, halo=False):
+    """Paste a berry centred in its slot. On bare ground the halo is the separation the die
+    would give it, without which a pale berry washes out on the cream theme."""
+    x, y = round(x) + (SIZE - tile.width) // 2, round(y) + (SIZE - tile.height) // 2
     if halo:
-        # On the die, berries are separated by die-coloured gaps. On bare ground there is no die,
-        # so a pale awake berry would wash out on the cream theme: this is the same separation,
-        # one cell pixel wide, drawn behind the berry.
-        canvas.paste(HALO, (round(x) - U, round(y) - U), HALO)
-    canvas.paste(tile, (round(x), round(y)), tile)
+        u = tile.width // CELL
+        h = HALOS[tile.width]
+        canvas.paste(h, (x - u, y - u), h)
+    canvas.paste(tile, (x, y), tile)
 
 
 def ease(t):
@@ -129,8 +164,9 @@ def build(dark: bool):
     H = cap_h + art_h + 22
 
     gtop = cap_h + (art_h - grape_h - stem_h) / 2 + stem_h
-    gpos, clause_of = [], []
+    gpos, clause_of, first = [], [], []
     for k, width in enumerate(CLAUSES):
+        first.append(len(gpos))
         row_w = width * PITCH - gap
         for j in range(width):
             gpos.append((W / 2 - row_w / 2 + j * PITCH, gtop + k * GROW))
@@ -194,61 +230,74 @@ def build(dark: bool):
             d.rectangle([sx0 + board + 2 * gap, y, sx0 + board + 2 * gap + pin - 1, y + 2 * U - 1],
                         fill=GOLD)
 
-    # --- act 1: the formula, one clause at a time -------------------------------------------
-    def grape(im, d, awake_n, flash=None, k=None, k_from=None, t=1.0):
+    # --- act 1: the formula, a decision and its implications, one clause at a time -----------
+    lit, out = set(), set()
+
+    def grape(im, d, flash=None, k=None, k_from=None, t=1.0):
         stem(d)
         if k is not None:
             bracket(d, k, k_from, t)
         for i, (x, y) in enumerate(gpos):
-            tile = FLASH if i == flash else (AWAKE if i < awake_n else ASLEEP)
+            if flash and flash[0] == i:
+                tile = flash[1]
+            else:
+                tile = AWAKE if i in lit else (OUT if i in out else ASLEEP)
             blit(im, x, y, tile, halo=True)
 
-    cap1 = ("one clause at a time, a single partial assignment", "CPU")
+    cap1 = ("a decision, then its implications, one clause at a time", "CPU")
     im, d = frame(*cap1)
-    grape(im, d, 0)
+    grape(im, d)
     frames.append(im)
     delays.append(900)
 
-    awake_n = 0
-    for k in range(M):
-        for f in range(1, 5):                    # the bracket eases down to the next clause
-            im, d = frame(*cap1)
-            grape(im, d, awake_n, k=k, k_from=k - 1 if k else None, t=ease(f / 4))
-            frames.append(im)
-            delays.append(60)
-        for i in range(awake_n, awake_n + CLAUSES[k]):
-            im, d = frame(*cap1)                 # the wake flash...
-            grape(im, d, awake_n, flash=i, k=k)
-            frames.append(im)
-            delays.append(70)
-            awake_n = i + 1
-            im, d = frame(*cap1)                 # ...then the berry is awake
-            grape(im, d, awake_n, k=k)
-            frames.append(im)
-            delays.append(120)
-    delays[-1] = 700
-    assert awake_n == len(gpos)
+    k_prev = None
+    for kind, k, j in TRACE:
+        i = first[k] + j
+        if k != k_prev:                          # the bracket eases over to the clause touched
+            for f in range(1, 5):
+                im, d = frame(*cap1)
+                grape(im, d, k=k, k_from=k_prev, t=ease(f / 4))
+                frames.append(im)
+                delays.append(60)
+            k_prev = k
+        pop, hold = {"decide": (DECIDE, 110), "force": (FLASH, 70), "out": (OUT_FLASH, 70)}[kind]
+        im, d = frame(*cap1)
+        grape(im, d, flash=(i, pop), k=k)
+        frames.append(im)
+        delays.append(hold)
+        (out if kind == "out" else lit).add(i)
+        im, d = frame(*cap1)
+        grape(im, d, k=k)
+        frames.append(im)
+        delays.append(200 if kind == "decide" else 140)
+    delays[-1] = 900
+    for k in range(M):                           # every clause satisfied by exactly one literal
+        assert sum(1 for i in range(first[k], first[k] + CLAUSES[k]) if i in lit) == 1
 
-    # --- act 2: each clause folds into one cell; the cells are that assignment's row ----------
-    # Two motions, not one: first every clause's berries slide together IN PLACE and merge into
-    # a single cell (the clause's packed word), then the five words travel to the row. Doing it
-    # in one diagonal sweep smeared eighteen overlapping sprites into a streak.
+    # --- act 2: each clause folds into one word; the words are that assignment's row -----------
+    # Two motions, not one: first every clause's berries slide together IN PLACE and merge onto
+    # the literal that satisfies it (the clause's packed word), then the five words travel to
+    # the row. Doing it in one diagonal sweep smeared eighteen overlapping sprites into a streak.
     cap2a = ("...under one assignment, a clause's whole state is one word",)
     cap2b = ("...and the assignment is one row of words",)
     # The bunch's rows nest closer than a cell is tall, so the merged column opens out to the
     # die's own pitch as it forms, or the five words would overlap.
     col_top = gtop + (grape_h - (M * PITCH - gap)) / 2
     centre = [(W / 2 - SIZE / 2, col_top + k * PITCH) for k in range(M)]
+    draw_order = [i for i in range(len(gpos)) if i not in lit] + sorted(lit)   # lit on top
 
     n_a = 10
     for f in range(1, n_a + 1):
         t = ease(f / n_a)
         im, d = frame(*cap2a)
         stem(d)
-        for i in reversed(range(len(gpos))):
+        for i in draw_order:
             x, y = gpos[i]
             cx, cy = centre[clause_of[i]]
-            blit(im, x + (cx - x) * t, y + (cy - y) * t, FLASH if f == n_a else AWAKE, halo=True)
+            tile = AWAKE if i in lit else (OUT if i in out else ASLEEP)
+            if f == n_a:
+                tile = FLASH
+            blit(im, x + (cx - x) * t, y + (cy - y) * t, tile, halo=True)
         frames.append(im)
         delays.append(50)
     delays[-1] = 500
@@ -301,17 +350,19 @@ def build(dark: bool):
     delays[-1] = 2200
 
     # The palette must be built from frames that between them carry every colour used: the last
-    # frame is all purple, so sampling it alone maps the stem and leaf greens onto the nearest plum.
-    swatch = Image.new("RGB", (W, H * 2), ground)
-    swatch.paste(frames[len(frames) // 5], (0, 0))
-    swatch.paste(frames[-1], (0, H))
+    # frame is all purple, so sampling it alone maps the stem, leaf and gold flash onto the
+    # nearest plum.
+    swatch = Image.new("RGB", (W, H * 3), ground)
+    swatch.paste(frames[2], (0, 0))                       # act 1: the grape, greens, the bracket
+    swatch.paste(frames[len(frames) // 3], (0, H))        # act 1 late: lit, out, the gold flash
+    swatch.paste(frames[-1], (0, 2 * H))                  # act 3: the die and the batch
     pal = swatch.quantize(colors=64, method=Image.MEDIANCUT)
     frames = [f.quantize(palette=pal, dither=Image.NONE) for f in frames]
-    out = ROOT / f"docs/assets/animation/gpap_propagate_{'dark' if dark else 'light'}.gif"
-    frames[0].save(out, save_all=True, append_images=frames[1:], duration=delays,
+    out_path = ROOT / f"docs/assets/animation/gpap_propagate_{'dark' if dark else 'light'}.gif"
+    frames[0].save(out_path, save_all=True, append_images=frames[1:], duration=delays,
                    loop=0, optimize=True, disposal=1)
-    print(f"{out.name}  {W}x{H}  {len(frames)} frames  "
-          f"{sum(delays) / 1000:.1f}s  {out.stat().st_size // 1024} KB")
+    print(f"{out_path.name}  {W}x{H}  {len(frames)} frames  "
+          f"{sum(delays) / 1000:.1f}s  {out_path.stat().st_size // 1024} KB")
 
 
 for dark in (True, False):
