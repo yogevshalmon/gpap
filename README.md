@@ -1,13 +1,14 @@
 <div align="center">
 
+<h1>
 <picture>
   <source media="(prefers-color-scheme: dark)"  srcset="docs/assets/animation/gpap_idle_wake_dark.gif">
   <source media="(prefers-color-scheme: light)" srcset="docs/assets/animation/gpap_idle_wake_light.gif">
-  <img src="docs/assets/icon_wake/gpap_icon_wake_256.png" width="176"
+  <img src="docs/assets/icon_wake/gpap_icon_wake_256.png" width="96" align="middle"
        alt="GPAP logo: a 3x3 grid of purple cells inside a chip die with gold pins, blinking">
 </picture>
-
-# GPAP
+&nbsp;GPAP
+</h1>
 
 **GPU-Parallel (partial) Assignment Propagation**
 
@@ -15,11 +16,11 @@ Boolean constraint propagation across **hundreds of thousands of independent par
 one kernel launch** — and the CircuitSAT solution sampler built on it, where **every emitted sample
 is a real solution**. No gradient, no rounding, no repair pass.
 
-[![CI](https://img.shields.io/github/actions/workflow/status/yogevshalmon/gpap/ci.yml?branch=main&style=flat-square&label=CI&labelColor=2C125A)](https://github.com/yogevshalmon/gpap/actions/workflows/ci.yml)
-[![license MIT](https://img.shields.io/badge/license-MIT-8E5EFA?style=flat-square&labelColor=2C125A)](LICENSE)
-[![python 3.10+](https://img.shields.io/badge/python-3.10%2B-8E5EFA?style=flat-square&labelColor=2C125A)](pyproject.toml)
-[![C++17](https://img.shields.io/badge/C%2B%2B-17-8E5EFA?style=flat-square&labelColor=2C125A)](cpp/)
-[![runtime: libcuda only](https://img.shields.io/badge/runtime-libcuda%20only-E4C470?style=flat-square&labelColor=2C125A)](#install)
+[![CI](https://github.com/yogevshalmon/gpap/actions/workflows/ci.yml/badge.svg)](https://github.com/yogevshalmon/gpap/actions/workflows/ci.yml)
+[![license MIT](https://img.shields.io/badge/license-MIT-8E5EFA?labelColor=2C125A)](LICENSE)
+[![python 3.10+](https://img.shields.io/badge/python-3.10%2B-8E5EFA?labelColor=2C125A)](pyproject.toml)
+[![C++17](https://img.shields.io/badge/C%2B%2B-17-8E5EFA?labelColor=2C125A)](cpp/)
+[![runtime: libcuda only](https://img.shields.io/badge/runtime-libcuda%20only-E4C470?labelColor=2C125A)](#install)
 
 [**Docs**](docs/) · [**Engine internals**](docs/ENGINE.md) · [**Python API**](docs/PYTHON_API.md) ·
 [**C++ API**](cpp/README.md) · [**Benchmarking**](docs/BENCHMARKING.md) · [**Artifact**](ARTIFACT.md)
@@ -221,19 +222,24 @@ Examples for both faces in [`cpp/examples/`](cpp/examples/) and [`examples/`](ex
 <picture>
   <source media="(prefers-color-scheme: dark)"  srcset="docs/assets/animation/gpap_propagate_dark.gif">
   <source media="(prefers-color-scheme: light)" srcset="docs/assets/animation/gpap_propagate_light.gif">
-  <img src="docs/assets/animation/gpap_propagate_dark.gif" width="760"
-       alt="Animation comparing two chips. On the left, a CPU: a single row of cells wakes up one after another, one partial assignment at a time. On the right, a GPU: twelve rows of cells wake in the same sweep, every assignment propagating together.">
+  <img src="docs/assets/animation/gpap_propagate_dark.gif" width="580"
+       alt="Animation in three acts. First a formula, drawn as a bunch of grapes in which every row is a clause and every berry a literal: a gold bracket walks the clauses one at a time and each berry wakes as propagation reaches it, until a single partial assignment is complete. Then each clause row folds into a single cell, and the five cells line up as that assignment's row. Finally the row becomes the first of five on a chip die — one row per partial assignment, one column per clause — and every row propagates at once, cells flashing as they wake.">
 </picture>
 
 </div>
 
-A CPU sampler propagates **one partial assignment at a time**. GPAP runs the same implication wave
-across **every row of the batch in one kernel launch** — and that is the whole speedup. It is not a
-cleverer search: it is the same randomized decide-and-propagate loop CMSGen runs, only with
-propagation throughput raised to **billions of implications per second**. (The one algorithmic
-difference is at a conflict, where CMSGen backtracks and GPAP simply drops the row.)
+**A formula first**, one clause per row of the bunch, propagated the way a CPU sampler does it: one
+clause at a time, one assignment at a time. Under that assignment each clause's whole state is
+**one packed word**, so the bunch folds into a **row of words** — and that row is the engine's
+state: one row per partial assignment, one column per clause, **thousands of rows in a single
+launch**, each with its own decisions and its own fixpoint.
 
-That is affordable only because a clause is never scanned:
+That is the whole speedup. It is not a cleverer search: it is the same randomized
+decide-and-propagate loop CMSGen runs, only with propagation throughput raised to **billions of
+implications per second**. (The one algorithmic difference is at a conflict, where CMSGen backtracks
+and GPAP drops the row.)
+
+And it is affordable only because a clause is never scanned:
 
 1. **Negated occurrence lists** (CSR): `occ[l]` is the set of clauses where `~l` appears, so setting
    `l` TRUE falsifies `~l` in exactly those clauses — and in no others. Binary clauses live only
@@ -296,9 +302,9 @@ pytest                             # full suite (GPU tests skip off-CUDA; `slow`
 <div align="center">
 <br>
 <picture>
-  <source media="(prefers-color-scheme: dark)"  srcset="docs/assets/animation/gpap_story_dark.gif">
-  <source media="(prefers-color-scheme: light)" srcset="docs/assets/animation/gpap_story_light.gif">
-  <img src="docs/assets/icon/gpap_icon_128.png" width="96"
-       alt="Animation: scattered cells assembling into the GPAP chip mark and lighting up">
+  <source media="(prefers-color-scheme: dark)"  srcset="docs/assets/animation/gpap_idle_wake_dark.gif">
+  <source media="(prefers-color-scheme: light)" srcset="docs/assets/animation/gpap_idle_wake_light.gif">
+  <img src="docs/assets/icon_wake/gpap_icon_wake_256.png" width="96"
+       alt="The GPAP chip mark, its nine cells blinking">
 </picture>
 </div>
