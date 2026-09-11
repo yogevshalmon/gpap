@@ -4,17 +4,18 @@ Three acts, told in the brand mark's own pixel language — the berry is the kit
 its L-shaped highlight and shadowed bottom edge, the bunch is staggered the way the kit's story
 grape is, and the stem curls into a leaf between the top berries.
 
-  1. THE FORMULA, drawn as the grape: every row of the bunch is a clause, every berry a literal.
+  1. THE FORMULA, drawn as the grape: every cell is a literal, every row of the bunch a clause.
      What plays is an actual BCP trace. A DECISION lights one literal (gold flash). Its negation
      KNOCKS OUT that literal wherever it occurs — the berry shrinks and darkens, `sat_count -= 1`.
-     A clause down to one survivor FORCES it (white flash): unit propagation. Fixpoint, next
-     decision. It ends with every clause satisfied by exactly one lit literal and most of the
-     formula never touched — which is what "partial assignment" means.
-  2. THE FOLD: under one assignment, a clause's whole state is one packed word. Each clause row
-     collapses onto its lit literal, and the words line up as that assignment's row.
-  3. THE BATCH: the engine's state is exactly that matrix — one row per partial assignment, one
-     column per clause. The die grows a row at a time, and every row propagates in the same
-     launch, each in its own order.
+     A clause down to one survivor FORCES it (white flash): unit propagation. It stops at a
+     FIXPOINT with one clause still open and most of the formula never touched — which is what
+     "partial assignment" means.
+  2. THE FOLD: under one assignment, a clause's whole state is a single berry. Each clause row
+     collapses onto one, and those berries line up as that assignment's row.
+  3. THE BATCH: a cell is now a clause state, so a row is every clause state of one partial
+     assignment. The die grows a row at a time and they all propagate in the same launch, each
+     to its own fixpoint — no row ever fills, and no cell is ever gold, because a clause state
+     is only ever changed by propagation.
 
 One scale throughout, 6x the 8px cell (a knocked-out literal sits at 5x; kit rules 1 and 2), at
 the kit's own 50-140 ms frame cadence.
@@ -39,8 +40,11 @@ STEM_HI, STEM_LO = (0x62, 0x74, 0x34), (0x42, 0x4E, 0x22)
 LEAF_HI, LEAF_LO = (0x8A, 0xB0, 0x92), (0x5E, 0x82, 0x66)
 
 CELL = 8
-CLAUSES = [4, 5, 4, 3, 2]       # the bunch, widest just under the stem, no unit clause (a unit
-M = len(CLAUSES)                # is already lit): M clauses = M columns of the state
+# The bunch: widest just under the stem, down to a binary clause at the tip. This is a PICTURE of
+# the idea, not a diagram of the state layout — it trades exactness for something a reader takes
+# in at a glance, so do not "correct" it into the engine's real shape.
+CLAUSES = [4, 5, 4, 3, 2]
+M = len(CLAUSES)                # M clauses = M columns of the state
 K = 5                           # partial assignments = rows of the state
 
 U = 6                           # 6x: one cell pixel is six on screen
@@ -52,16 +56,22 @@ OUT_SIZE = CELL * (U - 1)                            # a knocked-out literal, on
 TRACE = [
     ("decide", 0, 0),     # A0 := T                          A satisfied
     ("out", 2, 3),        #   ~A0 occurs in C: C3 is out
-    ("out", 4, 0),        #   ~A0 occurs in E: E0 is out     E has one survivor...
-    ("force", 4, 1),      #   ...so E1 := T                  E satisfied
-    ("out", 3, 0),        #   ~E1 occurs in D: D0 is out
-    ("out", 1, 1),        #   ~E1 occurs in B: B1 is out     fixpoint
+    ("out", 3, 0),        #   ~A0 occurs in D: D0 is out     no clause is unit yet: FIXPOINT
     ("decide", 1, 3),     # B3 := T                          B satisfied
-    ("out", 3, 2),        #   ~B3 occurs in D: D2 is out     D has one survivor...
+    ("out", 3, 2),        #   ~B3 occurs in D: D2 is out     D is down to one survivor...
     ("force", 3, 1),      #   ...so D1 := T                  D satisfied
-    ("out", 2, 1),        #   ~D1 occurs in C: C1 is out     fixpoint
-    ("decide", 2, 0),     # C0 := T                          C satisfied — every clause is
+    ("out", 4, 0),        #   ~D1 occurs in E: E0 is out     ...which leaves E with one...
+    ("force", 4, 1),      #   ...so E1 := T                  E satisfied
+    ("out", 2, 1),        #   ~E1 occurs in C: C1 is out     FIXPOINT — nothing else is forced
 ]
+# ...and it stops there. Four clauses are satisfied, C still has C0 and C2 live with no reason to
+# pick between them, and nine literals were never touched. That is what PARTIAL means, and it is
+# why neither the folded row nor the batch below ever lights up completely. The middle of the
+# trace is one implication CHAIN — B3 falsifies D2, which forces D1, which falsifies E2, which
+# forces E1, which falsifies C1 — because a chain is what propagation actually is.
+
+READ = 1500     # a caption gets its own still beat, long enough to read before anything moves
+READ_FIRST = 2800   # ...and the opening line, which defines the whole picture, gets longer
 
 MONO  = "/usr/share/fonts/truetype/dejavu/DejaVuSansMono.ttf"
 MONOB = "/usr/share/fonts/truetype/dejavu/DejaVuSansMono-Bold.ttf"
@@ -134,15 +144,30 @@ def ease(t):
     return t * t * (3 - 2 * t)
 
 
-def schedule(n, steps, rng, span_lo=0.5, span_hi=1.0):
-    """When each cell of one row wakes: its own random order, its own span."""
+def row_trace(n, steps, rng):
+    """One batch row's propagation, in act 1's vocabulary.
+
+    A cell here is a clause STATE, and a clause state only ever changes by propagation — the
+    decision is made on a variable, off-screen, and never on a clause. So there is no gold in
+    this act: a clause is either satisfied by an implication (white flash) or KNOCKED DOWN by a
+    falsified literal (small, dark). Each row runs to ITS OWN FIXPOINT, never to a full row of
+    lit cells — like the grape it ends with some clauses satisfied, some knocked down and some
+    never touched.
+    """
     order = list(range(n))
     rng.shuffle(order)
-    span = steps * rng.uniform(span_lo, span_hi)
-    wake = [0] * n
-    for k, c in enumerate(order):
-        wake[c] = 1 + round(k * (span - 1) / max(1, n - 1))
-    return wake
+    lit = order[:rng.randint(2, n - 1)]              # never all n: the row is still partial
+    span = steps * rng.uniform(0.55, 1.0)
+    wake, knock = [None] * n, [None] * n
+    for k, c in enumerate(lit):
+        wake[c] = 1 + round(k * (span - 1) / max(1, len(lit) - 1))
+    for c in lit[1:]:                                # knocked down, then satisfied anyway
+        if wake[c] >= 3 and rng.random() < 0.6:
+            knock[c] = rng.randint(1, wake[c] - 2)
+    for c in order[len(lit):]:                       # knocked down and left there, or untouched
+        if rng.random() < 0.55:
+            knock[c] = rng.randint(1, max(1, round(span)))
+    return wake, knock
 
 
 def build(dark: bool):
@@ -244,12 +269,15 @@ def build(dark: bool):
                 tile = AWAKE if i in lit else (OUT if i in out else ASLEEP)
             blit(im, x, y, tile, halo=True)
 
-    cap1 = ("a decision, then its implications, one clause at a time", "CPU")
-    im, d = frame(*cap1)
-    grape(im, d)
-    frames.append(im)
-    delays.append(900)
+    cap1a = ("a formula: each row is a clause, each cell a literal", "CPU")
+    cap1 = ("a variable is decided, then the implications it forces", "CPU")
+    for cap, hold in ((cap1a, READ_FIRST), (cap1, READ)):   # name the parts, then show them move
+        im, d = frame(*cap)
+        grape(im, d)
+        frames.append(im)
+        delays.append(hold)
 
+    idx_gold = None
     k_prev = None
     for kind, k, j in TRACE:
         i = first[k] + j
@@ -260,26 +288,40 @@ def build(dark: bool):
                 frames.append(im)
                 delays.append(60)
             k_prev = k
-        pop, hold = {"decide": (DECIDE, 110), "force": (FLASH, 70), "out": (OUT_FLASH, 70)}[kind]
+        pop, hold = {"decide": (DECIDE, 160), "force": (FLASH, 110), "out": (OUT_FLASH, 110)}[kind]
         im, d = frame(*cap1)
         grape(im, d, flash=(i, pop), k=k)
+        if kind == "decide" and idx_gold is None:
+            idx_gold = len(frames)
         frames.append(im)
         delays.append(hold)
         (out if kind == "out" else lit).add(i)
         im, d = frame(*cap1)
         grape(im, d, k=k)
         frames.append(im)
-        delays.append(200 if kind == "decide" else 140)
-    delays[-1] = 900
-    for k in range(M):                           # every clause satisfied by exactly one literal
-        assert sum(1 for i in range(first[k], first[k] + CLAUSES[k]) if i in lit) == 1
+        delays.append(280 if kind == "decide" else 190)
+    delays[-1] = 1100
+    # The fixpoint: a satisfied clause has exactly one lit literal, and the one open clause has
+    # none and at least two literals still live. Nothing here may end up fully assigned.
+    sat_clause = {clause_of[i] for i in lit}
+    for k in range(M):
+        cells = range(first[k], first[k] + CLAUSES[k])
+        n_lit = sum(1 for i in cells if i in lit)
+        assert n_lit == (1 if k in sat_clause else 0)
+        if k not in sat_clause:
+            assert sum(1 for i in cells if i not in lit and i not in out) >= 2
+    assert len(sat_clause) == M - 1
+
+    def word(k):
+        """The packed word clause k folds into: satisfied, or still open."""
+        return AWAKE if k in sat_clause else ASLEEP
 
     # --- act 2: each clause folds into one word; the words are that assignment's row -----------
     # Two motions, not one: first every clause's berries slide together IN PLACE and merge onto
     # the literal that satisfies it (the clause's packed word), then the five words travel to
     # the row. Doing it in one diagonal sweep smeared eighteen overlapping sprites into a streak.
-    cap2a = ("...under one assignment, a clause's whole state is one word",)
-    cap2b = ("...and the assignment is one row of words",)
+    cap2a = ("under one assignment, a clause's whole state is one cell",)
+    cap2b = ("so one partial assignment is one row of clause states",)
     # The bunch's rows nest closer than a cell is tall, so the merged column opens out to the
     # die's own pitch as it forms, or the five words would overlap.
     col_top = gtop + (grape_h - (M * PITCH - gap)) / 2
@@ -287,7 +329,7 @@ def build(dark: bool):
     draw_order = [i for i in range(len(gpos)) if i not in lit] + sorted(lit)   # lit on top
 
     n_a = 10
-    for f in range(1, n_a + 1):
+    for f in range(0, n_a + 1):              # f = 0 is the caption's beat: new text, no motion yet
         t = ease(f / n_a)
         im, d = frame(*cap2a)
         stem(d)
@@ -295,28 +337,28 @@ def build(dark: bool):
             x, y = gpos[i]
             cx, cy = centre[clause_of[i]]
             tile = AWAKE if i in lit else (OUT if i in out else ASLEEP)
-            if f == n_a:
-                tile = FLASH
+            if f == n_a:                      # the word each clause has become
+                tile = FLASH if clause_of[i] in sat_clause else ASLEEP
             blit(im, x + (cx - x) * t, y + (cy - y) * t, tile, halo=True)
         frames.append(im)
-        delays.append(50)
-    delays[-1] = 500
+        delays.append(READ if f == 0 else 50)
+    delays[-1] = 600
 
     n_b = 12
-    for f in range(1, n_b + 1):
+    for f in range(0, n_b + 1):
         t = ease(f / n_b)
         im, d = frame(*cap2b)
         if f == n_b:
             die(d, 1)
         for k, (cx, cy) in enumerate(centre):
             tx, ty = sx0 + k * PITCH, sy0
-            blit(im, cx + (tx - cx) * t, cy + (ty - cy) * t, AWAKE, halo=f < n_b)
+            blit(im, cx + (tx - cx) * t, cy + (ty - cy) * t, word(k), halo=f < n_b)
         frames.append(im)
-        delays.append(50)
-    delays[-1] = 700
+        delays.append(READ if f == 0 else 50)
+    delays[-1] = 900
 
     # --- act 3: the state matrix, one row per assignment ---------------------------------------
-    cap3 = ("one row per partial assignment, one column per clause", "GPU")
+    cap3 = ("thousands of rows: the same formula, different decisions", "GPU")
     cap4 = ("every row propagating in the same launch", "GPU")
 
     def state(im, d, rows, tile_of):
@@ -325,37 +367,47 @@ def build(dark: bool):
             for c in range(M):
                 blit(im, sx0 + c * PITCH, sy0 + r * PITCH, tile_of(r, c))
 
-    for n in range(2, K + 1):                    # the die grows a row at a time
+    for n in range(1, K + 1):                    # n = 1 is the caption's beat, then a row a frame
         im, d = frame(*cap3)
-        state(im, d, n, lambda r, c: AWAKE if r == 0 else ASLEEP)
+        state(im, d, n, lambda r, c: word(c) if r == 0 else ASLEEP)
         frames.append(im)
-        delays.append(110)
-    delays[-1] = 800
+        delays.append(READ if n == 1 else 190)
+    delays[-1] = 900
 
     rng = random.Random(11)
     steps = 12
-    wake = [None] + [schedule(M, steps, rng) for _ in range(K - 1)]
+    rows = [None] + [row_trace(M, steps, rng) for _ in range(K - 1)]
+    idx_act3 = None
     for step in range(steps + 2):
         im, d = frame(*cap4)
 
         def tile_of(r, c, step=step):
+            """The same three events as the grape, a clause word at a time."""
             if r == 0:
-                return AWAKE
-            w = wake[r][c]
-            return FLASH if step == w else (AWAKE if step > w else ASLEEP)
+                return word(c)                       # the partial assignment act 1 reached
+            wake, knock = rows[r]
+            w = wake[c]
+            if w is not None and step >= w:
+                return FLASH if step == w else AWAKE
+            if knock[c] is not None and step >= knock[c]:
+                return OUT_FLASH if step == knock[c] else OUT
+            return ASLEEP
 
         state(im, d, K, tile_of)
+        if step == steps // 2:
+            idx_act3 = len(frames)
         frames.append(im)
-        delays.append(90)
-    delays[-1] = 2200
+        delays.append(READ if step == 0 else 150)
+    delays[-1] = 2400
 
     # The palette must be built from frames that between them carry every colour used: the last
     # frame is all purple, so sampling it alone maps the stem, leaf and gold flash onto the
     # nearest plum.
-    swatch = Image.new("RGB", (W, H * 3), ground)
-    swatch.paste(frames[2], (0, 0))                       # act 1: the grape, greens, the bracket
-    swatch.paste(frames[len(frames) // 3], (0, H))        # act 1 late: lit, out, the gold flash
-    swatch.paste(frames[-1], (0, 2 * H))                  # act 3: the die and the batch
+    swatch = Image.new("RGB", (W, H * 4), ground)
+    swatch.paste(frames[0], (0, 0))                        # act 1: the grape, greens, the bracket
+    swatch.paste(frames[idx_gold], (0, H))                 # a decision: the gold berry
+    swatch.paste(frames[idx_act3], (0, 2 * H))             # act 3 mid: lit, out, gold, asleep
+    swatch.paste(frames[-1], (0, 3 * H))                   # act 3 end: the die and the batch
     pal = swatch.quantize(colors=64, method=Image.MEDIANCUT)
     frames = [f.quantize(palette=pal, dither=Image.NONE) for f in frames]
     out_path = ROOT / f"docs/assets/animation/gpap_propagate_{'dark' if dark else 'light'}.gif"

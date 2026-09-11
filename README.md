@@ -1,14 +1,11 @@
 <div align="center">
 
-<h1>
 <picture>
-  <source media="(prefers-color-scheme: dark)"  srcset="docs/assets/animation/gpap_idle_wake_dark.gif">
-  <source media="(prefers-color-scheme: light)" srcset="docs/assets/animation/gpap_idle_wake_light.gif">
-  <img src="docs/assets/icon_wake/gpap_icon_wake_256.png" width="96" align="middle"
-       alt="GPAP logo: a 3x3 grid of purple cells inside a chip die with gold pins, blinking">
+  <source media="(prefers-color-scheme: dark)"  srcset="docs/assets/wordmark/gpap_wordmark_dark.png">
+  <source media="(prefers-color-scheme: light)" srcset="docs/assets/wordmark/gpap_wordmark_light.png">
+  <img src="docs/assets/wordmark/gpap_wordmark_dark.png" width="590"
+       alt="GPAP — the wordmark beside the logo, a 3x3 grid of purple cells inside a chip die with gold pins">
 </picture>
-&nbsp;GPAP
-</h1>
 
 **GPU-Parallel (partial) Assignment Propagation**
 
@@ -223,7 +220,7 @@ Examples for both faces in [`cpp/examples/`](cpp/examples/) and [`examples/`](ex
   <source media="(prefers-color-scheme: dark)"  srcset="docs/assets/animation/gpap_propagate_dark.gif">
   <source media="(prefers-color-scheme: light)" srcset="docs/assets/animation/gpap_propagate_light.gif">
   <img src="docs/assets/animation/gpap_propagate_dark.gif" width="580"
-       alt="Animation in three acts. First a formula, drawn as a bunch of grapes in which every row is a clause and every berry a literal. A gold bracket follows propagation from clause to clause: a decision lights one literal, its negation knocks literals out of the clauses where it appears, and a clause down to one survivor forces that one to light — until every clause is satisfied by a single lit literal, with most of the formula never touched. Then each clause row folds onto its lit literal, becoming one cell, and the five cells line up as that assignment's row. Finally the row becomes the first of five on a chip die — one row per partial assignment, one column per clause — and every row propagates at once, cells flashing as they wake.">
+       alt="Animation in three acts. First a formula, drawn as a bunch of grapes in which every row is a clause and every berry a literal. A gold bracket follows propagation from clause to clause: a decision lights one literal, its negation knocks literals out of the clauses where it appears, and a clause down to one survivor forces that one to light — until propagation reaches a fixpoint with four clauses satisfied, one still open and most of the formula never touched. Then each clause folds into a single cell, lit where the clause is satisfied and dark where it is still open, and the five cells line up as that assignment's row. Finally the row becomes the first of five on a chip die — one row per partial assignment, one column per clause — and every row propagates at once in the same vocabulary, each reaching its own fixpoint rather than a full row.">
 </picture>
 
 </div>

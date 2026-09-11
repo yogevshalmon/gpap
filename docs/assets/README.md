@@ -3,7 +3,8 @@
 | folder | what it is | where it is used |
 |---|---|---|
 | `icon/` | the baseline mark, master SVG + PNGs (576 = 12× the 48px grid) | docs, badges, PyPI, anywhere inline |
-| `icon_wake/` | the eyes variant, hero sizes only | README header, social preview, slides |
+| `icon_wake/` | the eyes variant, hero sizes only | the header lockup, social preview, slides |
+| `wordmark/` | the generated header lockup: GPAP, then the mark, on a transparent ground | the README header |
 | `animation/` | idle / wave / story loops from the kit, plus the generated `propagate` pair | README header and sign-off (`idle_wake`), the core-idea section (`propagate`). `wave` and `story` are unused today |
 | `favicon/` | hand-drawn 16 / 24 / 32 px marks + `favicon.ico` | a docs site, PyPI project links |
 | `avatar/` | 1024px tiles, inset so a circle crop keeps the pin ring | GitHub avatar, PyPI |
@@ -47,6 +48,7 @@ thing on the page.
 The social card, the terminal demo and the `propagate` loops are generated, not drawn:
 
 ```bash
+python docs/assets/tools/make_wordmark.py       # the header lockup, dark + light
 python docs/assets/tools/make_social_card.py    # 1280x640 card, from the 48px grid up
 python docs/assets/tools/make_demo_gif.py       # the terminal recording
 python docs/assets/tools/make_propagation_gif.py  # the core-idea story, dark + light
@@ -60,6 +62,10 @@ matching its own output.
 `make_propagation_gif.py` tells the core idea in three acts — a formula drawn as the mark's grape
 with one clause per row, propagated a clause at a time; each clause collapsing to one packed word
 and the words lining up as that assignment's row; then the die, one row per assignment and one
-column per clause, every row propagating at once. It reads the cell sprite off
+column per clause, every row propagating at once in that same vocabulary — gold for the row's
+decision, a shrunken dark cell for a clause knocked down, a white flash for one forced. No row
+ever ends fully lit, in either act: propagation stops at a fixpoint, which is what makes the
+assignment partial. Each caption holds still for `READ` ms before anything moves, so it can be
+read. It reads the cell sprite off
 `icon/gpap_icon.png` rather than redrawing it, so the animation stays in the mark's pixel language
 if the mark is ever re-exported, and every size it draws is an integer multiple of the 8px cell.
