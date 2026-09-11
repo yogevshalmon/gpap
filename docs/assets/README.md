@@ -4,7 +4,7 @@
 |---|---|---|
 | `icon/` | the baseline mark, master SVG + PNGs (576 = 12× the 48px grid) | docs, badges, PyPI, anywhere inline |
 | `icon_wake/` | the eyes variant, hero sizes only | README header, social preview, slides |
-| `animation/` | idle / wave / story loops from the kit, plus the generated `propagate` pair | README header (`idle_wake`), the core-idea section (`propagate`), the sign-off (`story`) |
+| `animation/` | idle / wave / story loops from the kit, plus the generated `propagate` pair | README header and sign-off (`idle_wake`), the core-idea section (`propagate`). `wave` and `story` are unused today |
 | `favicon/` | hand-drawn 16 / 24 / 32 px marks + `favicon.ico` | a docs site, PyPI project links |
 | `avatar/` | 1024px tiles, inset so a circle crop keeps the pin ring | GitHub avatar, PyPI |
 | `social/` | 1280×640 card | GitHub → Settings → Social preview (**upload manually**; a repo file is not picked up) |
@@ -49,7 +49,7 @@ The social card, the terminal demo and the `propagate` loops are generated, not 
 ```bash
 python docs/assets/tools/make_social_card.py    # 1280x640 card, from the 48px grid up
 python docs/assets/tools/make_demo_gif.py       # the terminal recording
-python docs/assets/tools/make_propagation_gif.py  # CPU vs GPU propagation, dark + light
+python docs/assets/tools/make_propagation_gif.py  # the core-idea story, dark + light
 ```
 
 The demo's text is a verbatim capture of a real `gpap sample` run, pasted into the generator. If it
@@ -57,5 +57,9 @@ is re-recorded, the command shown must be the command that produced the output s
 several of those lines change wording with the flags, so a command edited after the fact stops
 matching its own output.
 
-`make_propagation_gif.py` reads the cell sprite off `icon/gpap_icon.png` rather than redrawing it,
-so the animation stays in the mark's pixel language if the mark is ever re-exported.
+`make_propagation_gif.py` tells the core idea in three acts — a formula drawn as the mark's grape
+with one clause per row, propagated a clause at a time; each clause collapsing to one packed word
+and the words lining up as that assignment's row; then the die, one row per assignment and one
+column per clause, every row propagating at once. It reads the cell sprite off
+`icon/gpap_icon.png` rather than redrawing it, so the animation stays in the mark's pixel language
+if the mark is ever re-exported, and every size it draws is an integer multiple of the 8px cell.
