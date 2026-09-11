@@ -223,13 +223,14 @@ Examples for both faces in [`cpp/examples/`](cpp/examples/) and [`examples/`](ex
   <source media="(prefers-color-scheme: dark)"  srcset="docs/assets/animation/gpap_propagate_dark.gif">
   <source media="(prefers-color-scheme: light)" srcset="docs/assets/animation/gpap_propagate_light.gif">
   <img src="docs/assets/animation/gpap_propagate_dark.gif" width="580"
-       alt="Animation in three acts. First a formula, drawn as a bunch of grapes in which every row is a clause and every berry a literal: a gold bracket walks the clauses one at a time and each berry wakes as propagation reaches it, until a single partial assignment is complete. Then each clause row folds into a single cell, and the five cells line up as that assignment's row. Finally the row becomes the first of five on a chip die — one row per partial assignment, one column per clause — and every row propagates at once, cells flashing as they wake.">
+       alt="Animation in three acts. First a formula, drawn as a bunch of grapes in which every row is a clause and every berry a literal. A gold bracket follows propagation from clause to clause: a decision lights one literal, its negation knocks literals out of the clauses where it appears, and a clause down to one survivor forces that one to light — until every clause is satisfied by a single lit literal, with most of the formula never touched. Then each clause row folds onto its lit literal, becoming one cell, and the five cells line up as that assignment's row. Finally the row becomes the first of five on a chip die — one row per partial assignment, one column per clause — and every row propagates at once, cells flashing as they wake.">
 </picture>
 
 </div>
 
-**A formula first**, one clause per row of the bunch, propagated the way a CPU sampler does it: one
-clause at a time, one assignment at a time. Under that assignment each clause's whole state is
+**A formula first**, one clause per row of the bunch, propagated the way a CPU sampler does it: a
+decision, then its implications, one clause at a time — and only the literals propagation touches
+ever change, which is what makes the assignment *partial*. Under it each clause's whole state is
 **one packed word**, so the bunch folds into a **row of words** — and that row is the engine's
 state: one row per partial assignment, one column per clause, **thousands of rows in a single
 launch**, each with its own decisions and its own fixpoint.
