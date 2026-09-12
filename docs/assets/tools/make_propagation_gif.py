@@ -416,8 +416,10 @@ def build(dark: bool):
     # the literal that satisfies it (the clause's packed word), then the five words travel to the
     # row beside the vine. Doing it in one diagonal sweep smeared eighteen overlapping sprites
     # into a streak.
-    cap2a = ("under one assignment, a clause's whole state is one cell",)
-    cap2b = ("so one partial assignment is one row of clause states",)
+    # These two lines ARE GPAP, so they carry its name the way act 1 carries CPU and act 3 GPU:
+    # the three leads read CPU -> GPAP -> GPU, which is the whole argument in three words.
+    cap2a = ("the idea: under one assignment, a clause is one cell of state", "GPAP")
+    cap2b = ("so one partial assignment is one row of clause states", "GPAP")
     # The bunch's rows nest closer than a cell is tall, so the merged column OPENS OUT to the
     # die's own pitch as it forms, or the five words would overlap. That even column is what
     # makes the unfold read: it is one shape spreading into another, symmetric about the middle
