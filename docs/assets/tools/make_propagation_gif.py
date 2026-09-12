@@ -16,7 +16,8 @@ TWO OBJECTS ON SCREEN AT A TIME, in two materials:
   DECIDED at random, a GREEN leaf one propagation FORCED. Nothing purple ever hangs on it.
   THE FORMULA, on the RIGHT, is the BUNCH — purple berries, one row per clause, one berry per
   literal. It HANGS FROM THE VINE, off the lower of the vine's two levels, its own six-pixel stem
-  topping out just under that run with its leaf poking out at the junction. From act 2 on, that same space holds THE CLAUSE STATES on a die instead, which is what
+  topping out just under that run. The plant's one leaf sits ON TOP of that same lower run, just
+  before the bunch hangs off it — on the vine, not beside it, which is what makes it read. From act 2 on, that same space holds THE CLAUSE STATES on a die instead, which is what
   the bunch turns into; the label above it says which it currently is.
 
   1. THE FORMULA. A real BCP trace, and the vine moves WITH it: a DECISION lights a berry gold and
@@ -98,12 +99,21 @@ READ_FIRST = 1900   # ...and the opening line, which defines the whole picture, 
 MONO  = "/usr/share/fonts/truetype/dejavu/DejaVuSansMono.ttf"
 MONOB = "/usr/share/fonts/truetype/dejavu/DejaVuSansMono-Bold.ttf"
 
-# The kit's stem and leaf, in cell pixels, relative to the top centre of the bunch.
+# The bunch's stem, in cell pixels relative to the top centre of the bunch: it hangs from the
+# vine's lower run and carries no leaf of its own.
 BUNCH_STEM = [(-1, -6, STEM_HI), (0, -6, STEM_HI), (-1, -5, STEM_HI), (0, -5, STEM_HI),
               (-1, -4, STEM_HI), (0, -4, STEM_HI), (-1, -3, STEM_LO), (0, -3, STEM_LO),
-              (-1, -2, STEM_LO), (0, -2, STEM_LO), (-1, -1, STEM_LO), (0, -1, STEM_LO),
-              (1, -7, LEAF_HI), (2, -7, LEAF_HI), (1, -6, LEAF_HI), (2, -6, LEAF_HI),
-              (3, -6, LEAF_LO), (2, -5, LEAF_HI), (3, -5, LEAF_LO)]
+              (-1, -2, STEM_LO), (0, -2, STEM_LO), (-1, -1, STEM_LO), (0, -1, STEM_LO)]
+
+# The mark's leaf, on the VINE and sitting ON TOP of it, which is what makes it read as a leaf
+# rather than a fleck. It goes on the LOWER run — the one that carries on to the bunch — just
+# before the bunch hangs off it. In cell pixels relative to (the bunch's stem, the lower run's
+# top row), so its bottom row lands one pixel above the run and its right edge one before the
+# stem. Hung off the END of that run it floated in the air; up on the upper run it belonged to
+# the wrong half of the vine.
+VINE_LEAF = [(-4, -3, LEAF_HI), (-3, -3, LEAF_HI),
+             (-4, -2, LEAF_HI), (-3, -2, LEAF_HI), (-2, -2, LEAF_LO),
+             (-3, -1, LEAF_HI), (-2, -1, LEAF_LO)]
 
 
 def berry(body, hi, lo, eyes, size=SIZE):
@@ -180,22 +190,35 @@ GOLD_LEAF, GOLD_POP = (GOLD, GOLD_LO), (GOLD_HI, GOLD)
 
 def row_trace(rng, steps):
     """Another row's propagation: a decision, implications behind it, clause states reacting a
-    step later. Never all variables and never all clauses — a row at its fixpoint is partial."""
+    step later. Never all variables and never all clauses — a row at its fixpoint is partial.
+
+    THE SPAN IS PER ROW. Two rows that set the same number of variables must not set them on the
+    same frames, or the batch pulses in unison: a common spacing formula makes every row tick
+    together, which is monotonous however random the contents are. A row's own span, plus knocks
+    scattered on their own moments rather than pinned behind a variable, is what makes the batch
+    bubble — several rows mid-flight at any instant, each on its own clock.
+    """
     order = list(range(NV))
     rng.shuffle(order)
     chosen = order[:rng.randint(2, NV - 2)]
-    vstep = {c: 1 + round(i * (steps - 4) / max(1, len(chosen) - 1)) for i, c in enumerate(chosen)}
+    span = steps * rng.uniform(0.55, 1.0)
+    start = rng.randint(1, 3)                             # ...and its own moment to start
+    vstep = {c: start + round(i * (span - start) / max(1, len(chosen) - 1))
+             for i, c in enumerate(chosen)}
     vgold = {c: i == 0 for i, c in enumerate(chosen)}     # the decision; the rest are forced
+
     cls = list(range(M))
     rng.shuffle(cls)
-    cstep, ckind, i = {}, {}, 0
-    for c in chosen:
-        for _ in range(rng.randint(0, 2)):
-            if i < M - 1:                                # never every clause: a row stays partial
-                k = cls[i]
-                i += 1
-                cstep[k] = vstep[c] + 1
-                ckind[k] = "sat" if rng.random() < 0.6 else "knock"
+    cstep, ckind = {}, {}
+    for i, c in enumerate(chosen):                        # a clause that variable satisfies...
+        if rng.random() < 0.55:
+            k = cls[i]
+            cstep[k] = min(steps, vstep[c] + rng.randint(1, 2))
+            ckind[k] = "sat"
+    for k in cls:                                         # ...and clauses merely knocked down,
+        if k not in cstep and rng.random() < 0.40:        # on their own moments, filling the gaps
+            cstep[k] = rng.randint(1, max(1, round(span)))
+            ckind[k] = "knock"
     return vstep, vgold, cstep, ckind
 
 
@@ -257,8 +280,13 @@ def build(dark: bool):
         return im, d
 
     def bunch_stem(d):
+        """What is drawn only while the bunch is on screen: the stem it hangs by, and the vine's
+        one leaf, up on the vine's own line above the step down."""
         for dx, dy, colour in BUNCH_STEM:
             x, y = gcx + dx * U, gtop + dy * U
+            d.rectangle([x, y, x + U - 1, y + U - 1], fill=colour)
+        for dx, dy, colour in VINE_LEAF:
+            x, y = (gcx - U) + dx * U, (y0 + SIZE // 2 - U) + dy * U
             d.rectangle([x, y, x + U - 1, y + U - 1], fill=colour)
 
     def bracket(d, k, k_from=None, t=1.0):
@@ -466,6 +494,9 @@ def build(dark: bool):
     cap4 = ("every row propagating in the same launch", "GPU")
 
     rng = random.Random(11)
+    # A row here fires on BOTH objects — leaves on the vine and cells on the die — so it carries
+    # roughly twice the events origin's die-only row did. A step is now two frames (pop, then
+    # rest), which is 260 ms of air per step, so the count comes back down to origin's.
     steps = 12
     traces = [row_trace(rng, steps) for _ in range(K)]
     # Row ROW0 is the assignment act 1 just built, at step -1 so it starts settled — and it is
@@ -481,7 +512,11 @@ def build(dark: bool):
         assert sum(1 for k in cstep if ckind[k] == "sat") < M
         assert len(vstep) < NV
 
-    def band(im, d, r, step):
+    def band(im, d, r, step, rest=False):
+        """`rest` draws the same step with nothing flashing: whatever landed on this step is
+        already settled. Act 1 gives every event a pop frame and then a settle frame, and that
+        beat is most of why it reads; act 3 without it packs new pops and old settles into the
+        same frame, so there is no rhythm for anything to pop out of."""
         vstep, vgold, cstep, ckind = traces[r]
         y = sy0 + r * PITCH
 
@@ -489,26 +524,27 @@ def build(dark: bool):
             s = vstep.get(j)
             if s is None or step < s:
                 return None
-            if step == s:
+            if step == s and not rest:
                 return GOLD_POP if vgold.get(j) else GREEN_POP
             return GOLD_LEAF if vgold.get(j) else GREEN_LEAF
 
         vine(d, y, node)
         for c in range(M):
             s = cstep.get(c)
+            landing = step == s and not rest
             if s is None or step < s:
                 tile = ASLEEP
             elif ckind[c] == "sat":
-                tile = FLASH if step == s else AWAKE
+                tile = FLASH if landing else AWAKE
             else:
-                tile = OUT_FLASH if step == s else OUT
+                tile = OUT_FLASH if landing else OUT
             blit(im, dx0 + c * PITCH, y, tile)
 
-    def batch(caption, lead, r0, rows, step):
+    def batch(caption, lead, r0, rows, step, rest=False):
         im, d = frame(caption, lead, right="the clause states")
         die(d, r0, rows)
         for r in range(r0, r0 + rows):
-            band(im, d, r, step)
+            band(im, d, r, step, rest)
         return im
 
     # The die grows DOWNWARD from the row just watched, ONE ROW A FRAME, so the row the reader is
@@ -521,10 +557,12 @@ def build(dark: bool):
 
     idx_mid = None
     for step in range(steps + 2):
-        frames.append(batch(*cap4, 0, K, step))
+        frames.append(batch(*cap4, 0, K, step))               # what lands on this step...
         if step == steps // 2:
             idx_mid = len(frames) - 1
-        delays.append(READ if step == 0 else 150)
+        delays.append(READ if step == 0 else 110)
+        frames.append(batch(*cap4, 0, K, step, rest=True))    # ...and a beat of calm after it
+        delays.append(150)
     delays[-1] = 2400
 
     # THE PALETTE IS PINNED, NOT SAMPLED. Median cut splits by pixel population, and the colours
