@@ -59,13 +59,36 @@ is re-recorded, the command shown must be the command that produced the output s
 several of those lines change wording with the flags, so a command edited after the fact stops
 matching its own output.
 
-`make_propagation_gif.py` tells the core idea in three acts — a formula drawn as the mark's grape
-with one clause per row, propagated a clause at a time; each clause collapsing to one packed word
-and the words lining up as that assignment's row; then the die, one row per assignment and one
-column per clause, every row propagating at once in that same vocabulary — gold for the row's
-decision, a shrunken dark cell for a clause knocked down, a white flash for one forced. No row
-ever ends fully lit, in either act: propagation stops at a fixpoint, which is what makes the
-assignment partial. Each caption holds still for `READ` ms before anything moves, so it can be
-read. It reads the cell sprite off
-`icon/gpap_icon.png` rather than redrawing it, so the animation stays in the mark's pixel language
-if the mark is ever re-exported, and every size it draws is an integer multiple of the 8px cell.
+`make_propagation_gif.py` tells the core idea in three acts. **The bunch is the point**: one row per
+clause, one berry per literal, and it is the only place the literal-level truth is visible — a
+literal falsified, a clause narrowing, a clause down to ONE survivor forcing it, which is the whole
+of BCP. A version that reduced each clause to a single grape was tried and thrown away for exactly
+that reason. Beside it, from the first frame and never moving, is **the assignment as a vine** on
+the left: a node per variable, a gold leaf where it was decided at random, a green leaf where
+propagation forced it, a bare node where nothing touched it. A decision lights a berry gold and
+grows its leaf *in the same frame*, because setting a variable is one event; what follows on later
+frames is what that literal falsifies elsewhere, which is the causal order already in the trace.
+Act 2 folds each clause row onto one cell — the engine's actual compression, one packed word per
+clause — which forms **already standing in that clause's own column**, so the five then rise
+STRAIGHT UP into the row beside the vine. Two motions that neither cross nor rotate; folding to a
+centred column and fanning that out into the row is a 90-degree rotation and read as scattering. Act 3 grows the die downwards from that row, so the
+row the reader is holding on to never moves — and it is then LEFT ALONE, because rows in a batch
+reach their fixpoints at different times and giving it one more decision out of nowhere was motion
+with no reason behind it. The vine's right end has two forms: while the bunch is on screen it runs
+STRAIGHT ON into the bunch's own stem (one plant, joined under the bunch's leaf), and it bends down
+into the die's pin only once the bunch has become that row. The two swap on the single frame the
+bunch leaves and the die arrives, so it reads as the right-hand object changing identity rather
+than as a glitch. The vine has ONE shape and two lengths: it runs
+level over its own nodes, STEPS DOWN once the assignment ends (`----|____`), and carries on at the
+lower level either to the die's pin for that row or on to the bunch, which HANGS from it by its own
+six-pixel stem with its leaf at the junction. Because only the length differs, the swap at the fold
+is all but invisible. Running level the whole way instead laid the vine along the top of the bunch,
+and running it level with the first clause row drove a straight line into the side of the berries.
+
+Two invariants are asserted at build time rather than trusted: no row ever ends with every clause
+satisfied and no vine with every variable set, because propagation stops at a fixpoint and that is
+what makes the assignment partial. Each caption holds still for `READ` ms before anything moves, so
+it can be read. Every size drawn is a whole multiple of the 8px cell, and **the GIF palette is
+pinned, not sampled**: median cut splits by pixel population, so the colours that matter most here
+are the rarest (a leaf's bright green exists only on the frame it grows on) and every swatch-based
+palette quantized them to plum.
