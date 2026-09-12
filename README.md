@@ -68,13 +68,16 @@ circuits, unrolled and pinned:
 | vs **DEMOTIC** and **Recurrent-CircuitSAT** — GPU gradient samplers, on their own instances | **2× – 170×** |
 
 > [!NOTE]
-> Geometric means per benchmark set, on an NVIDIA L4 with an Intel Xeon at 2.20 GHz — CMSGen
-> is single-core, so the CPU is as much a part of these ratios as the GPU is. The spread is
-> real, not a rounding choice:
-> the ratio depends on the instance and on how rare the pinned target is. Charging setup to both
-> sides brings the CMSGen figures down by roughly 2–4×. Every instance, every excluded cell and
-> every case where a tool emitted nothing is listed in
-> [`docs/paper/RESULTS.md`](docs/paper/RESULTS.md).
+> Geometric means per benchmark set, on an NVIDIA L4 with an Intel Xeon at 2.20 GHz — CMSGen is
+> single-core, so the CPU is as much a part of these ratios as the GPU is. The spread is real, not
+> a rounding choice: it depends on the instance and on how rare the pinned target is. Charging
+> setup to both sides brings the CMSGen figures down by roughly 2–4×.
+>
+> The **engine** is the flat part: propagation holds ~2 × 10⁹ implications per second across every
+> set, depth and target — around 550× a CMSGen core, with under 1.6× between the fastest and
+> slowest row. So the spread above is work per emitted sample, not propagation speed. How every
+> tool is timed, and what is excluded from a mean and why, is in
+> [`docs/BENCHMARKING.md`](docs/BENCHMARKING.md).
 
 ## Install
 
@@ -230,21 +233,26 @@ Examples for both faces in [`cpp/examples/`](cpp/examples/) and [`examples/`](ex
 
 </div>
 
-**A formula first**, one clause per row of the bunch, propagated the way a CPU sampler does it: a
-decision, then its implications, one clause at a time. The vine on the left is the assignment that
-is causing it — a leaf per variable set, gold where it was chosen and green where propagation
-forced it — and only what propagation touches ever changes, which is what makes the assignment
-*partial*. Under that assignment each clause's whole state is **one packed word**, so the bunch
-folds into a **row of words** — and that row is the engine's state: one row per partial assignment,
-one column per clause, **thousands of rows in a single launch**, each with its own decisions and
-its own fixpoint.
+**One primitive.** Hand GPAP a CNF formula and K partial assignments, and it propagates every one
+of them to its own BCP fixpoint in a single launch — reporting, per assignment, whether it
+conflicted and otherwise what it implied. On request it decides too: pick a free variable, fix a
+polarity, propagate from there. Everything else in this repository is built on that one call.
 
-That is the whole speedup. It is not a cleverer search: it is the same randomized
-decide-and-propagate loop CMSGen runs, only with propagation throughput raised to **billions of
-implications per second**. (The one algorithmic difference is at a conflict, where CMSGen backtracks
-and GPAP drops the row.)
+**One shared formula, K private jobs.** The formula is built once and read by all of them. What
+propagation mutates belongs to each job alone: an assignment, a trail, and the per-clause
+bookkeeping that says when a clause has gone unit or empty. Jobs never communicate, and one that
+derives a conflict simply stops — there is no conflict analysis and no backtracking to serialize.
+That leaves **bytes per clause** as the whole game, because they decide how many assignments fit on
+the card at once, and it is why that bookkeeping is a counter and a key updated **in place**. Two
+watched literals per clause is smaller still, but an update *relocates* which literals are watched,
+and irregular pointer work is exactly what a GPU is worst at.
 
-And it is affordable only because a clause is never scanned:
+**And the engine's rate barely moves.** It propagates at essentially the same rate whatever the
+formula, the depth or the target. So the spread in the sampling figures above is not the
+propagator: it is how much propagation an instance spends per emitted sample, which is a property
+of the task rather than of the engine.
+
+None of it is affordable unless a clause is never scanned:
 
 1. **Negated occurrence lists** (CSR): `occ[l]` is the set of clauses where `~l` appears, so setting
    `l` TRUE falsifies `~l` in exactly those clauses — and in no others. Binary clauses live only
@@ -257,19 +265,20 @@ And it is affordable only because a clause is never scanned:
 
 Literal indexing is `+v → 2(v-1)`, `-v → 2(v-1)+1`, negation `l ^ 1`; the assignment is a bitmap in
 which `l` and `~l` share a word, so a single `atomic_or` answers both "already set?" and
-"contradiction?". Because BCP fixpoints are confluent, the kernels are A/B'd against a pure-Python
-reference and every emitted model is externally verifiable.
+"contradiction?".
 [`cpp/kernels/bcp.py`](cpp/kernels/bcp.py) · [`docs/ENGINE.md`](docs/ENGINE.md)
 
 ## Uniformity
 
-A uniformity number is a claim about a distribution, so `gpap sample` does not make one. The tools
-that do live in [`eval/uniformity/`](eval/uniformity/): an exact-oracle fuzzer over enumerable
-instances, and a [Barbarik](https://github.com/meelgroup/barbarik) harness with GPAP hooked
-in-process and SPUR as the reference. Run it with both controls — an exactly uniform sampler under
-test must Accept, and the `soft` config must Reject. The guarantee is asymmetric: Reject is
-unconditional, Accept is "not caught".
-[`docs/findings/UNIFORMITY_FINDINGS.md`](docs/findings/UNIFORMITY_FINDINGS.md)
+A uniformity number is a claim about a distribution, so `gpap sample` does not make one on the way
+past: an honest test needs either the whole solution set or conditional sampling, and neither is
+something a sampler can do while sampling.
+
+Tested the way CMSGen was, under [Barbarik](https://github.com/meelgroup/barbarik), GPAP is never
+rejected — the same verdict CMSGen obtains. Read that as it is meant: the guarantee is asymmetric,
+so Reject is unconditional and Accept only ever means "not caught", and a run is evidence only with
+both controls in place — an exactly uniform reference must Accept, and a deliberately skewed config
+must Reject.
 
 ## Layout
 
@@ -281,7 +290,7 @@ gpap/
   circuits/       # .bench / AIGER parse, unroll, Tseitin, pin -> projected-sampling CNF
   mining.py       # entailed-clause mining over the core's probe primitive
   cli.py          # `gpap` subcommands
-eval/             # the experiment layer: campaign driver, rival harnesses, uniformity, paper tables
+eval/             # the experiment layer: campaign driver and rival harnesses
 scripts/          # build libgpap, optional third-party tools, fetch benchmarks
 docs/             # start at docs/README.md; docs/findings/ is the evidence behind every rule
 tests/            # pytest (CPU smoke + `gpu`/`slow` markers); circuit CNFs generated on demand
