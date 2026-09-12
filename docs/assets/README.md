@@ -69,9 +69,11 @@ propagation forced it, a bare node where nothing touched it. A decision lights a
 grows its leaf *in the same frame*, because setting a variable is one event; what follows on later
 frames is what that literal falsifies elsewhere, which is the causal order already in the trace.
 Act 2 folds each clause row onto one cell — the engine's actual compression, one packed word per
-clause — which forms **already standing in that clause's own column**, so the five then rise
-STRAIGHT UP into the row beside the vine. Two motions that neither cross nor rotate; folding to a
-centred column and fanning that out into the row is a 90-degree rotation and read as scattering. Act 3 grows the die downwards from that row, so the
+clause. The five stack into a **centred column opened out to the die's own pitch** (the bunch's
+rows nest tighter than a cell is tall, so without that they would overlap), and that column then
+unfolds into the row beside the vine, symmetric about the middle word, which barely moves. Folding
+each clause straight into its own column and lifting instead gives a diagonal staircase at the
+bunch's pitch, and a stair is not a shape: the even column is what makes the unfold read. Act 3 grows the die downwards from that row, so the
 row the reader is holding on to never moves — and it is then LEFT ALONE, because rows in a batch
 reach their fixpoints at different times and giving it one more decision out of nowhere was motion
 with no reason behind it. The vine's right end has two forms: while the bunch is on screen it runs

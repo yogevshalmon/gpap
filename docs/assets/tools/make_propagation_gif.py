@@ -25,9 +25,8 @@ TWO OBJECTS ON SCREEN AT A TIME, in two materials:
      white flash, green leaf. It halts at a FIXPOINT with one clause still open and most of the
      formula never touched, which is what "partial assignment" means.
   2. THE FOLD. Under one assignment a clause's whole state is ONE PACKED WORD, so each clause row
-     collapses onto one berry — already in that clause's own column — and the five then rise
-     STRAIGHT UP into the row beside the vine. Two motions that neither cross nor rotate: folding
-     to a centred column and fanning it out into the row read as the cells scattering.
+     collapses onto one berry, the five stack into an even column, and that column unfolds into
+     the row beside the vine — symmetric about the middle word, which barely moves.
   3. THE BATCH. A row is a vine and its clause states. Rows multiply DOWNWARD from the one just
      watched — which never moves — and all propagate in the same launch, each to its own fixpoint,
      so no vine ever fills and no row ever lights up completely.
@@ -94,7 +93,7 @@ TRACE = [
 VINE_SLOTS = [0, 2, 3, 5]
 
 READ = 1500         # a caption gets its own still beat, long enough to read before anything moves
-READ_FIRST = 2600   # ...and the opening line, which defines the whole picture, gets longer
+READ_FIRST = 1900   # ...and the opening line, which defines the whole picture, a little longer
 
 MONO  = "/usr/share/fonts/truetype/dejavu/DejaVuSansMono.ttf"
 MONOB = "/usr/share/fonts/truetype/dejavu/DejaVuSansMono-Bold.ttf"
@@ -367,20 +366,20 @@ def build(dark: bool):
     for kind, k, j in TRACE:
         i = first[k] + j
         if k != k_prev:                          # the bracket eases over to the clause touched
-            for f in range(1, 5):
-                frames.append(act1(*cap1, k=k, k_from=k_prev, t=ease(f / 4)))
-                delays.append(60)
+            for f in range(1, 7):
+                frames.append(act1(*cap1, k=k, k_from=k_prev, t=ease(f / 6)))
+                delays.append(45)
             k_prev = k
         # A decision or an implication SETS A VARIABLE, so the berry and the leaf are one event
         # and land in the same frame. What follows on later frames is what that set literal
         # falsifies elsewhere — the causal order is already in the trace.
         pop = None
         if kind == "out":
-            tile, hold = OUT_FLASH, 150
+            tile, hold = OUT_FLASH, 130
         else:
             pop = VINE_SLOTS[len(vine_state)]
             vine_state[pop] = kind == "decide"
-            tile, hold = (DEC_FLASH, 420) if kind == "decide" else (FLASH, 330)
+            tile, hold = (DEC_FLASH, 330) if kind == "decide" else (FLASH, 260)
         frames.append(act1(*cap1, flash=(i, tile), k=k, pop=pop))
         if kind == "decide" and idx_gold is None:
             idx_gold = len(frames) - 1
@@ -393,7 +392,7 @@ def build(dark: bool):
             if kind == "decide":
                 gold.add(i)
         frames.append(act1(*cap1, k=k))          # settle
-        delays.append(320 if kind == "decide" else 230)
+        delays.append(290 if kind == "decide" else 200)
     delays[-1] = 1500
 
     # The fixpoint: a satisfied clause has exactly one lit literal, the one open clause has none
@@ -414,14 +413,21 @@ def build(dark: bool):
 
     # --- act 2: each clause folds into one word; the words are that assignment's row -----------
     # Two motions, not one: first every clause's berries slide together IN PLACE and merge onto
-    # the literal that satisfies it, then the five words travel to the row beside the vine. Doing
-    # it in one diagonal sweep smeared eighteen overlapping sprites into a streak.
+    # the literal that satisfies it (the clause's packed word), then the five words travel to the
+    # row beside the vine. Doing it in one diagonal sweep smeared eighteen overlapping sprites
+    # into a streak.
     cap2a = ("under one assignment, a clause's whole state is one cell",)
     cap2b = ("so one partial assignment is one row of clause states",)
-    merge = [(dx0 + k * PITCH, gtop + k * GROW) for k in range(M)]
+    # The bunch's rows nest closer than a cell is tall, so the merged column OPENS OUT to the
+    # die's own pitch as it forms, or the five words would overlap. That even column is what
+    # makes the unfold read: it is one shape spreading into another, symmetric about the middle
+    # word, which barely moves. Folding each clause straight into its own column instead gives a
+    # diagonal staircase at the bunch's tighter pitch, and a stair is not a shape.
+    col_top = gtop + (grape_h - (M * PITCH - GAP)) / 2
+    centre = [(gcx - SIZE / 2, col_top + k * PITCH) for k in range(M)]
     draw_order = [i for i in range(len(gpos)) if i not in lit] + sorted(lit)   # lit on top
 
-    n_a = 12
+    n_a = 14
     for f in range(0, n_a + 1):           # f = 0 is the caption's beat: new text, no motion yet
         t = ease(f / n_a)
         im, d = frame(*cap2a)
@@ -429,26 +435,28 @@ def build(dark: bool):
         bunch_stem(d)
         for i in draw_order:
             x, y = gpos[i]
-            cx, cy = merge[clause_of[i]]
+            cx, cy = centre[clause_of[i]]
             tile = (DECIDED if i in gold else AWAKE) if i in lit else (
                 OUT if i in out else ASLEEP)
             if f == n_a:
                 tile = FLASH if clause_of[i] in sat_clause else ASLEEP
             blit(im, x + (cx - x) * t, y + (cy - y) * t, tile, halo=True)
         frames.append(im)
-        delays.append(READ if f == 0 else 55)
+        delays.append(READ if f == 0 else 40)
     delays[-1] = 600
 
-    n_b = 16
+    n_b = 18
     for f in range(0, n_b + 1):
         t = ease(f / n_b)
         im, d = frame(*cap2b, right="the clause states")
-        die(d, ROW0, 1)          # the chip is there to RECEIVE them, so the vine's bend, which
-        vine0(d, connect="pin")  # switches to the pin on this very frame, never hangs in mid-air
-        for k, (cx, cy) in enumerate(merge):
-            blit(im, cx, cy + (y0 - cy) * t, word(k), halo=f < n_b)   # straight up, same column
+        if f == n_b:             # the chip arrives WITH the words, not ahead of them: drawing it
+            die(d, ROW0, 1)      # up front puts a row of pins on screen long before it means
+        vine0(d, connect="pin")  # anything, and the eye reads that as the animation stalling
+        for k, (cx, cy) in enumerate(centre):
+            tx, ty = dx0 + k * PITCH, y0
+            blit(im, cx + (tx - cx) * t, cy + (ty - cy) * t, word(k), halo=f < n_b)
         frames.append(im)
-        delays.append(READ if f == 0 else 55)
+        delays.append(READ if f == 0 else 40)
     delays[-1] = 900
 
     # --- act 3: the batch — a row is a vine and its clause states ------------------------------
@@ -501,11 +509,12 @@ def build(dark: bool):
             band(im, d, r, step)
         return im
 
-    # The die grows DOWNWARD from the row just watched, so the row the reader is holding on to
-    # never moves and the empty frame below act 1 is what fills.
-    for r0, rows, hold in ((ROW0, 1, READ), (ROW0, 3, 430), (ROW0, K, 430)):
-        frames.append(batch(*cap3, r0, rows, 0))
-        delays.append(hold)
+    # The die grows DOWNWARD from the row just watched, ONE ROW A FRAME, so the row the reader is
+    # holding on to never moves and the empty frame below act 1 fills steadily. Growing it in a
+    # few big chunks instead is the same build in three jumps, and it reads as stiff.
+    for n in range(1, K + 1):                # n = 1 is the caption's beat, then a row a frame
+        frames.append(batch(*cap3, ROW0, n, 0))
+        delays.append(READ if n == 1 else 190)
     delays[-1] = 900
 
     idx_mid = None
