@@ -83,7 +83,9 @@ bunch leaves and the die arrives, so it reads as the right-hand object changing 
 than as a glitch. The vine has ONE shape and two lengths: it runs
 level over its own nodes, STEPS DOWN once the assignment ends (`----|____`), and carries on at the
 lower level either to the die's pin for that row or on to the bunch, which HANGS from it by its own
-six-pixel stem with its leaf at the junction. Because only the length differs, the swap at the fold
+six-pixel stem. The plant's one leaf sits on TOP of that lower run, just before the bunch hangs
+off it. On the vine and on top of it is what makes it read: hung off the end of the run it floated,
+and drawn on the bunch's own stem it was a fleck beside the berries. Because only the length differs, the swap at the fold
 is all but invisible. Running level the whole way instead laid the vine along the top of the bunch,
 and running it level with the first clause row drove a straight line into the side of the berries.
 
