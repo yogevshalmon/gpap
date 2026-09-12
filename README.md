@@ -219,18 +219,20 @@ Examples for both faces in [`cpp/examples/`](cpp/examples/) and [`examples/`](ex
 <picture>
   <source media="(prefers-color-scheme: dark)"  srcset="docs/assets/animation/gpap_propagate_dark.gif">
   <source media="(prefers-color-scheme: light)" srcset="docs/assets/animation/gpap_propagate_light.gif">
-  <img src="docs/assets/animation/gpap_propagate_dark.gif" width="580"
-       alt="Animation in three acts. First a formula, drawn as a bunch of grapes in which every row is a clause and every berry a literal. A gold bracket follows propagation from clause to clause: a decision lights one literal, its negation knocks literals out of the clauses where it appears, and a clause down to one survivor forces that one to light — until propagation reaches a fixpoint with four clauses satisfied, one still open and most of the formula never touched. Then each clause folds into a single cell, lit where the clause is satisfied and dark where it is still open, and the five cells line up as that assignment's row. Finally the row becomes the first of five on a chip die — one row per partial assignment, one column per clause — and every row propagates at once in the same vocabulary, each reaching its own fixpoint rather than a full row.">
+  <img src="docs/assets/animation/gpap_propagate_dark.gif" width="675"
+       alt="Animation of the engine's core idea, in three acts. Throughout, the assignment sits on the left as a green vine with a node per variable: a gold leaf marks a variable decided at random, a green leaf one forced by propagation, a bare node one never touched. The vine runs level over its own nodes, steps down once the assignment ends, and carries on at that lower level to the bunch, which hangs from it by its own stem with its leaf at the junction — so the two are one plant rather than two objects near each other. On the right is the formula, a bunch of grapes in which every row is a clause and every berry a literal. In the first act a real propagation trace runs, and the vine moves with it: a decision lights a berry gold and grows a gold leaf in the same frame, the literals that decision falsifies shrink and darken wherever they occur, and a clause left with one survivor forces it — a white flash and a green leaf — which falsifies more. It halts at a fixpoint with four clauses satisfied, one still open with two live literals, and most of the formula never touched. In the second act each clause row collapses onto a single cell, because under one assignment a clause's whole state is one packed word; each cell forms already standing in its own clause's column, and the five then rise straight up into a row beside the vine. In the third act rows multiply downwards until the die holds five, each a vine with its own decisions and its own row of clause states, now plugged into the die's pins, all propagating in the same launch and each stopping at its own fixpoint while the row just watched holds the one it already reached, so no vine fills and no row ever lights up completely.">
 </picture>
 
 </div>
 
 **A formula first**, one clause per row of the bunch, propagated the way a CPU sampler does it: a
-decision, then its implications, one clause at a time — and only the literals propagation touches
-ever change, which is what makes the assignment *partial*. Under it each clause's whole state is
-**one packed word**, so the bunch folds into a **row of words** — and that row is the engine's
-state: one row per partial assignment, one column per clause, **thousands of rows in a single
-launch**, each with its own decisions and its own fixpoint.
+decision, then its implications, one clause at a time. The vine on the left is the assignment that
+is causing it — a leaf per variable set, gold where it was chosen and green where propagation
+forced it — and only what propagation touches ever changes, which is what makes the assignment
+*partial*. Under that assignment each clause's whole state is **one packed word**, so the bunch
+folds into a **row of words** — and that row is the engine's state: one row per partial assignment,
+one column per clause, **thousands of rows in a single launch**, each with its own decisions and
+its own fixpoint.
 
 That is the whole speedup. It is not a cleverer search: it is the same randomized
 decide-and-propagate loop CMSGen runs, only with propagation throughput raised to **billions of
