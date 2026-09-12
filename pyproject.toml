@@ -5,7 +5,7 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "gpap"
 version = "0.1.0"
-description = "GPU-parallel (partial) assignment propagation: BCP over millions of independent partial assignments at once, and GPU CircuitSAT solution sampling"
+description = "GPU-parallel (partial) assignment propagation: BCP over hundreds of thousands of independent partial assignments in one kernel launch, and the GPU solution sampler built on it"
 readme = "README.md"
 requires-python = ">=3.10"
 authors = [{ name = "Yogev Shalmon" }]
