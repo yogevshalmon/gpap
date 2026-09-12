@@ -108,7 +108,9 @@ frames, delays = [], []
 
 # 1. typing the command, two characters a frame, across the shell continuation
 for r, (_, text) in enumerate(CMD_ROWS):
-    for i in range(0, len(text) + 1, 2):
+    # two characters a frame, and then the full line: stepping by two over an odd-length
+    # command left the last frame one character short of what it then cut to.
+    for i in sorted({*range(0, len(text), 2), len(text)}):
         im, d = blank()
         draw_cmd(d, r, i)
         cursor(d, r, 2 + i)
@@ -141,7 +143,16 @@ for on, ms in ((1, 1400), (0, 520), (1, 520), (0, 520), (1, 1600)):
     frames.append(im)
     delays.append(ms)
 
-pal = frames[0].quantize(colors=64, method=Image.MEDIANCUT)
+# THE PALETTE IS PINNED, NOT SAMPLED. frames[0] is the screen BEFORE a single character has
+# been typed, so median cut over it never sees CREAM, MUTED or LAV_HI: the command rendered
+# lavender instead of near-white and the output leaf-green instead of muted purple. Every
+# colour the cast uses gets an exact entry, and median cut is left only the antialiased greys.
+brand = list(dict.fromkeys([BG, BAR, BORDER, GOLD, CREAM, LAV_HI, LAV, VIOLET, MUTED, LEAF, DIM]))
+spare = 64 - len(brand)
+entries = [c for rgb in brand for c in rgb]
+entries += frames[-1].quantize(colors=spare, method=Image.MEDIANCUT).getpalette()[:3 * spare]
+pal = Image.new("P", (1, 1))
+pal.putpalette(entries + [0] * (768 - len(entries)))
 frames = [f.quantize(palette=pal, dither=Image.NONE) for f in frames]
 out = str(ROOT / "docs/assets/demo/gpap_demo.gif")
 frames[0].save(out, save_all=True, append_images=frames[1:], duration=delays,
