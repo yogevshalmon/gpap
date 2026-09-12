@@ -7,9 +7,12 @@ sampler that cannot choose it. This prices that decision by pairing two complete
 in exactly one flag.
 
     eval/artifact/soft_price_tables.py --safe <no-soft dir> --soft <--allow-soft dir> \\
-        --out-md docs/paper/SOFT_PRICE.md --out-tex docs/paper/soft_price.tex
+        --out-md $GPAP_RESULTS/paper/SOFT_PRICE.md --out-tex $GPAP_RESULTS/paper/soft_price.tex
 
-`eval/profile_soft_portfolio.py` answers the narrower question of GPAP against itself. Three
+By policy there is NO soft table in the paper (CLAUDE.md, working rules), so this writes
+beside the campaign rather than into docs/paper/; it exists to price the decision, not to
+publish it. `eval/profile_soft_portfolio.py` answers the narrower question of GPAP against
+itself. Three
 quantities here, because the first alone is misleading:
 
   * THROUGHPUT price over cells where both arms sampled. Diluted by construction — on most cells

@@ -1,7 +1,12 @@
 # Running the GPAP engine on non-NVIDIA GPUs
 
-*Analysis 2026-07-29, after the libgpap port. Measured facts are marked MEASURED; the rest is
-engineering estimate.*
+> **Status:** analysis, not a measurement — estimates except where a line says MEASURED.
+> **Measured:** 2026-07-29, after the libgpap port. Hardware-independent by subject: it is about
+> other vendors' GPUs, and no GPAP rate appears in it. The gfx cross-compile result predates
+> CLEAN mode and `tl.gather` — re-run it before quoting.
+> **Rule lives in:** nowhere — nothing here is implemented. `cpp/tools/make_libcuda_stub.py` is
+> the executable inventory of the CUDA surface this file sizes.
+> **Record only:** the port estimates and the recommendation.
 
 Short answer: AMD and Intel are a small port the current design already anticipates. Apple is
 not a port but a reimplementation of the kernel layer, because Triton, which makes the other two

@@ -1,9 +1,15 @@
 # A C++ core for the GPAP engine — what was measured, and what it cost
 
-Investigated 2026-07-28 (RTX 4080 laptop, WSL2, torch 2.11 + triton 3.6). Question: should GPAP
-have a C++ backend so other projects can link against it, and what does that do to performance?
-Verdict: linkability is the entire benefit, the port is a performance tie, and it was cheap
-because the kernels did not have to be rewritten.
+> **Status:** settled — the port shipped; the engine is `libgpap`.
+> **Measured:** 2026-07-28, RTX 4080 Laptop (WSL2), torch 2.11 + triton 3.6.
+> **Rule lives in:** `cpp/` (the core itself), `cpp/tools/build_kernels.py` (the AOT build), and
+> the two ABI rules in `cpp/CMakeLists.txt` and every options struct.
+> **Record only:** the retraction in §4 — "owning the device memory is worth 1.2–1.35×" was a
+> placement effect — and the reasoning for not hand-writing CUDA.
+
+Question: should GPAP have a C++ backend so other projects can link against it, and what does
+that do to performance? Verdict: linkability is the entire benefit, the port is a performance
+tie, and it was cheap because the kernels did not have to be rewritten.
 
 ## 1. Python is not on the critical path
 

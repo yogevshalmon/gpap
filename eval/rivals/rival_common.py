@@ -803,6 +803,32 @@ def unsat_at_depth(cnf_path, conf_budget=2_000_000, provenance=None):
     return None if res is None else (not res)
 
 
+def display_path(path, root=None):
+    """A path as it belongs in a file we SHIP, not as it happens to sit on this disk.
+
+    Generated headers are provenance, read by people who do not have our home directory — and an
+    absolute one also carries a username into an artifact that goes to Zenodo and stays there.
+    Two separate generators had already leaked one by the time this was written
+    (a committed slide table for a month, and `emission_audit.txt` into the packaged artifact),
+    which is what makes it a shared function rather than a local fix.
+
+    Rewrites a path under $GPAP_RESULTS or under the repository to a `$VAR/`-prefixed form, and
+    falls back to the basename for anything else — never the absolute path.
+    """
+    repo = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+    roots = [("$GPAP_RESULTS", os.environ.get("GPAP_RESULTS")
+              or os.path.join(os.path.dirname(repo), "gpap-results")),
+             ("$GPAP_REPO", repo)] if root is None else [(root[0], root[1])]
+    full = os.path.abspath(str(path))
+    for label, base in roots:
+        if not base:
+            continue
+        rel = os.path.relpath(full, os.path.abspath(base))
+        if not rel.startswith(os.pardir):
+            return f"{label}/{rel}" if rel != "." else label
+    return os.path.basename(full.rstrip("/")) or full
+
+
 def space_from_distinct(n_rows, n_distinct):
     """|S| such that `n_rows` uniform draws from |S| points yield `n_distinct` distinct ones in
     expectation, E[d] = S(1 - (1 - 1/S)^n), solved by bisection. None when no repeat was seen

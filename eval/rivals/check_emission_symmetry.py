@@ -23,6 +23,9 @@ import json
 import os
 import sys
 
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
+from eval.rivals.rival_common import display_path  # noqa: E402 — after sys.path
+
 REPO_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))  # eval/<sub>/ -> repo
 sys.path.insert(0, REPO_ROOT)
 
@@ -285,8 +288,10 @@ def main():
     if root is None:
         from gpap import paths
         root = str(paths.src_dir())
-    print(f"emission symmetry check | rivals={root}"
-          + (f" | results={args.results}" if args.results else ""))
+    # Portable, because this header is SHIPPED: eval/artifact/make_artifact.sh puts this file in
+    # the artifact as artifact-data/paper/emission_audit.txt, and that goes to Zenodo.
+    print(f"emission symmetry check | rivals={display_path(root)}"
+          + (f" | results={display_path(args.results)}" if args.results else ""))
     ok = scan_rivals(root)
     ok &= scan_gpap()
     if args.results:

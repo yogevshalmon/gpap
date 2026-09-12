@@ -1,16 +1,22 @@
 # Running the evaluation on a Colab L4 — results, and what the platform does to you
 
-> **Campaign of 2026-08-03/04 (Colab NVIDIA L4, 24 GB, 58 SM, sm_89, driven from a terminal via
-> the Colab CLI); it predates protocol v1.0** ([../EVAL_RUNBOOK.md](../EVAL_RUNBOOK.md) §0, frozen
-> 2026-09-06). Three inputs have moved: the rival rows predate the parallelism-grant and step-count
-> rules ([RIVAL_FAIRNESS_FINDINGS.md](RIVAL_FAIRNESS_FINDINGS.md) §2, §6); the CMSGen counts
-> predate `--maxtime` (§7 there), so a "CMSGen=0" cell here is a floored count; and the engine has
-> since gained the binary-edge representation and the shuffle WAVE schedule, so every absolute rate
-> is old. Kept for what holds: the degeneracy screens and ledger rules (§2), hardware-independent
+> **Status:** SUPERSEDED as a campaign — it predates protocol v1.0
+> ([../EVAL_RUNBOOK.md](../EVAL_RUNBOOK.md) §0, frozen 2026-09-06). The current campaign is
+> `$GPAP_RESULTS/l4_protocol_20260904`, paper folder `../gpap-results/paper/`
+> ([../paper/README.md](../paper/README.md)). **Quote no number from this file.**
+> **Measured:** 2026-08-03/04, Colab NVIDIA L4 (24 GB, 58 SM, sm_89).
+> **Rule lives in:** the screens and the zero ledger are `eval/artifact/paper_tables.py`
+> (`zero_search`, `tiny_space`, `VACUOUS_PINS`), gated by `tests/test_paper_tables.py`.
+> **Record only:** the price of the uniformity-safe default (§4).
+>
+> Three inputs have moved: the rival rows predate the parallelism-grant and step-count rules
+> ([RIVAL_FAIRNESS_FINDINGS.md](RIVAL_FAIRNESS_FINDINGS.md) §2, §6); the CMSGen counts predate
+> `--maxtime` (§7 there), so a "CMSGen=0" cell here is a floored count; and the engine has since
+> gained the binary-edge representation and the shuffle WAVE schedule, so every absolute rate is
+> old. Kept for what holds: the degeneracy screens and ledger rules (§2), hardware-independent
 > rival win counts (§1), the propagation identity (§3), the price of the uniformity-safe default
-> (§4), reproducibility (§5), the platform rules (§6). **The current campaign is
-> `$GPAP_RESULTS/l4_protocol_20260904`, paper folder `../gpap-results/paper/`**
-> ([../paper/README.md](../paper/README.md)).
+> (§4), reproducibility (§5). The Colab platform rules that were §6 moved to
+> `eval/colab/README.md`, beside the drivers they describe.
 
 Across everything here — 357 benchmark cells and ~2,800 uniformity runs — there was **not one
 unsound emission**. The audit also found four errors in what we had been quoting: vacuous pins
@@ -129,24 +135,7 @@ right thing to run after any multi-VM sweep.
 
 ## 6. The platform: a Colab VM lives about an hour
 
-Session history, unambiguous: created 13:45:29 UTC, keep-alive running normally, **terminated
-14:49:18** — 1 h 04 m, no error logged. That is the assignment's lifetime, and it recurred every
-session. **The rule it forces: results only exist once they are on the local disk**; per-row
-checkpointing to the VM's disk buys nothing, and the first rivals run was lost that way.
-`eval/colab/colab_supervisor.py` encodes the surviving loop (ensure session → push cached binaries
-→ bootstrap → push partials → launch → poll and PULL every cycle → reseed a fresh VM): every
-harness takes `--resume`, a downloaded result replaces the local copy only once it **parses**, and
-built binaries (CMSGen ≈ 10 min) are cached locally and pushed to each fresh VM along with the
-mirrored partials.
-
-Traps, each of which cost real time:
-
-* **Never grep a log for a status string over the console.** The console echoes the command it
-  runs, and `set -x` prints a script's `|| { echo BOOT_FAIL…; }` branch on success, so both read as
-  failure. Use **marker files** counted with `ls … | wc -l`.
-* **Resume must retry error rows, and replace them, not append.** Treating an error row as finished
-  froze 18 HTS rows behind a missing dependency; appending the retry produced 25 rows in an
-  18-instance file.
-* **Never wait on a grep against an append-only mirror** — it matches a previous run and fires
-  early. **One poller per session**: concurrent console users corrupt each other's commands.
-* Editing a running bash script rewrites it under a process that reads by byte offset.
+Moved to `eval/colab/README.md` (2026-09-12), beside `colab_supervisor.py`, which encodes it: the
+~1 h VM lifetime, the rule that results exist only once mirrored to local disk, and the four traps
+(marker files not log greps; resume replaces error rows; never wait on an append-only mirror; one
+poller per session). Operational knowledge about a rented machine, not a measurement of GPAP.

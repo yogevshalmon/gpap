@@ -1,8 +1,15 @@
 # Entailed-clause mining — measured results
 
+> **Status:** settled — shipped 2026-08-19/21.
+> **Measured:** 2026-08-19 to 2026-08-21, RTX 4080 Laptop unless a section says otherwise (one
+> L4 validation run).
+> **Rule lives in:** `gpap/mining.py`, `gpap/sampling/pipeline.py` (`STAGE1_MAX_TUPLES`,
+> `MINE_MIN_CLAUSES`, `MINE_SECONDS`), `cpp/src/probe.cpp`.
+> **Gated by:** `tests/test_mining.py`, including `test_mining_is_kernel_invariant`.
+> **Record only:** the "follow-ups, deliberately not built" table.
+
 Results and provenance for `gpap.mining` (`gpap mine`, and the mining stage of the default
-sampling pipeline). The rule lives in the code; this file holds the evidence. RTX 4080 Laptop
-unless stated otherwise. CLEAN mode, which removed the probe path's reset bottleneck, has its own
+sampling pipeline). CLEAN mode, which removed the probe path's reset bottleneck, has its own
 record: [CLEAN_MODE_FINDINGS.md](CLEAN_MODE_FINDINGS.md).
 
 ## What it does

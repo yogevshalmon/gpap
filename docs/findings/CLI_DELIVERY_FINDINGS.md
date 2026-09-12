@@ -1,8 +1,13 @@
 # CLI delivery — the rules for `--out`, counters and accounting
 
-2026-08-27, RTX 4080 Laptop (12 GB, WSL2), engine at `65623ed`. Nothing here implicated the
-engine; the defects were in the print/plumbing layer, where nothing crashes and every number
-looks plausible. This file keeps the rules that came out of it.
+> **Status:** settled — shipped 2026-08-27.
+> **Measured:** 2026-08-27, RTX 4080 Laptop (12 GB, WSL2), engine at `65623ed`. The walls below
+> are illustrations of a defect, not throughput claims; every rule here is machine-independent.
+> **Rule lives in:** `gpap/sampling/sampler.py`, `pipeline.py`, `output.py`; restated in
+> `docs/BENCHMARKING.md`.
+
+Nothing here implicated the engine; the defects were in the print/plumbing layer, where nothing
+crashes and every number looks plausible. This file keeps the rules that came out of it.
 
 ## 1. Rows are collected by the timed run
 

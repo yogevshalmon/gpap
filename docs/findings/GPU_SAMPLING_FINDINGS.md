@@ -1,12 +1,15 @@
 # GPU BCP-completion sampling — findings
 
-> **Historical record (2026-06 → 2026-07-04): the sampler's development log**, from the sk_ CNF
-> suite to the first circuit results, on the PyTorch engine and the first Triton kernels. What
-> follows is kept for the rules and the negative results; the engine, the portfolios and every
-> absolute number have moved since, so no rate or ratio from that era is quoted here. Current
-> numbers live in [`docs/paper/`](../paper/README.md) (the campaign tables) and
-> [RIVAL_FAIRNESS_FINDINGS.md](RIVAL_FAIRNESS_FINDINGS.md); [INSIGHTS.md](INSIGHTS.md) is the
-> index of settled results.
+> **Status:** HISTORICAL — the sampler's development log, kept for its rules and its negative
+> results. The engine, the portfolios and every absolute number have moved since, so **no rate or
+> ratio from this file is quotable**. Current numbers: [`docs/paper/`](../paper/README.md) and
+> [RIVAL_FAIRNESS_FINDINGS.md](RIVAL_FAIRNESS_FINDINGS.md).
+> **Measured:** 2026-06 → 2026-07-04, on the PyTorch engine and the first Triton kernels. No
+> card is named anywhere in this file, deliberately.
+> **Rule lives in:** the surviving decisions are in `gpap/sampling/pipeline.py` (the portfolio
+> definitions and the per-instance config rule, which cites this file).
+> **Record only:** the seven retired configurations and their verdicts — that code is deleted,
+> and this table is the sole reason not to rebuild them.
 
 Code: [`gpap/sampling/sampler.py`](../../gpap/sampling/sampler.py), harness
 [`gpap/benchmark.py`](../../gpap/benchmark.py), tests

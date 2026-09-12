@@ -29,7 +29,8 @@ solution**. No gradient, no rounding, no repair pass.
 </picture>
 
 <sub>Pinning <code>b10</code> to a rare reachable state, 25 cycles deep, and writing 50,000 input
-stimuli that reach it.</sub>
+stimuli that reach it. One run on a laptop GPU — measured throughput is in
+<a href="docs/paper/RESULTS.md">the results tables</a>.</sub>
 
 </div>
 

@@ -1,12 +1,21 @@
 # Rival-comparison fairness: what we were measuring, and what we should have been
 
-Status: settled record, 2026-08-24/25 through 2026-09-07. RTX 4080 Laptop for local calibration,
-NVIDIA L4 for every recorded campaign. Every audit here (§1–§16e) found a default that had
-flattered GPAP — the expected direction, since every unexamined default in a harness we wrote is
-a default we chose. §17 is protocol v1.0, frozen 2026-09-06 (`docs/EVAL_RUNBOOK.md` §0 is the
-frozen text); §17b is the presentation revision v1.1 of 2026-09-07. The rules also live in
-`docs/EVAL_RUNBOOK.md` §6 and `docs/BENCHMARKING.md` §4b/§4c; the numbers live here. Campaign
-headlines quoted in §15–§16e are superseded by §17 and §17b.
+> **Status:** settled record. §17 is protocol v1.0, FROZEN 2026-09-06 (`docs/EVAL_RUNBOOK.md` §0
+> is the frozen text); §17b is the presentation revision v1.1 of 2026-09-07. Campaign headlines
+> in §15–§16e are superseded by §17 and §17b.
+> **Measured:** 2026-08-24/25 through 2026-09-07 — RTX 4080 Laptop for local calibration, NVIDIA
+> L4 (Colab) for every recorded campaign.
+> **Rule lives in:** `eval/rivals/rival_common.py`, `eval/artifact/paper_tables.py`,
+> `eval/run_full_eval.sh`, `scripts/build_cmsgen.sh`; restated in `docs/EVAL_RUNBOOK.md` §6 and
+> `docs/BENCHMARKING.md` §4b/§4c.
+> **Gated by:** `tests/test_rival_targets.py`, `tests/test_paper_tables.py`.
+> **SECTION NUMBERS ARE AN API.** Code, tests and the GENERATED paper prose cite this file by
+> section (`paper_tables.py` emits "§17" into `docs/paper/RESULTS.md`). Sections are in writing
+> order, not numeric order — §10 follows §14 — and are append-only: never renumber one.
+
+Every audit here (§1–§16e) found a default that had flattered GPAP — the expected direction,
+since every unexamined default in a harness we wrote is a default we chose. The numbers live
+here; the rules also live in the code.
 
 ---
 
