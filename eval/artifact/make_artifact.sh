@@ -125,6 +125,22 @@ if [ "$VERIFY_OK" != 1 ] && [ "${GPAP_ARTIFACT_ALLOW_FAIL:-0}" != "1" ]; then
     exit 1
 fi
 
+# --- no absolute home path may ship ------------------------------------------------------------
+# A `/home/<user>/...` in a shipped file names a machine nobody else has, and puts a username in
+# an upload that is permanent once it has a DOI. It has happened twice, from two different
+# generators writing a path they were handed: a committed slide table carried one for a month,
+# and `emission_audit.txt` reached this staging directory with one. Both are fixed at the
+# source (`rival_common.display_path`), so this is the gate that says they stay fixed — checked
+# over the STAGED BYTES, like the verdict above, because that is what a reviewer receives.
+leaks="$(cd "$STAGE" && grep -rlI -E '/home/[a-z][A-Za-z0-9_.-]*/' . 2>/dev/null || true)"
+if [ -n "$leaks" ]; then
+    echo "[FATAL] these staged files carry an absolute home path:" >&2
+    echo "$leaks" | sed 's/^/          /' >&2
+    echo "        Fix the GENERATOR (eval/rivals/rival_common.py::display_path), regenerate," >&2
+    echo "        and re-package. GPAP_ARTIFACT_ALLOW_LEAK=1 overrides." >&2
+    [ "${GPAP_ARTIFACT_ALLOW_LEAK:-0}" = "1" ] || exit 1
+fi
+
 # --- manifest --------------------------------------------------------------------------------------
 # MANIFEST.md is written FIRST so that the hashes cover it: a manifest that advertises
 # `sha256sum -c` while being the one file nobody can check is a manifest with a hole in it. The

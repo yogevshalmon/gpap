@@ -302,7 +302,7 @@ SPUR reference). The rules (docs/findings/UNIFORMITY_FINDINGS.md §4b):
   (`eval/profile_soft_portfolio.py`; the user: keep it for now). The `l2_ratio` collision check
   is gross-skew only. 2-wise coverage (`gpap bench --twise`) is a spread metric, not uniformity.
 
-## Benchmark suite and CMSGen fairness (`gpap/benchmark.py`, schema 3)
+## Benchmark suite and CMSGen fairness (`gpap/benchmark.py`, schema 4)
 
 - `--encoders tseitin abc:fast` runs every circuit through each encoder in one process: one row
   per (instance, encoder). A failing cell becomes an `error`/`skipped` row; rows are written
@@ -392,5 +392,5 @@ skipped/errored instance; read it before quoting a geomean.
 - A campaign launches only on an explicit go; always `colab stop` when done; never
   `pkill -f colab_supervisor.py` (it matches itself); never put a kill-by-pattern and a launch
   in the same shell call.
-- No soft-config data in the paper; uniformity claims via Barbarik only; `docs/slides` is out
-  of scope for the paper work.
+- No soft-config data in the paper; uniformity claims via Barbarik only. The talk decks live in
+  `$GPAP_RESULTS/paper/slides/`, outside the repo, and are out of scope for the paper work.

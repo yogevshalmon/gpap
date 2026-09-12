@@ -1,9 +1,11 @@
 # Binary clauses as implication edges — design, gates, measurements
 
-*2026-08-27, RTX 4080 12GB (WSL2). Landed across `cpp/src/formula.cpp` (builder segregation),
-`cpp/kernels/bcp.py` + `helpers.py` (all kernel variants + `sound_rows`), `cpp/src/engine.cpp` /
-`readout.cpp` (staging, sizing, readout synthesis) and the sizing flip in `calibrate` callers.
-The rule lives in the code; this file is the evidence.*
+> **Status:** settled — shipped 2026-08-27.
+> **Measured:** 2026-08-27, RTX 4080 Laptop (12 GB, WSL2).
+> **Rule lives in:** `cpp/src/formula.cpp` (builder segregation), `cpp/kernels/bcp.py` +
+> `helpers.py` (all kernel variants, `sound_rows`), `cpp/src/engine.cpp` / `readout.cpp`
+> (staging, sizing, readout synthesis), and the sizing flip in `calibrate` callers.
+> **Gated by:** the two-checkout no-change gate, a pure-2-SAT propagation test.
 
 ## The change
 

@@ -16,9 +16,11 @@ one paragraph each, with a note wherever a later measurement moved a number; the
 lemmas of CLEAN mode. Retired directions stay recorded so they are not re-tried without new
 evidence.
 
-**[`paper/`](paper/)**, **[`slides/`](slides/)** — generated tables and the deck. Nothing in them
-is typed by hand; [paper/README.md](paper/README.md) says how to regenerate them from the raw
-results, which live outside the repository (`$GPAP_RESULTS`).
+**[`paper/`](paper/)** — the results record: which campaign the published numbers come from, the
+rules its generator enforces, and the generated tables themselves. Nothing in it is typed by hand;
+[paper/README.md](paper/README.md) says how to regenerate it from the raw results, which live
+outside the repository (`$GPAP_RESULTS`). The paper's LaTeX and the talk decks live there too —
+they are paper material, not documentation of the library.
 
 Two conventions hold everywhere: **code carries the rule, docs carry the evidence** (a comment
 says what the code does and why it is correct; the number that settled it lives here), and

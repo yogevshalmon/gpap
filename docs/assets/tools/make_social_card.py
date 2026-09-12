@@ -1,4 +1,6 @@
-"""Render the 1280x640 GitHub social-preview card the brand kit does not ship (INTEGRATION.md §4).
+"""Render the 1280x640 GitHub social-preview card the brand kit does not ship.
+
+The surface's rules — upload it by hand, a repo file is not picked up — are in docs/assets/README.md.
 
 The mark is taken back to its native 48px grid (the 576px master is an exact 12x render, verified)
 and re-scaled by an integer factor with nearest-neighbour, per the kit's rules 1 and 2.

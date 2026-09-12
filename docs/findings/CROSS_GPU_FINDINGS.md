@@ -1,9 +1,15 @@
 # Cross-GPU scaling — what a bigger GPU actually buys
 
-Measured 2026-08-03 on three cards: RTX 4080 Laptop (12 GB, 58 SM, the reference box), Colab L4
-(24 GB, 58 SM, sm_89) and Colab A100-SXM4 (40 GB, 108 SM, sm_80), driven from a terminal through
-the Colab CLI (§6). An A100 is worth ~1.8×, an L4 ~0.85×. Two measurement traps (§3) each gave a
-plausible wrong answer first; both are guarded in the harness.
+> **Status:** settled.
+> **Measured:** 2026-08-03 on three cards — RTX 4080 Laptop (12 GB, 58 SM, the reference box),
+> Colab L4 (24 GB, 58 SM, sm_89), Colab A100-SXM4 (40 GB, 108 SM, sm_80).
+> **Rule lives in:** `gpap/sampling/pipeline.py` (`SINGLE_PORTFOLIOS`), `cpp/src/calibrate.cpp`
+> (the occupancy plateau), `eval/artifact/compare_campaign.py`.
+> **Record only:** §4, b12's unexplained 2× success cliff on the A100 — open.
+
+An A100 is worth ~1.8×, an L4 ~0.85×. Two measurement traps (§3) each gave a plausible wrong
+answer first; both are guarded in the harness. How the Colab machines were driven is
+`eval/colab/README.md`, beside the drivers themselves.
 
 ## 1. The result
 
@@ -96,21 +102,6 @@ model count must be identical (docs/BENCHMARKING.md §3).
 
 ## 6. Running this on Colab from a terminal
 
-`pip install google-colab-cli`, then ADC with all four scopes (`openid`, `cloud-platform`,
-`userinfo.email`, `colaboratory`; it 403s without the last); `colab whoami` verifies. `colab exec`
-is broken in google-colab-cli 0.6.0 (it calls `jupyter_kernel_client.KernelClient`, renamed
-upstream to `JupyterKernelClient`); use `colab console`, a raw-websocket tmux shell:
-
-```bash
-printf 'nohup bash /content/job.sh > /content/job.log 2>&1 &\necho LAUNCHED\n' \
-    | colab console -s <session>                       # fire and detach
-printf 'grep -ac DONE_MARKER /content/job.log\n' | colab console -s <session>   # poll separately
-```
-
-The console exits on piped EOF, so always detach and poll; tmux line-wraps long one-liners (`&&`
-becomes `& &`), so keep commands short and newline-separated; filter output with `grep -a` and
-`sed 's/\x1b\[[0-9;]*[a-zA-Z]//g'`; never run two pollers against one session; move results back
-with `tar` + `colab download`. Bootstrap is ~2 min (`apt-get install build-essential cmake
-zlib1g-dev`, deps, `scripts/build_core.sh`); libgpap AOT-builds on sm_80 and sm_89 with no CUDA
-toolkit. Select the package by cwd + PYTHONPATH, not `pip install -e .`, when two trees must
-coexist. `colab stop -s <name>` when done; the keep-alive is a local daemon with a hard 24 h cap.
+Moved to `eval/colab/README.md` (2026-09-12), beside the drivers it describes: how to drive the
+Colab CLI, what its 0.6.0 `colab exec` bug forces, and the bootstrap. It is operational knowledge
+about a rented machine, not a measurement of GPAP — the distinction this directory keeps.

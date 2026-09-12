@@ -1,8 +1,15 @@
 # CLEAN mode — the fixpoint launch that restores its own state
 
-**Status: shipped and gated 2026-08-21; contract enforced 2026-08-22.** Supersedes the
-reset-restore plan (deleted; git history keeps it). Origin:
-[MINING_FINDINGS.md](MINING_FINDINGS.md) "The RESET is the bottleneck" (2026-08-19).
+> **Status:** settled — shipped and gated 2026-08-21, contract enforced 2026-08-22. Supersedes
+> the reset-restore plan (deleted; git history keeps it).
+> **Measured:** 2026-08-21, RTX 4080 Laptop (12 GB, WSL2); confirmed same day on a Colab L4.
+> **Rule lives in:** `cpp/src/engine.cpp` (`gpap_engine_apply_clean`, the reset-lite path),
+> `cpp/src/probe.cpp`, `cpp/kernels/bcp.py`, `cpp/tools/build_kernels.py`, `gpap/engine/_core.py`.
+> **Gated by:** `tests/test_clean_mode.py`.
+> **Record only:** the four soundness lemmas L1–L4 below. They are per-kernel-version facts with
+> no other home; the test is their tripwire, not their statement.
+
+Origin: [MINING_FINDINGS.md](MINING_FINDINGS.md) "The RESET is the bottleneck" (2026-08-19).
 
 ## The problem
 

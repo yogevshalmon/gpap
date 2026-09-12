@@ -1,11 +1,17 @@
 # How uniform is GPAP — against an exact oracle, against CMSGen, and under Barbarik
 
-> Settled findings. Exact-oracle campaigns 2026-07-29/30, Barbarik re-derivation (§4b) and the
-> 120/80-instance TV campaign (§4c) 2026-08-28; all on the RTX 4080 laptop (WSL2, libgpap core).
-> §4b supersedes §4's verdict counts; §4c supersedes §2's TV reading for the shipped pipeline. The
-> library samples and `eval/uniformity/` makes the claims: `metrics.py` (the statistics),
-> `fuzz_uniformity.py` (exact oracle), `barbarik_gpap.py` + `barbarik_screen.py` +
-> `barbarik_table.py` (the certificate). Gated by `tests/test_uniformity_fuzz.py`.
+> **Status:** settled. §4b supersedes §4's verdict counts; §4c supersedes §2's TV reading for
+> the shipped pipeline.
+> **Measured:** exact-oracle campaigns 2026-07-29/30; Barbarik re-derivation (§4b) and the
+> 120/80-instance TV campaign (§4c) 2026-08-28 — all on the RTX 4080 Laptop (WSL2, libgpap core).
+> A distributional result does not depend on the card; the wall-clock prices in §4c do.
+> **Rule lives in:** `gpap/sampling/pipeline.py` (the portfolios, `--allow-soft`), the warnings
+> on `sound_check` in `cpp/include/gpap/gpap.h` and `.hpp`, and `eval/uniformity/` — which makes
+> the claims the library does not: `metrics.py` (statistics), `fuzz_uniformity.py` (exact
+> oracle), `barbarik_gpap.py` + `barbarik_screen.py` + `barbarik_table.py` (the certificate).
+> **Gated by:** `tests/test_uniformity_fuzz.py`, `tests/test_sampler.py`.
+> **SECTION NUMBERS ARE AN API** — cited from `gpap/`, `cpp/`, `eval/`, the tests and the
+> generated paper prose. Append; never renumber.
 
 GPAP's sampler is the GPU-parallel form of CMSGen's Algorithm 1 and neither has a uniformity
 guarantee. The settled results:

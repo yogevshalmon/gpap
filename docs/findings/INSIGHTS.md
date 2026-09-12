@@ -4,25 +4,35 @@ One-paragraph summaries of every settled result in this project. The code that p
 result may be deleted; the insight lives here. Entries are dated and newest-first within a section.
 Do not re-litigate without new evidence.
 
-The deep write-ups, by topic:
+Every file below opens with a status block: what it settles, when and on which card it was
+measured, where the rule it justifies lives in the code, and what it is the only record of. Read
+that block before quoting anything out of the file.
+
+**Current evidence** — the rule is live and the numbers are the engine's:
 
 | topic | file |
 |---|---|
 | binary clauses as edges (2026-08-27) | [BINARY_OCC_FINDINGS.md](BINARY_OCC_FINDINGS.md) |
 | the WAVE shuffle lane schedule (2026-08-27) | [WAVE_SHUFFLE_FINDINGS.md](WAVE_SHUFFLE_FINDINGS.md) |
-| WAVE vs scalar by formula size (2026-08-23) | [KERNEL_AB_FINDINGS.md](KERNEL_AB_FINDINGS.md) |
 | CLEAN mode: design and lemmas | [CLEAN_MODE_FINDINGS.md](CLEAN_MODE_FINDINGS.md) |
 | the C++ core, AOT kernel build | [CPP_BACKEND_FINDINGS.md](CPP_BACKEND_FINDINGS.md) |
 | what a bigger GPU buys | [CROSS_GPU_FINDINGS.md](CROSS_GPU_FINDINGS.md) |
-| porting to AMD / Intel / Apple | [PORTABILITY.md](PORTABILITY.md) |
 | entailed-clause mining and redundancy | [MINING_FINDINGS.md](MINING_FINDINGS.md) |
 | uniformity: TV, Barbarik, the B knob | [UNIFORMITY_FINDINGS.md](UNIFORMITY_FINDINGS.md) |
-| rival-comparison fairness | [RIVAL_FAIRNESS_FINDINGS.md](RIVAL_FAIRNESS_FINDINGS.md) |
-| the 2026-08 L4 campaign | [L4_EVAL_FINDINGS.md](L4_EVAL_FINDINGS.md) |
+| rival-comparison fairness, and protocol v1.0 | [RIVAL_FAIRNESS_FINDINGS.md](RIVAL_FAIRNESS_FINDINGS.md) |
 | what `--out` cost (2026-08-27) | [CLI_DELIVERY_FINDINGS.md](CLI_DELIVERY_FINDINGS.md) |
-| the sampler's log (historical) | [GPU_SAMPLING_FINDINGS.md](GPU_SAMPLING_FINDINGS.md) |
-| GPU inprocessing for CDCL — retired | [ELS_INPROCESSING_FINDINGS.md](ELS_INPROCESSING_FINDINGS.md) |
 | reproducing the campaign (2026-09-09) | [ARTIFACT_FINDINGS.md](ARTIFACT_FINDINGS.md) |
+
+**Historical record** — kept so a settled question is not re-opened, and so a deleted subsystem
+leaves a trace. **Quote no rate from any of these.**
+
+| topic | file | why it is here |
+|---|---|---|
+| WAVE vs scalar by formula size (2026-08-23) | [KERNEL_AB_FINDINGS.md](KERNEL_AB_FINDINGS.md) | the `M ≥ 2048` rule is current; its numbers predate the shuffle schedule and must be re-measured |
+| the 2026-08 L4 campaign | [L4_EVAL_FINDINGS.md](L4_EVAL_FINDINGS.md) | superseded by `l4_protocol_20260904`; its screens survive in `paper_tables.py` |
+| the sampler's development log | [GPU_SAMPLING_FINDINGS.md](GPU_SAMPLING_FINDINGS.md) | pre-libgpap; the only record of seven retired configurations |
+| GPU inprocessing for CDCL — retired | [ELS_INPROCESSING_FINDINGS.md](ELS_INPROCESSING_FINDINGS.md) | the only record of a deleted subsystem, and why it is not re-tried |
+| porting to AMD / Intel / Apple | [PORTABILITY.md](PORTABILITY.md) | an analysis, not a measurement: nothing in it is implemented |
 
 ## Engine & memory model
 
@@ -335,6 +345,16 @@ them down and hands the rival less parallelism than the paper did; and 63 of 141
 VRAM-bound below the batch cap, so a larger card grows OUR K while the rival stays pinned.
 `GPAP_VRAM_BUDGET_MIB` (clamped once, in `gpap_mem_available`) holds the engine to the recorded
 card's budget, and `compare_campaign.py` counts every walked-down grant.
+
+**An absolute path in a generated file is a leak with a long half-life (2026-09-12).** Two
+generators, asked to record their provenance, printed the argument they were handed:
+`slide_tables.py` put `/home/<user>/…` into a committed slide table, where it sat for a month (the
+decks have since moved to `$GPAP_RESULTS/paper/slides/`), and `check_emission_symmetry.py` put one
+into `emission_audit.txt`, which
+`make_artifact.sh` ships as `artifact-data/paper/emission_audit.txt` — permanent once the archive
+has a DOI. A header is provenance for a reader who does not have our disk, so the path belongs in
+`$GPAP_RESULTS/…` form: `rival_common.display_path` is the one definition, and `make_artifact.sh`
+refuses to package a staged tree containing one. The frozen row JSONs were already clean.
 
 **A GATE THAT CANNOT FAIL IS NOT A GATE (2026-09-10;
 [ARTIFACT_FINDINGS.md](ARTIFACT_FINDINGS.md) §8).** Reviewing the artifact layer turned up the

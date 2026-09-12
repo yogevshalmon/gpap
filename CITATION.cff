@@ -6,10 +6,14 @@ authors:
     given-names: Yogev
 version: 0.1.0
 date-released: 2026-07-08
+repository-code: "https://github.com/yogevshalmon/gpap"
+license: MIT
 keywords:
   - SAT
   - constraint propagation
   - GPU
   - sampling
   - CircuitSAT
-# TODO before publication: add DOI, repository URL, and any preprint/paper reference.
+# TODO before publication: add the archive DOI (Zenodo, written by
+# eval/artifact/make_artifact.sh) and the paper reference; bump `version` to the release
+# tag. The same DOI goes in the paper's Data Availability Statement and in ARTIFACT.md.

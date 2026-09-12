@@ -1,8 +1,14 @@
 # WAVE shuffle-gather schedule — the O(W²) one-hot lane→segment machinery replaced by warp shuffles
 
-2026-08-27, RTX 4080 12GB (WSL2), on top of the binary-occ segregation. Origin: whether the WAVE
-kernel's per-lane branching could be reduced further, via a 2-bit assignment plane as in the
-UnitMarch-style encoding of Aistleitner's 2013 FMV thesis.
+> **Status:** settled — shipped 2026-08-27.
+> **Measured:** 2026-08-27, RTX 4080 Laptop (12 GB, WSL2), on top of the binary-occ segregation.
+> **Rule lives in:** `cpp/kernels/bcp.py` (the shuffle schedule), `WAVE_W = 32` in
+> `cpp/tools/build_kernels.py`.
+> **Record only:** the PTX instruction counts, and the rule to re-dump the PTX after any change
+> to W — nothing else holds them.
+
+Origin: whether the WAVE kernel's per-lane branching could be reduced further, via a 2-bit
+assignment plane as in the UnitMarch-style encoding of Aistleitner's 2013 FMV thesis.
 
 ## The 2-bit idea is already the shipped design
 

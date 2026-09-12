@@ -45,6 +45,15 @@ dev = ["pytest>=7.4", "ruff>=0.4", "python-sat>=0.1.8.dev0,<1.10"]
 [project.scripts]
 gpap = "gpap.cli:main"
 
+# Without these a PyPI page renders with no links at all — no source, no docs, no issue tracker.
+# `Documentation` points at the docs index rather than the README: the README is already the long
+# description on that same page, so linking it again says nothing.
+[project.urls]
+Homepage = "https://github.com/yogevshalmon/gpap"
+Documentation = "https://github.com/yogevshalmon/gpap/blob/main/docs/README.md"
+Repository = "https://github.com/yogevshalmon/gpap"
+Issues = "https://github.com/yogevshalmon/gpap/issues"
+
 [tool.setuptools.packages.find]
 include = ["gpap*"]
 

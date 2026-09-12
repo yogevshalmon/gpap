@@ -1,13 +1,17 @@
 # GPU Equivalent-Literal Substitution (ELS) + complete vivification — findings
 
-> **Retired direction — historical record (2026-06/07).** GPU inprocessing for a CDCL solver was
-> measured out on both legs: discovery is 7–15× slower than CaDiCaL's incremental probe, and the
-> reduction helps CaDiCaL but not kissat. The code this file describes
-> (`gpap/solver/inprocess.py`, `scripts/preprocess_solve.py`, …) exists only in git history, on
-> branch `pysat_cadical_inprocess_intg`. What survived into the shipping tree: ELS as a
-> *sampling* preprocess (`gpap/sampling/preprocess.py`, a measured ~1.4–1.5× win there, on by
-> default). The full-BCP-closure implication sweep shipped for a while as `gpap.implications` and
-> was removed 2026-09-01, unused. Summary in [INSIGHTS.md](INSIGHTS.md), "Retired application
+> **Status:** HISTORICAL — a RETIRED direction. GPU inprocessing for a CDCL solver was measured
+> out on both legs: discovery is 7–15× slower than CaDiCaL's incremental probe, and the reduction
+> helps CaDiCaL but not kissat.
+> **Measured:** 2026-06/07. The 7–15× gap is a structural asymmetry (a CPU prober propagates
+> each probe's delta; GPAP re-propagates the whole formula), not a property of any card.
+> **Rule lives in:** nothing here ships. The code (`gpap/solver/inprocess.py`,
+> `scripts/preprocess_solve.py`, …) exists only in git history, on branch
+> `pysat_cadical_inprocess_intg`. What survived is ELS as a *sampling* preprocess
+> (`gpap/sampling/preprocess.py`, ~1.4–1.5× there, on by default); the full-BCP-closure
+> implication sweep shipped for a while as `gpap.implications` and was removed 2026-09-01, unused.
+> **Record only:** this file is the sole record of a deleted subsystem, and the reason the
+> direction is not re-tried. Summary in [INSIGHTS.md](INSIGHTS.md), "Retired application
 > directions".
 
 ## What was built (all sound; 44 tests, 2 randomized soundness gates)

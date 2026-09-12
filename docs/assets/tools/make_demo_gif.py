@@ -1,8 +1,13 @@
 """Render the README's terminal demo GIF from a verbatim `gpap sample` cast.
 
-The text below is copied from cast_verified.txt, a real run on this box (RTX 4080 Laptop).
-Nothing is invented: the only edit is the temp CNF path, which is a real mktemp name.
-Palette is the brand kit's (INTEGRATION.md §7 rule 3).
+The text below is copied verbatim from a real `gpap sample` run. Nothing is invented: the only
+edit is the temp CNF path, which is a real mktemp name.
+
+IT IS A TRANSCRIPT, NOT A BENCHMARK. The rates in it are one run on one laptop GPU and belong to
+no table; published throughput is `docs/paper/RESULTS.md`, measured under the protocol. That is
+also why the rate must never be edited to look better: the command shown has to be the command
+that produced the output shown, flag for flag (docs/assets/README.md).
+Palette is the brand kit's (docs/assets/README.md, rule 3: never recolour ad hoc).
 """
 from pathlib import Path
 

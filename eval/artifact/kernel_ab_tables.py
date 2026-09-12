@@ -11,7 +11,11 @@ The exclusion rules live HERE, once, same as the paper's other generators:
     so the reader can see the cut costs nothing.
 
     eval/artifact/kernel_ab_tables.py .experiments/kernel_ab/kernel_ab.json \\
-        --out-md docs/paper/KERNEL_AB.md --out-tex docs/paper/kernel_ab.tex
+        --out-md $GPAP_RESULTS/paper/KERNEL_AB.md --out-tex $GPAP_RESULTS/paper/kernel_ab.tex
+
+The output is NOT committed under docs/paper/: the last such table was removed rather than left
+stale when the shuffle schedule moved the crossover, and a generated file belongs beside the
+campaign that produced it until the paper cites it.
 """
 import argparse
 import json

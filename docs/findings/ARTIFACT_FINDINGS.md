@@ -1,9 +1,17 @@
 # Artifact-evaluation findings
 
-The evidence behind `ARTIFACT.md` and `eval/artifact/reproduce.sh`. Measured 2026-09-09 against
-the frozen campaign `l4_protocol_20260904` (protocol v1.0, `docs/EVAL_RUNBOOK.md` §0). Nothing
-here changes the protocol; the artifact layer only chooses which cells a reviewer runs and under
-which two documented shortcuts.
+> **Status:** settled.
+> **Measured:** 2026-09-09/10 against the frozen campaign `l4_protocol_20260904` — NVIDIA L4
+> (24 GB, Colab) for the reference rows, RTX 4080 Laptop (12 GB) for the smoke tier.
+> **Rule lives in:** `GPAP_VRAM_BUDGET_MIB`, clamped once inside `gpap_mem_available`
+> (`cpp/src/calibrate.cpp`); `eval/artifact/reproduce.sh --vram-cap`;
+> `eval/artifact/compare_campaign.py`; `eval/artifact/subset.json`.
+> **Gated by:** `tests/test_k_cap.py`.
+> **Record only:** §8, the review post-mortem on gates that could not fail.
+
+The evidence behind `ARTIFACT.md` and `eval/artifact/reproduce.sh` (protocol v1.0,
+`docs/EVAL_RUNBOOK.md` §0). Nothing here changes the protocol; the artifact layer only chooses
+which cells a reviewer runs and under which two documented shortcuts.
 
 ## 1. 24 GB is a hard requirement, and the grants file proves it
 

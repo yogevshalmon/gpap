@@ -1098,11 +1098,16 @@ def build(args):
     # The commit below is when the TABLES were generated, not what measured the data — that is
     # the per-row build id, unioned over every stage.
     cores = sorted({c for v in cms.values() if v for c in v.get("cores", [])})
+    # A FAILED git call does not raise here — `subprocess.run` without check=True just returns a
+    # non-zero code and empty stdout — so the except below never fired in the one place it was
+    # meant to: the packaged artifact, which carries no .git and rendered this field as an empty
+    # pair of backticks. Say "not a git checkout" instead; a blank reads as a value.
     try:
-        commit = subprocess.run(["git", "rev-parse", "--short", "HEAD"], capture_output=True,
-                                text=True, timeout=10).stdout.strip()
+        r = subprocess.run(["git", "rev-parse", "--short", "HEAD"], capture_output=True,
+                           text=True, timeout=10)
+        commit = r.stdout.strip() if r.returncode == 0 and r.stdout.strip() else "not a git checkout"
     except Exception:                                   # noqa: BLE001
-        commit = "?"
+        commit = "not a git checkout"
 
     # Totals: `cells`/`unsound` are per-encoder and sum over every key, while `inst`/`skipped`/
     # `errors` describe the whole STAGE and are taken once per family.
