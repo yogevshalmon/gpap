@@ -150,7 +150,7 @@ def _abc_fingerprint() -> str:
     import hashlib
     try:
         from gpap import paths
-        exe = os.path.join(paths.gpap_home(), "bin", "abc")
+        exe = str(paths.tool("abc"))       # the ONE spelling of a GPAP-built tool's path
     except Exception:                                          # noqa: BLE001
         return "unknown"
     try:

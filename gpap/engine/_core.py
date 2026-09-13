@@ -3,7 +3,8 @@
 ctypes rather than a compiled extension: the C ABI (`cpp/include/gpap/gpap.h`) exists anyway for
 C++ consumers, so there is no extension to build and no interpreter/ABI coupling (one `.so` serves
 every Python), and call overhead is negligible against a sampling chunk. Lookup order: $GPAP_LIB
--> <repo>/build/ -> gpap/lib/libgpap.so; build with `python cpp/tools/build_kernels.py && cmake
+-> $GPAP_BUILD_DIR -> <repo>/build/ -> <repo>/cpp/build/ -> gpap/lib/libgpap.so; build with
+`python cpp/tools/build_kernels.py && cmake
 -S cpp -B build && cmake --build build -j`.
 """
 from __future__ import annotations
@@ -38,12 +39,22 @@ _LIB = None
 
 
 def _candidates() -> list[Path]:
-    """$GPAP_LIB, then a repo-local build tree, then the package copy — build tree FIRST."""
+    """$GPAP_LIB, then $GPAP_BUILD_DIR, then a repo-local build tree, then the package copy —
+    build trees FIRST, so a fresh build wins over an older installed copy.
+
+    `$GPAP_BUILD_DIR` is here because `scripts/build_core.sh` honours it: told to build into a
+    fast scratch filesystem and not given `--install`, the library existed and nothing could find
+    it. The repo root is counted from this file rather than taken from `gpap.paths.repo_root()`
+    on purpose — that walks up for a `pyproject.toml`, which under a venv inside someone's project
+    would find THEIR project and make `<their project>/build/libgpap.so` a candidate."""
     env = os.environ.get("GPAP_LIB")
     if env and not Path(env).exists():
         # Explicit beats implicit: falling through on a typo benchmarks the wrong build.
         raise GpapError(0, "GPAP_LIB is set but does not exist", env)
     out = [Path(env)] if env else []
+    build = os.environ.get("GPAP_BUILD_DIR")
+    if build:
+        out.append(Path(build) / "libgpap.so")
     here = Path(__file__).resolve()
     repo = here.parents[2]
     out += [repo / "build" / "libgpap.so", repo / "cpp" / "build" / "libgpap.so"]

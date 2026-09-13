@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Plots for the GPAP cross-GPU SAMPLING benchmark payload (scripts/colab_sampling_benchmark.py).
+"""Plots for the GPAP cross-GPU SAMPLING benchmark payload (colab_sampling_benchmark.py).
 
 make_plots(payload, out_dir) writes up to three PNGs next to the per-GPU result JSON and returns
 their paths. Best-effort: if matplotlib is missing it warns and returns []. Figures:

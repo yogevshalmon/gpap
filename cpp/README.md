@@ -165,7 +165,8 @@ Examples: [`examples/sample.cpp`](examples/sample.cpp) (`gpap::Sampler`),
 [`examples/probe.cpp`](examples/probe.cpp) (`gpap::Prober`),
 [`examples/c_api.c`](examples/c_api.c) (plain C, the raw ABI), and the Python ones in
 [`../examples/`](../examples/). `gpap.engine._core` binds the same ABI with `ctypes`, taking the
-library from `$GPAP_LIB`, then `<repo>/build/`, then the copy installed beside the package.
+library from `$GPAP_LIB`, then `$GPAP_BUILD_DIR` (what `scripts/build_core.sh` builds into),
+then `<repo>/build/`, then `<repo>/cpp/build/`, then the copy installed beside the package.
 
 The core's contract is gated by [`tests/test_core.py`](../tests/test_core.py) against two
 independent pure-Python oracles ([`tests/reference_formula.py`](../tests/reference_formula.py),

@@ -19,6 +19,7 @@ Host-only: this reads the test sources, it does not run them.
 """
 import ast
 import pathlib
+import re
 
 import pytest
 
@@ -153,3 +154,45 @@ def test_the_anchored_paths_exist(name):
     FileNotFoundError one layer down."""
     from tests import conftest
     assert pathlib.Path(getattr(conftest, name)).is_dir(), name
+
+
+#: `NAME = <count your way up from __file__>`, in the two spellings the repo uses. Anything named
+#: for the repo root has to BE the repo root — the depth is written by hand, and moving a file one
+#: directory changes the answer without changing the line.
+_ROOT_DECL = re.compile(
+    r"^(ROOT|REPO|REPO_ROOT|_REPO_ROOT)\s*=\s*(?:str\()?"
+    r"(?:Path\(__file__\)\.resolve\(\)\.parents\[(?P<n>\d+)\]"
+    r'|os\.path\.abspath\(os\.path\.join\(os\.path\.dirname\(__file__\)(?P<ups>(?:,\s*"\.\.")+)'
+    r"|(?P<dirnames>(?:os\.path\.dirname\()+)os\.path\.abspath\(__file__\))",
+    re.M)
+
+
+def test_every_repo_root_constant_is_the_repo_root():
+    """A constant named for the checkout that points one directory off is the quietest bug in the
+    tree: `sys.path` still imports (the cwd usually saves it), and every default built on it turns
+    into a directory that simply does not exist, so the driver falls back or skips.
+
+    It has happened here — an `eval/` reorg moved eleven files a level deeper and left their
+    hand-counted depths behind, and `eval/colab/colab_sampling_benchmark.py` still had one in
+    2026-09-13, resolving to `<repo>/eval` and pointing `--sampling-dir` and `--circuit-dir` at
+    paths with no files in them. Counted here rather than trusted, for every file in the repo."""
+    repo = pathlib.Path(__file__).resolve().parents[1]
+    skip = {".gpap", "build", "build-asan", "__pycache__", ".venv", "venv", ".git", "node_modules"}
+    checked, wrong = 0, []
+    for f in sorted(repo.rglob("*.py")):
+        if skip & set(f.parts):
+            continue
+        for m in _ROOT_DECL.finditer(f.read_text(errors="ignore")):
+            if m.group("n") is not None:
+                up = int(m.group("n"))
+            elif m.group("ups") is not None:
+                up = m.group("ups").count("..")
+            else:
+                up = m.group("dirnames").count("dirname(") - 1
+            checked += 1
+            got = f.resolve().parents[up] if up < len(f.resolve().parents) else None
+            if got != repo:
+                wrong.append(f"{f.relative_to(repo)}:{f.read_text().count(chr(10), 0, m.start()) + 1}"
+                             f": {m.group(1)} -> {got}")
+    assert checked >= 15, f"the declaration pattern stopped matching (only {checked} found)"
+    assert not wrong, "repo-root constant does not resolve to the repo root:\n  " + "\n  ".join(wrong)

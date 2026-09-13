@@ -8,9 +8,9 @@ same on every GPU, so rows from two cards are comparable without pinning; --k-ca
 Results go to benchmarks/colab_sampling_results/<gpu>.json (+ plots); compare_saved() ranks them.
 
 Headless usage:
-    PYTHONPATH=. .venv/bin/python scripts/colab_sampling_benchmark.py --quick --device cuda \
+    PYTHONPATH=. .venv/bin/python eval/colab/colab_sampling_benchmark.py --quick --device cuda \
         --cmsgen /path/to/cmsgen
-    PYTHONPATH=. .venv/bin/python scripts/colab_sampling_benchmark.py --compare   # rank saved results
+    PYTHONPATH=. .venv/bin/python eval/colab/colab_sampling_benchmark.py --compare  # rank saved runs
 """
 import argparse
 import glob
@@ -27,7 +27,7 @@ os.environ.setdefault("TQDM_DISABLE", "1")
 import numpy as np
 import torch
 
-REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+REPO_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))  # eval/<sub>/ -> repo
 if REPO_ROOT not in sys.path:
     sys.path.insert(0, REPO_ROOT)
 

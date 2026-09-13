@@ -34,6 +34,8 @@ import time
 REPO_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))
 sys.path.insert(0, REPO_ROOT)
 
+from gpap import paths  # noqa: E402  (needs the sys.path insert above)
+
 
 def _ind(path):
     ind = []
@@ -51,7 +53,9 @@ def _spur_ok(spur, path, seconds):
     (spur takes a different path for s=1). Screening at 50 would have declared it eligible and the
     sweep would have hung on it."""
     t0 = time.perf_counter()
-    out = "/tmp/barbarik_screen_spur.out"
+    # Not a fixed /tmp name: two screens running at once overwrote each other's output, and a
+    # predictable path in a shared directory is somebody else's to plant.
+    out = paths.scratch_file("barbarik_screen_spur", ".out")
     rc = -1
     for n in ("1", "50"):
         try:
@@ -68,7 +72,7 @@ def _spur_ok(spur, path, seconds):
 
 
 def _count(spur, nv, clauses, extra):
-    tmp = "/tmp/barbarik_screen_count.cnf"
+    tmp = paths.scratch_file("barbarik_screen_count", ".cnf")
     with open(tmp, "w") as f:
         f.write(f"p cnf {nv} {len(clauses) + len(extra)}\n")
         for c in clauses:
@@ -117,7 +121,8 @@ def _spread(spur, path, k):
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("cnfs", nargs="+")
-    ap.add_argument("--spur", default=os.path.join(REPO_ROOT, ".gpap/src/barbarik/samplers/spur"))
+    # `paths.src_dir()`, not a hard-coded `<repo>/.gpap`: barbarik is installed under $GPAP_HOME.
+    ap.add_argument("--spur", default=str(paths.src_dir() / "barbarik" / "samplers" / "spur"))
     ap.add_argument("--spur-seconds", type=float, default=20.0,
                     help="reference budget for ONE sample. CM_test needs 36 of them from the "
                          "reference plus 1,836 from the sampler under test, so a 65 s/sample "

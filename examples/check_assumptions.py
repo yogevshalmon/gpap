@@ -12,9 +12,13 @@ import time
 
 import numpy as np
 
+from pathlib import Path
+
 from gpap.engine import AssumptionChecker
 
-DEFAULT = "benchmarks/sampling/10.sk_1_46.cnf"
+# Anchored on this file, not on the working directory: `python examples/…` from anywhere but
+# the repo root used to be a FileNotFoundError. Same spelling as examples/mine_clauses.py.
+DEFAULT = Path(__file__).resolve().parent.parent / "benchmarks" / "sampling" / "10.sk_1_46.cnf"
 
 
 def tutorial() -> None:

@@ -21,9 +21,13 @@ import pytest
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-RIVAL_RUN_PY = os.path.join(REPO, ".gpap", "src", "Recurrent-CircuitSAT-Sampler",
-                            "src", "pytorch", "run.py")
+from gpap import paths  # noqa: E402  (after the sys.path insert above)
+from tests.conftest import REPO_ROOT, SEQ_DIR  # noqa: E402
+
+# Through `paths.src_dir()`, not a hard-coded `<repo>/.gpap`: `rivals_setup.sh` installs into
+# `$GPAP_HOME/src`, so with that variable set this file pointed at a path that does not exist and
+# the test below skipped itself — passing while verifying nothing.
+RIVAL_RUN_PY = str(paths.src_dir() / "Recurrent-CircuitSAT-Sampler" / "src" / "pytorch" / "run.py")
 
 
 def _their_branches(src):
@@ -99,7 +103,7 @@ def _load_source():
 
 
 def _n_outputs(stem):
-    p = os.path.join(REPO, "benchmarks", "circuits", "bench", "seq", f"{stem}.bench")
+    p = os.path.join(SEQ_DIR, f"{stem}.bench")
     if not os.path.isfile(p):
         return None
     return sum(1 for ln in open(p) if ln.lstrip().startswith("OUTPUT("))
@@ -149,7 +153,7 @@ def test_every_committed_circuit_their_table_covers_is_transcribed():
     from eval.rivals.rivals_recurrent import TARGETS
 
     covered = {n for names, _, _ in branches for n in names}
-    seq = os.path.join(REPO, "benchmarks", "circuits", "bench", "seq")
+    seq = SEQ_DIR
     missing = []
     for f in sorted(os.listdir(seq)):
         if not f.endswith(".bench"):
@@ -252,7 +256,7 @@ def test_the_memory_term_is_skipped_when_memory_cannot_be_read():
     saved = rc._available_bytes
     rc._available_bytes = lambda: None
     try:
-        assert oversize_reason(os.path.join(REPO, "benchmarks", "circuits", "bench", "seq",
+        assert oversize_reason(os.path.join(SEQ_DIR,
                                             "b13.bench"), 25) is None
     finally:
         rc._available_bytes = saved
@@ -409,7 +413,7 @@ def test_the_gpap_arm_cache_key_covers_the_python_sampling_layer(tmp_path, monke
     task = {"harness": "t", "cycles": 25}
     before = rc.gpap_cache_key(str(f), task)
 
-    pipe = os.path.join(REPO, "gpap", "sampling", "pipeline.py")
+    pipe = os.path.join(REPO_ROOT, "gpap", "sampling", "pipeline.py")
     bak = tmp_path / "pipeline.bak"
     shutil.copy(pipe, bak)
     try:
@@ -730,7 +734,7 @@ def test_the_recurrent_miter_self_checks_and_catches_an_inverted_miter(tmp_path)
     inverted miter (P ~ 1 - p) must be caught, or the check proves nothing."""
     from eval.rivals import rivals_recurrent as rr
 
-    src = os.path.join(REPO, "benchmarks", "circuits", "bench", "seq", "b06.bench")
+    src = os.path.join(SEQ_DIR, "b06.bench")
     dst = str(tmp_path / "b06_rare.bench")
     pattern, est, p_miter, ok = rr.miter_bench(src, dst, 3, 5)
     assert ok and 0.0 <= p_miter <= 1.0 and pattern and est is not None

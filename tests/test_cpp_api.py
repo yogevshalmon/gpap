@@ -18,9 +18,21 @@ import pytest
 from tests.reference_bcp import lit_idx, ref_bcp
 
 REPO = Path(__file__).resolve().parent.parent
-SAMPLE_BIN = REPO / "build" / "gpap_sample"
-ASSUME_BIN = REPO / "build" / "gpap_assumptions"
-PROBE_BIN = REPO / "build" / "gpap_probe"
+
+
+def _bin(name: str) -> Path:
+    """An example binary in whichever build tree it was built into — the same set `_core.py`
+    accepts for the library. Pinning `build/` alone meant a `cpp/build/` or `$GPAP_BUILD_DIR`
+    checkout skipped every test in this file and said nothing."""
+    import os
+    trees = [Path(os.environ["GPAP_BUILD_DIR"])] if os.environ.get("GPAP_BUILD_DIR") else []
+    trees += [REPO / "build", REPO / "cpp" / "build"]
+    return next((t / name for t in trees if (t / name).exists()), trees[0] / name)
+
+
+SAMPLE_BIN = _bin("gpap_sample")
+ASSUME_BIN = _bin("gpap_assumptions")
+PROBE_BIN = _bin("gpap_probe")
 
 pytestmark = pytest.mark.gpu
 
