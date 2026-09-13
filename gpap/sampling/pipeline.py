@@ -6,7 +6,8 @@ driver and the Colab driver:
 
 `n_time` is a contract: the timed run samples until it has delivered that many models. The
 safety valves (`time_limit` seconds of sampling wall, and the sampler's zero-progress stop)
-are reported via `chunk_capped` and the CLI's '<' marker. `samples_per_s` is the best-measured
+are reported via `chunk_capped` and the CLI's '<' marker (never set on a proved-UNSAT run,
+which delivered everything there was). `samples_per_s` is the best-measured
 config's steady-state rate (`best_rate_sps`); `sps_e2e_total` is the end-to-end rate including
 construction, simplification and mining, which is what a CMSGen comparison must charge.
 
@@ -235,7 +236,7 @@ def sample_clauses(nv, clauses, support, device, *, simplify=True, els=True, n_t
                    lookahead=False, verify_clauses=None, verify_cpu=False, cov_k_cap=2048,
                    verify_sound=False,
                    random_var=True, configs="default", mine="auto",
-                   mine_gate=0.15, min_measure_chunks=3, seed=5,
+                   mine_gate=0.15, min_measure_chunks=3, seed=5, progress=None,
                    _t_start=None, _phases=None, _wire_map=None):
     """The throughput run, timed end-to-end, plus an optional collect run for coverage/soundness.
 
@@ -248,7 +249,11 @@ def sample_clauses(nv, clauses, support, device, *, simplify=True, els=True, n_t
     models to host RAM stays bounded.
     `k_cap="auto"` is the library's cap, the same on every GPU; an int forces it.
     `verify_sound` (default off) re-checks every emitted model on the GPU and reports
-    `sound_check` ("ok" / "UNSOUND" / "off") plus `unsound_rows`; its wall is in no rate."""
+    `sound_check` ("ok" / "UNSOUND" / "off") plus `unsound_rows`; its wall is in no rate.
+    `progress(event, data)` is called as the run reaches each of them — "formula" once the
+    formula is built, "mined" once mining has been kept or reverted — so a front-end can report a
+    phase WHEN IT HAPPENS instead of reading it off the returned dict minutes later. This module
+    never prints; the callback is how the print layer learns the order."""
     if configs == "default":
         configs = DEFAULT_PORTFOLIO
     # Resolve once so every rebuild below lands on the same cap.
@@ -272,10 +277,33 @@ def sample_clauses(nv, clauses, support, device, *, simplify=True, els=True, n_t
         torch.cuda.synchronize()
         return w
 
+    def _active_support(s):
+        """Support variables still active after preprocessing, or None when the formula declared
+        no support. 0 and None are DIFFERENT facts — a support propagation determines entirely is
+        0 active, not "no support declared" — and reporting both as None hid the largest change
+        there is."""
+        return None if s.support is None else len(s.support)
+
+    def _unsat(s) -> bool:
+        """PROVED no models (preprocessing returned None, or the construction flush conflicted),
+        which is a different fact from "found nothing". One definition: it is reported at
+        construction time and again in the returned dict."""
+        return bool((getattr(s, "_recon", None) or {}).get("unsat")) or bool(s.engine.flush_conflict)
+
+    def _report(event, data):
+        if progress is not None:
+            progress(event, data)
+
     _tc = time.perf_counter()
     smp = GPUSampler.from_clauses(nv, clauses, device, simplify=simplify, els=els,
                                   support=support, k_cap=k_cap, seed=seed)
     phases["construct"] = time.perf_counter() - _tc
+    # The shape of the instance is known now, and everything after it (warmup, up to MINE_SECONDS
+    # of mining, the timed run) takes real time: report it before spending any of that.
+    _report("formula", {"nv": nv, "n_clauses": len(clauses),
+                        "n_support": len(support) if support else nv,
+                        "support_size": _active_support(smp),
+                        "unsat": _unsat(smp)})
     mine_info = None
     if device.type == "cuda":
         _tw = time.perf_counter()
@@ -349,6 +377,13 @@ def sample_clauses(nv, clauses, support, device, *, simplify=True, els=True, n_t
                              "n_ternary": mi.by_width.get(3, 0), "seconds": mi.seconds,
                              "kept": bool(learned),
                              "gain": (score_after / score_before) if score_before else None}
+                # `smp` is now the sampler the timed run will use (kept or reverted), so the
+                # active support here is the FINAL one. It is not merely smaller: the rebuild
+                # re-runs simplification and ELS over the augmented formula, which fixes support
+                # variables (fewer) but also splits equivalence classes (more). The console
+                # reported the pre-mining count with no way to see either.
+                _report("mined", {**mine_info,
+                                  "support_size": _active_support(smp)})
             except RuntimeError as e:   # mining is an optimization — never let it kill the run
                 log.warning("mining skipped after a device error: %s", e)
     t0 = time.perf_counter()
@@ -451,10 +486,7 @@ def sample_clauses(nv, clauses, support, device, *, simplify=True, els=True, n_t
     phases_diag["coverage"] = (time.perf_counter() - _tcov) if n_cov else 0.0
     # The declared support (every emitted row's width), beside `support_size` (what stays active).
     sup1 = [v + 1 for v in (support or range(nv))]
-    # Proved UNSAT (preprocessing returned None, or the construction flush conflicted) is a
-    # different fact from "found nothing", and the caller must be able to tell them apart.
-    unsat =bool((getattr(smp, "_recon", None) or {}).get("unsat")) or bool(
-        smp.engine.flush_conflict)
+    unsat = _unsat(smp)
     del smp
     if device.type == "cuda":
         torch.cuda.empty_cache()
@@ -474,8 +506,10 @@ def sample_clauses(nv, clauses, support, device, *, simplify=True, els=True, n_t
             "phases": phases,                                 # DELIVERY phases; these sum to wall_total_s
             "phases_diag": phases_diag,                       # opt-in readouts, OUTSIDE wall_total_s
             "n_models": t["n_models"],                        # total solutions found in the timed run
-            # a safety valve stopped the timed run before n_time models (rates stay valid)
-            "chunk_capped": t["n_models"] < n_time,
+            # A safety valve stopped the run short of `n_time` (rates stay valid). NOT set on a proved-UNSAT
+            # formula, where 0 models is the complete answer and nothing was cut: the flag is
+            # what both printers mark with '<', and marking that row would invent a valve.
+            "chunk_capped": (t["n_models"] < n_time) and not unsat,
             "wall_timed_s": wall,                             # the solver's sampling wall (timed run)
             "wall_total_s": wall_total,                       # e2e wall incl. construction+simplify+mining
             "mined": mine_info,                               # entailed-clause mining stats (None = skipped)

@@ -24,13 +24,13 @@ solution**. No gradient, no rounding, no repair pass.
 
 <picture>
   <source srcset="docs/assets/demo/gpap_demo.gif">
-  <img src="https://raw.githubusercontent.com/yogevshalmon/gpap/v0.1.0/docs/assets/demo/gpap_demo.gif" width="830"
-       alt="Terminal recording: gpap sample runs on b10.bench unrolled 25 cycles, encodes it to 7,851 variables and 19,682 clauses, and writes 50,000 input stimuli in under seven seconds at about 21,000 samples per second">
+  <img src="https://raw.githubusercontent.com/yogevshalmon/gpap/v0.1.0/docs/assets/demo/gpap_demo.gif" width="812"
+       alt="Terminal recording: gpap sample runs on b10.bench unrolled 25 cycles, encodes it to 7,851 variables and 19,682 clauses, mines 86 units that pay their way, and writes 50,000 input stimuli in under seven seconds at about 20,000 samples per second">
 </picture>
 
 <sub>Pinning <code>b10</code> to a rare reachable state, 25 cycles deep, and writing 50,000 input
-stimuli that reach it. One run on a laptop GPU — measured throughput is in
-<a href="docs/paper/RESULTS.md">the results tables</a>.</sub>
+stimuli that reach it. One run on a laptop GPU, not a benchmark — how throughput is measured is in
+<a href="docs/BENCHMARKING.md">the benchmarking notes</a>.</sub>
 
 </div>
 
@@ -296,7 +296,7 @@ scripts/          # build libgpap, optional third-party tools, fetch benchmarks
 docs/             # start at docs/README.md; docs/findings/ is the evidence behind every rule
 tests/            # pytest (CPU smoke + `gpu`/`slow` markers); circuit CNFs generated on demand
 benchmarks/       # small committed .bench sources (CNFs are generated, never committed)
-.gpap/            # built/fetched tools and benchmark sets, gitignored
+.gpap/            # built/fetched tools, benchmark sets and run scratch, gitignored
 ```
 
 **Code carries the rule; `docs/` carries the evidence.** A comment says what the code does and why

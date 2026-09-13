@@ -62,9 +62,42 @@ def resolve_opt(opt: str, est_unrolled_ands: int) -> str:
     return opt
 
 
+def _scratch_aig() -> str:
+    """An intermediate AIG in `gpap.paths.tmp_dir()` (`<repo>/.gpap/tmp`), where the library puts
+    scratch: a framed AIG of a deep unroll is a big file, and `/tmp` is RAM-backed on several
+    current distributions (gpap/paths.py)."""
+    from gpap import paths
+    return paths.scratch_file("abc", ".aig")
+
+
+#: Characters abc cannot carry in a script argument even inside quotes, each MEASURED against the
+#: real binary: tab, newline and carriage return are rewritten to a space, a double quote ends the
+#: quoting, and a single quote is stripped and swallows the rest of the script into the filename.
+#: Every one of them silently produced no output and surfaced as "abc produced no framed AIG" —
+#: the failure `_q` exists to prevent — so they are refused by name instead.
+_ABC_UNQUOTABLE = '"\'\n\r\t'
+
+
+def _q(path: str) -> str:
+    """A path as an abc script argument. abc splits its script on whitespace, so an unquoted path
+    with a space in it silently becomes two arguments and the command writes nothing (the caller
+    then reports "abc produced no framed AIG"). abc does honour double quotes — verified for
+    spaces, `;`, glob characters, `$`, `&`, `|`, a backtick, a leading dash and UTF-8 — so quoting
+    is the fix, with the five characters in `_ABC_UNQUOTABLE`, which quoting does NOT survive,
+    refused up front. This binds for the USER's circuit path and, since the intermediates moved
+    into `<repo>/.gpap/tmp`, for a checkout whose own directory has one of them in it."""
+    bad = [c for c in _ABC_UNQUOTABLE if c in path]
+    if bad:
+        raise _AbcError(f"abc cannot be given a path containing {bad[0]!r}: {path!r} — "
+                        f"rename it, or use the native encoder (--encoder tseitin)")
+    return f'"{path}"'
+
+
 def _run_abc(abc: str, script: str, timeout: float = 1800.0) -> str:
+    from gpap import paths
+
     # Run in a scratch cwd: abc drops an `abc.history` wherever it is invoked (paths are absolute).
-    with tempfile.TemporaryDirectory(prefix="gpap-abc-") as cwd:
+    with tempfile.TemporaryDirectory(prefix="gpap-abc-", dir=paths.tmp_dir()) as cwd:
         p = subprocess.run([abc, "-q", script], capture_output=True, text=True,
                            timeout=timeout, cwd=cwd)
     if p.returncode != 0:
@@ -84,15 +117,15 @@ def unroll_optimize_to_aig(input_path: str, cycles: int, aig_path: str, *,
     pre = f"{pre}; " if pre else ""
     post = f"{post}; " if post else ""
     input_path, aig_path = os.path.abspath(input_path), os.path.abspath(aig_path)
-    out = _run_abc(exe, f"{reader} {input_path}; strash; zero; {pre}frames -F {cycles} -i; {post}"
-                        f"write_aiger -s {aig_path}")
+    out = _run_abc(exe, f"{reader} {_q(input_path)}; strash; zero; {pre}frames -F {cycles} -i; "
+                        f"{post}write_aiger -s {_q(aig_path)}")
     if not os.path.exists(aig_path) or os.path.getsize(aig_path) == 0:
         # abc reports command failures on stdout with exit code 0 — surface its message.
         raise _AbcError(f"abc produced no framed AIG for {input_path}: {out.strip()[-300:]}")
 
 
 def _read_framed(input_path: str, cycles: int, abc, opt) -> Aig:
-    tmp = tempfile.NamedTemporaryFile(suffix=".aig", delete=False).name
+    tmp = _scratch_aig()
     try:
         unroll_optimize_to_aig(input_path, cycles, tmp, abc=abc, opt=opt)
         return read_aiger(tmp)
@@ -231,11 +264,11 @@ def simplify_bench_abc(src: str, dst: str, *, abc: str | None = None,
     if exe is None:
         raise _AbcError("no `abc` binary found (build it with scripts/build_abc.sh)")
     src, dst = os.path.abspath(src), os.path.abspath(dst)
-    tmp = tempfile.NamedTemporaryFile(suffix=".aig", delete=False).name
+    tmp = _scratch_aig()
     try:
-        pre = _run_abc(exe, f"read_bench {src}; strash; print_stats")
-        out = _run_abc(exe, f"read_bench {src}; strash; zero; {script}; "
-                            f"print_stats; write_aiger -s {tmp}")
+        pre = _run_abc(exe, f"read_bench {_q(src)}; strash; print_stats")
+        out = _run_abc(exe, f"read_bench {_q(src)}; strash; zero; {script}; "
+                            f"print_stats; write_aiger -s {_q(tmp)}")
         if not os.path.exists(tmp) or os.path.getsize(tmp) == 0:
             raise _AbcError(f"abc produced no AIG for {src}: {out.strip()[-300:]}")
         aig = read_aiger(tmp)
@@ -332,7 +365,7 @@ def build_cnf_abc_aig(aig: Aig, aig_path: str, cycles: int, seed: int,
     # Hand ABC a canonical BINARY rewrite rather than the original file: its read_aiger rejects
     # ASCII `aag`. Symbols are preserved, so the frames name-verify still applies.
     from gpap.circuits.aiger import write_aiger_binary
-    tmp = tempfile.NamedTemporaryFile(suffix=".aig", delete=False).name
+    tmp = _scratch_aig()
     try:
         write_aiger_binary(aig, tmp)
         faig = _read_framed(tmp, T, abc, opt)

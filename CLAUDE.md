@@ -90,7 +90,9 @@ scripts/                   # build_core.sh, build_abc.sh, build_cmsgen.sh (+ cms
                            #   fetch_benchmarks.sh, perf_ab_trees.py
 docs/findings/             # INSIGHTS.md (settled-results index) + *_FINDINGS.md
 tests/                     # pytest; circuit CNFs generated from benchmarks/circuits/bench/ at test time
-.gpap/                     # built/fetched tools and benchmark sets: gitignored, not $HOME (gpap/paths.py)
+.gpap/                     # built/fetched tools, benchmark sets, and `tmp/` (the LIBRARY+CLI
+                           #   scratch: converted CNFs, abc intermediates; `eval/` keeps its own):
+                           #   gitignored, not $HOME, not /tmp — reasons in `gpap/paths.py`
 ```
 
 ## Engine contract: two entry points (`gpap/engine/__init__.py`)

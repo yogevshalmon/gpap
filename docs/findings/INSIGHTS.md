@@ -20,7 +20,7 @@ that block before quoting anything out of the file.
 | entailed-clause mining and redundancy | [MINING_FINDINGS.md](MINING_FINDINGS.md) |
 | uniformity: TV, Barbarik, the B knob | [UNIFORMITY_FINDINGS.md](UNIFORMITY_FINDINGS.md) |
 | rival-comparison fairness, and protocol v1.0 | [RIVAL_FAIRNESS_FINDINGS.md](RIVAL_FAIRNESS_FINDINGS.md) |
-| what `--out` cost (2026-08-27) | [CLI_DELIVERY_FINDINGS.md](CLI_DELIVERY_FINDINGS.md) |
+| what `--out` cost, and what the console says (2026-08-27, 2026-09-12) | [CLI_DELIVERY_FINDINGS.md](CLI_DELIVERY_FINDINGS.md) |
 | reproducing the campaign (2026-09-09) | [ARTIFACT_FINDINGS.md](ARTIFACT_FINDINGS.md) |
 
 **Historical record** — kept so a settled question is not re-opened, and so a deleted subsystem
@@ -35,6 +35,16 @@ leaves a trace. **Quote no rate from any of these.**
 | porting to AMD / Intel / Apple | [PORTABILITY.md](PORTABILITY.md) | an analysis, not a measurement: nothing in it is implemented |
 
 ## Engine & memory model
+
+**A phase belongs where it happens, and a printed number must mean one thing (2026-09-12).**
+`gpap sample` read every line off the returned dict, so mining printed below the throughput it ran
+before; `sample_clauses(progress=)` reports "formula" and "mined" as they happen and the CLI prints
+from it (the library still never prints). Same pass: the active support is restated after mining,
+which moves it both ways (the header's count is pre-mining, `--stats` is post-), `chunk_capped` no
+longer marks a proved-UNSAT run as cut short, a success rate renders once
+(`gpap/verdict.py::fmt_pct`) instead of once per printer, and run scratch moved to
+`<repo>/.gpap/tmp` — which exposed that abc splits its script on whitespace, so any path with a
+space in it wrote nothing. [CLI_DELIVERY_FINDINGS.md](CLI_DELIVERY_FINDINGS.md).
 
 **The sampling chunk loop moved into the core (2026-09-01).** `cpp/src/sample.cpp`
 (`gpap_sampler_*`) owns chunks, bandit, valves, buckets and accounting; both faces marshal over it.

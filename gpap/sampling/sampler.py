@@ -551,7 +551,8 @@ class GPUSampler:
             "implications_per_s": (bcp_impl / elapsed) if elapsed > 0 else 0.0,
             "bcp_decisions": bcp_decs, "bcp_implications": bcp_impl,
             "n_chunks": chunk, "K": K, "B": B, "random_var": bool(random_var),
-            "support_size": (len(sup) if sup else None),
+            # None = no support declared; 0 = declared and propagation determined all of it.
+            "support_size": (None if sup is None else len(sup)),
             "mean_decision_rounds": float(st.rounds_mean),
             "max_decision_rounds": int(st.rounds_max),
             "n_distinct": len(distinct) if keep_rows else None,

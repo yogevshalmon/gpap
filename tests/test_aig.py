@@ -145,7 +145,7 @@ def _bench_to_aig(tmp_path, name):
     import subprocess
     src = os.path.abspath(os.path.join(BENCH, f"{name}.bench"))
     dst = str(tmp_path / f"{name}.aig")
-    subprocess.run([find_abc(), "-q", f"read_bench {src}; strash; zero; write_aiger -s {dst}"],
+    subprocess.run([find_abc(), "-q", f'read_bench "{src}"; strash; zero; write_aiger -s "{dst}"'],
                    check=True, capture_output=True, cwd=str(tmp_path))
     return dst
 
