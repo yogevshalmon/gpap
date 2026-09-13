@@ -369,16 +369,21 @@ def rival_vram_budget(fraction: float = None) -> int:
         from gpap.engine.calibrate import gpu_mem_available
         if torch.cuda.is_available():
             return gpu_mem_available(torch.device("cuda", 0), fraction)
-        # No card to measure means no core call to carry the ceiling, so this branch applies it
-        # itself — the same reader, not a second one. It was missed once because the branch a
-        # developer box takes is not the branch CI takes: with the clamp only inside
-        # `gpap_mem_available`, a cap on a CPU-only machine bounded our side and left the rival
-        # at the full fallback, which is exactly the asymmetry the cap exists to remove.
-        cap = _vram_cap_mib() << 20
-        return min(RIVAL_VRAM_FALLBACK, cap) if cap else RIVAL_VRAM_FALLBACK
     except Exception:                                   # noqa: BLE001 — sizing must never be fatal
         pass
-    return RIVAL_VRAM_FALLBACK
+    # No core call carried the ceiling — no card to measure, OR a card and no built library (an
+    # unpacked artifact before `setup`: the core call raises and lands here) — so this branch
+    # applies it itself, the same reader, not a second one. Missed twice, because the branch a
+    # developer box takes is never the one CI or a fresh unpack takes: with the clamp only inside
+    # `gpap_mem_available`, a cap on a CPU-only machine bounded our side and left the rival at the
+    # full fallback, exactly the asymmetry the cap exists to remove; and the first fix clamped the
+    # no-card route while the raise route still returned the fallback bare
+    # (tests/test_k_cap.py::test_rival_budget_is_capped_when_the_core_cannot_load).
+    try:
+        cap = _vram_cap_mib() << 20
+    except Exception:                                   # noqa: BLE001 — no torch at all
+        cap = 0
+    return min(RIVAL_VRAM_FALLBACK, cap) if cap else RIVAL_VRAM_FALLBACK
 
 
 # ---------------------------------------------------------------- the instance sets

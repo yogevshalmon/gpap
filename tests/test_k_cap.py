@@ -23,6 +23,7 @@ import os
 import pytest
 import torch
 
+from gpap.engine import _core
 from gpap.engine.calibrate import K_CAP, default_k_cap, resolve_k_cap
 
 # Spelled out rather than imported so that editing K_CAP cannot silently make this test agree
@@ -41,8 +42,13 @@ def test_cap_is_device_independent(device):
     """THE property: same cap everywhere. A CPU device must answer without touching the driver,
     and a CUDA device must answer the same number — otherwise `auto` silently means a different
     experiment per machine."""
-    if device == "cuda" and not torch.cuda.is_available():
-        pytest.skip("needs CUDA")
+    if device == "cuda":
+        if not torch.cuda.is_available():
+            pytest.skip("needs CUDA")
+        try:                       # a card and no built library: an unpacked artifact before `setup`
+            _core.load()
+        except _core.GpapError:
+            pytest.skip("needs a built libgpap")
     assert default_k_cap(torch.device(device)) == EXPECTED_CAP
 
 
@@ -374,3 +380,23 @@ def test_pipeline_reports_the_resolved_cap():
     info = sample_clauses(4, clauses, None, dev, n_time=200, time_limit=5.0, mine=False)
     assert info["engine"]["k_cap"] == default_k_cap(dev)
     assert info["engine"]["K"] <= info["engine"]["k_cap"]
+
+
+def test_rival_budget_is_capped_when_the_core_cannot_load(monkeypatch):
+    """The THIRD route, found inside an unpacked artifact before `setup` has built anything: CUDA
+    is visible, so the CUDA branch is taken, the core call raises "libgpap not found", the
+    `except` swallows it — and the last-resort return handed the rival the whole fallback with
+    the ceiling ignored. Same asymmetry as the CPU-only case, on the machine a reviewer has the
+    moment they unpack."""
+    import gpap.engine.calibrate as calibrate
+    from eval.rivals.rival_common import RIVAL_VRAM_FALLBACK, rival_vram_budget
+
+    def no_core(*_a, **_k):
+        raise RuntimeError("libgpap not found")
+
+    monkeypatch.setattr(calibrate, "gpu_mem_available", no_core)
+    monkeypatch.setattr(torch.cuda, "is_available", lambda: True)
+    monkeypatch.delenv("GPAP_VRAM_BUDGET_MIB", raising=False)
+    assert rival_vram_budget() == RIVAL_VRAM_FALLBACK
+    monkeypatch.setenv("GPAP_VRAM_BUDGET_MIB", "1024")
+    assert rival_vram_budget() == 1024 << 20
