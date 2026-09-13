@@ -15,7 +15,8 @@ WANT="${1:-all}"
 want_set() { [ "$WANT" = "all" ] || [ "$WANT" = "$1" ]; }
 
 REPO="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-CACHE="${GPAP_HOME:-$REPO/.gpap}/benchmarks"
+# Ask, never recompute: gpap/paths.py is the one definition (see its docstring).
+CACHE="$(PYTHONPATH="$REPO" "${PYTHON:-python3}" -m gpap.paths benchmarks)"
 mkdir -p "$CACHE"
 cd "$CACHE"
 

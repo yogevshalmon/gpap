@@ -24,7 +24,6 @@ import re
 import shutil
 import subprocess
 import sys
-import tempfile
 import time
 
 REPO_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))  # eval/<sub>/ -> repo
@@ -290,7 +289,7 @@ def main():
                                                  args.circuit_type == "comb") else BENCH_SEQ)
     steps, steps_src = resolve_steps("demotic", args.steps)
     lr, lr_src = resolve_lr("demotic", args.lr)
-    tmp = tempfile.mkdtemp(prefix="rivals_demotic_")
+    tmp = paths.scratch_dir("rivals_demotic")
     mode_txt = ("their target table" if args.mode == "native"
                 else f"OUR {args.target} fixed-T instance as a miter")
     if args.cmsgen and not os.access(args.cmsgen, os.X_OK):

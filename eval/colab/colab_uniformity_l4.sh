@@ -22,9 +22,10 @@ cd "$REPO_ROOT"
 export PYTHONPATH="$REPO_ROOT"
 PY="${PYTHON:-python3}"
 
-OUT="${OUT:-$REPO_ROOT/.experiments/uniformity}"
+OUT="${OUT:-$(PYTHONPATH="$REPO_ROOT" "${PYTHON:-python3}" -m eval.paths experiments)/uniformity}"
 mkdir -p "$OUT"
-GPAP_HOME="${GPAP_HOME:-$REPO_ROOT/.gpap}"      # tool root: one spelling, run_full_eval.sh's
+# Ask, never recompute: gpap/paths.py is the one definition (see its docstring).
+GPAP_HOME="$(PYTHONPATH="$REPO_ROOT" "${PYTHON:-python3}" -m gpap.paths home)"
 CMSGEN="${CMSGEN:-$GPAP_HOME/bin/cmsgen}"
 CMS_ARGS=()
 [ -x "$CMSGEN" ] && CMS_ARGS=(--cmsgen "$CMSGEN") \

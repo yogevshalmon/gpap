@@ -1,12 +1,20 @@
-"""Where GPAP keeps things that are built or fetched rather than shipped.
+"""Where GPAP puts what it GENERATES, and the one place that decides it.
 
-Optional third-party tools (abc, cmsgen), their sources, downloaded benchmark sets, and the
-scratch files a run writes and deletes do not live in the repository and are never vendored.
-They land in ONE place:
+Three roots, told apart by what losing one costs:
 
-    $GPAP_HOME  ->  <repo>/.gpap  ->  ./.gpap
+    `.gpap/`           DISPOSABLE MACHINERY: built tools, fetched third-party sources, fetched
+                       benchmark sets, and ALL scratch. Delete it and you lose only time.
+                       `$GPAP_HOME` moves the whole root.
+    `.experiments/`    a run's OUTPUT, on its way to the record.     -> eval/paths.py
+    `../gpap-results`  the RECORD itself, outside the checkout.      -> eval/paths.py
 
-(`tmp_dir()` is the one exception to the last arrow, and says why.)
+This module owns the first. The other two are the experiment layer's and live in `eval/paths.py`,
+because the library must not know what a campaign is.
+
+**Nothing outside those two modules names a directory.** That is the whole convention, and it is
+what makes the rule unspellable-two-ways rather than merely documented: shell scripts ASK
+(`python3 -m gpap.paths tmp`) instead of recomputing, so bash and Python cannot end up disagreeing
+about symlinks, `..` or `~` — there is one implementation and nothing to keep in step.
 
 Repo-local by default, deliberately. These artifacts run to gigabytes once benchmarks are
 fetched, and a home directory is the wrong place to put them silently: on a shared or quota'd
@@ -15,10 +23,6 @@ works and one that fails halfway with no obvious cause. Keeping them beside the 
 means removing the checkout removes everything it created.
 
 Set `GPAP_HOME` to override (a fast scratch filesystem, a shared read-only tool install).
-
-Only the directories PYTHON reads are accessors here. `scripts/fetch_benchmarks.sh` resolves
-`$GPAP_HOME/benchmarks` itself and nothing imports it back, so there is no `benchmarks_dir()` —
-a second spelling of a path with no reader is just a thing that can drift.
 """
 from __future__ import annotations
 
@@ -40,7 +44,7 @@ def repo_root() -> Path | None:
 
 
 def gpap_home() -> Path:
-    """Base directory for built tools, fetched sources and benchmarks."""
+    """The disposable-machinery root: `$GPAP_HOME`, else `<repo>/.gpap`, else `./.gpap`."""
     env = os.environ.get("GPAP_HOME")
     if env:
         return Path(env).expanduser()
@@ -54,8 +58,13 @@ def bin_dir() -> Path:
 
 
 def src_dir() -> Path:
-    """Checkouts of optional third-party sources."""
+    """Checkouts of optional third-party sources (abc, cmsgen, the rival samplers, barbarik)."""
     return gpap_home() / "src"
+
+
+def benchmarks_dir() -> Path:
+    """Downloaded benchmark sets (`scripts/fetch_benchmarks.sh`)."""
+    return gpap_home() / "benchmarks"
 
 
 def tool(name: str) -> Path:
@@ -80,8 +89,9 @@ def _writable(d: Path, *, follow_symlink: bool = True) -> bool:
 
 
 def tmp_dir() -> Path:
-    """Scratch for files a run writes and then deletes: the CNF a circuit is unrolled to, the
-    intermediate AIGs the ABC route hands to `abc`.
+    """THE scratch directory, for every layer: files a run writes and then deletes — the CNF a
+    circuit is unrolled to, the intermediate AIGs the ABC route hands to `abc`, a rival harness's
+    working copies, a screen's throwaway output.
 
     `$GPAP_HOME/tmp` (so `<repo>/.gpap/tmp` by default) rather than the system temp directory,
     for the reason at the top of this file plus two of its own. `/tmp` is a tmpfs capped at half
@@ -90,9 +100,10 @@ def tmp_dir() -> Path:
     sample it; the checkout's disk has room either way. And the path is PRINTED, where
     `.gpap/tmp/b10-c25-kzdub143.cnf` says what it holds and `/tmp/tmpuo7r0zb0.cnf` does not.
 
-    This covers the library and the `gpap` CLI, and NOT `eval/`, which stays on the system
-    temp directory for a reason that belongs to the experiment layer (eval/README.md). The
-    campaign driver passes an explicit scratch; `gpap bench` defaults to this one.
+    One directory, no per-file judgement — that question used to be re-answered per harness and
+    the answers drifted to five. A caller that passes an explicit scratch directory still wins:
+    `gpap bench --scratch` and the campaign drivers put converted CNFs beside the rows they
+    produced, on purpose, so a row's input stays auditable.
 
     Falls back to the system temp directory when there is no checkout and no `$GPAP_HOME` — an
     installed wheel, where `./.gpap` would mean creating a directory in whatever directory the
@@ -104,12 +115,9 @@ def tmp_dir() -> Path:
     last resort is the system temp directory itself, which is what every version before this one
     used.
 
-    Nothing here is MEANT to survive a run: `gpap sample` and `gpap mine` unlink in a `finally`,
-    and `gpap bench` drops each converted CNF as its row finishes. Neither survives a kill — and a
-    Ctrl-C during `gpap bench` leaves that row's CNF, since its cleanup is not in a `finally` — so
-    files do collect here, inside the checkout rather than somewhere the OS reclaims. `rm -rf
-    .gpap/tmp` is safe against anything but a run in flight, and `gpap bench --keep-cnf` fills it
-    on purpose.
+    Nothing here is MEANT to survive a run, but a kill leaves files behind, so they do collect —
+    inside the checkout rather than somewhere the OS reclaims. `rm -rf .gpap/tmp` is safe against
+    anything but a run in flight, and `gpap bench --keep-cnf` fills it on purpose.
     """
     if os.environ.get("GPAP_HOME") or repo_root() is not None:
         d = gpap_home() / "tmp"
@@ -129,3 +137,29 @@ def scratch_file(stem: str, suffix: str) -> str:
     fd, path = tempfile.mkstemp(prefix=f"{stem}-", suffix=suffix, dir=tmp_dir())
     os.close(fd)
     return path
+
+
+def scratch_dir(stem: str) -> str:
+    """Create a directory in `tmp_dir()` and return its path — the several-files form of
+    `scratch_file`, for a harness that hands a whole working directory to a subprocess. The
+    caller owns removing it; `mkdtemp`, so concurrent runs never share one."""
+    return tempfile.mkdtemp(prefix=f"{stem}-", dir=tmp_dir())
+
+
+#: What `python3 -m gpap.paths <role>` prints, so a shell script asks instead of recomputing.
+ROLES = {"repo": lambda: repo_root() or Path.cwd(), "home": gpap_home, "bin": bin_dir,
+         "src": src_dir, "benchmarks": benchmarks_dir, "tmp": tmp_dir}
+
+
+def _main(argv) -> int:
+    if len(argv) != 1 or argv[0] not in ROLES:
+        import sys
+        print(f"usage: python3 -m gpap.paths {{{'|'.join(ROLES)}}}", file=sys.stderr)
+        return 2
+    print(ROLES[argv[0]]())
+    return 0
+
+
+if __name__ == "__main__":
+    import sys
+    raise SystemExit(_main(sys.argv[1:]))

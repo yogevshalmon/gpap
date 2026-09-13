@@ -17,10 +17,6 @@ import os
 import subprocess
 import time
 
-#: The checkout. ONE spelling: this file has moved between eval/ subdirectories before, and
-#: a hand-counted `dirname` depth is what broke REPO_ROOT in eleven files when it did.
-_REPO = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-
 VARIANTS = ("raw", "abc")
 
 
@@ -154,7 +150,12 @@ def _abc_fingerprint() -> str:
     import hashlib
     try:
         from gpap import paths
-        exe = str(paths.tool("abc"))       # the ONE spelling of a GPAP-built tool's path
+        # The GPAP-BUILT abc, via its owner. NOTE this is not necessarily the binary that
+        # encoded: `abc_backend.find_abc` prefers an explicit path, then $GPAP_ABC, then PATH,
+        # so on a box whose abc comes from PATH this hashes "absent" and the arm cache key
+        # stops depending on the encoder. Fixing it invalidates every recorded cache entry,
+        # so it is a deliberate open item, not an oversight.
+        exe = str(paths.tool("abc"))
     except Exception:                                          # noqa: BLE001
         return "unknown"
     try:
@@ -805,54 +806,6 @@ def unsat_at_depth(cnf_path, conf_budget=2_000_000, provenance=None):
     except Exception:                                          # noqa: BLE001
         return None
     return None if res is None else (not res)
-
-
-def results_root() -> str:
-    """Where raw results live: `$GPAP_RESULTS`, else `gpap-results` beside the checkout.
-
-    ONE definition, and a PHYSICAL one, because the fallback's `..` is not inert: left in the
-    string it resolves physically when the path is OPENED (the kernel follows the symlink,
-    then the `..`) but lexically when the same string is COMPARED through `abspath`/`relpath`,
-    so for a checkout reached through a symlink one spelling named two directories — and
-    `display_path` settles a SHIPPED provenance header by comparing exactly that. Physical is
-    the side that keeps what opening it always did.
-
-    An imported module's `__file__` already comes back resolved, so `realpath` here is belt and
-    braces — it puts the intent in the code rather than leaving it to an interpreter detail.
-    The shell entry points DO need forcing, because bash's `cd` is logical: `cd -P` in
-    `reproduce.sh` and `make_artifact.sh`, gated by tests/test_suite_hygiene.py.
-
-    An explicit `$GPAP_RESULTS` is taken as given (made absolute, never resolved): the caller
-    named that directory and a symlink they chose is theirs to keep.
-    """
-    env = os.environ.get("GPAP_RESULTS")
-    if env:
-        return os.path.abspath(os.path.expanduser(env))
-    return os.path.join(os.path.dirname(os.path.realpath(_REPO)), "gpap-results")
-
-
-def display_path(path, root=None):
-    """A path as it belongs in a file we SHIP, not as it happens to sit on this disk.
-
-    Generated headers are provenance, read by people who do not have our home directory — and an
-    absolute one also carries a username into an artifact that goes to Zenodo and stays there.
-    Two separate generators had already leaked one by the time this was written
-    (a committed slide table for a month, and `emission_audit.txt` into the packaged artifact),
-    which is what makes it a shared function rather than a local fix.
-
-    Rewrites a path under $GPAP_RESULTS or under the repository to a `$VAR/`-prefixed form, and
-    falls back to the basename for anything else — never the absolute path.
-    """
-    roots = [("$GPAP_RESULTS", results_root()),
-             ("$GPAP_REPO", _REPO)] if root is None else [(root[0], root[1])]
-    full = os.path.abspath(str(path))
-    for label, base in roots:
-        if not base:
-            continue
-        rel = os.path.relpath(full, os.path.abspath(base))
-        if not rel.startswith(os.pardir):
-            return f"{label}/{rel}" if rel != "." else label
-    return os.path.basename(full.rstrip("/")) or full
 
 
 def space_from_distinct(n_rows, n_distinct):

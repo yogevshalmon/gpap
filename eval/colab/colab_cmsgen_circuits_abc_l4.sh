@@ -25,8 +25,9 @@ export N_TIME="${N_TIME:-50000}"
 export TIME_LIMIT="${TIME_LIMIT:-60}"
 # Its own OUT: this matrix is a subset of the full one, and sharing a directory with a
 # full-matrix run would let --resume interleave rows measured under different ENCODERS.
-export OUT="${OUT:-$REPO_ROOT/.experiments/full_eval/nvidia-l4-abc}"
-GPAP_HOME="${GPAP_HOME:-$REPO_ROOT/.gpap}"      # tool root: one spelling, run_full_eval.sh's
+export OUT="${OUT:-$(PYTHONPATH="$REPO_ROOT" "${PYTHON:-python3}" -m eval.paths experiments)/full_eval/nvidia-l4-abc}"
+# Ask, never recompute: gpap/paths.py is the one definition (see its docstring).
+GPAP_HOME="$(PYTHONPATH="$REPO_ROOT" "${PYTHON:-python3}" -m gpap.paths home)"
 export CMSGEN="${CMSGEN:-$GPAP_HOME/bin/cmsgen}"
 
 if [ ! -x "$CMSGEN" ]; then

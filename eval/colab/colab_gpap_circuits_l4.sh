@@ -30,7 +30,7 @@ export TIME_LIMIT="${TIME_LIMIT:-60}"
 export CMSGEN=/nonexistent-gpap-only
 # A fixed OUT, not the GPU slug: the supervisor mirrors these filenames, and a slug surprise on
 # a new VM image must not silently retarget the sweep.
-export OUT="${OUT:-$REPO_ROOT/.experiments/full_eval/nvidia-l4-gpaponly}"
+export OUT="${OUT:-$(PYTHONPATH="$REPO_ROOT" "${PYTHON:-python3}" -m eval.paths experiments)/full_eval/nvidia-l4-gpaponly}"
 
 "$PYTHON" -m gpap.cli info 2>/dev/null | head -8 || true
 

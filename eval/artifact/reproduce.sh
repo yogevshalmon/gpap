@@ -59,11 +59,8 @@ if [ -z "$REFERENCE" ]; then
     # Tested for ROWS, not for a directory: an empty `$GPAP_RESULTS/paper/data` — the normal
     # state of a fresh checkout beside an empty results tree — used to shadow the copy the
     # artifact bundles, and every step downstream then ran happily over nothing.
-    # `cd -P`, and never a raw `../`: an un-collapsed `..` resolves physically when opened and
-    # lexically when compared, which for a symlinked checkout is two directories. -P because
-    # bash's cd is logical, where Python's side already resolves. One rule, and it lives in
-    # rival_common.results_root.
-    RESULTS="${GPAP_RESULTS:-$(cd -P "$REPO_ROOT/.." && pwd)/gpap-results}"
+    # Ask, never recompute: eval/paths.py is the one definition.
+    RESULTS="$(PYTHONPATH="$REPO_ROOT" "${PYTHON:-python3}" -m eval.paths results)"
     for cand in "$RESULTS/paper/data" \
                 "$REPO_ROOT/artifact-data/paper/data"; do
         [ -n "$(ls "$cand"/rivals_*.json 2>/dev/null)" ] && { REFERENCE="$cand"; break; }
@@ -111,7 +108,7 @@ GPU_SLUG="$($PY -c "
 import re, torch
 n = torch.cuda.get_device_properties(0).name if torch.cuda.is_available() else 'cpu'
 print(re.sub(r'[^a-z0-9]+', '-', n.lower()).strip('-'))" 2>/dev/null || echo unknown-gpu)"
-OUT="${OUT:-$REPO_ROOT/.experiments/artifact/$GPU_SLUG-$STEP}"
+OUT="${OUT:-$(PYTHONPATH="$REPO_ROOT" "${PYTHON:-python3}" -m eval.paths experiments)/artifact/$GPU_SLUG-$STEP}"
 SUBSET_JSON="$REPO_ROOT/eval/artifact/subset.json"
 
 # Every step runs from the repo root, so a relative --out/--reference would resolve there and

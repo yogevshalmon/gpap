@@ -32,7 +32,6 @@ import json
 import math
 import os
 import sys
-import tempfile
 import time
 
 import numpy as np
@@ -100,7 +99,7 @@ def main(argv=None):
     for i, src in enumerate(files):
         name = os.path.basename(src)[:-6]
         row = {"instance": name, "vacuous": name in VACUOUS}
-        tmp = tempfile.NamedTemporaryFile(suffix=".cnf", delete=False).name
+        tmp = paths.scratch_file(name, ".cnf")
         try:
             t0 = time.perf_counter()
             convert_one(src, tmp, args.cycles, args.seed, encoder=args.encoder,

@@ -24,7 +24,7 @@ import os
 import sys
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
-from eval.rivals.rival_common import display_path  # noqa: E402 — after sys.path
+from eval.paths import display_path  # noqa: E402 — after sys.path
 
 REPO_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))  # eval/<sub>/ -> repo
 sys.path.insert(0, REPO_ROOT)

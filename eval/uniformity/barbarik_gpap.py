@@ -44,7 +44,6 @@ import json
 import os
 import subprocess
 import sys
-import tempfile
 import time
 import traceback
 
@@ -169,7 +168,7 @@ def _pipeline_solutions(input_file, num_solutions, ind_var_list, seed, device, p
 def _cmsgen_solutions(input_file, num_solutions, ind_var_list, seed, cmsgen_bin):
     """Same contract, CMSGen as the sampler under test. CMSGen emits FULL assignments (it ignores
     `c ind`), so the projection onto ind_var_list happens here."""
-    out = os.path.join(tempfile.gettempdir(), f"cmsgen_barbarik_{os.getpid()}.out")
+    out = paths.scratch_file("cmsgen_barbarik", ".out")
     p = subprocess.run([cmsgen_bin, "--samples", str(num_solutions), "--seed", str(int(seed)),
                         "--verb", "0", "--samplefile", out, input_file],
                        capture_output=True, text=True, timeout=1800)

@@ -14,7 +14,7 @@ import os
 import sys
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
-from eval.rivals.rival_common import display_path  # noqa: E402 — one definition, shared
+from eval.paths import display_path  # noqa: E402 — one definition, shared
 from eval.artifact.paper_tables import (barbarik, cms_family,  # noqa: E402
                                prop_rates, rival_family, stage_encoders, uniformity)
 
