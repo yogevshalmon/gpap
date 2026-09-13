@@ -20,7 +20,8 @@ set -euo pipefail
 CMSGEN_COMMIT="${GPAP_CMSGEN_COMMIT:-8210aa90b7535c75cbde8e6a3c5bb9763b233eda}"
 CMSGEN_REPO="${GPAP_CMSGEN_REPO:-https://github.com/meelgroup/cmsgen.git}"
 REPO="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-PREFIX="${GPAP_HOME:-$REPO/.gpap}"
+# Ask, never recompute: gpap/paths.py is the one definition (see its docstring).
+PREFIX="$(PYTHONPATH="$REPO" "${PYTHON:-python3}" -m gpap.paths home)"
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 PATCH="${GPAP_CMSGEN_PATCH:-$REPO_ROOT/scripts/cmsgen_gpap_eval.patch}"
 

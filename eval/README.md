@@ -28,15 +28,17 @@ PYTHONPATH=. python eval/artifact/paper_tables.py ...
 eval/run_full_eval.sh seq
 ```
 
-Third-party tools and fetched benchmarks install under `.gpap/` beside the repo (`gpap/paths.py`),
-never `$HOME`; `$GPAP_HOME` overrides it. **Raw results live outside the repo**, under
-`$GPAP_RESULTS`: inputs, not artifacts to commit.
+Three roots, and which one a file belongs in follows from how long it lives:
 
-Scratch is the one thing here that does **not** follow `.gpap/`: each harness writes its CNFs to
-the system temp directory. That reads like drift and is not safe to tidy — the DIMACS parse of a
-harness's CNF falls inside `wall_total_s`, which Table 1's `e2e` column divides
-(`paper_tables.gpap_e2e`), so which filesystem the file sits on is inside a published number.
-Moving it is a re-measurement, not a cleanup.
+| root | holds | owner |
+|---|---|---|
+| `.gpap/` | built tools, fetched sources and benchmark sets, **and all scratch** — delete it and you lose only time (`$GPAP_HOME` moves it) | `gpap/paths.py` |
+| `.experiments/` | a run's rows, logs and plots while it produces them, then mirrored out (`$GPAP_EXPERIMENTS`) | `eval/paths.py` |
+| `$GPAP_RESULTS` | the record, outside the checkout so deleting either of the above cannot touch evidence | `eval/paths.py` |
+
+Nothing else names one of those directories: a shell script asks (`python3 -m eval.paths results`)
+rather than recomputing, which is what stopped four derivations of the record root from drifting
+apart. Gated by tests/test_suite_hygiene.py.
 
 ## Reading a number before quoting it
 

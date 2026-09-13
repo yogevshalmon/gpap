@@ -15,14 +15,13 @@ import json
 import os
 import subprocess
 import sys
-import tempfile
 import time
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
 
+from eval import paths as eval_paths  # noqa: E402
 from eval.rivals.rival_common import RIVAL_LR, RIVAL_PAPER_CONFIG, RIVAL_STEPS  # noqa: E402
-
-REPO = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+from gpap import paths  # noqa: E402
 # One instance per tool, the same ones the original tie-break used, so the two are comparable.
 PROBES = {
     "demotic": dict(inst="c432", args=["--mode", "native", "c432"]),
@@ -85,7 +84,7 @@ def probe(tool, value, tmp, hts_cnfs, timeout, axis="steps", extra=(), cycles=No
         key = "hts"
     cmd += CHEAP[tool] + ["--timeout", str(timeout)]
     t0 = time.perf_counter()
-    p = subprocess.run(cmd, cwd=REPO, capture_output=True, text=True)
+    p = subprocess.run(cmd, cwd=eval_paths.REPO, capture_output=True, text=True)
     wall = time.perf_counter() - t0
     if not os.path.isfile(out):
         tail = (p.stderr or p.stdout or "").strip().splitlines()[-1:] or ["no output"]
@@ -118,7 +117,7 @@ def main():
     if "hts" in tools and not hts_cnfs:
         print("hts: skipped — pass --hts-cnfs '<dir>/*.cnf' (the rivals stage's hts_cnf dir)")
         tools.remove("hts")
-    tmp = tempfile.mkdtemp(prefix="steps_calib_")
+    tmp = paths.scratch_dir("steps_calib")
     res = {}
     print(f"{'tool':<11}{'steps':>7}{'unique/s':>15}{'wall':>8}   note")
     print("-" * 62)
@@ -170,9 +169,7 @@ def main():
             print(f"  ** FLIP: {tool} is faster at steps={best} "
                   f"({arms[best]['unique_per_s']:,.0f} vs {arms[pinned]['unique_per_s']:,.0f} "
                   f"u/s). RIVAL_STEPS pins {pinned}; change it deliberately, in one place.")
-    # Anchored on the repo, like every other .experiments default in the tree: a cwd-relative
-    # one drops the calibration wherever the shell happened to be standing.
-    out_path = args.out or os.path.join(REPO, ".experiments",
+    out_path = args.out or os.path.join(eval_paths.experiments_dir(),
                                         f"rivals_{args.axis}_calibration.json")
     args.out = out_path
     os.makedirs(os.path.dirname(args.out) or ".", exist_ok=True)

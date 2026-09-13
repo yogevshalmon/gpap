@@ -34,7 +34,6 @@ import shutil
 import signal
 import subprocess
 import sys
-import tempfile
 import time
 
 REPO_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))  # eval/<sub>/ -> repo
@@ -524,8 +523,7 @@ def run_gpap(bench_file, T, pin_outputs, target, seeds, n_time, device, time_lim
     import numpy as np
     from gpap.sampling.pipeline import portfolio, sample_file
     if cnf is None:
-        with tempfile.NamedTemporaryFile("w", suffix=".cnf", delete=False) as f:
-            cnf_path = f.name
+        cnf_path = paths.scratch_file(os.path.basename(str(bench_file)).split(".")[0], ".cnf")
         info, own = build_arm_cnf(bench_file, T, pin_outputs, target, cnf_path, encoder), True
     else:
         (cnf_path, info), own = cnf, False
@@ -727,7 +725,7 @@ def main():
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     steps, steps_src = resolve_steps("recurrent", args.steps)
     lr, lr_src = resolve_lr("recurrent", args.lr)
-    tmp = tempfile.mkdtemp(prefix="rivals_recurrent_")
+    tmp = paths.scratch_dir("rivals_recurrent")
     mode = "rare(fixed-T pattern, MITER)" if args.rare else "their target table"
     if args.cmsgen and not os.access(args.cmsgen, os.X_OK):
         sys.exit(f"--cmsgen {args.cmsgen}: not an executable (scripts/build_cmsgen.sh)")

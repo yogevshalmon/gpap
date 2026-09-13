@@ -36,20 +36,20 @@ leaves a trace. **Quote no rate from any of these.**
 
 ## Engine & memory model
 
-**A wrong path fails SILENTLY, so every one of them is counted rather than read (2026-09-13).**
-`eval/colab/colab_sampling_benchmark.py` counted two directories up from `eval/colab/` and landed on
-`<repo>/eval` — a leftover from when it lived in `scripts/` — so every default built on it named a
-directory with no files in it, and launching it the documented way (`PYTHONPATH=.`) hid that. Two
-more ignored `$GPAP_HOME` and made their own tests `pytest.skip` themselves, green while verifying
-nothing; `$GPAP_BUILD_DIR` was honoured by `build_core.sh` and by nothing that loads the library;
-the cmsgen path had three spellings across six campaign wrappers, which agreed only because the VM
-bootstrap happened to set `GPAP_HOME` to `$REPO_ROOT/.gpap`; and `$GPAP_RESULTS` had four
-derivations, two of them leaving the fallback's `..` in the string — it resolves physically when the
-path is OPENED and lexically when the same string is COMPARED, so on a symlinked checkout one
-spelling named two directories and `display_path` could ship either into a provenance header. One
-definition each (`gpap/paths.py`, `rival_common.results_root`), and the gates count rather than
-trust: tests/test_suite_hygiene.py re-derives every repo-root constant in the tree and re-checks
-that the shell entry points and Python land in the same directory through a symlink.
+**Three roots by lifetime, and one owner each, because a path rule that needs restating at every
+site is not in the code (2026-09-13).** Every path bug here was one shape: a file computed a
+managed directory itself and its copy of the rule drifted. Scratch had five conventions, the
+results record four derivations (two of which named different directories on a symlinked
+checkout, since an un-collapsed `..` resolves physically when OPENED and lexically when COMPARED),
+and a Colab VM path was built from the LOCAL machine's `$GPAP_HOME`. Patching sites made it worse:
+the explanation got copied to each one and three copies were wrong. Now `.gpap/` is disposable
+machinery including ALL scratch (`gpap/paths.py`), `.experiments/` is a run's output and
+`$GPAP_RESULTS` the record (`eval/paths.py`), nothing else names them, and shell ASKS
+(`python3 -m gpap.paths home`) rather than reimplementing the rule in a second language — which is
+what the divergences all were. Gated by tests/test_suite_hygiene.py: path construction is checked
+through the AST so prose is not a false positive, every repo-root constant is re-derived in all
+four spellings the tree uses, and internal imports must resolve (a driver had imported a module
+from its pre-reorg path for weeks inside an `except` that printed a one-line skip).
 
 **A phase belongs where it happens, and a printed number must mean one thing (2026-09-12).**
 `gpap sample` read every line off the returned dict, so mining printed below the throughput it ran

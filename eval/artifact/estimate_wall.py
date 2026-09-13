@@ -48,7 +48,7 @@ import sys
 REPO = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 sys.path.insert(0, REPO)
 
-from eval.rivals.rival_common import results_root  # noqa: E402 — one definition, shared
+from eval.paths import results_root  # noqa: E402 — one definition, shared
 
 #: stage stem -> (the row key holding the rival's numbers, a human label)
 STAGES = {

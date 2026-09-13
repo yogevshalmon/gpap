@@ -16,7 +16,8 @@ set -uo pipefail
 
 # This file lives in eval/rivals/, so the repo root is two levels up.
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
-GPAP_HOME="${GPAP_HOME:-$REPO_ROOT/.gpap}"
+# Ask, never recompute: gpap/paths.py is the one definition (see its docstring).
+GPAP_HOME="$(PYTHONPATH="$REPO_ROOT" "${PYTHON:-python3}" -m gpap.paths home)"
 SRC="$GPAP_HOME/src"
 MODE="${1:-setup}"
 PY_BIN="${PYTHON:-$REPO_ROOT/.venv/bin/python}"

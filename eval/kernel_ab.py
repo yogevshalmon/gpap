@@ -36,7 +36,6 @@ import json
 import math
 import os
 import sys
-import tempfile
 import time
 
 REPO_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
@@ -296,7 +295,7 @@ def main(argv=None):
                 cnf = src
             else:
                 e, opt = parse_encoder(enc)
-                tmp = tempfile.NamedTemporaryFile(suffix=".cnf", delete=False).name
+                tmp = paths.scratch_file(row["instance"], ".cnf")
                 t0 = time.perf_counter()
                 convert(kind, src, tmp, cycles, args.seed, pin, e, opt, args.abc, args.target)
                 row["encode_s"] = round(time.perf_counter() - t0, 1)

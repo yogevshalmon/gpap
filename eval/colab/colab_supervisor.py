@@ -35,10 +35,11 @@ import subprocess
 import sys
 import time
 
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
+
+from eval.paths import VM_GPAP_HOME, VM_PREBUILT, VM_REPO, VM_ROOT  # noqa: E402
+
 COLAB = os.environ.get("COLAB_BIN") or shutil.which("colab") or ".venv/bin/colab"
-#: Where GPAP-built tools live ON THE COLAB VM — the convention every `eval/colab/*_l4.sh`
-#: driver defaults to. Not `gpap.paths`, which answers for THIS machine.
-VM_GPAP_HOME = os.environ.get("GPAP_VM_HOME", "/root/.gpap")
 
 
 def log(msg):
@@ -105,24 +106,25 @@ def marker(session, path):
 
 def bootstrap(session, tarball, bootstrap_sh):
     log("bootstrapping VM ...")
-    for local, remote in ((tarball, "/content/gpap_src.tgz"),
-                          (bootstrap_sh, "/content/bootstrap.sh")):
+    for local, remote in ((tarball, f"{VM_ROOT}/gpap_src.tgz"),
+                          (bootstrap_sh, f"{VM_ROOT}/bootstrap.sh")):
         rc, out = run([COLAB, "upload", "-s", session, local, remote], timeout=900)
         if rc != 0:
             log(f"upload failed {local}: {out.strip()[:200]}")
             return False
-    console(session, ["nohup bash /content/bootstrap.sh > /dev/null 2>&1 &", "echo LAUNCHED"])
+    console(session, [f"nohup bash {VM_ROOT}/bootstrap.sh > /dev/null 2>&1 &",
+                      "echo LAUNCHED"])
     deadline = time.time() + 1800
     while time.time() < deadline:
         time.sleep(30)
         if not session_alive(session):
             log("VM died during bootstrap")
             return False
-        if marker(session, "/content/bootstrap.ok"):
+        if marker(session, f"{VM_ROOT}/bootstrap.ok"):
             log("bootstrap complete")
             return True
-        if marker(session, "/content/bootstrap.fail"):
-            log("bootstrap FAILED: " + console(session, ["cat /content/bootstrap.fail"]).strip()
+        if marker(session, f"{VM_ROOT}/bootstrap.fail"):
+            log("bootstrap FAILED: " + console(session, [f"cat {VM_ROOT}/bootstrap.fail"]).strip()
                 .replace("\n", " ")[:160])
             return False
     log("bootstrap timed out")
@@ -185,7 +187,8 @@ def main():
     ap.add_argument("--gpu", default="L4")
     ap.add_argument("--tarball", required=True, help="repo tarball to unpack on the VM")
     ap.add_argument("--bootstrap", required=True, help="bootstrap script (must echo BOOTSTRAP_DONE)")
-    ap.add_argument("--remote-cmd", required=True, help="run from /content/gpap, must be resumable")
+    ap.add_argument("--remote-cmd", required=True,
+                    help=f"run from {VM_REPO}, must be resumable")
     ap.add_argument("--remote-dir", required=True, help="where the remote job writes its JSONs")
     ap.add_argument("--files", nargs="+", required=True, help="result filenames to mirror")
     ap.add_argument("--local-dir", required=True)
@@ -253,13 +256,21 @@ def main():
                     # runs locally, and reading the LOCAL $GPAP_HOME here pointed the download at
                     # a directory that exists on this machine and not on the VM. Override with
                     # $GPAP_VM_HOME if a VM is laid out differently.
-                    built = src.replace("/content/prebuilt/", VM_GPAP_HOME + "/bin/")
+                    built = src.replace(VM_PREBUILT + "/", VM_GPAP_HOME + "/bin/")
                     rc, _ = run([COLAB, "download", "-s", args.session, built, local], timeout=900)
                     if rc == 0 and os.path.isfile(local) and os.path.getsize(local) > 0:
                         os.chmod(local, 0o755)
                         log(f"  cache FILL <- {built} ({os.path.getsize(local):,} B)")
-                    elif os.path.exists(local):
-                        os.remove(local)
+                    else:
+                        # Said out loud: this branch has never succeeded in a recorded campaign
+                        # ("cache FILL" appears in no supervisor log), because a spec's UPLOAD name
+                        # is not always its INSTALLED name — the bootstrap installs
+                        # `abc_stripped` as `abc` — so the download asks for a file the VM does
+                        # not have. Failing silently is what hid it; the cache is hand-seeded
+                        # instead and every fresh VM rebuilds.
+                        log(f"  cache fill MISSED {built} (upload name != installed name?)")
+                        if os.path.exists(local):
+                            os.remove(local)
             for spec in args.push:
                 local, _, remote = spec.partition(":")
                 if not os.path.isfile(local):
@@ -275,9 +286,9 @@ def main():
             # env-var prefix makes it look for a program literally named "FOO=bar" and fail
             # silently, in a log nobody reads, after the VM has already been built.
             console(args.session, [
-                "cd /content/gpap",
-                f"cat > /content/job.sh <<'GPAPJOBEOF'\n{args.remote_cmd}\nGPAPJOBEOF",
-                "nohup bash /content/job.sh > /content/run.log 2>&1 &",
+                f"cd {VM_REPO}",
+                f"cat > {VM_ROOT}/job.sh <<'GPAPJOBEOF'\n{args.remote_cmd}\nGPAPJOBEOF",
+                f"nohup bash {VM_ROOT}/job.sh > {VM_ROOT}/run.log 2>&1 &",
                 "echo LAUNCHED_JOB"])
             launched_on = endpoint
 
@@ -296,7 +307,7 @@ def main():
             launched_on = None
             continue
         had_results = had_results or bool(got)
-        tail = console(args.session, ["tail -c 3000 /content/run.log"])
+        tail = console(args.session, [f"tail -c 3000 {VM_ROOT}/run.log"])
         with open(local_log, "a") as fh:
             fh.write(f"\n===== {time.strftime('%F %T')} =====\n{tail}\n")
         log(f"mirrored {len(got)}/{len(args.files)}: {', '.join(got) or 'nothing yet'}")

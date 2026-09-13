@@ -36,6 +36,8 @@ from gpap.sampling.sampler import GPUSampler   # sets expandable_segments
 from gpap.engine.calibrate import default_k_cap
 from gpap.benchmark import cmsgen_sample, distinct_projections, two_wise_coverage
 from gpap.sampling.pipeline import sample_file as gpap_sample
+from gpap import paths as gpap_paths
+from eval import paths as eval_paths
 
 
 def gpu_info(device: torch.device) -> dict:
@@ -72,7 +74,10 @@ def _slug(name: str) -> str:
     return re.sub(r"[^a-z0-9]+", "-", (name or "cpu").lower()).strip("-") or "cpu"
 
 DEFAULT_SAMPLING_DIR = os.path.join(REPO_ROOT, "benchmarks", "sampling")
-DEFAULT_OUT_DIR = os.path.join(REPO_ROOT, "benchmarks", "colab_sampling_results")
+#: A run's output goes to the experiments root, never into the tracked tree — and the record
+#: itself lives in $GPAP_RESULTS (eval/paths.py). This wrote under `benchmarks/`, where
+#: .gitignore even declared the combined file committed.
+DEFAULT_OUT_DIR = os.path.join(eval_paths.experiments_dir(), "colab_sampling")
 
 # The K cap has one definition, gpap.engine.calibrate.default_k_cap; do not redefine it here.
 
@@ -97,7 +102,7 @@ def build_cmsgen(dest: str | None = None) -> str | None:
     """Clone + cmake-build meelgroup/cmsgen, returning the binary path (or None on failure).
 
     Idempotent: an existing binary is returned immediately. Needs cmake, build-essential, zlib1g-dev."""
-    dest = dest or os.path.join(REPO_ROOT, ".cmsgen")
+    dest = dest or str(gpap_paths.src_dir() / "cmsgen")   # ONE tool root, not a second one
     binp = os.path.join(dest, "build", "cmsgen")
     if os.path.exists(binp):
         return binp
@@ -507,7 +512,7 @@ def run_all(quick: bool = False, device=None, sampling_dir: str = DEFAULT_SAMPLI
     device = _resolve_device(device)
     if k_cap is None:
         k_cap = default_k_cap(device)
-    scratch = scratch or os.path.join(REPO_ROOT, ".cmsgen_scratch")
+    scratch = scratch or str(gpap_paths.tmp_dir())
     os.makedirs(scratch, exist_ok=True)
 
     if cmsgen_bin == "auto":
@@ -636,7 +641,7 @@ def run_all(quick: bool = False, device=None, sampling_dir: str = DEFAULT_SAMPLI
         _print_headline(payload)
     if do_plots:
         try:
-            from eval.colab_sampling_plots import make_plots
+            from eval.colab.colab_sampling_plots import make_plots
             paths = make_plots(payload, out_dir)
             if verbose and paths:
                 print("\nPlots:")
@@ -682,7 +687,7 @@ def run_family(family: str, *, quick: bool = False, device=None, cmsgen_bin: str
     device = _resolve_device(device)
     if k_cap is None:
         k_cap = default_k_cap(device)
-    scratch = scratch or os.path.join(REPO_ROOT, ".cmsgen_scratch")
+    scratch = scratch or str(gpap_paths.tmp_dir())
     os.makedirs(scratch, exist_ok=True)
     if cmsgen_bin == "auto":
         cmsgen_bin = build_cmsgen()
@@ -811,7 +816,7 @@ def finalize_families(*, device=None, out_dir: str = DEFAULT_OUT_DIR, do_plots: 
     save_results(payload, out_dir)
     if do_plots:
         try:
-            from eval.colab_sampling_plots import make_plots
+            from eval.colab.colab_sampling_plots import make_plots
             for p in make_plots(payload, out_dir):
                 print(f"  plot: {p}")
         except Exception as e:  # noqa: BLE001
@@ -831,7 +836,7 @@ def run_ksweep(payload: dict | None = None, *, device=None, out_dir: str = DEFAU
     device = _resolve_device(device)
     if k_cap is None:
         k_cap = default_k_cap(device)
-    scratch = scratch or os.path.join(REPO_ROOT, ".cmsgen_scratch")
+    scratch = scratch or str(gpap_paths.tmp_dir())
     chunks = chunks or 8
     if payload is None:
         p = os.path.join(out_dir, f"{_slug(gpu_info(device)['name'])}.json")
@@ -863,7 +868,7 @@ def run_ksweep(payload: dict | None = None, *, device=None, out_dir: str = DEFAU
         save_results(payload, out_dir)
         if do_plots:
             try:
-                from eval.colab_sampling_plots import make_plots
+                from eval.colab.colab_sampling_plots import make_plots
                 for pp in make_plots(payload, out_dir):
                     print(f"  plot: {pp}")
             except Exception as e:  # noqa: BLE001

@@ -45,6 +45,8 @@ import numpy as np
 REPO_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))  # eval/<sub>/ -> repo
 sys.path.insert(0, REPO_ROOT)
 
+from gpap import paths  # noqa: E402
+
 from eval.uniformity.metrics import chi2_sf, uniformity_stats  # noqa: E402
 
 # Configs are (random_var, B, lookahead) as gpap.sampling.pipeline defines them. Every portfolio
@@ -509,7 +511,7 @@ def main(argv=None):
     ap.add_argument("--keep-dir", default=None,
                     help="write every generated instance as DIMACS here (feed them to "
                          "eval/uniformity/barbarik_gpap.py for the standard certificate)")
-    ap.add_argument("--scratch", default=os.environ.get("TMPDIR", "/tmp"))
+    ap.add_argument("--scratch", default=str(paths.tmp_dir()))
     args = ap.parse_args(argv)
 
     rng = np.random.default_rng(args.seed)

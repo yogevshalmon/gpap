@@ -31,7 +31,8 @@ cd "$REPO_ROOT"
 PY="${PYTHON:-$REPO_ROOT/.venv/bin/python}"
 [ -x "$PY" ] || PY="$(command -v python3)"
 
-RESULTS="${GPAP_RESULTS:-$(cd -P "$REPO_ROOT/.." && pwd)/gpap-results}"  # rival_common.results_root
+# Ask, never recompute: eval/paths.py is the one definition (physical, `$GPAP_RESULTS`-aware).
+RESULTS="$(PYTHONPATH="$REPO_ROOT" "${PYTHON:-python3}" -m eval.paths results)"
 OUT="${1:-$RESULTS}"
 SRC_DATA="${GPAP_PAPER_DIR:-$RESULTS/paper}"
 COMMIT="$(git rev-parse --short HEAD 2>/dev/null || echo unknown)"

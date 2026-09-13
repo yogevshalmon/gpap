@@ -90,9 +90,12 @@ scripts/                   # build_core.sh, build_abc.sh, build_cmsgen.sh (+ cms
                            #   fetch_benchmarks.sh, perf_ab_trees.py
 docs/findings/             # INSIGHTS.md (settled-results index) + *_FINDINGS.md
 tests/                     # pytest; circuit CNFs generated from benchmarks/circuits/bench/ at test time
-.gpap/                     # built/fetched tools, benchmark sets, and `tmp/` (the LIBRARY+CLI
-                           #   scratch: converted CNFs, abc intermediates; `eval/` keeps its own):
-                           #   gitignored, not $HOME, not /tmp — reasons in `gpap/paths.py`
+.gpap/                     # DISPOSABLE MACHINERY, one root for it: built/fetched tools, sources,
+                           #   benchmark sets, and `tmp/` — ALL scratch, every layer. Gitignored,
+                           #   not $HOME, not /tmp; `$GPAP_HOME` moves it. `gpap/paths.py` owns it
+.experiments/              # a run's output while it is produced, then mirrored to $GPAP_RESULTS
+                           #   (the record, outside the repo). Both owned by `eval/paths.py`.
+                           #   Nothing else names these three; shell asks. gpap/paths.py says why
 ```
 
 ## Engine contract: two entry points (`gpap/engine/__init__.py`)
