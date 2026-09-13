@@ -1,12 +1,17 @@
 """Render the README's terminal demo GIF from a verbatim `gpap sample` cast.
 
-The text below is copied verbatim from a real `gpap sample` run. Nothing is invented: the only
-edit is the temp CNF path, which is a real mktemp name.
+The text below is copied verbatim from a real `gpap sample` run, character for character:
+nothing is edited. The two long lines are wrapped at a token boundary with a hanging indent —
+tidier than a terminal, which hard-wraps mid-token and indents nothing — which is what keeps the
+frame 812px wide at one pixel per pixel in the README. It was captured from a scratch directory
+(which is where `--out stim.out` went) with `$GPAP_HOME` set to `<that directory>/.gpap`, so that
+nothing landed in the checkout; that changes no line of the transcript, because `.gpap/tmp/...` is
+exactly what the scratch CNF's path is in a default run from a checkout (gpap/paths.py).
 
 IT IS A TRANSCRIPT, NOT A BENCHMARK. The rates in it are one run on one laptop GPU and belong to
-no table; published throughput is `docs/paper/RESULTS.md`, measured under the protocol. That is
-also why the rate must never be edited to look better: the command shown has to be the command
-that produced the output shown, flag for flag (docs/assets/README.md).
+no table; how published throughput is measured is `docs/BENCHMARKING.md`. That is also why the
+rate must never be edited to look better: the command shown has to be the command that produced
+the output shown, flag for flag (docs/assets/README.md).
 Palette is the brand kit's (docs/assets/README.md, rule 3: never recolour ad hoc).
 """
 from pathlib import Path
@@ -43,23 +48,27 @@ BAR_H = 30
 # sound-check clause whether or not --verify-sound was passed, so it stays, dimmed.
 CMD_LINES = ["gpap sample b10.bench --cycles 25 -n 50000 --target rare --out stim.out"]
 
-# (segments, delay_ms) — segments are (text, colour, bold). Verbatim from cast_rare.txt; the two
-# long lines are wrapped with a hanging indent, the way the terminal wrapped them.
+# (segments, delay_ms) — segments are (text, colour, bold). Verbatim from the cast; the two long
+# lines are wrapped with a hanging indent, the way the terminal wrapped them. The ORDER is the
+# run's order, which is the point of the sequence: the formula, then what mining decided, then
+# the result. Each line's delay is roughly the pause the run itself had there, so the hold after
+# `mined` is the sampling.
 OUT = [
-    ([("b10.bench -> /tmp/tmpijhp30mx.cnf: ", MUTED, 0),
-      ("PI=11 PO=6 DFF=17 gates=172", LAV, 0), (" | cycles=25 enc=tseitin", MUTED, 0)], 40),
-    ([("  target=rare(freq~1.03e-02) -> ", MUTED, 0),
+    ([("b10.bench -> .gpap/tmp/b10-c25-crjhax2d.cnf: ", MUTED, 0),
+      ("PI=11 PO=6 DFF=17 gates=172", LAV, 0), (" | cycles=25", MUTED, 0)], 40),
+    ([("  enc=tseitin target=rare(freq~1.03e-02) -> ", MUTED, 0),
       ("vars=7851 clauses=19682 support=275", LAV, 0)], 420),
     ([("  encoded in 0.1s [tseitin]", MUTED, 0)], 300),
-    ([("  portfolio [circuit]: random order, B=8; random order, B=1", MUTED, 0)], 900),
+    ([("  portfolio [circuit]: random order, B=8; random order, B=1", MUTED, 0)], 700),
     ([("b10.bench: ", MUTED, 0), ("N=7851 M=19682 |sup|=275", LAV, 0),
-      (" (269 active after simplify)", MUTED, 0)], 1600),
+      (" (269 active after simplify)", MUTED, 0)], 1100),
+    ([("  mined 86 units / 0 binary / 0 ternary in 0.6s (", MUTED, 0), ("kept", LEAF, 0),
+      (", 1.21x projected models/chunk)", MUTED, 0)], 900),
     ([("  ", MUTED, 0), ("50,464 models", LAV_HI, 1), (" in ", MUTED, 0),
-      ("6.6s", LAV_HI, 1), (" e2e (4.1s sampling)", MUTED, 0)], 340),
-    ([("  ", MUTED, 0), ("20,989 samples/s", VIOLET, 1), (" (steady-state), ", MUTED, 0),
-      ("7,601/s", LAV, 1), (" end-to-end | success 2%", MUTED, 0)], 40),
+      ("6.9s", LAV_HI, 1), (" e2e (4.3s sampling)", MUTED, 0)], 340),
+    ([("  ", MUTED, 0), ("20,352 samples/s", VIOLET, 1), (" (steady-state), ", MUTED, 0),
+      ("7,292/s", LAV, 1), (" end-to-end | success 2%", MUTED, 0)], 40),
     ([("         | sound-check not run (--verify-sound)", DIM, 0)], 600),
-    ([("  mined 86 units / 0 binary / 0 ternary in 0.6s", MUTED, 0)], 700),
     ([("  wrote ", MUTED, 0), ("50,000 samples", LAV_HI, 1),
       (" (275 cols) -> stim.out [bits]", MUTED, 0)], 1000),
 ]

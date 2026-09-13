@@ -200,7 +200,13 @@ def test_unsat_is_reported_as_a_proof_not_as_zero_models(tmp_path, capsys):
     """An UNSAT formula printed "0 models ... sound=True", indistinguishable from a satisfiable
     instance the sampler merely failed on. Both detectors were already in hand."""
     cli_main(["sample", _cnf(tmp_path, UNSAT, "u.cnf"), "-n", "10"])
-    assert "UNSAT" in capsys.readouterr().out
+    out = capsys.readouterr().out
+    # ONCE: construction proves it here, and the CLI has a second site for the formula only
+    # MINING proves unsatisfiable — the two must not both fire on the same run.
+    assert out.count("UNSAT") == 1
+    # ...and NOT also marked '<' (a safety valve cut the run short of -n): 0 models is the
+    # complete answer here, so `chunk_capped` excludes it and both printers agree.
+    assert "0<" not in out
 
 
 def test_zero_models_on_a_satisfiable_formula_says_why(tmp_path, capsys, monkeypatch):
@@ -226,6 +232,61 @@ def test_zero_models_on_a_satisfiable_formula_says_why(tmp_path, capsys, monkeyp
     out = capsys.readouterr().out
     assert "no models" in out and "--portfolio" in out
     assert "UNSAT" not in out                    # the opposite fact must not be implied
+
+
+# --------------------------------------------------------------- the order the run happened in
+
+@needs_gpu
+def test_each_phase_is_printed_where_it_happened(tmp_path, capsys):
+    """Mining runs BEFORE the timed run and the formula is built before either, but both lines
+    were read off the returned dict and printed under the throughput — so the console said the
+    sampler mined after it finished sampling. The pipeline reports them through `progress=`."""
+    cli_main(["sample", _cnf(tmp_path, SMALL), "-n", "10", "--mine", "on"])
+    out = capsys.readouterr().out.splitlines()
+    where = {k: next(i for i, ln in enumerate(out) if k in ln)
+             for k in ("N=4 M=2", "mined", "models in")}
+    assert where["N=4 M=2"] < where["mined"] < where["models in"], out
+
+
+@needs_gpu
+def test_a_formula_only_mining_refutes_is_reported_as_unsat(tmp_path, capsys):
+    """The REAL path behind the test below. Every 3-literal clause over 3 variables: construction
+    cannot refute it (no units, no equivalences), but mining fails every literal, so the rebuilt
+    formula's unit flush conflicts and the run is UNSAT — a fact that only exists after mining.
+    The stub below pins the CLI's half; this pins the pipeline's, which reported the
+    construction-time value and turned the proof into a silent "0 models"."""
+    cnf = "p cnf 3 8\n" + "".join(f"{a} {b} {c} 0\n"
+                                  for a in (1, -1) for b in (2, -2) for c in (3, -3))
+    cli_main(["sample", _cnf(tmp_path, cnf, "u3.cnf"), "-n", "10", "--mine", "on"])
+    out = capsys.readouterr().out
+    assert "UNSAT" in out, out
+    assert out.count("UNSAT") == 1, out
+    assert "0<" not in out, out             # nothing was cut short; there was nothing to find
+
+
+def test_unsat_proved_after_construction_is_still_printed(tmp_path, capsys, monkeypatch):
+    """The UNSAT proof is printed from the `progress` callback, which fires at CONSTRUCTION —
+    but mining can prove it later (every literal failing yields both polarities as units, and the
+    rebuilt formula's flush conflicts), and that formula must not go out as a silent "0 models".
+    Driven through the print layer: the state is "construction said satisfiable, the run says
+    UNSAT", which is what the CLI has to notice."""
+    from gpap.sampling import pipeline
+
+    def _fake(path, device, progress=None, **kw):
+        progress("formula", {"nv": 3, "n_clauses": 8, "n_support": 3, "support_size": 3,
+                             "unsat": False})                      # construction proved nothing
+        return {"samples_per_s": 0.0, "success_rate": 0.0, "nv": 3, "n_clauses": 8,
+                "sup1": [1, 2, 3], "sps_e2e_total": 0.0, "phases": {},
+                "n_models": 0, "chunk_capped": False, "wall_timed_s": 1.0, "wall_total_s": 1.0,
+                "mined": None, "support_size": 3, "unsat": True,   # ...mining did
+                "samples": np.zeros((0, 3), np.uint8), "cols": [1, 2, 3], "wire_map": {},
+                "out_requested": 0, "n_collected": 0}
+    import gpap.cli as _cli
+    monkeypatch.setattr(pipeline, "sample_file", _fake)
+    monkeypatch.setattr(_cli, "_require_engine", lambda a: None)
+    cli_main(["sample", _cnf(tmp_path, SMALL), "-n", "10"])
+    out = capsys.readouterr().out
+    assert out.count("UNSAT") == 1               # said once, by the site that learned it
 
 
 # ------------------------------------------------------------- the soundness tri-state

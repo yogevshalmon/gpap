@@ -176,3 +176,42 @@ def test_simplify_bench_abc_output_is_parseable_and_primitive(tmp_path):
         assert re.fullmatch(r"[A-Za-z_]\w*", tok), tok
     # ...and the header must not contain the substrings their line classifier keys on
     assert not any(k in text.splitlines()[0] for k in ("INPUT", "OUTPUT", "DFF", "="))
+
+
+def test_abc_paths_survive_a_space(tmp_path):
+    """abc splits its script on whitespace, so an unquoted path with a space in it became two
+    arguments: the command wrote nothing and the caller reported "abc produced no framed AIG".
+    It binds on the USER's circuit path, and — since the intermediates live in `<repo>/.gpap/tmp`
+    — on a checkout whose own directory has a space in it, which is not the user's doing at all."""
+    import shutil
+
+    from gpap.circuits.abc_backend import unroll_optimize_to_aig
+
+    d = tmp_path / "a dir with spaces"
+    d.mkdir()
+    src = str(d / "b01 copy.bench")
+    shutil.copy(os.path.join(BENCH, "b01.bench"), src)
+    out = str(d / "framed out.aig")
+    unroll_optimize_to_aig(src, 2, out, opt="fast")      # spaced INPUT and spaced OUTPUT
+    # The OTHER abc-script site: the `--circuit-variants abc` route that writes a rival's
+    # primitive-gate .bench. Reverting the quoting there passed every other test.
+    from gpap.circuits.abc_backend import simplify_bench_abc
+    simplify_bench_abc(src, str(d / "simplified out.bench"))
+    assert os.path.getsize(str(d / "simplified out.bench")) > 0
+
+
+@pytest.mark.parametrize("ch", ['"', "'", "\n", "\r", "\t"])
+def test_abc_paths_it_cannot_carry_are_refused_by_name(tmp_path, ch):
+    """Quoting survives a space, a `;`, a glob, a backtick, `&` and UTF-8 — but abc rewrites tab,
+    newline and carriage return inside a quoted argument into a space, ends the quote at a `"`,
+    and strips a `'`, swallowing the rest of the script into the filename. Every one of them wrote
+    nothing and surfaced as "abc produced no framed AIG", the misleading message quoting was added
+    to remove, so they are refused up front with a message that names the character."""
+    import shutil
+
+    from gpap.circuits.abc_backend import _AbcError, unroll_optimize_to_aig
+
+    src = str(tmp_path / f"b01{ch}x.bench")
+    shutil.copy(os.path.join(BENCH, "b01.bench"), src)
+    with pytest.raises(_AbcError, match="cannot be given a path containing"):
+        unroll_optimize_to_aig(src, 2, str(tmp_path / "out.aig"), opt="fast")

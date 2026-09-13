@@ -11,6 +11,7 @@ import subprocess
 import sys
 import textwrap
 
+from itertools import product
 import pytest
 
 from gpap.benchmark import (
@@ -446,12 +447,18 @@ class TestTableAlignment:
         hdr = _format_header(args, multi_enc, has_circuits, quality)
         # Three sim_baseline shapes, because they are three separate format branches and only
         # one of them was ever exercised by a manual eyeball.
-        for sim in (None,
-                    {"hits": 7, "p_accept": 4.9e-4, "accepted_per_s": 162_912_098.0},
-                    {"hits": 0, "p_accept_lt": 1e-9}):
-            row = dict(self.ROW, sim_baseline=sim, amplification=2047.0)
+        # succ is varied with them: `succ%` renders through `fmt_pct`, whose small end is the
+        # widest string it produces ("4e-07%" fills the field exactly), and a row pinned at 100%
+        # never exercises the width the column is sized for. Recorded rates reach 3.9e-8
+        # (kernel_ab) and 3.6e-7 (sin.aig); 3.6e-9 is below both, so the gate holds at the small
+        # end of what `fmt_pct` can be asked to render, not merely at the smallest seen.
+        for sim, succ in product((None,
+                                  {"hits": 7, "p_accept": 4.9e-4, "accepted_per_s": 162_912_098.0},
+                                  {"hits": 0, "p_accept_lt": 1e-9}),
+                                 (1.0, 1e-4, 3.6e-9)):
+            row = dict(self.ROW, sim_baseline=sim, amplification=2047.0, succ=succ)
             line = _format_row(row, args, multi_enc, has_circuits, quality)
-            why = f"(sim={None if sim is None else sim['hits']})\n{hdr}\n{line}"
+            why = f"(sim={None if sim is None else sim['hits']}, succ={succ})\n{hdr}\n{line}"
             assert len(line) == len(hdr), \
                 f"row is {len(line) - len(hdr):+d} chars off the header {why}"
             assert len(line.split()) == len(hdr.split()), \

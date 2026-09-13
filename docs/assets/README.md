@@ -57,7 +57,11 @@ python docs/assets/tools/make_propagation_gif.py  # the core-idea story, dark + 
 The demo's text is a verbatim capture of a real `gpap sample` run, pasted into the generator. If it
 is re-recorded, the command shown must be the command that produced the output shown, flag for flag:
 several of those lines change wording with the flags, so a command edited after the fact stops
-matching its own output.
+matching its own output. Capture it from a scratch directory (so the 50,000-row `--out` file lands
+there rather than in the checkout) with `GPAP_HOME=<that directory>/.gpap` — the `.gpap` suffix is
+load-bearing, since the scratch CNF is `$GPAP_HOME/tmp/...` and the transcript has to show the
+`.gpap/tmp/...` a default run from a checkout prints. The line ORDER is the run's own — formula, then what mining decided, then the result — so a
+re-record must not reshuffle it into a tidier story than the run told.
 
 `make_propagation_gif.py` tells the core idea in three acts. **The bunch is the point**: one row per
 clause, one berry per literal, and it is the only place the literal-level truth is visible — a

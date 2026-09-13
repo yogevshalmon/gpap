@@ -45,9 +45,12 @@ CELLS = [
 ]
 
 
-def run(tree, cell_argv, out, k_cap, seed, py):
+def run(tree, cell_argv, out, k_cap, seed, py, scratch):
+    # ONE scratch for both arms: each arm is its own checkout, so the default (`<repo>/.gpap/tmp`)
+    # would put each arm's converted CNF on its own tree — and the documented setup puts the base
+    # tree under /tmp. Encode is outside the measured column either way; symmetry is the point.
     argv = [py, "-m", "gpap.benchmark"] + cell_argv + [
-        "--k-cap", str(k_cap), "--seed", str(seed), "--output", out]
+        "--k-cap", str(k_cap), "--seed", str(seed), "--output", out, "--scratch", scratch]
     env = dict(os.environ, PYTHONPATH=tree, GPAP_LIB=os.environ["GPAP_LIB"])
     p = subprocess.run(argv, cwd=tree, env=env, capture_output=True, text=True)
     if p.returncode != 0:
@@ -83,7 +86,7 @@ def main():
             argv = [x.replace("SKGLOB", a.sk_glob) for x in argv]
             for arm, tree in arms:
                 out = os.path.join(tmp, f"{cell}_{arm}_{rep}.json")
-                rows, err = run(tree, argv, out, a.k_cap, a.seed, a.python)
+                rows, err = run(tree, argv, out, a.k_cap, a.seed, a.python, tmp)
                 if rows is None:
                     print(f"  [FAIL] {cell:<9} {arm:<5} rep{rep}: {err}", file=sys.stderr)
                     continue

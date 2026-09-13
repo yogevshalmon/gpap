@@ -27,6 +27,11 @@ import time
 # the campaign path (`--time-limit 0` here is also the rival subprocess's timeout).
 from gpap.cli import CIRCUIT_EXTS, _NONNEG_INT, _POS_INT, _POS_SECS, _k_cap_arg
 from gpap.sampling.pipeline import merge_sound_check, sound_verdict
+from gpap.verdict import PCT_WIDTH, fmt_pct
+
+#: The succ% column: one wider than the widest rate, so a full-width "<0.01%" still has a space
+#: between it and impl/s. Header and row read the same constant, or they drift apart.
+_SUCC_W = PCT_WIDTH + 1
 
 SCHEMA = 4          # results-JSON schema version (docs/BENCHMARKING.md §9)
 #   1: flat rows;  2: + encode_s / encoder / sim_baseline / per_seed
@@ -299,7 +304,11 @@ def _build_argparser():
                          "sweep: a 50-cycle b15 unroll parses for minutes before it samples")
     ap.add_argument("--max-vars", type=_POS_INT, default=None,
                     help="same, on variables (the packed-word envelope caps 2N at 16.7M anyway)")
-    ap.add_argument("--scratch", default="/tmp")
+    # The repo-local scratch (`<repo>/.gpap/tmp`), one place for everything a run writes and
+    # deletes; the campaign driver passes its own `--scratch "$OUT/cnf"` and is unaffected.
+    ap.add_argument("--scratch", default=None,
+                    help="where converted circuit CNFs and the rival's sample file are written "
+                         "(default: <repo>/.gpap/tmp)")
     ap.add_argument("--keep-cnf", action="store_true",
                     help="keep each converted circuit CNF in --scratch after its row finishes. "
                          "Default: delete it — a full matrix (encoders x targets x depths) of "
@@ -380,6 +389,9 @@ def main(argv=None):
     quality = args.n_cov > 0
     mine = {"auto": "auto", "on": True, "off": False}[args.mine]
     specs = parse_encoder_specs(args.encoders, args.encoder, args.abc_opt)
+    if args.scratch is None:
+        from gpap import paths
+        args.scratch = str(paths.tmp_dir())
     os.makedirs(args.scratch, exist_ok=True)
     has_circuits = any(f.endswith(CIRCUIT_EXTS) for f in files)
     multi_enc = len(specs) > 1
@@ -770,7 +782,7 @@ def _format_header(args, multi_enc, has_circuits, quality):
     if multi_enc:
         hdr += f"{'enc':>10}"
     hdr += (f"{'N':>7}{'M':>8}{'|sup|':>6}{'GPAP/s':>13}{'e2e/s':>13}"
-            f"{'dec/s':>9}{'impl/s':>9}{'succ%':>6}{'sols':>13}{'t_slv':>7}{'t_tot':>7}")
+            f"{'dec/s':>9}{'impl/s':>9}{'succ%':>{_SUCC_W}}{'sols':>13}{'t_slv':>7}{'t_tot':>7}")
     if args.seeds:
         hdr += f"{'±%':>5}"
     if has_circuits:
@@ -802,7 +814,7 @@ def _format_row(r, args, multi_enc, has_circuits, quality):
     sols_s = f"{r['n_models']:,}" + ("<" if r.get("chunk_capped") else "")
     line += (f"{r['nv']:>7}{r['M']:>8}{r['support']:>6}"
              f"{r['gpap_sps']:>13,.0f}{r.get('gpap_sps_e2e') or 0:>13,.0f}{dps:>9}{ips:>9}"
-             f"{100*r['succ']:>5.0f}%{mn}{sols_s:>12}"
+             f"{fmt_pct(r['succ']):>{_SUCC_W}}{mn}{sols_s:>12}"
              f"{r['wall_timed_s']:>6.1f}s{r['wall_total_s']:>6.1f}s")
     if args.seeds:
         sp = r.get("sps_spread_frac")

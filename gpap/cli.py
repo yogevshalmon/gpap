@@ -50,6 +50,12 @@ _POS_SECS = _bounded(float, 0.0, "a positive number of seconds", exclusive=True)
 # How `sound_check` prints. Three values, not two: "off" is not "unsound".
 _SOUND_LABEL = {"ok": "OK", "UNSOUND": "*** UNSOUND ***", "off": "not run (--verify-sound)"}
 
+#: A PROOF, not a failure to find anything — the two print identically otherwise. One string,
+#: because it has two sites: construction proves it for almost every UNSAT formula, but mining can
+#: prove it later (a formula whose every literal fails yields both polarities as units).
+_UNSAT_LINE = ("  UNSAT: the formula has no models (proved by propagation, before sampling). "
+               "Nothing to sample.")
+
 
 def _sound_label(info):
     """The printed verdict; `sound_verdict` is the ONE rule, shared with the bench and paper
@@ -58,16 +64,32 @@ def _sound_label(info):
     return _SOUND_LABEL[sound_verdict(info)]
 
 
+def _pct(frac):
+    """The success rate, rendered the way `gpap bench` renders it (gpap/verdict.py)."""
+    from gpap.verdict import fmt_pct
+    return fmt_pct(frac)
+
+
 def _ensure_cnf(args):
     """(cnf_path, temp_path_or_None, encode_seconds_or_None) for a CNF or a circuit input, and
-    shared by every subcommand that takes an instance. A circuit is unrolled to a temporary CNF
-    whose `c wire ...` / `c encoder ...` comments let output name each column by its wire."""
+    shared by every subcommand that takes an instance. A circuit is unrolled to a scratch CNF
+    whose `c wire ...` / `c encoder ...` comments let output name each column by its wire.
+
+    The scratch CNF goes to `gpap.paths.tmp_dir()` (`<repo>/.gpap/tmp`), not to the system temp
+    directory: a deep unroll is a big file, `/tmp` is a RAM-backed tmpfs on several current
+    distributions, and this path gets PRINTED — `.gpap/tmp/b10-c25-kzdub143.cnf` says what it holds."""
     path = args.input
     if not path.endswith(CIRCUIT_EXTS):
         return path, None, None
-    import tempfile
     import time as _time
-    tmp = tempfile.NamedTemporaryFile(suffix=".cnf", delete=False).name
+
+    from gpap import paths
+    stem = f"{os.path.splitext(os.path.basename(path))[0]}-c{args.cycles}"
+    tmp = paths.scratch_file(stem, ".cnf")
+    # Shown relative to the working directory when it is below it (the usual case: the checkout's
+    # own .gpap), absolute otherwise. Nothing chdirs, so the two name the same file.
+    rel = os.path.relpath(tmp)
+    tmp = tmp if rel.startswith(os.pardir) else rel
     t0 = _time.perf_counter()
     try:
         if path.endswith(".bench"):
@@ -85,8 +107,8 @@ def _ensure_cnf(args):
             os.unlink(tmp)
         raise
     encode_s = _time.perf_counter() - t0
-    print(f"  encoded in {encode_s:.1f}s [{args.encoder}"
-          f"{'/' + args.abc_opt if args.encoder != 'tseitin' else ''}]")
+    print_now(f"  encoded in {encode_s:.1f}s [{args.encoder}"
+              f"{'/' + args.abc_opt if args.encoder != 'tseitin' else ''}]")
     return tmp, tmp, encode_s
 
 
@@ -121,6 +143,69 @@ def _require_engine(args):
     return torch.device(args.device) if args.device else torch.device("cuda")
 
 
+def print_now(*a):
+    """A line the user should see WHEN IT IS PRINTED, not when the process exits: stdout is
+    block-buffered whenever it is not a terminal."""
+    print(*a, flush=True)
+
+
+def _sample_progress(args):
+    """The `sample_file` progress callback: print each phase AS IT HAPPENS.
+
+    Everything here used to be read off the returned dict and printed after the run, which put
+    the mining line under the throughput lines — as though the sampler had mined after it
+    finished sampling. Mining runs BEFORE the timed run (and can spend `MINE_SECONDS`), and the
+    formula's shape is known before either, so both belong where they happen. The library does
+    not print; this is where its phase order becomes the console's order.
+
+    Every line here is FLUSHED. Python block-buffers a pipe, so without it `gpap sample | tee
+    run.log`, a CI log and a redirected nohup run all get the whole transcript at exit — which is
+    the case where watching the phases arrive matters most, and the one place the tty testing was
+    guaranteed not to show."""
+    def report(event, d):
+        if event == "formula":
+            # |sup| = the DECLARED support (the width of a printed row); `support_size` is what
+            # stays ACTIVE after simplification/ELS. Print both: either alone misleads.
+            act = d.get("support_size")
+            report.said_support = d["n_support"]
+            report.said_active = act if act is not None else d["n_support"]
+            act_s = ("" if act is None or act == d["n_support"]
+                     else f" ({act:,} active after simplify)")
+            print_now(f"{os.path.basename(args.input)}: N={d['nv']} M={d['n_clauses']} "
+                  f"|sup|={d['n_support']}{act_s}")
+            if d["n_clauses"] == 0:
+                print_now("  [warn] the formula has 0 clauses (empty or comment-only input?) — every "
+                      "assignment is a model, so these numbers measure nothing")
+            if d["unsat"]:
+                report.said_unsat = True     # printed here, because this is where it is known
+                print_now(_UNSAT_LINE)
+        elif event == "mined":
+            n = d["n_units"] + d["n_binary"] + d["n_ternary"]
+            if not n:
+                print_now(f"  mined nothing in {d['seconds']:.1f}s")
+                return
+            # Whether the clauses were KEPT is the point of the line: width >= 3 finds shrink K,
+            # so a mine that found plenty can still be reverted. `gain` is the projected
+            # models-per-chunk ratio (K x success), a proxy and not a measurement.
+            g = d.get("gain")
+            gain_s = f", {g:.2f}x projected models/chunk" if g else ""
+            verdict = f"kept{gain_s}" if d["kept"] else f"reverted — did not pay{gain_s}"
+            # Mining rebuilds the formula, so simplification and ELS run again over
+            # `clauses + learned` and the ACTIVE support is recomputed: mined units fix support
+            # variables (fewer), and the added clauses also change the equivalence classes, so a
+            # variable ELS had merged away can come back as its own (more). It moves both ways —
+            # hence "after mining", not "still". Without this the console and the `--stats` JSON
+            # report different support sizes for the same run.
+            act = d.get("support_size")
+            if act is not None and report.said_active is not None and act != report.said_active:
+                verdict += f"; {act:,} of {report.said_support:,} support vars active after mining"
+            print_now(f"  mined {d['n_units']} units / {d['n_binary']} binary / {d['n_ternary']} "
+                  f"ternary in {d['seconds']:.1f}s ({verdict})")
+    report.said_unsat = False
+    report.said_support = report.said_active = None
+    return report
+
+
 def _cmd_sample(args):
     # Host checks FIRST: a missing file or an undeliverable --out is a fact about the arguments,
     # not the machine, so it must not need a GPU to report.
@@ -145,38 +230,34 @@ def _sample_run(args, device, path, tmp, encode_s):
     portfolio = _portfolio(args.portfolio, allow_soft=args.allow_soft)
     if args.allow_soft:
         print(soft_warning())
-    print(f"  portfolio [{args.portfolio}]: {describe_portfolio(portfolio)}")
+    print_now(f"  portfolio [{args.portfolio}]: {describe_portfolio(portfolio)}")
     # Collect sample bits when an output file is requested (up to `-n`, never past the
     # --max-samples ceiling), or when --sim-check needs rows to simulate.
     out_cap = min(args.n, args.max_samples) if (args.out or args.sim_check) else 0
     mine = {"auto": "auto", "on": True, "off": False}[args.mine]
+    progress = _sample_progress(args)
     info = sample_file(path, device, n_time=args.n, n_cov=args.n_cov, out_cap=out_cap,
                        seed=args.seed, simplify=not args.no_simplify, els=not args.no_els, mine=mine,
                        configs=portfolio, k_cap=args.k_cap,
-                       verify_sound=args.verify_sound,
+                       verify_sound=args.verify_sound, progress=progress,
                        # 0 = no cap (the pipeline reads None that way); a literal 0 expires the
                        # sampling loop before its first chunk.
                        time_limit=args.time_limit or None)
     if encode_s is not None:
         info["encode_s"] = encode_s
         info["encoder"] = args.encoder
+    # '<' = a safety valve stopped the run short of -n. `chunk_capped` already excludes a
+    # proved-UNSAT run, so this printer and the bench table's mark the same rows.
     capped = "<" if info.get("chunk_capped") else ""
-    # |sup| = the DECLARED support (the width of a printed row); `support_size` is what stays
-    # ACTIVE after simplification/ELS. Print both: either alone misleads.
-    act = info.get("support_size")
-    act_s = "" if act is None or act == len(info["sup1"]) else f" ({act:,} active after simplify)"
-    print(f"{os.path.basename(args.input)}: N={info['nv']} M={info['n_clauses']} "
-          f"|sup|={len(info['sup1'])}{act_s}")
-    if info["n_clauses"] == 0:
-        print("  [warn] the formula has 0 clauses (empty or comment-only input?) — every "
-              "assignment is a model, so these numbers measure nothing")
-    if info.get("unsat"):
-        # A PROOF, not a failure to find anything — say which, because the two print identically.
-        print("  UNSAT: the formula has no models (proved during construction). Nothing to sample.")
+    # The formula line, the UNSAT proof and the mining stats are printed by `_sample_progress`,
+    # at the point in the run where each becomes true. The exception is a formula only MINING
+    # proves unsatisfiable, which construction could not have reported.
+    if info.get("unsat") and not progress.said_unsat:
+        print(_UNSAT_LINE)
     print(f"  {info['n_models']:,}{capped} models in {info['wall_total_s']:.1f}s e2e "
           f"({info['wall_timed_s']:.1f}s sampling)")
     print(f"  {info['samples_per_s']:,.0f} samples/s (steady-state), "
-          f"{info.get('sps_e2e_total') or 0:,.0f}/s end-to-end | success {info['success_rate']*100:.0f}% "
+          f"{info.get('sps_e2e_total') or 0:,.0f}/s end-to-end | success {_pct(info['success_rate'])} "
           f"| sound-check {_sound_label(info)}")
     if info["n_models"] == 0 and not info.get("unsat") and info["n_clauses"]:
         # Every trajectory conflicted. The three causes want different responses, so name them.
@@ -190,10 +271,6 @@ def _sample_run(args, device, path, tmp, encode_s):
         print(f"  quality [--n-cov]: {nd:,} distinct of {nc:,} collected "
               f"({100.0 * nd / nc:.0f}% distinct)"
               + (f" | cpu-verified={cpu}" if cpu is not None else ""))
-    if info.get("mined"):
-        m = info["mined"]
-        print(f"  mined {m['n_units']} units / {m['n_binary']} binary / {m['n_ternary']} ternary "
-              f"in {m['seconds']:.1f}s")
     if args.sim_baseline:
         # The rejection-sampling rival (simulate.py): random inputs + bit-parallel simulation,
         # no CNF. Perfectly uniform by construction; its only weakness is p_accept.
@@ -623,7 +700,12 @@ def _user_error_types():
 
 
 def main(argv=None):
-    p = argparse.ArgumentParser(prog="gpap", description=__doc__.splitlines()[0])
+    # Its OWN sentence, not `__doc__`: this module's docstring opens with a note to whoever edits
+    # it (that the print layer lives here), and `gpap --help` was greeting users with it.
+    p = argparse.ArgumentParser(
+        prog="gpap",
+        description="GPU-parallel propagation over many partial assignments at once, and the "
+                    "solution sampler built on it.")
     sub = p.add_subparsers(dest="cmd", required=True)
 
     s = sub.add_parser("sample", help="sample models from one CNF, .bench or .aig/.aag file")
@@ -656,12 +738,15 @@ def main(argv=None):
                         "success on tight/deep circuits, but it BIASES the distribution "
                         "(Barbarik rejects it on 64 of 65 circuits) — opt in only when throughput matters and "
                         "uniformity does not")
-    s.add_argument("--no-simplify", action="store_true")
+    s.add_argument("--no-simplify", action="store_true",
+                   help="disable unit-propagation simplification (ON by default; it is "
+                        "model-preserving, unlike the variable elimination a sampler must switch "
+                        "off, and it is most of the win over an unpreprocessed formula)")
     s.add_argument("--no-els", action="store_true",
                    help="disable equivalent-literal substitution (ON by default: it merges "
-                        "mutually-implied literals, removing variables and clauses. Measured 1.42x "
-                        "geomean over 24 circuit instances, and uniformity-fuzzed at 0 verdict "
-                        "flips / 0 unsound rows against the exact oracle)")
+                        "mutually-implied literals, removing variables and clauses — a measured "
+                        "sampling win, and uniformity-fuzzed at 0 verdict flips / 0 unsound rows "
+                        "against the exact oracle; docs/findings/INSIGHTS.md)")
     s.add_argument("--cycles", type=_POS_INT, default=25,
                    help="unroll depth (circuit inputs; combinational AIGs clamp to 1)")
     s.add_argument("--pin-outputs", type=_NONNEG_INT, default=None,
@@ -815,7 +900,8 @@ def main(argv=None):
     _add_encoder_args(c)
     c.set_defaults(func=_cmd_circuit2cnf)
 
-    i = sub.add_parser("info", help="device, triton availability, power-limit warning")
+    i = sub.add_parser("info", help="device, engine core, kernel/encoder availability, VRAM cap, "
+                                    "power-limit warning")
     i.set_defaults(func=_cmd_info)
 
     args = p.parse_args(argv)
