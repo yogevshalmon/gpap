@@ -2,3 +2,9 @@
 *.gif  binary
 *.png  binary
 *.ico  binary
+
+# Development-only files: in the repository, never in an archive. `git archive` honours this, and
+# both the artifact packager (eval/artifact/make_artifact.sh) and GitHub's zip download use it; a
+# reviewer or a PyPI user has no use for either file.
+CLAUDE.md export-ignore
+.github export-ignore
