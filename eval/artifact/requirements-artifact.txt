@@ -1,0 +1,17 @@
+# The Python environment the published campaign ran under, pinned.
+#
+# Every row records torch's build (`gpu.torch` = 2.11.0+cu128), and torch pins the triton that
+# compiles the kernels (3.6.0 on Linux): an unpinned install a year from now would compile
+# cpp/kernels/bcp.py with whatever triton ships then, and the kernels are written against this
+# one's API (tl.gather, >= 3.2). `reproduce.sh tables` — the CPU-only reading of the rows — needs
+# none of this; a stock python3 runs it.
+#
+#   pip install -r eval/artifact/requirements-artifact.txt && pip install -e .
+#
+# cu128 is the CUDA build the campaign ran. A driver too old for CUDA 12.8 takes the cu126 wheel
+# of the same torch from the matching index; the kernels do not change.
+--extra-index-url https://download.pytorch.org/whl/cu128
+torch==2.11.0+cu128
+numpy>=1.24
+python-sat>=0.1.8.dev0,<1.10    # the unsat screen; pyproject.toml says why both bounds matter
+matplotlib>=3.7                 # the two figures only; `tables` says so and continues without it
