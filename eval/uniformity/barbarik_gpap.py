@@ -51,6 +51,9 @@ from gpap import paths
 
 REPO_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))  # eval/<sub>/ -> repo
 sys.path.insert(0, REPO_ROOT)
+# Error text lands in a row that ships; a message that prints the argument it was handed put an
+# operator's scratch directory into three rows of the published campaign (tests/test_artifact_gate.py).
+from eval.paths import display_path  # noqa: E402 — after sys.path
 
 # (random_var, B, lookahead), as gpap.sampling.pipeline defines a config. Every config a default
 # portfolio can select must appear here or the certificate has a hole: the bandit emits only the
@@ -130,10 +133,10 @@ def _gpap_solutions(input_file, num_solutions, ind_var_list, seed, device, confi
     bits = rows
     if bits is None or len(bits) < num_solutions:
         raise RuntimeError(f"GPAP produced {0 if bits is None else len(bits)}/{num_solutions} "
-                           f"samples on {input_file}")
+                           f"samples on {display_path(input_file)}")
     if sorted(cols) != sorted(ind_var_list):   # biasFind needs one literal per declared indVar
         raise RuntimeError(f"projection columns {len(cols)} != declared support "
-                           f"{len(ind_var_list)} on {input_file}")
+                           f"{len(ind_var_list)} on {display_path(input_file)}")
     return [[v if row[i] else -v for i, v in enumerate(cols)] for row in bits[:num_solutions]]
 
 
@@ -158,10 +161,10 @@ def _pipeline_solutions(input_file, num_solutions, ind_var_list, seed, device, p
     bits, cols = info.get("samples"), info.get("cols") or []
     if bits is None or len(bits) < num_solutions:
         raise RuntimeError(f"pipeline produced {0 if bits is None else len(bits)}/"
-                           f"{num_solutions} samples on {input_file}")
+                           f"{num_solutions} samples on {display_path(input_file)}")
     if sorted(cols) != sorted(ind_var_list):
         raise RuntimeError(f"projection columns {len(cols)} != declared support "
-                           f"{len(ind_var_list)} on {input_file}")
+                           f"{len(ind_var_list)} on {display_path(input_file)}")
     return [[v if row[i] else -v for i, v in enumerate(cols)] for row in bits[:num_solutions]]
 
 
@@ -173,7 +176,7 @@ def _cmsgen_solutions(input_file, num_solutions, ind_var_list, seed, cmsgen_bin)
                         "--verb", "0", "--samplefile", out, input_file],
                        capture_output=True, text=True, timeout=1800)
     if p.returncode not in (0, 10):            # 10 = SATISFIABLE
-        raise RuntimeError(f"cmsgen failed on {input_file}: {p.stdout[-300:]}{p.stderr[-300:]}")
+        raise RuntimeError(f"cmsgen failed on {display_path(input_file)}: {p.stdout[-300:]}{p.stderr[-300:]}")
     sols = []
     with open(out) as f:
         for line in f:
@@ -182,7 +185,7 @@ def _cmsgen_solutions(input_file, num_solutions, ind_var_list, seed, cmsgen_bin)
                 sols.append([v if v in lits else -v for v in ind_var_list])
     os.unlink(out)
     if len(sols) < num_solutions:
-        raise RuntimeError(f"cmsgen produced {len(sols)}/{num_solutions} on {input_file}")
+        raise RuntimeError(f"cmsgen produced {len(sols)}/{num_solutions} on {display_path(input_file)}")
     return sols[:num_solutions]
 
 

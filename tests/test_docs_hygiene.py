@@ -152,20 +152,31 @@ def test_every_findings_file_opens_with_its_status_block(path):
         f"is written down). That distinction is what makes the file safe to delete, or not.")
 
 
+#: The shapes of a path that names one machine, mirrored from eval/artifact/check_leaks.sh: that
+#: script gates the SHIPPED tree, this test the checkout, and bash and Python cannot share one
+#: definition — so each names the other. tests/test_artifact_gate.py proves the script refuses each.
+_LEAK_SHAPES = (r"/home/[a-z][\w.-]*/", r"/Users/[A-Za-z][\w.-]*/",
+                r"-home-[a-z][\w.-]*-", r"/claude-[0-9]+/")
+
+
 def test_no_tracked_file_carries_an_absolute_home_path():
     """A committed `/home/<user>/...` is a leak and a lie: it names a machine nobody else has.
 
     `docs/slides/l4_results.tex` carried one for a month, written there by a generator, and
-    `eval/artifact/make_artifact.sh` archives HEAD — so it would have shipped to reviewers.
+    `eval/artifact/make_artifact.sh` archives HEAD — so it would have shipped to reviewers. The
+    second leak found had no `/home/` in it: an agent's scratch directory with the home path
+    flattened into its name. Hence shapes, not one pattern.
     """
     leaks = []
     for path, text in _tracked_files():
+        if "test_docs_hygiene" in path.name:
+            continue
         for i, line in enumerate(text.splitlines(), 1):
-            if re.search(r"/home/[a-z][\w.-]*/", line) and "test_docs_hygiene" not in path.name:
+            if any(re.search(shape, line) for shape in _LEAK_SHAPES):
                 leaks.append(f"{path.relative_to(REPO)}:{i}: {line.strip()[:90]}")
     assert not leaks, (
-        "absolute home paths in tracked files — use $GPAP_RESULTS, $HOME or a relative path:\n  "
-        + "\n  ".join(leaks))
+        "paths that name one machine, in tracked files — use $GPAP_RESULTS, $HOME or a relative "
+        "path:\n  " + "\n  ".join(leaks))
 
 
 def test_every_relative_markdown_link_resolves():
