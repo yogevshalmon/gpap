@@ -373,6 +373,17 @@ VRAM-bound below the batch cap, so a larger card grows OUR K while the rival sta
 `GPAP_VRAM_BUDGET_MIB` (clamped once, in `gpap_mem_available`) holds the engine to the recorded
 card's budget, and `compare_campaign.py` counts every walked-down grant.
 
+**A gate that knows one shape of a leak is a gate for that shape (2026-09-13).** The third
+absolute path to ship had no `/home/` in it: an agent's scratch directory with the home path
+flattened into its NAME, inside three Barbarik error rows, and the packager's inline `/home/` check
+passed it. The shapes now live in one script, `eval/artifact/check_leaks.sh`, proven to refuse
+each on its own (tests/test_artifact_gate.py); literal names come from a denylist outside the
+repository, because the script ships in the tarball it checks; and the double-blind copy is a
+transform over the packager's tarball, `$GPAP_RESULTS/artifact/anonymize.sh`, that must still pass
+the gate and the host suite. Running `pytest` inside the packaged tree for the first time found
+six failures no checkout could show: no `.git`, and a card with no built core.
+docs/findings/ARTIFACT_FINDINGS.md §9.
+
 **An absolute path in a generated file is a leak with a long half-life (2026-09-12).** Two
 generators, asked to record their provenance, printed the argument they were handed:
 `slide_tables.py` put `/home/<user>/…` into a committed slide table, where it sat for a month (the
