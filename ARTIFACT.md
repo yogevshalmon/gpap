@@ -95,9 +95,18 @@ while the rival stays pinned to the recorded batch — again in our favour. The 
 `--vram-cap l4` holds the engine's memory budget to the 17,280 MiB the L4 run had; it is a
 ceiling, so it is inert on smaller cards. `--vram-cap none` measures the card as it is.
 
-Software: an NVIDIA driver, cmake, a C++17 compiler, Python ≥ 3.10. **No CUDA toolkit and no
-nvcc** — `scripts/build_core.sh` links against `libcuda` and the kernels are AOT-compiled into
-the library. There is no CPU execution path: the engine needs a GPU.
+Software: an NVIDIA driver, cmake, a C++17 compiler, Python ≥ 3.10, and the Python packages in
+`eval/artifact/requirements-artifact.txt` — pinned to the versions the published campaign ran
+under (every row records torch's build), so that a reproduction a year from now compiles the
+kernels with the same triton:
+
+```bash
+pip install -r eval/artifact/requirements-artifact.txt && pip install -e .
+```
+
+torch brings triton, which compiles the kernels at BUILD time only; the built library links
+against `libcuda` alone. **No CUDA toolkit and no nvcc.** There is no CPU execution path: the
+engine needs a GPU. `reproduce.sh tables` needs none of this: a stock `python3` runs it.
 
 ### What each tier costs
 
