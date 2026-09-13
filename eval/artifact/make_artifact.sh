@@ -25,6 +25,11 @@
 # the tables describe the bytes actually shipped, not the checkout they were built from, and a
 # failing verdict refuses to package.
 set -uo pipefail
+# Nothing that runs inside the staged tree may leave bytecode in it: every artifact built before
+# this line shipped nine `__pycache__/*.pyc` files, written by the generators and the gate as they
+# ran over the stage. The scrub before the leak gate is the other half, for anything a subprocess
+# writes regardless.
+export PYTHONDONTWRITEBYTECODE=1
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 cd "$REPO_ROOT"
@@ -36,7 +41,12 @@ RESULTS="$(PYTHONPATH="$REPO_ROOT" "${PYTHON:-python3}" -m eval.paths results)"
 : "${RESULTS:?cannot resolve — python3 must be able to import the repo (gpap/paths.py, eval/paths.py)}"
 OUT="${1:-$RESULTS}"
 SRC_DATA="${GPAP_PAPER_DIR:-$RESULTS/paper}"
-COMMIT="$(git rev-parse --short HEAD 2>/dev/null || echo unknown)"
+# What is archived: HEAD, unless GPAP_ARTIFACT_TREE names another tree-ish — the dry-run knob for
+# packaging UNCOMMITTED work (`git write-tree` on a temporary index gives the working tree as a
+# tree object) so the gates below can be run against a change before it is committed. The name
+# and the manifest then carry that object's id, not HEAD's, so a dry run cannot pass as a release.
+TREE="${GPAP_ARTIFACT_TREE:-HEAD}"
+COMMIT="$(git rev-parse --short "$TREE" 2>/dev/null || echo unknown)"
 NAME="gpap-artifact-$(date +%Y%m%d)-$COMMIT"
 STAGE="$OUT/.staging_$NAME.$$"
 FINAL="$OUT/$NAME"
@@ -64,7 +74,7 @@ rm -rf "$STAGE"; mkdir -p "$STAGE"
 trap 'rm -rf "$STAGE"' EXIT
 
 # --- the code, exactly as committed ------------------------------------------------------------
-git archive HEAD | tar -x -C "$STAGE"
+git archive "$TREE" | tar -x -C "$STAGE"
 
 # --- the rows the tables are generated from -----------------------------------------------------
 mkdir -p "$STAGE/artifact-data/paper"
@@ -127,18 +137,31 @@ if [ "$VERIFY_OK" != 1 ] && [ "${GPAP_ARTIFACT_ALLOW_FAIL:-0}" != "1" ]; then
     exit 1
 fi
 
-# --- no absolute home path may ship ------------------------------------------------------------
-# A `/home/<user>/...` in a shipped file names a machine nobody else has, and puts a username in
-# an upload that is permanent once it has a DOI. It has happened twice, from two different
-# generators writing a path they were handed: a committed slide table carried one for a month,
-# and `emission_audit.txt` reached this staging directory with one. Both are fixed at the
-# source (`eval/paths.py::display_path`), so this is the gate that says they stay fixed — checked
-# over the STAGED BYTES, like the verdict above, because that is what a reviewer receives.
-leaks="$(cd "$STAGE" && grep -rlI -E '/home/[a-z][A-Za-z0-9_.-]*/' . 2>/dev/null || true)"
-if [ -n "$leaks" ]; then
-    echo "[FATAL] these staged files carry an absolute home path:" >&2
+# --- nothing the staging steps themselves wrote may ship --------------------------------------------
+# Before the gate and the manifest, so both see exactly the bytes that ship.
+find "$STAGE" -type d \( -name __pycache__ -o -name .pytest_cache -o -name .ruff_cache \) \
+    -prune -exec rm -rf {} +
+
+# --- nothing that names one machine or one person may ship ---------------------------------------
+# A path in a shipped file names the disk it was generated on, and puts a username into an upload
+# that is permanent once it has a DOI. It has happened three times, each from a generator writing
+# the path it was handed (a committed slide table, `emission_audit.txt`, three Barbarik error
+# rows), and the third had a shape the first version of this check — one `/home/` pattern inline
+# here — did not know. The shapes now live in ONE place, `check_leaks.sh` (gated by
+# tests/test_artifact_gate.py); the generators are fixed at the source
+# (`eval/paths.py::display_path`) and this is what says they stay fixed — over the STAGED BYTES,
+# like the verdict above, because that is what a reviewer receives. `GPAP_ARTIFACT_DENYLIST=<file>`
+# adds literal strings (a name, a hostname) that cannot be spelled in a script that ships.
+leaks="$(bash eval/artifact/check_leaks.sh "$STAGE" \
+             ${GPAP_ARTIFACT_DENYLIST:+--denylist "$GPAP_ARTIFACT_DENYLIST"})"
+gate=$?
+if [ "$gate" = 2 ]; then
+    echo "[FATAL] the leak gate could not run — see above" >&2
+    exit 1
+elif [ "$gate" != 0 ]; then
+    echo "[FATAL] these staged files carry a string that names one machine or one person:" >&2
     echo "$leaks" | sed 's/^/          /' >&2
-    echo "        Fix the GENERATOR (eval/paths.py::display_path), regenerate," >&2
+    echo "        Fix the GENERATOR (eval/paths.py::display_path), regenerate the rows," >&2
     echo "        and re-package. GPAP_ARTIFACT_ALLOW_LEAK=1 overrides." >&2
     [ "${GPAP_ARTIFACT_ALLOW_LEAK:-0}" = "1" ] || exit 1
 fi
@@ -181,5 +204,7 @@ echo
 echo "artifact: $OUT/$NAME.tar.gz  ($(du -h "$OUT/$NAME.tar.gz" | cut -f1), $NFILES files)"
 echo "verdict : $VERDICT"
 echo
-echo "Next: upload to Zenodo for the DOI (the Available badge), and put that DOI in"
-echo "      CITATION.cff and the paper's Data Availability Statement."
+echo "Next: for a double-blind review copy, \$GPAP_RESULTS/artifact/anonymize.sh <this tarball>"
+echo "      (outside the repository: it spells the author's name). Then upload to Zenodo for the"
+echo "      DOI (the Available badge), and put that DOI in CITATION.cff and the paper's Data"
+echo "      Availability Statement."
