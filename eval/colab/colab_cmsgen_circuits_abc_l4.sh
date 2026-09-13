@@ -26,7 +26,8 @@ export TIME_LIMIT="${TIME_LIMIT:-60}"
 # Its own OUT: this matrix is a subset of the full one, and sharing a directory with a
 # full-matrix run would let --resume interleave rows measured under different ENCODERS.
 export OUT="${OUT:-$REPO_ROOT/.experiments/full_eval/nvidia-l4-abc}"
-export CMSGEN="${CMSGEN:-$REPO_ROOT/.gpap/bin/cmsgen}"
+GPAP_HOME="${GPAP_HOME:-$REPO_ROOT/.gpap}"      # tool root: one spelling, run_full_eval.sh's
+export CMSGEN="${CMSGEN:-$GPAP_HOME/bin/cmsgen}"
 
 if [ ! -x "$CMSGEN" ]; then
     echo "[FATAL] no cmsgen at $CMSGEN — this sweep IS the CMSGen comparison." >&2

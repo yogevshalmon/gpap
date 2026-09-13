@@ -36,6 +36,21 @@ leaves a trace. **Quote no rate from any of these.**
 
 ## Engine & memory model
 
+**A wrong path fails SILENTLY, so every one of them is counted rather than read (2026-09-13).**
+`eval/colab/colab_sampling_benchmark.py` counted two directories up from `eval/colab/` and landed on
+`<repo>/eval` — a leftover from when it lived in `scripts/` — so every default built on it named a
+directory with no files in it, and launching it the documented way (`PYTHONPATH=.`) hid that. Two
+more ignored `$GPAP_HOME` and made their own tests `pytest.skip` themselves, green while verifying
+nothing; `$GPAP_BUILD_DIR` was honoured by `build_core.sh` and by nothing that loads the library;
+the cmsgen path had three spellings across six campaign wrappers, which agreed only because the VM
+bootstrap happened to set `GPAP_HOME` to `$REPO_ROOT/.gpap`; and `$GPAP_RESULTS` had four
+derivations, two of them leaving the fallback's `..` in the string — it resolves physically when the
+path is OPENED and lexically when the same string is COMPARED, so on a symlinked checkout one
+spelling named two directories and `display_path` could ship either into a provenance header. One
+definition each (`gpap/paths.py`, `rival_common.results_root`), and the gates count rather than
+trust: tests/test_suite_hygiene.py re-derives every repo-root constant in the tree and re-checks
+that the shell entry points and Python land in the same directory through a symlink.
+
 **A phase belongs where it happens, and a printed number must mean one thing (2026-09-12).**
 `gpap sample` read every line off the returned dict, so mining printed below the throughput it ran
 before; `sample_clauses(progress=)` reports "formula" and "mined" as they happen and the CLI prints

@@ -24,7 +24,8 @@ PY="${PYTHON:-python3}"
 
 OUT="${OUT:-$REPO_ROOT/.experiments/uniformity}"
 mkdir -p "$OUT"
-CMSGEN="${CMSGEN:-${GPAP_HOME:-/root/.gpap}/bin/cmsgen}"
+GPAP_HOME="${GPAP_HOME:-$REPO_ROOT/.gpap}"      # tool root: one spelling, run_full_eval.sh's
+CMSGEN="${CMSGEN:-$GPAP_HOME/bin/cmsgen}"
 CMS_ARGS=()
 [ -x "$CMSGEN" ] && CMS_ARGS=(--cmsgen "$CMSGEN") \
     || echo "[warn] no cmsgen — uniformity runs GPAP-only (no head-to-head column)" >&2

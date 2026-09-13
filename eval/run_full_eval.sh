@@ -40,8 +40,11 @@ PY="${PYTHON:-$REPO_ROOT/.venv/bin/python}"
 [ -x "$PY" ] || PY="$(command -v python3)"
 export PYTHONPATH="${PYTHONPATH:-.}"
 
-REPO="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-GPAP_HOME="${GPAP_HOME:-$REPO/.gpap}"
+# THE tool root, and the one spelling of it: scripts/build_cmsgen.sh installs into
+# $GPAP_HOME, so a hard-coded `<repo>/.gpap` silently ignores an override and `/root/.gpap`
+# is nobody's checkout. Every eval/colab wrapper copies these two lines rather than
+# inventing a third spelling; six of them had.
+GPAP_HOME="${GPAP_HOME:-$REPO_ROOT/.gpap}"
 CMSGEN="${CMSGEN:-$GPAP_HOME/bin/cmsgen}"
 GPU_SLUG="$($PY -c "
 import re, torch

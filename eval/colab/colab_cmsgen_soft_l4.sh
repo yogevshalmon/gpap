@@ -26,7 +26,8 @@ export TARGETS="${TARGETS:-rare random}"
 export CYCLES="${CYCLES:-25 50}"
 export N_TIME="${N_TIME:-50000}"
 export TIME_LIMIT="${TIME_LIMIT:-60}"
-export CMSGEN="${CMSGEN:-${GPAP_HOME:-/root/.gpap}/bin/cmsgen}"
+GPAP_HOME="${GPAP_HOME:-$REPO_ROOT/.gpap}"      # tool root: one spelling, run_full_eval.sh's
+export CMSGEN="${CMSGEN:-$GPAP_HOME/bin/cmsgen}"
 
 # THE one changed bit, and a separate output tree so the two arms cannot overwrite each other.
 export EXTRA_ARGS="${EXTRA_ARGS:---allow-soft}"

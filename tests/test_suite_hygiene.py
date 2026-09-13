@@ -160,7 +160,7 @@ def test_the_anchored_paths_exist(name):
 #: for the repo root has to BE the repo root — the depth is written by hand, and moving a file one
 #: directory changes the answer without changing the line.
 _ROOT_DECL = re.compile(
-    r"^(ROOT|REPO|REPO_ROOT|_REPO_ROOT)\s*=\s*(?:str\()?"
+    r"^(ROOT|REPO|REPO_ROOT|_REPO_ROOT|_REPO)\s*=\s*(?:str\()?"
     r"(?:Path\(__file__\)\.resolve\(\)\.parents\[(?P<n>\d+)\]"
     r'|os\.path\.abspath\(os\.path\.join\(os\.path\.dirname\(__file__\)(?P<ups>(?:,\s*"\.\.")+)'
     r"|(?P<dirnames>(?:os\.path\.dirname\()+)os\.path\.abspath\(__file__\))",
@@ -196,3 +196,73 @@ def test_every_repo_root_constant_is_the_repo_root():
                              f": {m.group(1)} -> {got}")
     assert checked >= 15, f"the declaration pattern stopped matching (only {checked} found)"
     assert not wrong, "repo-root constant does not resolve to the repo root:\n  " + "\n  ".join(wrong)
+
+
+#: Where `gpap-results` may be SPELLED. rival_common.results_root is the one derivation; the two
+#: shell entry points force the same normalization; paper_tables names it in prose.
+_RESULTS_SITES = {"eval/rivals/rival_common.py", "eval/artifact/make_artifact.sh",
+                  "eval/artifact/reproduce.sh", "eval/artifact/paper_tables.py"}
+
+
+def test_the_results_root_has_one_spelling(tmp_path):
+    """`$GPAP_RESULTS` had four derivations, and two of them left the fallback's `..` in the
+    string. That `..` is not inert: it resolves PHYSICALLY when the path is opened (the kernel
+    follows the symlink, then the `..`) and LEXICALLY when the same string goes through
+    `abspath`/`relpath`, so for a checkout reached through a symlink one spelling named two
+    directories — and `display_path` decides what a SHIPPED provenance header says by comparing
+    exactly that. One derivation now, and the two shell entry points force it with `cd -P`,
+    because bash's `cd` is logical where Python's `getcwd` is not.
+
+    Both halves are gated: nowhere else may spell it, and the two languages must agree — checked
+    THROUGH A SYMLINK, because that is the only layout where the lexical and physical forms differ
+    and a plain checkout would pass either way (the agreement assertion was vacuous until it ran
+    here)."""
+    repo = pathlib.Path(__file__).resolve().parents[1]
+    skip = {".gpap", "build", "build-asan", "__pycache__", ".venv", "venv", ".git", "node_modules"}
+    me = pathlib.Path(__file__).resolve()
+    found, offenders = set(), []
+    for f in sorted(repo.rglob("*.py")) + sorted(repo.rglob("*.sh")):
+        if skip & set(f.parts) or f.resolve() == me:   # a gate naming the string is not a spelling
+            continue
+        rel = f.relative_to(repo).as_posix()
+        for i, line in enumerate(f.read_text(errors="ignore").splitlines(), 1):
+            if "gpap-results" not in line or line.lstrip().startswith("#"):
+                continue
+            found.add(rel)
+            if rel not in _RESULTS_SITES:
+                offenders.append(f"{rel}:{i}: a fifth spelling — use rival_common.results_root")
+            elif f.suffix == ".sh" and "cd -P" not in line:
+                offenders.append(f"{rel}:{i}: shell fallback must normalize with `cd -P`")
+    assert not offenders, "the results root drifted:\n  " + "\n  ".join(offenders)
+    assert found == _RESULTS_SITES, f"the scan stopped matching: {found} != {_RESULTS_SITES}"
+
+    # ...and the two languages must land in the same directory. The shell halves are evaluated
+    # AS WRITTEN — the `RESULTS=` line is read out of each file, not retyped here — through a
+    # SYMLINKED checkout, which is the only layout where they can disagree: bash's `cd` and `$PWD`
+    # are logical, so dropping the `-P` silently yields the symlink's parent instead of the
+    # checkout's real one. (Python needs no forcing: an imported module's `__file__` already comes
+    # back resolved. `results_root` says `realpath` anyway, so the intent is in the code rather
+    # than inherited from an interpreter detail.)
+    import os
+    import subprocess
+    import sys
+    link = tmp_path / "checkout"
+    link.symlink_to(repo, target_is_directory=True)
+    env = {k: v for k, v in os.environ.items() if k != "GPAP_RESULTS"}
+    py = subprocess.run([sys.executable, "-c",
+                         "from eval.rivals.rival_common import results_root; print(results_root())"],
+                        cwd=str(link), env={**env, "PYTHONPATH": str(link)},
+                        capture_output=True, text=True)
+    assert py.returncode == 0, py.stderr
+    for rel in ("eval/artifact/reproduce.sh", "eval/artifact/make_artifact.sh"):
+        line = next((ln.strip() for ln in (repo / rel).read_text().splitlines()
+                     if ln.strip().startswith("RESULTS=")), None)
+        assert line, f"{rel}: no RESULTS= line to check — did the entry point stop deriving it?"
+        # NEWLINES, not `;`: one of these lines ends in a trailing comment, which would
+        # otherwise swallow the printf and compare against an empty string.
+        sh = subprocess.run(["bash", "-c", f'REPO_ROOT="$1"\n{line}\nprintf %s "$RESULTS"',
+                             "_", str(link)], env=env, capture_output=True, text=True)
+        assert sh.returncode == 0, f"{rel}: {sh.stderr}"
+        assert sh.stdout == py.stdout.strip(), \
+            (f"through a symlinked checkout {rel} resolves {sh.stdout!r} while "
+             f"rival_common.results_root says {py.stdout.strip()!r}")
