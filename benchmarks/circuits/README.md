@@ -7,7 +7,7 @@ full sets into `.gpap/benchmarks/`.
 |---|---|---|---|---|
 | `bench/comb/` | ISCAS-85, **all 11** (c17, c432…c7552) | classic distribution (the DEMOTIC set) | de-facto public research benchmarks | Brglez & Fujiwara, ISCAS 1985 |
 | `bench/seq/s*.bench` | ISCAS-89 (the 8 in Recurrent-CircuitSAT's Table II) | classic distribution; `s208.1`, `s4863`, `s15850.1`, `s35932`, `s38584` from the rivals' pinned checkouts | de-facto public research benchmarks | Brglez, Bryan & Kozminski, ISCAS 1989 |
-| `bench/seq/b*.bench` | ITC'99 (I99T) | [cad-polito-it/I99T](https://github.com/cad-polito-it/I99T) | **EUPL-1.2** (see upstream LICENSE) | Corno, Sonza Reorda & Squillero, *IEEE D&T* 17(3), 2000 |
+| `bench/seq/b*.bench` | ITC'99 (I99T) | [cad-polito-it/I99T](https://github.com/cad-polito-it/I99T) | **EUPL-1.2** — text in [LICENSE-ITC99.EUPL-1.2.txt](LICENSE-ITC99.EUPL-1.2.txt), shipped because the licence requires it of a redistributor | Corno, Sonza Reorda & Squillero, *IEEE D&T* 17(3), 2000 |
 | `epfl/` | EPFL combinational suite (arithmetic + random_control, AIG) | [lsils/benchmarks](https://github.com/lsils/benchmarks) | freely usable research benchmarks (MIT-licensed repo) | Amarù, Gaillardon & De Micheli, IWLS 2015 |
 | `hwmcc17/` | HWMCC'17 single-property AIGs | [fmv.jku.at/hwmcc17](https://fmv.jku.at/hwmcc17/) | competition benchmarks, free for research use | Biere, van Dijk & Heljanko, *HWMCC 2017* (FMCAD'17 report) |
 
