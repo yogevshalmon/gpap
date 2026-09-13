@@ -9,6 +9,7 @@ import contextlib
 import math
 import os
 import sys
+from gpap.verdict import fmt_pct
 
 CIRCUIT_EXTS = (".bench", ".aig", ".aag")
 
@@ -64,20 +65,14 @@ def _sound_label(info):
     return _SOUND_LABEL[sound_verdict(info)]
 
 
-def _pct(frac):
-    """The success rate, rendered the way `gpap bench` renders it (gpap/verdict.py)."""
-    from gpap.verdict import fmt_pct
-    return fmt_pct(frac)
-
 
 def _ensure_cnf(args):
     """(cnf_path, temp_path_or_None, encode_seconds_or_None) for a CNF or a circuit input, and
     shared by every subcommand that takes an instance. A circuit is unrolled to a scratch CNF
     whose `c wire ...` / `c encoder ...` comments let output name each column by its wire.
 
-    The scratch CNF goes to `gpap.paths.tmp_dir()` (`<repo>/.gpap/tmp`), not to the system temp
-    directory: a deep unroll is a big file, `/tmp` is a RAM-backed tmpfs on several current
-    distributions, and this path gets PRINTED — `.gpap/tmp/b10-c25-kzdub143.cnf` says what it holds."""
+    The scratch CNF goes to the one scratch directory, and its name says what it holds because
+    this path is printed (gpap/paths.py)."""
     path = args.input
     if not path.endswith(CIRCUIT_EXTS):
         return path, None, None
@@ -86,10 +81,15 @@ def _ensure_cnf(args):
     from gpap import paths
     stem = f"{os.path.splitext(os.path.basename(path))[0]}-c{args.cycles}"
     tmp = paths.scratch_file(stem, ".cnf")
-    # Shown relative to the working directory when it is below it (the usual case: the checkout's
-    # own .gpap), absolute otherwise. Nothing chdirs, so the two name the same file.
-    rel = os.path.relpath(tmp)
-    tmp = tmp if rel.startswith(os.pardir) else rel
+    # Repo-relative only when the reader stands in the checkout, where `.gpap/tmp/x.cnf` is the
+    # short name they know; absolute otherwise, since from an ancestor the relative form is a
+    # bare `gpu-sat/gpap/.gpap/...` that reads like someone else's tree. Nothing chdirs, so
+    # both forms open the same file.
+    root = paths.repo_root()
+    cwd = os.getcwd()
+    if root is not None and (cwd == str(root) or cwd.startswith(str(root) + os.sep)):
+        rel = os.path.relpath(tmp)
+        tmp = tmp if rel.startswith(os.pardir) else rel
     t0 = _time.perf_counter()
     try:
         if path.endswith(".bench"):
@@ -158,10 +158,7 @@ def _sample_progress(args):
     formula's shape is known before either, so both belong where they happen. The library does
     not print; this is where its phase order becomes the console's order.
 
-    Every line here is FLUSHED. Python block-buffers a pipe, so without it `gpap sample | tee
-    run.log`, a CI log and a redirected nohup run all get the whole transcript at exit — which is
-    the case where watching the phases arrive matters most, and the one place the tty testing was
-    guaranteed not to show."""
+    Every line goes through `print_now`, which says why it flushes."""
     def report(event, d):
         if event == "formula":
             # |sup| = the DECLARED support (the width of a printed row); `support_size` is what
@@ -257,7 +254,7 @@ def _sample_run(args, device, path, tmp, encode_s):
     print(f"  {info['n_models']:,}{capped} models in {info['wall_total_s']:.1f}s e2e "
           f"({info['wall_timed_s']:.1f}s sampling)")
     print(f"  {info['samples_per_s']:,.0f} samples/s (steady-state), "
-          f"{info.get('sps_e2e_total') or 0:,.0f}/s end-to-end | success {_pct(info['success_rate'])} "
+          f"{info.get('sps_e2e_total') or 0:,.0f}/s end-to-end | success {fmt_pct(info['success_rate'])} "
           f"| sound-check {_sound_label(info)}")
     if info["n_models"] == 0 and not info.get("unsat") and info["n_clauses"]:
         # Every trajectory conflicted. The three causes want different responses, so name them.

@@ -42,13 +42,16 @@ export PYTHONPATH="${PYTHONPATH:-.}"
 
 # Ask, never recompute: gpap/paths.py is the one definition (see its docstring).
 GPAP_HOME="$(PYTHONPATH="$REPO_ROOT" "${PYTHON:-python3}" -m gpap.paths home)"
+: "${GPAP_HOME:?cannot resolve — python3 must be able to import the repo (gpap/paths.py, eval/paths.py)}"
 CMSGEN="${CMSGEN:-$GPAP_HOME/bin/cmsgen}"
 GPU_SLUG="$($PY -c "
 import re, torch
 n = torch.cuda.get_device_properties(0).name if torch.cuda.is_available() else 'cpu'
 print(re.sub(r'[^a-z0-9]+', '-', n.lower()).strip('-'))" 2>/dev/null || echo unknown-gpu)"
 OUT_EXPLICIT="${OUT:-}"          # remember whether the caller chose the directory (smoke needs it)
-OUT="${OUT:-$(PYTHONPATH="$REPO_ROOT" "${PYTHON:-python3}" -m eval.paths experiments)/full_eval/$GPU_SLUG}"
+EXPERIMENTS="$(PYTHONPATH="$REPO_ROOT" "${PYTHON:-python3}" -m eval.paths experiments)"
+: "${EXPERIMENTS:?cannot resolve — python3 must be able to import the repo (gpap/paths.py, eval/paths.py)}"
+OUT="${OUT:-$EXPERIMENTS/full_eval/$GPU_SLUG}"
 LOGS="$OUT/logs"
 mkdir -p "$OUT" "$LOGS"
 
@@ -93,7 +96,7 @@ if [ "$STAGE" = "smoke" ]; then
     RIVAL_SEEDS="${RIVAL_SEEDS:-5}"; RIVAL_T="${RIVAL_T:-5}"; RIVAL_STEPS="${RIVAL_STEPS:-1}"
     # Must land elsewhere: stage files share names with the real run, and --resume would then
     # treat 5-second smoke rows as finished work.
-    [ -n "$OUT_EXPLICIT" ] || OUT="$(PYTHONPATH="$REPO_ROOT" "${PYTHON:-python3}" -m eval.paths experiments)/full_eval/${GPU_SLUG}-smoke"
+    [ -n "$OUT_EXPLICIT" ] || OUT="$EXPERIMENTS/full_eval/${GPU_SLUG}-smoke"
     LOGS="$OUT/logs"; SCRATCH="$OUT/cnf"; mkdir -p "$OUT" "$LOGS" "$SCRATCH"
     echo "SMOKE run (tiny budgets, 1-2 instances per family) -> $OUT"
 fi

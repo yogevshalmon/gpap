@@ -33,6 +33,7 @@ PY="${PYTHON:-$REPO_ROOT/.venv/bin/python}"
 
 # Ask, never recompute: eval/paths.py is the one definition (physical, `$GPAP_RESULTS`-aware).
 RESULTS="$(PYTHONPATH="$REPO_ROOT" "${PYTHON:-python3}" -m eval.paths results)"
+: "${RESULTS:?cannot resolve — python3 must be able to import the repo (gpap/paths.py, eval/paths.py)}"
 OUT="${1:-$RESULTS}"
 SRC_DATA="${GPAP_PAPER_DIR:-$RESULTS/paper}"
 COMMIT="$(git rev-parse --short HEAD 2>/dev/null || echo unknown)"
@@ -131,13 +132,13 @@ fi
 # an upload that is permanent once it has a DOI. It has happened twice, from two different
 # generators writing a path they were handed: a committed slide table carried one for a month,
 # and `emission_audit.txt` reached this staging directory with one. Both are fixed at the
-# source (`rival_common.display_path`), so this is the gate that says they stay fixed — checked
+# source (`eval/paths.py::display_path`), so this is the gate that says they stay fixed — checked
 # over the STAGED BYTES, like the verdict above, because that is what a reviewer receives.
 leaks="$(cd "$STAGE" && grep -rlI -E '/home/[a-z][A-Za-z0-9_.-]*/' . 2>/dev/null || true)"
 if [ -n "$leaks" ]; then
     echo "[FATAL] these staged files carry an absolute home path:" >&2
     echo "$leaks" | sed 's/^/          /' >&2
-    echo "        Fix the GENERATOR (eval/rivals/rival_common.py::display_path), regenerate," >&2
+    echo "        Fix the GENERATOR (eval/paths.py::display_path), regenerate," >&2
     echo "        and re-package. GPAP_ARTIFACT_ALLOW_LEAK=1 overrides." >&2
     [ "${GPAP_ARTIFACT_ALLOW_LEAK:-0}" = "1" ] || exit 1
 fi

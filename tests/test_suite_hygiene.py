@@ -160,12 +160,10 @@ def test_the_anchored_paths_exist(name):
     assert pathlib.Path(getattr(conftest, name)).is_dir(), name
 
 
-#: `NAME = <count your way up from __file__>`, in the two spellings the repo uses. Anything named
-#: for the repo root has to BE the repo root — the depth is written by hand, and moving a file one
-#: directory changes the answer without changing the line.
-#: Every way this tree spells "the checkout, counted from this file". A spelling missing from
-#: here is a declaration nothing checks, which is how two of them sat wrong: the count below
-#: is pinned per alternative so losing one reddens instead of passing quietly.
+#: Every way this tree spells "the checkout, counted from this file". The depth is written by
+#: hand, so moving a file changes the answer without changing the line — and a spelling missing
+#: from here is a declaration nothing checks, which is how two of them sat wrong. Each
+#: alternative is required to match below, so losing one reddens instead of passing quietly.
 _ROOT_DECL = re.compile(
     r"^\s*(?P<name>[A-Z_]*(?:ROOT|REPO)[A-Z_]*)\s*=\s*(?:str\()?"
     r"(?:(?:pathlib\.)?Path\(__file__\)\.resolve\(\)"
@@ -180,7 +178,11 @@ def _tracked(*suffixes):
     never redden because of somebody's local `.experiments/` or a third-party checkout under
     `.gpap/` — a gate that fires on scratch is a gate that gets muted."""
     out = subprocess.run(["git", "ls-files"], cwd=REPO, capture_output=True, text=True)
-    return [f for f in out.stdout.split() if f.endswith(suffixes)]
+    found = [f for f in out.stdout.split() if f.endswith(suffixes)]
+    # A scan over zero files asserts nothing. Without this, an sdist or a missing git turned two
+    # of these gates green instead of red — the silence this file exists to prevent.
+    assert found, f"`git ls-files` produced no {suffixes} files (no git? not a checkout?)"
+    return found
 
 
 def test_every_repo_root_constant_is_the_repo_root():
@@ -232,16 +234,31 @@ _MANAGED = {".gpap": "gpap/paths.py", ".experiments": "eval/paths.py",
 _SHELL_DERIVATIONS = ("${GPAP_HOME:-", "${GPAP_RESULTS:-", "${GPAP_EXPERIMENTS:-")
 
 
-def _names_a_managed_root(value: str) -> bool:
-    """Is `value` a managed directory used as a whole path SEGMENT — not merely mentioned?
+def _is_managed_path(value: str) -> bool:
+    """Is this string a PATH rooted at a managed directory, rather than prose describing one?
 
-    The distinction is what makes this gate usable: help text saying "else <repo>/.gpap/bin/abc",
-    and the README demo's verbatim `.gpap/tmp/...` transcript line, describe a path and must be
-    left alone; `os.path.join(root, ".gpap", "bin")` builds one and must not exist."""
+    A path literal has no whitespace; prose about a path does. That one discriminator is what lets
+    the token match a whole path COMPONENT — which is what closes `f"{root}/.gpap/bin"`,
+    `root + "/.gpap/bin"` and `"../gpap-results/paper"` — without flagging `gpap/cli.py`'s help
+    text or the README demo's verbatim transcript line, and without a whitelist of prose sites.
+
+    An ABSOLUTE token only counts as a prefix: `/tmp` must not match the bare component `"tmp"`,
+    which is the commonest path component there is and used to make this gate fire on
+    `tmp_path / "tmp"`.
+
+    What it does NOT catch, stated rather than implied: a path assembled at runtime from pieces
+    that are individually innocent, and `tempfile`'s own defaults (no literal to see). The
+    structural rule — paths come from two modules — is the protection; this catches the
+    reintroduction of a literal."""
+    v = value.strip()
+    if not v or any(c.isspace() for c in v):
+        return False
+    parts = [p for p in v.replace("\\", "/").split("/") if p and p != "."]
     for tok in _MANAGED:
-        if value == tok or value == tok.lstrip("/"):
-            return True
-        if value.startswith(tok + "/") or value.endswith("/" + tok) or f"/{tok}/" in value:
+        if tok.startswith("/"):
+            if v == tok or v.startswith(tok + "/"):
+                return True
+        elif tok in parts:
             return True
     return False
 
@@ -249,42 +266,49 @@ def _names_a_managed_root(value: str) -> bool:
 def test_only_the_paths_modules_name_a_managed_directory():
     """ONE definition per managed directory, enforced rather than documented.
 
-    Every path bug this suite has seen was the same shape: a file computed a managed directory
-    itself, and its copy of the rule drifted — four scratch conventions, four derivations of the
-    results root (two of which disagreed on a symlinked checkout), a VM path built from the LOCAL
-    machine's variable. Documenting the rule at each site is what produced three copies of one
-    paragraph, one of them false. So the rule lives in two modules and nothing else may spell it.
+    Every path bug this suite has seen was one shape: a file computed a managed directory itself
+    and its copy of the rule drifted — five scratch conventions, four derivations of the results
+    root, a VM path built from the LOCAL machine's variable. Documenting the rule at each site is
+    what produced three copies of one paragraph, one of them false. So the rule lives in two
+    modules, and their own tests, and nothing else spells it.
 
-    Python is checked through the AST, on path CONSTRUCTION only (`os.path.join`, `Path / str`),
-    so prose and help text are not false positives and no whitelist is needed. Shell is checked
-    for re-deriving a root it should be asking for."""
+    Scanned: tracked `.py` and `.sh`. A workflow YAML is not — `.github/workflows/ci.yml`
+    links against a `/tmp/libcuda.so` stub it generates, which is right for an ephemeral
+    runner with no checkout to outlive, and is deliberately none of these roots."""
+    exempt = set(_MANAGED.values()) | {"tests/test_suite_hygiene.py", "tests/test_paths.py"}
     bad = []
     for rel in _tracked(".py"):
-        if rel in set(_MANAGED.values()) or rel == "tests/test_suite_hygiene.py":
+        if rel in exempt:
             continue
         try:
             tree = ast.parse((REPO / rel).read_text(errors="ignore"))
         except SyntaxError:                       # not ours to parse; other gates cover syntax
             continue
+        docs = set()
         for node in ast.walk(tree):
-            if isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute) \
-                    and node.func.attr == "join":
-                parts = node.args
-            elif isinstance(node, ast.BinOp) and isinstance(node.op, ast.Div):
-                parts = [node.left, node.right]
-            else:
-                continue
-            for part in parts:
-                if isinstance(part, ast.Constant) and isinstance(part.value, str) \
-                        and _names_a_managed_root(part.value):
-                    owner = next(o for t, o in _MANAGED.items() if t in part.value)
-                    bad.append(f"{rel}:{part.lineno}: builds {part.value!r} — ask {owner}")
+            body = getattr(node, "body", None)
+            if isinstance(node, (ast.Module, ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)) \
+                    and body and isinstance(body[0], ast.Expr) \
+                    and isinstance(body[0].value, ast.Constant) \
+                    and isinstance(body[0].value.value, str):
+                docs.add(id(body[0].value))
+        for node in ast.walk(tree):
+            if isinstance(node, ast.Constant) and isinstance(node.value, str) \
+                    and id(node) not in docs and _is_managed_path(node.value):
+                bad.append(f"{rel}:{node.lineno}: the path {node.value[:40]!r} — ask its owner")
     for rel in _tracked(".sh"):
         for i, line in enumerate((REPO / rel).read_text(errors="ignore").splitlines(), 1):
-            code = re.sub(r"(^|\s)#.*$", "", line)      # a comment may describe a path freely
+            code = re.sub(r"(^|\s)#.*$", "", line)   # a comment may describe a path freely
             for d in _SHELL_DERIVATIONS:
                 if d in code:
                     bad.append(f"{rel}:{i}: re-derives {d} — ask `python3 -m gpap.paths`")
+            for tok in _MANAGED:
+                # A component, so `OUT=.experiments/x` counts (every driver cd's to the repo first,
+                # so a leading slash was never required); `$OUT/.gpap_cache` does not.
+                lead = r"(?:^|[\s\"'=:(])" if tok.startswith("/") else r"(?:^|[\s\"'=:(/])"
+                if re.search(lead + re.escape(tok.lstrip("/") if not tok.startswith("/") else tok)
+                             + r"(?:/|\"|\}|\s|$)", code):
+                    bad.append(f"{rel}:{i}: names {tok} literally — ask its owner")
     assert not bad, "a managed directory is spelled outside its owner:\n  " + "\n  ".join(bad)
 
 
@@ -310,3 +334,34 @@ def test_every_internal_import_resolves():
                 broken.append(f"{rel}: {mod}")
     assert not broken, ("an internal import names a module that does not exist:\n  "
                         + "\n  ".join(sorted(set(broken))))
+
+
+def test_every_shell_ask_for_a_path_is_guarded():
+    """A shell script that ASKS for a directory must refuse to continue without one.
+
+    These drivers run `set -uo pipefail` deliberately — no `-e`, because a campaign must survive a
+    failing stage — so a failed command substitution leaves the variable EMPTY and execution goes
+    on. `make_artifact.sh` then reached `rm -rf "$OUT/..."` with `OUT=""`, i.e. at the filesystem
+    root: denied for a user, DONE for root, which is what a rented VM is. Pure shell could not fail
+    this way; asking a module introduced it.
+
+    Written because the first attempt at the guards missed four sites — including the campaign
+    driver — and nothing noticed. Under `set -e` the assignment itself aborts, so those scripts are
+    exempt (their failure is loud already, if terse)."""
+    missing = []
+    for rel in _tracked(".sh"):
+        text = (REPO / rel).read_text(errors="ignore")
+        if "set -euo" in text:                      # aborts at the assignment; no guard reachable
+            continue
+        lines = text.splitlines()
+        for i, line in enumerate(lines):
+            if not re.search(r"-m (?:gpap|eval)\.paths \w+", line):
+                continue
+            var = re.match(r"\s*(?:export\s+)?([A-Za-z_][A-Za-z0-9_]*)=", line)
+            if not var:
+                missing.append(f"{rel}:{i + 1}: an ask that assigns nothing")
+                continue
+            if f"{var.group(1)}:?" not in "\n".join(lines[i + 1:i + 3]):
+                missing.append(f"{rel}:{i + 1}: {var.group(1)} is not guarded by `: \"${{...:?}}\"`")
+    assert not missing, ("a shell ask may not continue with an empty path:\n  "
+                         + "\n  ".join(missing))

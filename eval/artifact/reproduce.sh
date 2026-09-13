@@ -61,6 +61,7 @@ if [ -z "$REFERENCE" ]; then
     # artifact bundles, and every step downstream then ran happily over nothing.
     # Ask, never recompute: eval/paths.py is the one definition.
     RESULTS="$(PYTHONPATH="$REPO_ROOT" "${PYTHON:-python3}" -m eval.paths results)"
+    : "${RESULTS:?cannot resolve — python3 must be able to import the repo (gpap/paths.py, eval/paths.py)}"
     for cand in "$RESULTS/paper/data" \
                 "$REPO_ROOT/artifact-data/paper/data"; do
         [ -n "$(ls "$cand"/rivals_*.json 2>/dev/null)" ] && { REFERENCE="$cand"; break; }
@@ -108,7 +109,9 @@ GPU_SLUG="$($PY -c "
 import re, torch
 n = torch.cuda.get_device_properties(0).name if torch.cuda.is_available() else 'cpu'
 print(re.sub(r'[^a-z0-9]+', '-', n.lower()).strip('-'))" 2>/dev/null || echo unknown-gpu)"
-OUT="${OUT:-$(PYTHONPATH="$REPO_ROOT" "${PYTHON:-python3}" -m eval.paths experiments)/artifact/$GPU_SLUG-$STEP}"
+EXPERIMENTS="$(PYTHONPATH="$REPO_ROOT" "${PYTHON:-python3}" -m eval.paths experiments)"
+: "${EXPERIMENTS:?cannot resolve — python3 must be able to import the repo (eval/paths.py)}"
+OUT="${OUT:-$EXPERIMENTS/artifact/$GPU_SLUG-$STEP}"
 SUBSET_JSON="$REPO_ROOT/eval/artifact/subset.json"
 
 # Every step runs from the repo root, so a relative --out/--reference would resolve there and

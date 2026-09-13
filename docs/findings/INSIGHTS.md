@@ -46,10 +46,12 @@ the explanation got copied to each one and three copies were wrong. Now `.gpap/`
 machinery including ALL scratch (`gpap/paths.py`), `.experiments/` is a run's output and
 `$GPAP_RESULTS` the record (`eval/paths.py`), nothing else names them, and shell ASKS
 (`python3 -m gpap.paths home`) rather than reimplementing the rule in a second language — which is
-what the divergences all were. Gated by tests/test_suite_hygiene.py: path construction is checked
-through the AST so prose is not a false positive, every repo-root constant is re-derived in all
-four spellings the tree uses, and internal imports must resolve (a driver had imported a module
-from its pre-reorg path for weeks inside an `except` that printed a one-line skip).
+what the divergences all were. Gated by tests/test_suite_hygiene.py — every string
+constant through the AST (a path literal has no whitespace; prose about one does, which is what
+separates them without a whitelist), every repo-root constant re-derived in all four spellings the
+tree uses, every internal import resolved (a driver had imported a module from its pre-reorg path
+for weeks inside an `except` that printed a one-line skip), and every shell ask guarded, because
+asking a module for a path let an empty answer reach `rm -rf`. Behaviour by tests/test_paths.py.
 
 **A phase belongs where it happens, and a printed number must mean one thing (2026-09-12).**
 `gpap sample` read every line off the returned dict, so mining printed below the throughput it ran
@@ -378,7 +380,7 @@ decks have since moved to `$GPAP_RESULTS/paper/slides/`), and `check_emission_sy
 into `emission_audit.txt`, which
 `make_artifact.sh` ships as `artifact-data/paper/emission_audit.txt` — permanent once the archive
 has a DOI. A header is provenance for a reader who does not have our disk, so the path belongs in
-`$GPAP_RESULTS/…` form: `rival_common.display_path` is the one definition, and `make_artifact.sh`
+`$GPAP_RESULTS/…` form: `eval/paths.py::display_path` is the one definition, and `make_artifact.sh`
 refuses to package a staged tree containing one. The frozen row JSONs were already clean.
 
 **A GATE THAT CANNOT FAIL IS NOT A GATE (2026-09-10;

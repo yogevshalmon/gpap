@@ -23,7 +23,9 @@ PY="${PYTHON:-python3}"
 # surprise on a new image — no torch, a renamed card, `unknown-gpu` — would write the sweep
 # where nothing collects it and lose it with the machine. Same reasoning as
 # colab_gpap_circuits_l4.sh. The name is what an L4 slug produced, so nothing moves.
-OUT="${OUT:-$(PYTHONPATH="$REPO_ROOT" "${PYTHON:-python3}" -m eval.paths experiments)/full_eval/nvidia-l4}"
+EXPERIMENTS="$(PYTHONPATH="$REPO_ROOT" "${PYTHON:-python3}" -m eval.paths experiments)"
+: "${EXPERIMENTS:?cannot resolve — python3 must be able to import the repo (eval/paths.py)}"
+OUT="${OUT:-$EXPERIMENTS/full_eval/nvidia-l4}"
 LOGS="$OUT/logs"
 mkdir -p "$OUT" "$LOGS"
 
@@ -86,6 +88,7 @@ want() { case " $STAGES " in *" $1 "*) return 0 ;; *) echo "[skip] $1 (not in ST
 # rows to an armed file, and absent is not zero. CMSGEN=none opts out explicitly.
 # Ask, never recompute: gpap/paths.py is the one definition (see its docstring).
 GPAP_HOME="$(PYTHONPATH="$REPO_ROOT" "${PYTHON:-python3}" -m gpap.paths home)"
+: "${GPAP_HOME:?cannot resolve — python3 must be able to import the repo (gpap/paths.py, eval/paths.py)}"
 CMSGEN="${CMSGEN:-$GPAP_HOME/bin/cmsgen}"
 CMS_ARGS=()
 if [ "$CMSGEN" != "none" ]; then

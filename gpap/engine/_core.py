@@ -54,6 +54,10 @@ def _candidates() -> list[Path]:
     out = [Path(env)] if env else []
     build = os.environ.get("GPAP_BUILD_DIR")
     if build:
+        # Same rule as $GPAP_LIB above: an explicit build tree with no library in it is a typo,
+        # and falling through to `build/` would load the tree the caller was steering away from.
+        if not (Path(build) / "libgpap.so").exists():
+            raise GpapError(-1, "GPAP_BUILD_DIR is set but holds no libgpap.so", build)
         out.append(Path(build) / "libgpap.so")
     here = Path(__file__).resolve()
     repo = here.parents[2]

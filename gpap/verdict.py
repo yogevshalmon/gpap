@@ -34,8 +34,9 @@ def fmt_pct(frac) -> str:
     quantity, and a rounding rule that lives in two places is one that will disagree in two.
 
     At most `PCT_WIDTH` characters, which is what makes it usable in a table — but the small end
-    keeps its MAGNITUDE ("4e-05%", not "<0.01%"), because a rare-pinned instance lives there —
-    recorded rates run down to 3.6e-7 on sin.aig — and the order of magnitude is the story on it. The exact rate is `success_rate` in the row.
+    keeps its MAGNITUDE ("4e-05%", not "<0.01%"), because a rare-pinned instance lives down there
+    and the order of magnitude is the story on it (docs/findings/CLI_DELIVERY_FINDINGS.md §7 has
+    the recorded range). The exact rate is `success_rate` in the row.
     """
     v = 100.0 * frac
     if v != v:                                   # nan: no rate was measured, do not print "0%"

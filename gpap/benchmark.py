@@ -304,8 +304,8 @@ def _build_argparser():
                          "sweep: a 50-cycle b15 unroll parses for minutes before it samples")
     ap.add_argument("--max-vars", type=_POS_INT, default=None,
                     help="same, on variables (the packed-word envelope caps 2N at 16.7M anyway)")
-    # The repo-local scratch (`<repo>/.gpap/tmp`), one place for everything a run writes and
-    # deletes; the campaign driver passes its own `--scratch "$OUT/cnf"` and is unaffected.
+    # Default: the one scratch directory (gpap/paths.py). The campaign driver passes its own
+    # `--scratch "$OUT/cnf"`, which keeps a row's input beside the row, and is unaffected.
     ap.add_argument("--scratch", default=None,
                     help="where converted circuit CNFs and the rival's sample file are written "
                          "(default: <repo>/.gpap/tmp)")

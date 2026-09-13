@@ -64,7 +64,7 @@ engine (regenerate from a fresh `eval/kernel_ab.py` campaign before citing a ker
 ## Regenerate
 
 ```bash
-R=${GPAP_RESULTS:-../gpap-results}
+R=$(PYTHONPATH=. python3 -m eval.paths results)
 bash $R/paper/regenerate.sh      # checks data/MANIFEST.sha256, then: tables -> gate -> audit
                                  # -> figures -> copies RESULTS.md + tables.tex in here
 ```

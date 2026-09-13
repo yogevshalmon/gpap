@@ -22,10 +22,13 @@ cd "$REPO_ROOT"
 export PYTHONPATH="$REPO_ROOT"
 PY="${PYTHON:-python3}"
 
-OUT="${OUT:-$(PYTHONPATH="$REPO_ROOT" "${PYTHON:-python3}" -m eval.paths experiments)/uniformity}"
+EXPERIMENTS="$(PYTHONPATH="$REPO_ROOT" "${PYTHON:-python3}" -m eval.paths experiments)"
+: "${EXPERIMENTS:?cannot resolve — python3 must be able to import the repo (eval/paths.py)}"
+OUT="${OUT:-$EXPERIMENTS/uniformity}"
 mkdir -p "$OUT"
 # Ask, never recompute: gpap/paths.py is the one definition (see its docstring).
 GPAP_HOME="$(PYTHONPATH="$REPO_ROOT" "${PYTHON:-python3}" -m gpap.paths home)"
+: "${GPAP_HOME:?cannot resolve — python3 must be able to import the repo (gpap/paths.py, eval/paths.py)}"
 CMSGEN="${CMSGEN:-$GPAP_HOME/bin/cmsgen}"
 CMS_ARGS=()
 [ -x "$CMSGEN" ] && CMS_ARGS=(--cmsgen "$CMSGEN") \

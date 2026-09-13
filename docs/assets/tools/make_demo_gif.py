@@ -1,12 +1,9 @@
 """Render the README's terminal demo GIF from a verbatim `gpap sample` cast.
 
-The text below is copied verbatim from a real `gpap sample` run, character for character:
-nothing is edited. The two long lines are wrapped at a token boundary with a hanging indent —
-tidier than a terminal, which hard-wraps mid-token and indents nothing — which is what keeps the
-frame 812px wide at one pixel per pixel in the README. It was captured from a scratch directory
-(which is where `--out stim.out` went) with `$GPAP_HOME` set to `<that directory>/.gpap`, so that
-nothing landed in the checkout; that changes no line of the transcript, because `.gpap/tmp/...` is
-exactly what the scratch CNF's path is in a default run from a checkout (gpap/paths.py).
+The text below is copied from a real `gpap sample` run; the ONE edit is the line wrapping. The
+two long lines are wrapped at a token boundary with a hanging indent — tidier than a terminal,
+which hard-wraps mid-token and indents nothing — which is what keeps the frame 812px wide at one
+pixel per pixel in the README. Capture recipe: docs/assets/README.md.
 
 IT IS A TRANSCRIPT, NOT A BENCHMARK. The rates in it are one run on one laptop GPU and belong to
 no table; how published throughput is measured is `docs/BENCHMARKING.md`. That is also why the
@@ -48,8 +45,8 @@ BAR_H = 30
 # sound-check clause whether or not --verify-sound was passed, so it stays, dimmed.
 CMD_LINES = ["gpap sample b10.bench --cycles 25 -n 50000 --target rare --out stim.out"]
 
-# (segments, delay_ms) — segments are (text, colour, bold). Verbatim from the cast; the two long
-# lines are wrapped with a hanging indent, the way the terminal wrapped them. The ORDER is the
+# (segments, delay_ms) — segments are (text, colour, bold). Verbatim from the cast, wrapped as
+# the docstring describes. The ORDER is the
 # run's order, which is the point of the sequence: the formula, then what mining decided, then
 # the result. Each line's delay is roughly the pause the run itself had there, so the hold after
 # `mined` is the sampling.

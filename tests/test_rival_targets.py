@@ -1327,7 +1327,7 @@ def test_a_recorded_failure_is_only_honoured_when_asked_for():
     from eval.rivals.rival_common import (grant_key, lookup_grant,  # noqa: PLC0415
                                           lookup_recorded_failure)
 
-    grants = {"_path": "/tmp/g.json", "recurrent": {
+    grants = {"_path": "grants/g.json", "recurrent": {
         grant_key("b17", "rare", 25, "abc"): {"batch": None, "error": "did not initialize: ..."},
         grant_key("b03", "rare", 25, "abc"): {"batch": 300_000, "start_point": 4},
     }}

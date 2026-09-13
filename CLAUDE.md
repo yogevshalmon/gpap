@@ -93,7 +93,7 @@ tests/                     # pytest; circuit CNFs generated from benchmarks/circ
 .gpap/                     # DISPOSABLE MACHINERY, one root for it: built/fetched tools, sources,
                            #   benchmark sets, and `tmp/` — ALL scratch, every layer. Gitignored,
                            #   not $HOME, not /tmp; `$GPAP_HOME` moves it. `gpap/paths.py` owns it
-.experiments/              # a run's output while it is produced, then mirrored to $GPAP_RESULTS
+.experiments/              # a run's output while it is produced, then hand-copied to $GPAP_RESULTS
                            #   (the record, outside the repo). Both owned by `eval/paths.py`.
                            #   Nothing else names these three; shell asks. gpap/paths.py says why
 ```
