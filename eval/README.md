@@ -33,7 +33,7 @@ Three roots, and which one a file belongs in follows from how long it lives:
 | root | holds | owner |
 |---|---|---|
 | `.gpap/` | built tools, fetched sources and benchmark sets, **and all scratch** — delete it and you lose only time (`$GPAP_HOME` moves it) | `gpap/paths.py` |
-| `.experiments/` | a run's rows, logs and plots while it produces them, then mirrored out (`$GPAP_EXPERIMENTS`) | `eval/paths.py` |
+| `.experiments/` | a run's rows, logs and plots while it produces them, then hand-copied into the record — nothing automates that step (`$GPAP_EXPERIMENTS` moves the root) | `eval/paths.py` |
 | `$GPAP_RESULTS` | the record, outside the checkout so deleting either of the above cannot touch evidence | `eval/paths.py` |
 
 Nothing else names one of those directories: a shell script asks (`python3 -m eval.paths results`)

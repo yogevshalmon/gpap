@@ -23,6 +23,7 @@ export N_TIME="${N_TIME:-50000}"
 export TIME_LIMIT="${TIME_LIMIT:-60}"
 # Ask, never recompute: gpap/paths.py is the one definition (see its docstring).
 GPAP_HOME="$(PYTHONPATH="$REPO_ROOT" "${PYTHON:-python3}" -m gpap.paths home)"
+: "${GPAP_HOME:?cannot resolve — python3 must be able to import the repo (gpap/paths.py, eval/paths.py)}"
 export CMSGEN="${CMSGEN:-$GPAP_HOME/bin/cmsgen}"
 
 if [ ! -x "$CMSGEN" ]; then

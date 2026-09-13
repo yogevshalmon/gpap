@@ -38,6 +38,17 @@ C_API_BIN = _bin("gpap_c_api")
 pytestmark = pytest.mark.gpu
 
 
+def _need_cuda():
+    """Skip unless a CUDA device is here, and hand back `torch` for the callers that go on to
+    use it. The C example needs a DRIVER, not torch — torch is only how a test asks whether one
+    is present. One helper, so three copies of the guard cannot drift apart."""
+    pytest.importorskip("torch")
+    import torch
+    if not torch.cuda.is_available():
+        pytest.skip("needs CUDA")
+    return torch
+
+
 def _need(binary: Path):
     if not binary.exists():
         pytest.skip(f"{binary.name} not built (scripts/build_core.sh)")
@@ -220,10 +231,7 @@ def _probe(cnf: Path, width: int):
 def test_probe_finds_the_same_failed_literals_as_python(tmp_path):
     """The C++ face and the Python face are two skins on ONE core sweep, so they must agree on
     the clause SET — not merely on how many were found."""
-    pytest.importorskip("torch")
-    import torch
-    if not torch.cuda.is_available():
-        pytest.skip("needs CUDA")
+    torch = _need_cuda()
     from gpap.engine import core_available
     if not core_available():
         pytest.skip("needs a built libgpap")
@@ -293,10 +301,7 @@ def test_c_api_example_checks_both_entry_points_through_the_raw_abi():
 
     The example self-checks (it exits non-zero unless x1=TRUE reaches a fixpoint and x1=FALSE
     conflicts), so the assertion is its exit status plus the verdict it printed."""
-    pytest.importorskip("torch")
-    import torch
-    if not torch.cuda.is_available():
-        pytest.skip("needs CUDA")
+    _need_cuda()
     r = _c_api()
     assert r.returncode == 0, f"gpap_c_api failed:\n{r.stdout}\n{r.stderr}"
     assert "PASS" in r.stdout, r.stdout
@@ -310,10 +315,7 @@ def test_c_api_sampling_models_satisfy_the_formula(tmp_path):
     The example prints its own soundness verdict off `gpap_check_sound`, which is the DEVICE's
     answer; this re-derives it on the host from the printed bits, so a readout that gathered the
     wrong columns cannot agree with itself. Under 32 variables, so no model is truncated."""
-    pytest.importorskip("torch")
-    import torch
-    if not torch.cuda.is_available():
-        pytest.skip("needs CUDA")
+    _need_cuda()
     # 8 variables, and every clause length the packed word distinguishes (unit, binary, long).
     clauses = [[1, 2, 3], [-1, -2], [4, 5], [-4, -5], [6], [-7, 8], [7, -8], [2, -3, 5]]
     nv = 8

@@ -5,7 +5,7 @@ Measures on this GPU: (1) throughput vs CMSGen (GPAP samples/s / CMSGen samples/
 geomean), (2) quality parity via 2-wise coverage, (3) K-scaling (samples/s along a K ladder up to
 this GPU's auto-K). K auto-sizes to free VRAM under the library's batch cap (default_k_cap), the
 same on every GPU, so rows from two cards are comparable without pinning; --k-cap overrides.
-Results go to benchmarks/colab_sampling_results/<gpu>.json (+ plots); compare_saved() ranks them.
+Results go to .experiments/colab_sampling/<gpu>.json (+ plots); compare_saved() ranks them.
 
 Headless usage:
     PYTHONPATH=. .venv/bin/python eval/colab/colab_sampling_benchmark.py --quick --device cuda \

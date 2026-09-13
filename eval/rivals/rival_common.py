@@ -150,11 +150,10 @@ def _abc_fingerprint() -> str:
     import hashlib
     try:
         from gpap import paths
-        # The GPAP-BUILT abc, via its owner. NOTE this is not necessarily the binary that
-        # encoded: `abc_backend.find_abc` prefers an explicit path, then $GPAP_ABC, then PATH,
-        # so on a box whose abc comes from PATH this hashes "absent" and the arm cache key
-        # stops depending on the encoder. Fixing it invalidates every recorded cache entry,
-        # so it is a deliberate open item, not an oversight.
+        # The GPAP-BUILT abc. NOT necessarily the one that encoded: `abc_backend.find_abc`
+        # prefers an explicit path, then $GPAP_ABC, then PATH, so where abc comes from PATH this
+        # hashes "absent" and the key stops identifying the encoder. Open: the fix invalidates
+        # every recorded cache entry (docs/findings/RIVAL_FAIRNESS_FINDINGS.md §4).
         exe = str(paths.tool("abc"))
     except Exception:                                          # noqa: BLE001
         return "unknown"

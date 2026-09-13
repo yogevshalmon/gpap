@@ -63,9 +63,7 @@ def resolve_opt(opt: str, est_unrolled_ands: int) -> str:
 
 
 def _scratch_aig() -> str:
-    """An intermediate AIG in `gpap.paths.tmp_dir()` (`<repo>/.gpap/tmp`), where the library puts
-    scratch: a framed AIG of a deep unroll is a big file, and `/tmp` is RAM-backed on several
-    current distributions (gpap/paths.py)."""
+    """An intermediate AIG in the one scratch directory (gpap/paths.py)."""
     from gpap import paths
     return paths.scratch_file("abc", ".aig")
 

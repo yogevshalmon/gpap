@@ -16,7 +16,7 @@ want_set() { [ "$WANT" = "all" ] || [ "$WANT" = "$1" ]; }
 
 REPO="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 # Ask, never recompute: gpap/paths.py is the one definition (see its docstring).
-CACHE="$(PYTHONPATH="$REPO" "${PYTHON:-python3}" -m gpap.paths benchmarks)"
+CACHE="$(PYTHONPATH="$REPO" "${PYTHON:-python3}" -m gpap.paths benchmarks)" || { echo "$0: cannot resolve the GPAP root — is python3 able to import the repo?" >&2; exit 1; }
 mkdir -p "$CACHE"
 cd "$CACHE"
 

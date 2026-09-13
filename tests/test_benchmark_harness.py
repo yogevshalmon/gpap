@@ -449,9 +449,9 @@ class TestTableAlignment:
         # one of them was ever exercised by a manual eyeball.
         # succ is varied with them: `succ%` renders through `fmt_pct`, whose small end is the
         # widest string it produces ("4e-07%" fills the field exactly), and a row pinned at 100%
-        # never exercises the width the column is sized for. Recorded rates reach 3.9e-8
-        # (kernel_ab) and 3.6e-7 (sin.aig); 3.6e-9 is below both, so the gate holds at the small
-        # end of what `fmt_pct` can be asked to render, not merely at the smallest seen.
+        # never exercises the width the column is sized for. 3.6e-9 is below every recorded rate,
+        # so the gate holds at the small end of what `fmt_pct` can be ASKED to render rather than
+        # at the smallest yet seen (docs/findings/CLI_DELIVERY_FINDINGS.md §7 has the range).
         for sim, succ in product((None,
                                   {"hits": 7, "p_accept": 4.9e-4, "accepted_per_s": 162_912_098.0},
                                   {"hits": 0, "p_accept_lt": 1e-9}),

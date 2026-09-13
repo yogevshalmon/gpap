@@ -13,7 +13,7 @@ because the library must not know what a campaign is.
 
 **Nothing outside those two modules names a directory.** That is the whole convention, and it is
 what makes the rule unspellable-two-ways rather than merely documented: shell scripts ASK
-(`python3 -m gpap.paths tmp`) instead of recomputing, so bash and Python cannot end up disagreeing
+(`python3 -m gpap.paths home`) instead of recomputing, so bash and Python cannot end up disagreeing
 about symlinks, `..` or `~` — there is one implementation and nothing to keep in step.
 
 Repo-local by default, deliberately. These artifacts run to gigabytes once benchmarks are
@@ -47,7 +47,10 @@ def gpap_home() -> Path:
     """The disposable-machinery root: `$GPAP_HOME`, else `<repo>/.gpap`, else `./.gpap`."""
     env = os.environ.get("GPAP_HOME")
     if env:
-        return Path(env).expanduser()
+        # expanduser AND absolute, the same normalization eval/paths.py applies to its two
+        # roots: a relative `$GPAP_HOME` used to stay relative, so the directory a shell
+        # `mkdir -p`ed depended on where the caller stood.
+        return Path(env).expanduser().absolute()
     root = repo_root()
     return (root or Path.cwd()) / DIRNAME
 
@@ -102,22 +105,17 @@ def tmp_dir() -> Path:
 
     One directory, no per-file judgement — that question used to be re-answered per harness and
     the answers drifted to five. A caller that passes an explicit scratch directory still wins:
-    `gpap bench --scratch` and the campaign drivers put converted CNFs beside the rows they
-    produced, on purpose, so a row's input stays auditable.
+    `python -m gpap.benchmark --scratch` (what the campaign drivers run) puts converted CNFs
+    beside the rows they produced, on purpose, so a row's input stays auditable.
 
-    Falls back to the system temp directory when there is no checkout and no `$GPAP_HOME` — an
-    installed wheel, where `./.gpap` would mean creating a directory in whatever directory the
-    user happens to be in — and whenever the directory is not WRITABLE: a read-only shared tool
-    install, or a `<tmp>/gpap-<uid>` someone else on the box got to first. Writability, not just
-    creation: `mkdir(exist_ok=True)` succeeds on a directory nobody can write to, and the
-    PermissionError then surfaced from the unrelated line that opened the file. (A full or
-    over-quota filesystem still fails at the open — no probe short of writing catches that.) The
-    last resort is the system temp directory itself, which is what every version before this one
-    used.
+    Falls back to the system temp directory when there is no checkout and no `$GPAP_HOME` (an
+    installed wheel, where `./.gpap` would mean a directory in wherever the user happens to
+    stand) and whenever the root is not writable — see `_writable` for why creation is not the
+    test. Gated by tests/test_paths.py.
 
     Nothing here is MEANT to survive a run, but a kill leaves files behind, so they do collect —
     inside the checkout rather than somewhere the OS reclaims. `rm -rf .gpap/tmp` is safe against
-    anything but a run in flight, and `gpap bench --keep-cnf` fills it on purpose.
+    anything but a run in flight, and `python -m gpap.benchmark --keep-cnf` fills it on purpose.
     """
     if os.environ.get("GPAP_HOME") or repo_root() is not None:
         d = gpap_home() / "tmp"
@@ -147,8 +145,9 @@ def scratch_dir(stem: str) -> str:
 
 
 #: What `python3 -m gpap.paths <role>` prints, so a shell script asks instead of recomputing.
-ROLES = {"repo": lambda: repo_root() or Path.cwd(), "home": gpap_home, "bin": bin_dir,
-         "src": src_dir, "benchmarks": benchmarks_dir, "tmp": tmp_dir}
+#: Only the roles a script actually asks for. Everything else is reachable as a function, and an
+#: unused spelling of a path is the thing this module exists to prevent.
+ROLES = {"home": gpap_home, "benchmarks": benchmarks_dir, "tmp": tmp_dir}
 
 
 def _main(argv) -> int:

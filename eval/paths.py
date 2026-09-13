@@ -21,14 +21,24 @@ from __future__ import annotations
 
 import os
 
+from gpap.paths import DIRNAME  # the machinery root's NAME has one owner
+
 #: The checkout. One spelling, because a hand-counted depth is what broke the repo root in eleven
 #: files the last time `eval/` was reorganized.
 REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
 
+def _from_env(var: str, default: str) -> str:
+    """A root the caller may override, normalized ONE way for all of them: `~` expanded and made
+    absolute. Left raw, `GPAP_EXPERIMENTS=~/runs` had a shell `mkdir -p` a directory literally
+    named `~`, and a relative value resolved against wherever the caller happened to stand."""
+    env = os.environ.get(var)
+    return os.path.abspath(os.path.expanduser(env)) if env else default
+
+
 def experiments_dir() -> str:
     """Where a run writes its rows before they are mirrored to the record."""
-    return os.environ.get("GPAP_EXPERIMENTS") or os.path.join(REPO, ".experiments")
+    return _from_env("GPAP_EXPERIMENTS", os.path.join(REPO, ".experiments"))
 
 
 def results_root() -> str:
@@ -45,13 +55,11 @@ def results_root() -> str:
     An explicit `$GPAP_RESULTS` is taken as given (made absolute, never resolved): the caller
     named that directory and a symlink they chose is theirs to keep.
     """
-    env = os.environ.get("GPAP_RESULTS")
-    if env:
-        return os.path.abspath(os.path.expanduser(env))
-    return os.path.join(os.path.dirname(os.path.realpath(REPO)), "gpap-results")
+    return _from_env("GPAP_RESULTS",
+                     os.path.join(os.path.dirname(os.path.realpath(REPO)), "gpap-results"))
 
 
-def display_path(path, root=None) -> str:
+def display_path(path) -> str:
     """A path as it belongs in a file we SHIP, not as it happens to sit on this disk.
 
     Generated headers are provenance, read by people who do not have our home directory — and an
@@ -65,8 +73,7 @@ def display_path(path, root=None) -> str:
     physical, matching `results_root()`: mixing one physical root with one lexical one silently
     demoted a `$GPAP_RESULTS/...` header to a bare basename on a symlinked checkout.
     """
-    roots = [("$GPAP_RESULTS", results_root()),
-             ("$GPAP_REPO", os.path.realpath(REPO))] if root is None else [(root[0], root[1])]
+    roots = [("$GPAP_RESULTS", results_root()), ("$GPAP_REPO", os.path.realpath(REPO))]
     full = os.path.realpath(str(path))
     for label, base in roots:
         if not base:
@@ -78,34 +85,38 @@ def display_path(path, root=None) -> str:
 
 
 # ------------------------------------------------------------------ a rented machine's layout
-# NOT this machine's. The supervisor runs locally and drives a VM, so every path it hands to the
-# VM must come from the VM's convention: the bootstrap untars the checkout at VM_REPO, exports
-# `GPAP_HOME=<VM_REPO>/.gpap`, and every driver then resolves its tools under it. Reading the
-# LOCAL `$GPAP_HOME` here pointed a download at a directory that exists only on this box.
-#: The rented machine's working root — Colab's. Everything else over there derives from it,
-#: so a differently-laid-out VM is one variable, not a dozen string literals.
-VM_ROOT = os.environ.get("GPAP_VM_ROOT", "/content")
-#: Where the bootstrap untars the checkout.
-VM_REPO = os.environ.get("GPAP_VM_REPO", VM_ROOT + "/gpap")
-#: The VM's machinery root — the same `<repo>/.gpap` rule, resolved over there. It is NOT
-#: `/root/.gpap`: that was this constant's default for a while and exists on no machine the
-#: bootstrap builds, which is why the prebuilt-cache fill never found anything.
-VM_GPAP_HOME = os.environ.get("GPAP_VM_HOME", VM_REPO + "/.gpap")
-#: Where the supervisor uploads prebuilt binaries for the bootstrap to install from.
-VM_PREBUILT = os.environ.get("GPAP_VM_PREBUILT", VM_ROOT + "/prebuilt")
+# NOT this machine's. The supervisor runs locally and drives a VM, so every path it hands over must
+# come from the VM's convention: the bootstrap untars the checkout at `vm_repo()`, exports
+# `GPAP_HOME=<that>/.gpap`, and every driver resolves its tools under it. Reading the LOCAL
+# `$GPAP_HOME` here pointed a download at a directory that exists only on this box. Call-time like
+# every accessor above, so setting the override after import still takes effect.
+
+def vm_root() -> str:
+    """The rented machine's working root (Colab's). Everything else over there derives from it, so
+    a differently-laid-out VM is one variable rather than a dozen string literals."""
+    return os.environ.get("GPAP_VM_ROOT", "/content")
 
 
-def vm_tool(name: str) -> str:
-    """Path of a GPAP-built tool ON THE VM — the same `bin/` rule as `gpap.paths.tool`, over
-    there. `name` is the INSTALLED name, which is not always the uploaded one (the supervisor
-    pushes `abc_stripped` and the bootstrap installs it as `abc`)."""
-    return f"{VM_GPAP_HOME}/bin/{name}"
+def vm_repo() -> str:
+    """Where the bootstrap untars the checkout."""
+    return os.environ.get("GPAP_VM_REPO", vm_root() + "/gpap")
+
+
+def vm_gpap_home() -> str:
+    """The VM's machinery root — the same `<repo>/.gpap` rule, resolved over there. NOT
+    `/root/.gpap`, which was the default for a while and exists on no machine the bootstrap
+    builds."""
+    return os.environ.get("GPAP_VM_HOME", vm_repo() + "/" + DIRNAME)
+
+
+def vm_prebuilt() -> str:
+    """Where the supervisor uploads prebuilt binaries for the bootstrap to install from."""
+    return os.environ.get("GPAP_VM_PREBUILT", vm_root() + "/prebuilt")
 
 
 #: What `python3 -m eval.paths <role>` prints, so a shell script asks instead of recomputing.
-ROLES = {"repo": lambda: REPO, "experiments": experiments_dir, "results": results_root,
-         "vm-repo": lambda: VM_REPO, "vm-home": lambda: VM_GPAP_HOME,
-         "vm-prebuilt": lambda: VM_PREBUILT}
+#: Only the roles something actually asks for — the VM layout is imported, not shelled out to.
+ROLES = {"experiments": experiments_dir, "results": results_root}
 
 
 def _main(argv) -> int:

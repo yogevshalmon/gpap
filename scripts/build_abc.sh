@@ -17,7 +17,7 @@ ABC_COMMIT="${GPAP_ABC_COMMIT:-bcfdf592289a408cd67ec19260f8a60a37b085b6}"
 ABC_REPO="${GPAP_ABC_REPO:-https://github.com/berkeley-abc/abc.git}"
 REPO="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 # Ask, never recompute: gpap/paths.py is the one definition (see its docstring).
-PREFIX="$(PYTHONPATH="$REPO" "${PYTHON:-python3}" -m gpap.paths home)"
+PREFIX="$(PYTHONPATH="$REPO" "${PYTHON:-python3}" -m gpap.paths home)" || { echo "$0: cannot resolve the GPAP root — is python3 able to import the repo?" >&2; exit 1; }
 
 SRC="$PREFIX/src/abc"
 BIN_DIR="$PREFIX/bin"

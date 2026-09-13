@@ -16,8 +16,7 @@ from pathlib import Path
 
 from gpap.engine import AssumptionChecker
 
-# Anchored on this file, not on the working directory: `python examples/…` from anywhere but
-# the repo root used to be a FileNotFoundError. Same spelling as examples/mine_clauses.py.
+# Anchored on this file, so `python examples/…` works from anywhere.
 DEFAULT = Path(__file__).resolve().parent.parent / "benchmarks" / "sampling" / "10.sk_1_46.cnf"
 
 

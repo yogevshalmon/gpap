@@ -120,6 +120,9 @@ Three rules came out of the same pass, each a case of one printed number meaning
   the table, because `%.2g` of a rare-pin rate is `0.00019%` — 8 characters into a 6-wide column,
   and 175 of 4,797 recorded rows are under 0.01% success. `PCT_WIDTH` is now a stated contract, the
   column is sized from it, and the small end keeps its magnitude (`4e-07%`, not `<0.01%`).
+  The recorded range that sizes it: rates reach **3.9e-8** (kernel_ab) and **3.6e-7** (sin.aig),
+  so `tests/test_benchmark_harness.py` gates at 3.6e-9 — below both, i.e. at the small end of what
+  `fmt_pct` can be ASKED to render rather than at the smallest yet seen.
 
 Also here: the scratch CNF a circuit is unrolled to, and the ABC encoder's intermediate AIGs, move
 from the system temp directory to `gpap.paths.tmp_dir()` (`<repo>/.gpap/tmp`) — reasons in

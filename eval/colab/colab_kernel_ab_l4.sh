@@ -12,7 +12,9 @@ REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"   # this file li
 cd "$REPO_ROOT"
 export PYTHONPATH="$REPO_ROOT"
 PY="${PYTHON:-python3}"
-OUT="${OUT:-$(PYTHONPATH="$REPO_ROOT" "${PYTHON:-python3}" -m eval.paths experiments)/kernel_ab}"
+EXPERIMENTS="$(PYTHONPATH="$REPO_ROOT" "${PYTHON:-python3}" -m eval.paths experiments)"
+: "${EXPERIMENTS:?cannot resolve — python3 must be able to import the repo (gpap/paths.py, eval/paths.py)}"
+OUT="${OUT:-$EXPERIMENTS/kernel_ab}"
 mkdir -p "$OUT"
 
 echo "########## KERNEL A/B (wave vs scalar)  $(date -Is)"
