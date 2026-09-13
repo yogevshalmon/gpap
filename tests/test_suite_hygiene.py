@@ -18,6 +18,7 @@ what is mechanical is checked here.
 Host-only: this reads the test sources, it does not run them.
 """
 import ast
+import os
 import pathlib
 import re
 import subprocess
@@ -173,15 +174,44 @@ _ROOT_DECL = re.compile(
     re.M)
 
 
+#: What the no-git walk steps over: every ignored directory that can hold a `.py` or `.sh` — the
+#: venv, the build trees, the caches and the managed roots (all dot-directories), the egg-info.
+#: Names, not paths, so a nested `build/` or `__pycache__` is pruned wherever it sits. Proven to
+#: agree with git by `test_the_no_git_fallback_sees_what_git_sees`.
+_PRUNE = {"__pycache__", "build", "build-asan", "venv", "dist", "node_modules"}
+
+
+def _walk(*suffixes):
+    """The file set WITHOUT git: a walk from the repo root that prunes the ignored trees — for an
+    unpacked artifact or an sdist, where `git ls-files` has no repository to ask."""
+    found = set()
+    for root, dirs, files in os.walk(REPO):
+        dirs[:] = sorted(d for d in dirs
+                         if not (d.startswith(".") or d in _PRUNE or d.endswith(".egg-info")))
+        for f in files:
+            if f.endswith(suffixes):
+                found.add(pathlib.Path(root, f).relative_to(REPO).as_posix())
+    return found
+
+
 def _tracked(*suffixes):
     """Files git tracks, filtered by suffix. `git ls-files` rather than `rglob`, so a gate can
     never redden because of somebody's local `.experiments/` or a third-party checkout under
-    `.gpap/` — a gate that fires on scratch is a gate that gets muted."""
-    out = subprocess.run(["git", "ls-files"], cwd=REPO, capture_output=True, text=True)
-    found = [f for f in out.stdout.split() if f.endswith(suffixes)]
-    # A scan over zero files asserts nothing. Without this, an sdist or a missing git turned two
-    # of these gates green instead of red — the silence this file exists to prevent.
-    assert found, f"`git ls-files` produced no {suffixes} files (no git? not a checkout?)"
+    `.gpap/` — a gate that fires on scratch is a gate that gets muted.
+
+    Without a repository — an unpacked artifact, an sdist — git answers nothing, and a scan over
+    zero files asserts nothing: that silence turned four of these gates red (once, green) on
+    exactly the tree reviewers are told to run `pytest` in. So the fallback is the pruned walk
+    above, and the assertion that SOMETHING was found stands on both routes."""
+    try:
+        out = subprocess.run(["git", "ls-files"], cwd=REPO, capture_output=True, text=True)
+        found = [f for f in out.stdout.split() if f.endswith(suffixes)] if out.returncode == 0 \
+            else []
+    except FileNotFoundError:                      # no git binary at all
+        found = []
+    if not found:
+        found = sorted(_walk(*suffixes))
+    assert found, f"no {suffixes} files found, by git or by walking {REPO} (not a checkout?)"
     return found
 
 
@@ -365,3 +395,20 @@ def test_every_shell_ask_for_a_path_is_guarded():
                 missing.append(f"{rel}:{i + 1}: {var.group(1)} is not guarded by `: \"${{...:?}}\"`")
     assert not missing, ("a shell ask may not continue with an empty path:\n  "
                          + "\n  ".join(missing))
+
+
+def test_the_no_git_fallback_sees_what_git_sees():
+    """An unpacked artifact and an sdist have no `.git`, and `git ls-files` there produced
+    nothing — so four gates in this file failed on exactly the tree reviewers are told to run
+    `pytest` in. The fallback is a walk with a prune list; this is the proof that it scans the
+    same files git does, run wherever git works (where it does not, the fallback is in use and
+    has nothing to be compared against). Compared against tracked PLUS untracked-unignored, which
+    is what a walk that honours the ignore list can see — a file you have not `git add`ed yet is
+    not a discrepancy."""
+    out = subprocess.run(["git", "ls-files", "-co", "--exclude-standard"], cwd=REPO,
+                         capture_output=True, text=True)
+    if out.returncode != 0 or not out.stdout.strip():
+        pytest.skip("no git here: the fallback is in use, not under test")
+    suffixes = (".py", ".sh", ".ipynb")
+    by_git = {f for f in out.stdout.split() if f.endswith(suffixes)}
+    assert _walk(*suffixes) == by_git
