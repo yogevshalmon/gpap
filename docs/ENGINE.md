@@ -194,7 +194,7 @@ The cap is a saturation limit, not a safety one: on the cards measured, 4× the 
 | `GPAP_KERNEL=scalar\|wave` | force the propagate kernel | auto (§4) |
 | `GPAP_CLEAN=0` | disable CLEAN mode and the reset skip (exact legacy behaviour) | on |
 | `vscan = -1` in `gpap_engine_options` | disable the warp-wide decision scan | on in WAVE |
-| `GPAP_LIB=/path/libgpap.so` | which library the Python face loads | `build/`, then the installed copy |
+| `GPAP_LIB=/path/libgpap.so` | which library the Python face loads | `$GPAP_BUILD_DIR`, `build/`, `cpp/build/`, then the installed copy |
 | `WAVE_W` in `cpp/tools/build_kernels.py` | lane width, a power of two, baked at build time | 32 (both ways of raising it measured out) |
 
 ## 9. What is guaranteed

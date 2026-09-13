@@ -36,6 +36,9 @@ import sys
 import time
 
 COLAB = os.environ.get("COLAB_BIN") or shutil.which("colab") or ".venv/bin/colab"
+#: Where GPAP-built tools live ON THE COLAB VM — the convention every `eval/colab/*_l4.sh`
+#: driver defaults to. Not `gpap.paths`, which answers for THIS machine.
+VM_GPAP_HOME = os.environ.get("GPAP_VM_HOME", "/root/.gpap")
 
 
 def log(msg):
@@ -246,7 +249,11 @@ def main():
                 if not os.path.isfile(local):
                     os.makedirs(os.path.dirname(local) or ".", exist_ok=True)
                     src = spec.split(":", 1)[0]
-                    built = src.replace("/content/prebuilt/", os.environ.get("GPAP_HOME", "/root/.gpap") + "/bin/")
+                    # A path ON THE VM, so it is the VM's layout that decides it — this process
+                    # runs locally, and reading the LOCAL $GPAP_HOME here pointed the download at
+                    # a directory that exists on this machine and not on the VM. Override with
+                    # $GPAP_VM_HOME if a VM is laid out differently.
+                    built = src.replace("/content/prebuilt/", VM_GPAP_HOME + "/bin/")
                     rc, _ = run([COLAB, "download", "-s", args.session, built, local], timeout=900)
                     if rc == 0 and os.path.isfile(local) and os.path.getsize(local) > 0:
                         os.chmod(local, 0o755)
