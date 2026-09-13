@@ -73,7 +73,7 @@ markers = [
 [tool.ruff]
 line-length = 100
 target-version = "py310"
-extend-exclude = ["notebooks", ".gpap"]
+extend-exclude = [".gpap"]
 
 [tool.ruff.lint]
 # Keep the net light: real errors + unused-import hygiene (F, E9), NOT style churn on this
