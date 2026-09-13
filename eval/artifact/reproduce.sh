@@ -152,22 +152,30 @@ try:
     print(f"reference: NVIDIA L4, 23.7 GB total, 23.45 GB free on every recorded row")
     # Asked of the engine, never re-derived here: the memory model lives in
     # cpp/src/calibrate.cpp and a copy of the arithmetic in a shell heredoc is a copy that drifts.
-    from gpap.engine.calibrate import gpu_mem_available, vram_budget_cap_mib
-    cap = vram_budget_cap_mib()
-    if cap:
-        got = gpu_mem_available(torch.device("cuda", 0))
-        print(f"VRAM cap : {cap:,} MiB "
-              + ("binds — our batch is held to the reference card's allowance"
-                 if got >= (cap << 20) else
-                 "inert — this card's own budget is already below the cap"))
-    elif os.environ.get("GPAP_VRAM_BUDGET_MIB"):
-        print(f"VRAM cap : IGNORED — GPAP_VRAM_BUDGET_MIB="
-              f"{os.environ['GPAP_VRAM_BUDGET_MIB']!r} is not a plain number of MiB")
+    # The warning FIRST, and unconditionally. The cap probe below asks the engine, and before
+    # `setup` has built it that raised — so the one line a reviewer with a smaller card most
+    # needs was the one line `check` never reached.
     if total < 23e9:
         print("WARNING: under 24 GB. Every one of the 92 pinned Recurrent rungs sits at the\n"
               "         reference card's memory ceiling, so most cells will walk DOWN a rung.\n"
               "         The run still completes and every walked-down cell is reported, but the\n"
               "         rival gets less parallelism there than the paper gave it.")
+    from gpap.engine.calibrate import gpu_mem_available, vram_budget_cap_mib
+    cap = vram_budget_cap_mib()
+    if cap:
+        try:
+            got = gpu_mem_available(torch.device("cuda", 0))
+        except Exception as exc:                      # the core is not built yet
+            print(f"VRAM cap : {cap:,} MiB — whether it binds on this card is known once the\n"
+                  f"           engine is built (`setup`); not yet: {type(exc).__name__}")
+        else:
+            print(f"VRAM cap : {cap:,} MiB "
+                  + ("binds — our batch is held to the reference card's allowance"
+                     if got >= (cap << 20) else
+                     "inert — this card's own budget is already below the cap"))
+    elif os.environ.get("GPAP_VRAM_BUDGET_MIB"):
+        print(f"VRAM cap : IGNORED — GPAP_VRAM_BUDGET_MIB="
+              f"{os.environ['GPAP_VRAM_BUDGET_MIB']!r} is not a plain number of MiB")
 except ImportError:
     raise SystemExit("torch is not installed — only the `tables` step can run here")
 EOF
@@ -252,6 +260,18 @@ run_rivals() {
     echo "grants        : $GRANTS"
     echo "recorded fails: $([ "$HONOUR_FAILURES" = 1 ] && echo 'PINNED (--remeasure-failures re-derives them)' || echo 're-measured')"
     echo "VRAM cap      : ${GPAP_VRAM_BUDGET_MIB:-none} MiB"
+    # A smaller card than the reference is not a refusal — the run completes and the comparator
+    # reports every walked-down cell — but it is said HERE too, not only by `check`, because a
+    # reviewer who goes straight to a tier never saw `check`.
+    $PY - <<'EOF'
+import torch
+if torch.cuda.is_available():
+    total = torch.cuda.get_device_properties(0).total_memory
+    print(f"this card     : {total/1e9:.1f} GB (reference: NVIDIA L4, 23.7 GB)"
+          + ("\nWARNING       : under 24 GB — pinned rival rungs walk DOWN where they do not fit;"
+             "\n                the run completes, and the comparison names every such cell"
+             if total < 23e9 else ""))
+EOF
     echo "seeds         : $SEEDS"
     echo "instances     : $(echo "$seq_insts" | wc -w) sequential, $(echo "$comb" | wc -w) combinational entry, depths $depths"
     OUT="$OUT" RIVAL_SEQ="$seq_insts" RIVAL_COMB="$comb" RIVAL_SEEDS="$SEEDS" \
