@@ -298,6 +298,10 @@ stage_rivals() {
         done
         "$PY" eval/rivals/rivals_hts.py "$hts_dir/*.cnf" --timeout "$rto" --steps "$rsteps" \
             --output "$OUT/rivals_hts.json" 2>&1 | tee -a "$LOGS/rivals.log"
+    elif [ "${RIVAL_HTS:-0}" != "1" ]; then
+        # Said for what it is: after `setup` had listed HTS as present, "not installed" read
+        # as a broken install to a reviewer, when it was the default above.
+        echo "[skip] HTS is off by default — its published set holds no circuits (RIVAL_HTS=1 runs it)"
     else
         echo "[skip] HTS not installed (eval/rivals/rivals_setup.sh)"
     fi
