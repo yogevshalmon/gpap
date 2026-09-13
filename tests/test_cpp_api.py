@@ -33,6 +33,7 @@ def _bin(name: str) -> Path:
 SAMPLE_BIN = _bin("gpap_sample")
 ASSUME_BIN = _bin("gpap_assumptions")
 PROBE_BIN = _bin("gpap_probe")
+C_API_BIN = _bin("gpap_c_api")
 
 pytestmark = pytest.mark.gpu
 
@@ -273,3 +274,60 @@ def test_probe_bounds_an_impossible_width_without_enumerating_it(tmp_path):
     assert "exhaustive" not in out, "a budgeted sweep is not a proof"
     assert ("stopped at max_tuples" in out) or ("deadline" in out), out
     assert "entailed: (" in out, "a budgeted sweep still KEEPS the clauses it proved"
+
+
+# ------------------------------------------------------------------ the raw C ABI
+
+def _c_api(*args, timeout=300):
+    _need(C_API_BIN)
+    r = subprocess.run([str(C_API_BIN), *map(str, args)],
+                       capture_output=True, text=True, timeout=timeout)
+    return r
+
+
+def test_c_api_example_checks_both_entry_points_through_the_raw_abi():
+    """`cpp/examples/c_api.c` is the reference for `gpap/gpap.h` and the only consumer in the tree
+    that touches the ABI with no C++ wrapper: 0-based variables, caller-owned buffers,
+    `gpap_status` returns. CI checked that it LINKS and nothing ever ran it, so every one of those
+    conventions was unexercised — a header change that broke them would have shipped green.
+
+    The example self-checks (it exits non-zero unless x1=TRUE reaches a fixpoint and x1=FALSE
+    conflicts), so the assertion is its exit status plus the verdict it printed."""
+    pytest.importorskip("torch")
+    import torch
+    if not torch.cuda.is_available():
+        pytest.skip("needs CUDA")
+    r = _c_api()
+    assert r.returncode == 0, f"gpap_c_api failed:\n{r.stdout}\n{r.stderr}"
+    assert "PASS" in r.stdout, r.stdout
+    assert "row 0 (x1=TRUE ): ok" in r.stdout, r.stdout
+    assert "row 1 (x1=FALSE): CONFLICT" in r.stdout, r.stdout
+
+
+def test_c_api_sampling_models_satisfy_the_formula(tmp_path):
+    """The ABI's readout path (`gpap_select_complete` -> `gpap_var_bits`) against the clauses.
+
+    The example prints its own soundness verdict off `gpap_check_sound`, which is the DEVICE's
+    answer; this re-derives it on the host from the printed bits, so a readout that gathered the
+    wrong columns cannot agree with itself. Under 32 variables, so no model is truncated."""
+    pytest.importorskip("torch")
+    import torch
+    if not torch.cuda.is_available():
+        pytest.skip("needs CUDA")
+    # 8 variables, and every clause length the packed word distinguishes (unit, binary, long).
+    clauses = [[1, 2, 3], [-1, -2], [4, 5], [-4, -5], [6], [-7, 8], [7, -8], [2, -3, 5]]
+    nv = 8
+    cnf = tmp_path / "abi.cnf"
+    cnf.write_text("p cnf %d %d\n" % (nv, len(clauses))
+                   + "".join(" ".join(map(str, c)) + " 0\n" for c in clauses))
+    r = _c_api(cnf)
+    assert r.returncode == 0, f"gpap_c_api failed:\n{r.stdout}\n{r.stderr}"
+    assert "soundness: ok" in r.stdout, r.stdout
+    models = re.findall(r"^  model \d+: ([01]+)$", r.stdout, re.M)
+    assert models, f"a sound run printed no model to check:\n{r.stdout}"
+    for bits in models:
+        assert len(bits) == nv, f"{bits!r}: {len(bits)} columns, formula has {nv} variables"
+        row = [(v + 1) if bits[v] == "1" else -(v + 1) for v in range(nv)]
+        assignment = set(row)
+        for clause in clauses:
+            assert assignment & set(clause), f"{bits} falsifies {clause}"

@@ -17,6 +17,10 @@ import os
 import subprocess
 import time
 
+#: The checkout. ONE spelling: this file has moved between eval/ subdirectories before, and
+#: a hand-counted `dirname` depth is what broke REPO_ROOT in eleven files when it did.
+_REPO = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+
 VARIANTS = ("raw", "abc")
 
 
@@ -803,6 +807,30 @@ def unsat_at_depth(cnf_path, conf_budget=2_000_000, provenance=None):
     return None if res is None else (not res)
 
 
+def results_root() -> str:
+    """Where raw results live: `$GPAP_RESULTS`, else `gpap-results` beside the checkout.
+
+    ONE definition, and a PHYSICAL one, because the fallback's `..` is not inert: left in the
+    string it resolves physically when the path is OPENED (the kernel follows the symlink,
+    then the `..`) but lexically when the same string is COMPARED through `abspath`/`relpath`,
+    so for a checkout reached through a symlink one spelling named two directories — and
+    `display_path` settles a SHIPPED provenance header by comparing exactly that. Physical is
+    the side that keeps what opening it always did.
+
+    An imported module's `__file__` already comes back resolved, so `realpath` here is belt and
+    braces — it puts the intent in the code rather than leaving it to an interpreter detail.
+    The shell entry points DO need forcing, because bash's `cd` is logical: `cd -P` in
+    `reproduce.sh` and `make_artifact.sh`, gated by tests/test_suite_hygiene.py.
+
+    An explicit `$GPAP_RESULTS` is taken as given (made absolute, never resolved): the caller
+    named that directory and a symlink they chose is theirs to keep.
+    """
+    env = os.environ.get("GPAP_RESULTS")
+    if env:
+        return os.path.abspath(os.path.expanduser(env))
+    return os.path.join(os.path.dirname(os.path.realpath(_REPO)), "gpap-results")
+
+
 def display_path(path, root=None):
     """A path as it belongs in a file we SHIP, not as it happens to sit on this disk.
 
@@ -815,10 +843,8 @@ def display_path(path, root=None):
     Rewrites a path under $GPAP_RESULTS or under the repository to a `$VAR/`-prefixed form, and
     falls back to the basename for anything else — never the absolute path.
     """
-    repo = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-    roots = [("$GPAP_RESULTS", os.environ.get("GPAP_RESULTS")
-              or os.path.join(os.path.dirname(repo), "gpap-results")),
-             ("$GPAP_REPO", repo)] if root is None else [(root[0], root[1])]
+    roots = [("$GPAP_RESULTS", results_root()),
+             ("$GPAP_REPO", _REPO)] if root is None else [(root[0], root[1])]
     full = os.path.abspath(str(path))
     for label, base in roots:
         if not base:

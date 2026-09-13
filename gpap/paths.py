@@ -90,8 +90,9 @@ def tmp_dir() -> Path:
     sample it; the checkout's disk has room either way. And the path is PRINTED, where
     `.gpap/tmp/b10-c25-kzdub143.cnf` says what it holds and `/tmp/tmpuo7r0zb0.cnf` does not.
 
-    This covers the library and the `gpap` CLI. The experiment layer (`eval/`) keeps its own
-    scratch conventions, and the campaign driver passes an explicit one.
+    This covers the library and the `gpap` CLI, and NOT `eval/`, which stays on the system
+    temp directory for a reason that belongs to the experiment layer (eval/README.md). The
+    campaign driver passes an explicit scratch; `gpap bench` defaults to this one.
 
     Falls back to the system temp directory when there is no checkout and no `$GPAP_HOME` — an
     installed wheel, where `./.gpap` would mean creating a directory in whatever directory the

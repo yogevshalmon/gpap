@@ -170,7 +170,10 @@ def main():
             print(f"  ** FLIP: {tool} is faster at steps={best} "
                   f"({arms[best]['unique_per_s']:,.0f} vs {arms[pinned]['unique_per_s']:,.0f} "
                   f"u/s). RIVAL_STEPS pins {pinned}; change it deliberately, in one place.")
-    out_path = args.out or f".experiments/rivals_{args.axis}_calibration.json"
+    # Anchored on the repo, like every other .experiments default in the tree: a cwd-relative
+    # one drops the calibration wherever the shell happened to be standing.
+    out_path = args.out or os.path.join(REPO, ".experiments",
+                                        f"rivals_{args.axis}_calibration.json")
     args.out = out_path
     os.makedirs(os.path.dirname(args.out) or ".", exist_ok=True)
     json.dump({"generated": time.strftime("%Y-%m-%d %H:%M"), "tools": res},

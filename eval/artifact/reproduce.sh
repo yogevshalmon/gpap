@@ -59,7 +59,12 @@ if [ -z "$REFERENCE" ]; then
     # Tested for ROWS, not for a directory: an empty `$GPAP_RESULTS/paper/data` — the normal
     # state of a fresh checkout beside an empty results tree — used to shadow the copy the
     # artifact bundles, and every step downstream then ran happily over nothing.
-    for cand in "${GPAP_RESULTS:-$REPO_ROOT/../gpap-results}/paper/data" \
+    # `cd -P`, and never a raw `../`: an un-collapsed `..` resolves physically when opened and
+    # lexically when compared, which for a symlinked checkout is two directories. -P because
+    # bash's cd is logical, where Python's side already resolves. One rule, and it lives in
+    # rival_common.results_root.
+    RESULTS="${GPAP_RESULTS:-$(cd -P "$REPO_ROOT/.." && pwd)/gpap-results}"
+    for cand in "$RESULTS/paper/data" \
                 "$REPO_ROOT/artifact-data/paper/data"; do
         [ -n "$(ls "$cand"/rivals_*.json 2>/dev/null)" ] && { REFERENCE="$cand"; break; }
     done

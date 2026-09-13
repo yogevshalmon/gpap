@@ -18,11 +18,12 @@ cd "$REPO_ROOT"
 export PYTHONPATH="$REPO_ROOT"
 PY="${PYTHON:-python3}"
 
-GPU_SLUG="$($PY -c "
-import re, torch
-n = torch.cuda.get_device_properties(0).name if torch.cuda.is_available() else 'cpu'
-print(re.sub(r'[^a-z0-9]+', '-', n.lower()).strip('-'))" 2>/dev/null || echo unknown-gpu)"
-OUT="${OUT:-$REPO_ROOT/.experiments/full_eval/$GPU_SLUG}"
+# A fixed OUT, not the GPU slug: the supervisor mirrors this directory by LITERAL path
+# (--remote-dir, see colab_supervisor.py) off a VM that dies within the hour, so a slug
+# surprise on a new image — no torch, a renamed card, `unknown-gpu` — would write the sweep
+# where nothing collects it and lose it with the machine. Same reasoning as
+# colab_gpap_circuits_l4.sh. The name is what an L4 slug produced, so nothing moves.
+OUT="${OUT:-$REPO_ROOT/.experiments/full_eval/nvidia-l4}"
 LOGS="$OUT/logs"
 mkdir -p "$OUT" "$LOGS"
 
@@ -83,7 +84,8 @@ want() { case " $STAGES " in *" $1 "*) return 0 ;; *) echo "[skip] $1 (not in ST
 
 # The CMSGen arm gets a hard preflight: a stage resumed without the binary would append armless
 # rows to an armed file, and absent is not zero. CMSGEN=none opts out explicitly.
-CMSGEN="${CMSGEN:-$REPO_ROOT/.gpap/bin/cmsgen}"
+GPAP_HOME="${GPAP_HOME:-$REPO_ROOT/.gpap}"      # tool root: one spelling, run_full_eval.sh's
+CMSGEN="${CMSGEN:-$GPAP_HOME/bin/cmsgen}"
 CMS_ARGS=()
 if [ "$CMSGEN" != "none" ]; then
     if [ ! -x "$CMSGEN" ]; then

@@ -48,6 +48,8 @@ import sys
 REPO = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 sys.path.insert(0, REPO)
 
+from eval.rivals.rival_common import results_root  # noqa: E402 — one definition, shared
+
 #: stage stem -> (the row key holding the rival's numbers, a human label)
 STAGES = {
     "rivals_demotic_native": ("demotic", "DEMOTIC, their ISCAS-85 pins, T=1"),
@@ -196,9 +198,7 @@ def main():
     ap = argparse.ArgumentParser(description=__doc__.split("\n\n")[0],
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("data_dir", nargs="?",
-                    default=os.path.join(os.environ.get("GPAP_RESULTS",
-                                                        os.path.join(REPO, "..", "gpap-results")),
-                                         "paper", "data"),
+                    default=os.path.join(results_root(), "paper", "data"),
                     help="the REFERENCE campaign rows (default: $GPAP_RESULTS/paper/data)")
     ap.add_argument("--mode", choices=("honour", "remeasure"), default="honour",
                     help="honour (default, the artifact's own default): a cell the grants file "

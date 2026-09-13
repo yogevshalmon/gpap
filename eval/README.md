@@ -32,6 +32,12 @@ Third-party tools and fetched benchmarks install under `.gpap/` beside the repo 
 never `$HOME`; `$GPAP_HOME` overrides it. **Raw results live outside the repo**, under
 `$GPAP_RESULTS`: inputs, not artifacts to commit.
 
+Scratch is the one thing here that does **not** follow `.gpap/`: each harness writes its CNFs to
+the system temp directory. That reads like drift and is not safe to tidy — the DIMACS parse of a
+harness's CNF falls inside `wall_total_s`, which Table 1's `e2e` column divides
+(`paper_tables.gpap_e2e`), so which filesystem the file sits on is inside a published number.
+Moving it is a re-measurement, not a cleanup.
+
 ## Reading a number before quoting it
 
 `eval_plots.py` writes a `summary.md` listing every skipped and errored instance — read it before
