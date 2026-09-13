@@ -271,3 +271,41 @@ read the ceiling through the same reader, and the test forces the fallback
 (`monkeypatch.setattr(torch.cuda, "is_available", ...)`) so it fails on either kind of machine.
 The general form is the older lesson in one more disguise: a test proves nothing about a branch
 it did not take, and "which branch" can be a property of the hardware rather than of the input.
+
+## 9. The third leak had no `/home/` in it (2026-09-13)
+
+Three rows of the published Barbarik campaign (`data/barbarik/circ_abc_b8.jsonl` and
+`circ_abc_pipe.jsonl`, verdict `error`) carried the instance's absolute path inside the error
+message: an agent's scratch directory, `/tmp/claude-<uid>/-home-<user>-…/`, with the operator's
+username flattened into a directory NAME. The packager's gate, one `/home/` pattern inline, passed
+it, and a tarball built on 2026-09-13 shipped it. Same lesson as §8, a different shape: a gate that
+knows one shape of a leak is a gate for that shape.
+
+**What changed.** The shapes live in one script, `eval/artifact/check_leaks.sh` — a Linux home, a
+macOS home, a home flattened into one directory name, an agent scratch root — run by the packager
+over the STAGED bytes and mirrored by `tests/test_docs_hygiene.py` over the checkout.
+`tests/test_artifact_gate.py` proves the script refuses each shape on its own and a denylisted
+literal case-insensitively, and that a blank or comment line in the denylist matches nothing (to
+`grep -F -f` an empty line is a pattern that matches every line, and the failure mode of that is an
+operator setting the override for good). Literal names cannot be in the script, which ships inside
+the tarball it checks; they come from a denylist outside the repository,
+`GPAP_ARTIFACT_DENYLIST=<file>`. The harness now prints `display_path(input_file)`, and the three
+rows were edited to the basename the fixed harness prints; the paper folder's README and
+`data/MANIFEST.sha256` record the edit, and no verdict moved.
+
+**Two more things the packaged tree taught**, found by running `pytest` inside it — the reviewer's
+first command — for the first time. Four gates in `tests/test_suite_hygiene.py` enumerate files
+with `git ls-files`, and an archive has no `.git`: they now fall back to a pruned walk, proven to
+see what git sees where git works. And with a card visible and no built library — an unpacked
+artifact before `setup` — `rival_vram_budget` took the CUDA branch, the core call raised, and the
+last-resort return handed the rival the whole fallback uncapped: the third route past the ceiling
+(§8 closed the CPU-only one), now capped and gated by
+`tests/test_k_cap.py::test_rival_budget_is_capped_when_the_core_cannot_load`.
+
+**The double-blind copy** is a transform over the packager's tarball,
+`$GPAP_RESULTS/artifact/anonymize.sh`, kept outside the repository because it spells the author's
+name: delete the brand kit and the development files, rewrite the identity lines (each
+substitution must hit, or the script refuses as stale), the gate with the denylist, the host suite
+inside the result, the manifest rewritten, repacked as `<name>-anon`. `GPAP_ARTIFACT_TREE=<tree-ish>`
+lets the packager dry-run uncommitted work (`git write-tree` on a temporary index); the name and
+the manifest then carry that object's id, so a dry run cannot pass as a release.
