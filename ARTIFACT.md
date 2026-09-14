@@ -96,17 +96,25 @@ while the rival stays pinned to the recorded batch — again in our favour. The 
 ceiling, so it is inert on smaller cards. `--vram-cap none` measures the card as it is.
 
 Software: an NVIDIA driver, cmake, a C++17 compiler, Python ≥ 3.10, and the Python packages in
-`eval/artifact/requirements-artifact.txt` — pinned to the versions the published campaign ran
-under (every row records torch's build), so that a reproduction a year from now compiles the
-kernels with the same triton:
+`eval/artifact/requirements-artifact.txt`, which fixes the three that can move a number — torch
+(every row records its build), the triton that compiles the kernels, and the SAT solver that
+adjudicates the `unsat` screen. **Into a virtualenv**, whose `python` every step below then uses:
 
 ```bash
+python -m venv .venv && . .venv/bin/activate
 pip install -r eval/artifact/requirements-artifact.txt && pip install -e .
+pytest -m "not gpu and not slow"      # optional: the shipped tree's own suite, ~10 s
 ```
 
-torch brings triton, which compiles the kernels at BUILD time only; the built library links
-against `libcuda` alone. **No CUDA toolkit and no nvcc.** There is no CPU execution path: the
-engine needs a GPU. `reproduce.sh tables` needs none of this: a stock `python3` runs it.
+If you would rather not activate it, pass the interpreter explicitly:
+`PYTHON=/path/to/python eval/artifact/reproduce.sh …`.
+
+Building the engine needs **no CUDA toolkit installation and never invokes nvcc**:
+`scripts/build_core.sh` compiles the kernels through triton and links against `libcuda`, the
+driver library. (torch's wheels do pull CUDA runtime libraries as Python packages, one of them
+named `cuda-toolkit` — that is torch's own dependency, and nothing in this build calls it.)
+There is no CPU execution path: the engine needs a GPU. `reproduce.sh tables` needs none of this:
+a stock `python3` runs it.
 
 ### What each tier costs
 
