@@ -50,7 +50,8 @@ import traceback
 from gpap import paths
 
 REPO_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))  # eval/<sub>/ -> repo
-sys.path.insert(0, REPO_ROOT)
+if REPO_ROOT not in sys.path:        # guarded: unconditional, it prepended a duplicate entry on
+    sys.path.insert(0, REPO_ROOT)    # every import, which is a side effect on the whole session
 # Error text lands in a row that ships; a message that prints the argument it was handed put an
 # operator's scratch directory into three rows of the published campaign (tests/test_artifact_gate.py).
 from eval.paths import display_path  # noqa: E402 — after sys.path
@@ -172,18 +173,26 @@ def _cmsgen_solutions(input_file, num_solutions, ind_var_list, seed, cmsgen_bin)
     """Same contract, CMSGen as the sampler under test. CMSGen emits FULL assignments (it ignores
     `c ind`), so the projection onto ind_var_list happens here."""
     out = paths.scratch_file("cmsgen_barbarik", ".out")
-    p = subprocess.run([cmsgen_bin, "--samples", str(num_solutions), "--seed", str(int(seed)),
-                        "--verb", "0", "--samplefile", out, input_file],
-                       capture_output=True, text=True, timeout=1800)
-    if p.returncode not in (0, 10):            # 10 = SATISFIABLE
-        raise RuntimeError(f"cmsgen failed on {display_path(input_file)}: {p.stdout[-300:]}{p.stderr[-300:]}")
-    sols = []
-    with open(out) as f:
-        for line in f:
-            lits = {int(x) for x in line.split() if x.lstrip("-").isdigit()}
-            if lits:
-                sols.append([v if v in lits else -v for v in ind_var_list])
-    os.unlink(out)
+    try:
+        p = subprocess.run([cmsgen_bin, "--samples", str(num_solutions), "--seed", str(int(seed)),
+                            "--verb", "0", "--samplefile", out, input_file],
+                           capture_output=True, text=True, timeout=1800)
+        if p.returncode not in (0, 10):        # 10 = SATISFIABLE
+            raise RuntimeError(f"cmsgen failed on {display_path(input_file)}: "
+                               f"{p.stdout[-300:]}{p.stderr[-300:]}")
+        sols = []
+        with open(out) as f:
+            for line in f:
+                lits = {int(x) for x in line.split() if x.lstrip("-").isdigit()}
+                if lits:
+                    sols.append([v if v in lits else -v for v in ind_var_list])
+    finally:
+        # Every raise above used to leave the file behind, and a campaign errors per cell, so the
+        # scratch root filled with sample files nobody would ever read.
+        try:
+            os.unlink(out)
+        except OSError:
+            pass
     if len(sols) < num_solutions:
         raise RuntimeError(f"cmsgen produced {len(sols)}/{num_solutions} on {display_path(input_file)}")
     return sols[:num_solutions]
