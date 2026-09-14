@@ -9,7 +9,8 @@ in exactly one flag.
     eval/artifact/soft_price_tables.py --safe <no-soft dir> --soft <--allow-soft dir> \\
         --out-md $GPAP_RESULTS/paper/SOFT_PRICE.md --out-tex $GPAP_RESULTS/paper/soft_price.tex
 
-By policy there is NO soft table in the paper (CLAUDE.md, working rules), so this writes
+By policy there is NO soft table in the paper (docs/findings/UNIFORMITY_FINDINGS.md §4), so this
+writes
 beside the campaign rather than into docs/paper/; it exists to price the decision, not to
 publish it. `eval/profile_soft_portfolio.py` answers the narrower question of GPAP against
 itself. Three

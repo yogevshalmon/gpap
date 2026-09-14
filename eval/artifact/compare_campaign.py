@@ -145,7 +145,7 @@ def compare_stage(stem, key, ref_rows, new_rows, report):
             continue                             # nothing was emitted, so there is nothing to check
         delivered += 1
         # A cell that DELIVERED models and reports no verdict is not a pass. `off` covers
-        # "requested but never reached" as well as "never requested" (CLAUDE.md), and the
+        # "requested but never reached" as well as "never requested" (`gpap/verdict.py`), and the
         # artifact runs every tier under VERIFY_SOUND=1, so `off` here means the evidence the
         # gate is about to summarise was never produced.
         for field, want in (("sound_check", "the on-device soundness re-check"),

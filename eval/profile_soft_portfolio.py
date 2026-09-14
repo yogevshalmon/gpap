@@ -21,7 +21,8 @@ METHOD (do not "simplify" this — the numbers are meaningless without it):
   * the reported rate per arm is the BEST over repetitions (drift makes any single run a lower
     bound), and `samples_per_s` is the winning config's steady-state rate, not the e2e blend;
   * VACUOUS-PIN instances (b02/b05/b07/s526 — constant last-cycle outputs at T=25, so pinning is a
-    tautology) are measured but excluded from the headline geomean, per the CLAUDE.md ground rule.
+    tautology) are measured but excluded from the headline geomean, by the screens that live once
+    in `eval/artifact/paper_tables.py`.
 
   PYTHONPATH=. .venv/bin/python eval/profile_soft_portfolio.py \
       --glob 'benchmarks/circuits/bench/seq/*.bench' --encoder abc --abc-opt fast --cycles 25
