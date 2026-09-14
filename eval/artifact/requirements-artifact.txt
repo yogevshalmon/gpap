@@ -1,17 +1,36 @@
-# The Python environment the published campaign ran under, pinned.
+# The reproduction environment. A LOCK, which is the opposite discipline from `pyproject.toml`:
+# the library there declares RANGES, because a library that pins is uninstallable beside anything
+# else and because the right torch build is the one matching the user's driver, not ours. This
+# file is for one job — re-deriving a published measurement — so here the versions are fixed.
 #
-# Every row records torch's build (`gpu.torch` = 2.11.0+cu128), and torch pins the triton that
-# compiles the kernels (3.6.0 on Linux): an unpinned install a year from now would compile
-# cpp/kernels/bcp.py with whatever triton ships then, and the kernels are written against this
-# one's API (tl.gather, >= 3.2). `reproduce.sh tables` — the CPU-only reading of the rows — needs
-# none of this; a stock python3 runs it.
-#
+#   python -m venv .venv && . .venv/bin/activate        # into a virtualenv, never system python
 #   pip install -r eval/artifact/requirements-artifact.txt && pip install -e .
+#
+# WHAT IS PINNED, and why exactly these:
+#   torch       every published row records its build (`gpu.torch` = 2.11.0+cu128), and torch is
+#               what pins the triton below.
+#   triton      compiles cpp/kernels/*.py into the library ahead of time. The kernels are written
+#               against this API (tl.gather, >= 3.2); a newer triton is where a silent
+#               miscompile would come from. Restated rather than left implicit in torch's
+#               metadata, because it is the one build-time dependency that can change a NUMBER.
+#   python-sat  an ADJUDICATOR, not a utility: a cell where both samplers emit nothing is
+#               screened as `unsat` only when it PROVES it, and every such row records the solver
+#               class and this version (`"pysat": "1.9.dev15"`). A floating range would let a
+#               re-run move a cell between the `unsat` bucket and `both0` with nothing in the row
+#               to say so. The `.dev` is load-bearing — pyproject.toml says why.
+#
+# WHAT IS NOT, and why that is not an oversight: numpy and matplotlib touch no verdict. The table
+# generators and the gate are pure JSON readers that import neither (gated by
+# tests/test_paper_tables.py::test_the_table_generators_import_without_torch_or_numpy);
+# matplotlib only draws the two figures, which no claim rests on. Floors, so a reviewer on an
+# older Python still resolves.
 #
 # cu128 is the CUDA build the campaign ran. A driver too old for CUDA 12.8 takes the cu126 wheel
 # of the same torch from the matching index; the kernels do not change.
 --extra-index-url https://download.pytorch.org/whl/cu128
 torch==2.11.0+cu128
+triton==3.6.0 ; platform_system == "Linux"
+python-sat==1.9.dev15
 numpy>=1.24
-python-sat>=0.1.8.dev0,<1.10    # the unsat screen; pyproject.toml says why both bounds matter
 matplotlib>=3.7                 # the two figures only; `tables` says so and continues without it
+pytest>=7.4                     # the shipped tree's own test suite: `pytest -m "not gpu"`
