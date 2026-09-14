@@ -246,3 +246,40 @@ def test_the_python_package_version_is_the_same_number_in_all_three_places():
              str(cite_f.relative_to(REPO)): cite.group(1)}
     assert len(set(found.values())) == 1, f"the package version disagrees with itself: {found}"
 
+
+
+def _export_ignored():
+    """The paths `.gitattributes` keeps out of every archive `git archive` makes — which is what
+    the artifact packager and GitHub's zip download both are."""
+    out = []
+    for line in (REPO / ".gitattributes").read_text().splitlines():
+        body = line.split("#")[0].strip()
+        if body.endswith("export-ignore"):
+            out.append(body.split()[0])
+    return out
+
+
+def test_no_shipped_file_names_a_path_no_archive_carries():
+    """An `export-ignore` line deletes a file from every archive while leaving it in the
+    checkout, so a reference to it reads fine here and dangles for everyone who receives the
+    tarball — the same dead-path class as the deleted `INTEGRATION.md`, reintroduced from the
+    other end, and invisible to the test above because that one only checks that a path exists
+    HERE.
+
+    So: whatever `.gitattributes` withholds from archives may not be named by anything that
+    ships. Adding an `export-ignore` line is therefore also a promise to reword its references.
+    """
+    ignored = _export_ignored()
+    assert ignored, "no export-ignore entries — this gate would assert nothing"
+    named = []
+    for path, text in _tracked_files():
+        if path.name in ("test_docs_hygiene.py", ".gitattributes"):
+            continue                       # this gate and the file that declares the rule
+        for target in ignored:
+            pat = rf"(?<![\w/.]){re.escape(target.lstrip('/'))}\b"
+            for i, line in enumerate(text.splitlines(), 1):
+                if re.search(pat, line):
+                    named.append(f"{path.relative_to(REPO)}:{i}: names {target}")
+    assert not named, (
+        "these SHIPPED files name a path that `.gitattributes` keeps out of every archive, so "
+        "the reference dangles for everyone who unpacks one:\n  " + "\n  ".join(named))

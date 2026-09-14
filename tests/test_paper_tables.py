@@ -956,8 +956,8 @@ def test_a_timeout_steps_down_but_the_probe_is_bounded():
 
 # --------------------------------------------------------------- one home for the screens
 
-#: The rules that decide which cells a published number is computed over. CLAUDE.md states they
-#: live in `eval/artifact/paper_tables.py` ONCE and that the deck imports them; nothing enforced
+#: The rules that decide which cells a published number is computed over. They live in
+#: `eval/artifact/paper_tables.py` ONCE and every other consumer imports them; nothing enforced
 #: it, and "the second tool re-derived the first tool's rule" is the failure mode the whole file
 #: above exists for — a re-derivation drifts silently, and the two tables then disagree about
 #: what was excluded while both look correct.

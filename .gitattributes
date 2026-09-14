@@ -3,8 +3,14 @@
 *.png  binary
 *.ico  binary
 
-# Development-only files: in the repository, never in an archive. `git archive` honours this, and
-# both the artifact packager (eval/artifact/make_artifact.sh) and GitHub's zip download use it; a
-# reviewer or a PyPI user has no use for either file.
+# Agent-facing, and only that: in the repository, never in an archive. `git archive` honours this,
+# and both the artifact packager (eval/artifact/make_artifact.sh) and GitHub's zip download use it.
+#
+# `.github/` deliberately STAYS in the archive: `ci.yml` is the only place that documents building
+# the engine with no GPU and no CUDA toolkit (the libcuda stub, the AOT compile for one arch), and
+# that is evidence an artifact evaluator wants rather than clutter.
+#
+# Adding a line here is also a promise to reword whatever names the file: it vanishes from every
+# tarball while staying in the checkout, so a reference to it dangles for everyone who unpacks one
+# and looks fine here. tests/test_docs_hygiene.py enforces that.
 CLAUDE.md export-ignore
-.github export-ignore
