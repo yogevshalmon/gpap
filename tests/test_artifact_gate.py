@@ -96,3 +96,15 @@ def test_the_harness_error_text_carries_no_directory(tmp_path):
         _cmsgen_solutions(str(cnf), 1, [1], 0, "/bin/false")
     msg = str(err.value)
     assert "toy.cnf" in msg and str(tmp_path) not in msg, msg
+
+
+def test_a_denylist_with_windows_line_endings_still_matches(tmp_path):
+    """`grep -F -f` takes a trailing carriage return as part of the pattern, so a denylist saved
+    on Windows (or pasted through one) matched nothing and the gate returned CLEAN — silently,
+    which is the only way a gate fails that nobody notices. It is the last thing between a
+    username and a DOI that cannot be edited."""
+    tree = _tree(tmp_path, '{"note": "measured by Alice on her box"}\n')
+    deny = tmp_path / "deny.txt"
+    deny.write_bytes(b"# names\r\nalice\r\n")
+    r = _gate(tree, deny)
+    assert r.returncode == 1 and "rows.jsonl" in r.stdout, r.stdout + r.stderr

@@ -16,8 +16,9 @@
 #
 # Literal names — a person, a hostname — cannot be spelled here: this file ships inside the tarball
 # it checks. They come from a denylist kept OUTSIDE the repository: one fixed string per line,
-# matched case-insensitively; blank lines and `#` comments are ignored, because to `grep -F -f` an
-# empty line is a pattern that matches EVERY line. Gated by tests/test_artifact_gate.py.
+# matched case-insensitively; blank lines, `#` comments and carriage returns are stripped, because
+# to `grep -F -f` an empty line is a pattern that matches EVERY line and a trailing CR is part of
+# the pattern — the two ways this gate can fail open. Gated by tests/test_artifact_gate.py.
 set -uo pipefail
 
 usage() { echo "usage: check_leaks.sh DIR [--denylist FILE]" >&2; exit 2; }
@@ -51,8 +52,10 @@ for shape in "${SHAPES[@]}"; do
     fi
 done
 if [ -n "$DENY" ]; then
-    # Comments and blank lines are stripped BEFORE grep sees a pattern — see the header.
-    pats="$(grep -vE '^[[:space:]]*(#|$)' "$DENY" || true)"
+    # Comments and blank lines are stripped BEFORE grep sees a pattern, and so is a carriage
+    # return: `grep -F` takes a trailing CR as part of the pattern, so a denylist saved on Windows
+    # matched nothing and this returned CLEAN — see the header.
+    pats="$(tr -d '\r' < "$DENY" | grep -vE '^[[:space:]]*(#|$)' || true)"
     if [ -n "$pats" ]; then
         hits="$(cd "$DIR" && printf '%s\n' "$pats" | grep -rlIiF -f - . 2>/dev/null || true)"
         if [ -n "$hits" ]; then
