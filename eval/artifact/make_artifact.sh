@@ -47,7 +47,12 @@ SRC_DATA="${GPAP_PAPER_DIR:-$RESULTS/paper}"
 # and the manifest then carry that object's id, not HEAD's, so a dry run cannot pass as a release.
 TREE="${GPAP_ARTIFACT_TREE:-HEAD}"
 COMMIT="$(git rev-parse --short "$TREE" 2>/dev/null || echo unknown)"
-NAME="gpap-artifact-$(date +%Y%m%d)-$COMMIT"
+# A dry run says so IN ITS NAME. A tree id and a commit id are the same seven hex characters, the
+# tarball lands in the same directory as a release one, and the mistake this prevents — uploading
+# a dry run to Zenodo — is not reversible once a DOI exists.
+DRYRUN=""
+[ -z "${GPAP_ARTIFACT_TREE:-}" ] || DRYRUN="-dryrun"
+NAME="gpap-artifact-$(date +%Y%m%d)-$COMMIT$DRYRUN"
 STAGE="$OUT/.staging_$NAME.$$"
 FINAL="$OUT/$NAME"
 
@@ -83,6 +88,23 @@ for f in README.md RESULTS.md tables.tex VERIFICATION.txt emission_audit.txt; do
     [ -f "$SRC_DATA/$f" ] && cp "$SRC_DATA/$f" "$STAGE/artifact-data/paper/$f"
 done
 [ -d "$SRC_DATA/plots" ] && cp -r "$SRC_DATA/plots" "$STAGE/artifact-data/paper/plots"
+
+# THE ROWS MUST BE THE FROZEN ROWS. `data/MANIFEST.sha256` pins them, and a row edited without
+# updating it is the one way the shipped tables silently stop describing the published campaign —
+# it is also the check that says whether the copied `emission_audit.txt` below still applies,
+# since that file is produced from these rows and nothing here can re-derive it.
+[ -f "$STAGE/artifact-data/paper/data/MANIFEST.sha256" ] || {
+    echo "[FATAL] no data/MANIFEST.sha256 beside the rows in $SRC_DATA/data — without it" >&2
+    echo "        nothing here can tell the frozen campaign from a working copy." >&2
+    exit 1
+}
+( cd "$STAGE/artifact-data/paper/data" && sha256sum --quiet -c MANIFEST.sha256 ) || {
+    echo "[FATAL] the rows do not match data/MANIFEST.sha256 — these are not the frozen rows." >&2
+    echo "        If a row was edited deliberately, re-run the paper folder's regenerate.sh" >&2
+    echo "        (tables, gate and emission audit) and update the manifest, then re-package." >&2
+    exit 1
+}
+echo "manifest   : the rows match data/MANIFEST.sha256"
 
 # --- the benchmarks the repository does not carry ------------------------------------------------
 # Gitignored because of their size, fetched at run time from a raw GitHub URL that is neither
@@ -120,22 +142,44 @@ if [ "$TABLES_OK" != 1 ]; then
     exit 1
 fi
 VERIFY_OK=1
+# Beside the tables it judges, and OVER them: the copy loop above brought a `VERIFICATION.txt`
+# from the results folder, and this overwrites it. Written anywhere else, the artifact ships two
+# files of that name with different provenance — one regenerated here, one copied — which agree
+# until the first time the rows change, and then disagree with nothing to say which is authoritative.
 ( cd "$STAGE" && $PY eval/artifact/verify_artifact.py --rivals artifact-data/paper/data \
-    ${BARARGS[@]+"${BARARGS[@]}"} ) > "$STAGE/artifact-data/VERIFICATION.txt" 2>&1 || VERIFY_OK=0
-VERDICT="$(tail -1 "$STAGE/artifact-data/VERIFICATION.txt")"
+    ${BARARGS[@]+"${BARARGS[@]}"} ) > "$STAGE/artifact-data/paper/VERIFICATION.txt" 2>&1 \
+    || VERIFY_OK=0
+VERDICT="$(tail -1 "$STAGE/artifact-data/paper/VERIFICATION.txt")"
 echo "$VERDICT"
 if [ "$VERIFY_OK" != 1 ] && [ "${GPAP_ARTIFACT_ALLOW_FAIL:-0}" != "1" ]; then
-    grep '^  FAIL' "$STAGE/artifact-data/VERIFICATION.txt" >&2 \
-        || tail -20 "$STAGE/artifact-data/VERIFICATION.txt" >&2
+    grep '^  FAIL' "$STAGE/artifact-data/paper/VERIFICATION.txt" >&2 \
+        || tail -20 "$STAGE/artifact-data/paper/VERIFICATION.txt" >&2
     # The EXIT trap is about to delete the staging tree, and with it the only copy of the
     # evidence for this refusal.
-    cp "$STAGE/artifact-data/VERIFICATION.txt" "$OUT/$NAME.VERIFICATION.txt" 2>/dev/null \
+    cp "$STAGE/artifact-data/paper/VERIFICATION.txt" "$OUT/$NAME.VERIFICATION.txt" 2>/dev/null \
         && echo "        the failing verdict is kept at $OUT/$NAME.VERIFICATION.txt" >&2
     echo "[FATAL] the gate FAILED — refusing to package an artifact its own verifier calls" >&2
     echo "        unpublishable. GPAP_ARTIFACT_ALLOW_FAIL=1 packages anyway; the verdict" >&2
     echo "        ships inside either way." >&2
     exit 1
 fi
+
+# --- the emission audit is COPIED, deliberately, and must be there ---------------------------------
+# Unlike the tables and the verdict above, this one is NOT re-derived here, and trying to was a
+# mistake worth recording: the audit inspects the RIVALS' OWN SOURCE to show that none was timed
+# while writing samples out, and the staged tree carries no rival checkouts (they ship no licence;
+# `rivals_setup.sh` fetches them at pinned commits). Regenerated in the stage it skipped all three
+# and still said PASS — a weaker claim wearing the same words. It has to come from a machine where
+# the checkouts exist, which is where `$GPAP_RESULTS/paper/regenerate.sh` runs it.
+#
+# So what is checked here instead is that it EXISTS, and that the rows it describes are the frozen
+# ones — see the manifest check above, which is the real staleness signal.
+[ -f "$STAGE/artifact-data/paper/emission_audit.txt" ] || {
+    echo "[FATAL] no emission_audit.txt in $SRC_DATA — it is evidence the paper cites, and it" >&2
+    echo "        cannot be produced here (no rival checkouts in a staged tree). Run" >&2
+    echo "        \$GPAP_RESULTS/paper/regenerate.sh on a machine that has them." >&2
+    exit 1
+}
 
 # --- nothing the staging steps themselves wrote may ship --------------------------------------------
 # Before the gate and the manifest, so both see exactly the bytes that ship.
@@ -175,7 +219,12 @@ NFILES=$((NFILES + 1))                                   # MANIFEST.md itself, w
 {
   echo "# $NAME"
   echo
-  echo "Built $(date -Is) from commit \`$COMMIT\` on $(uname -sr)."
+  if [ -n "$DRYRUN" ]; then
+    echo "**DRY RUN** — built $(date -Is) from the TREE OBJECT \`$COMMIT\` on $(uname -sr):"
+    echo "uncommitted work, packaged to exercise the gates. NOT a release, and not for upload."
+  else
+    echo "Built $(date -Is) from commit \`$COMMIT\` on $(uname -sr)."
+  fi
   echo
   echo "    $VERDICT"
   echo
