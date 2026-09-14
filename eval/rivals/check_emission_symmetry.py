@@ -87,7 +87,10 @@ def scan_rivals(root):
         path = os.path.join(root, name, rel)
         print(f"\n[1] {name}")
         if not os.path.isfile(path):
-            print(f"    SKIP — no checkout at {path}")
+            # display_path, like the header above: this file is SHIPPED, and the one line that
+            # prints a raw path is the one that fires when a checkout is missing — which is
+            # exactly the machine whose layout nobody else should be reading about.
+            print(f"    SKIP — no checkout at {display_path(path)}")
             continue
         src = open(path).read()
         tree = ast.parse(src)
