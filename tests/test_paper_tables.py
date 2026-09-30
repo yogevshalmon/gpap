@@ -578,6 +578,7 @@ def test_the_cmsgen_figures_classify_through_table_1s_rule(tmp_path):
     p.write_text(json.dumps([rrow("s386"), rrow("b12"), rrow("b04")] + screened))
     assert fig_cmsgen_sps_scatter(plt, [str(p)], str(tmp_path)) is not None
     assert (tmp_path / "sps_scatter_cmsgen.png").exists()
+    assert (tmp_path / "sps_scatter_cmsgen.pdf").exists()      # the paper's vector copy
     out = fig_vs_cmsgen_rival(plt, str(p), str(tmp_path))
     assert out is not None and (tmp_path / "vs_cmsgen_recurrent_rare.png").exists()
     p.write_text(json.dumps([rrow("s386"), rrow("b12")] + screened))
