@@ -86,7 +86,9 @@ drawn (`vs_cmsgen_<stage>.png`) and Table 2's (`rivals_<stage>.png`), plus the t
 scatters (`sps_scatter_cmsgen.png`, `sps_scatter_rivals.png`, hollow markers for T=50) that answer
 what a geomean hides — how the instances are distributed around a ratio. Each classifies its cells
 through the tables' own rules (`paper_tables.rival_cms_cells`, `rival_cells`), so it cannot draw a
-cell its table excludes, and what is not drawn is named on it. `RESULTS.md`'s two commits differ:
+cell its table excludes, and what is not drawn is named on it (the two scatters, drawn title-free
+at print size as PNG + PDF for the paper, print that ledger when generated and leave it to the
+caption). `RESULTS.md`'s two commits differ:
 the measured engine is the per-row build id (more than one value means mixed engines), `tables
 generated at` only the HEAD the generator ran under.
 

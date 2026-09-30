@@ -5,15 +5,18 @@ Reads every bench results JSON in a directory (one per stage, from gpap/benchmar
 rival head-to-head JSONs, and writes PNGs + `summary.md`: the encoder A/B, GPAP vs CMSGen per
 stage and per rival stage (Table 1's row, drawn), the CMSGen emission control, work rates,
 propagation_summary, amplification, the rival dumbbells (Table 2's row, drawn) and three log-log
-scatters. Every screen and cell classification is IMPORTED from eval/artifact/paper_tables.py,
-so a figure's geomean is the paper's over the paper's cells.
+scatters, the two all-cells ones drawn at the paper's print size as PNG + PDF. Every screen and
+cell classification is IMPORTED from eval/artifact/paper_tables.py, so a figure's geomean is the
+paper's over the paper's cells.
 
   PYTHONPATH=. .venv/bin/python eval/eval_plots.py .experiments/full_eval/<gpu> [--out-dir DIR]
 """
 import argparse
 import glob
 import json
+import math
 import os
+import re
 import statistics as st
 import sys
 
@@ -609,80 +612,170 @@ def fig_vs_cmsgen_rival(plt, path, out_dir):
         path=os.path.join(out_dir, f"vs_cmsgen_{short}.png"))
 
 
-def _ratio_guides(ax, lo, hi):
-    """Constant-ratio diagonals from 1x up by decades, extended as far as the data spreads."""
+# The paper's figures are drawn at their print width, the LNCS text width (12.2 cm), so LaTeX
+# places them 1:1 and the point size set here is the one printed. The height is the page budget.
+PRINT_W, PRINT_H = 4.8, 3.5
+
+
+def _save_print(fig, path):
+    """A paper figure, laid out at its print size, saved at exactly that size (a tight bbox
+    would crop it and LaTeX would rescale the fonts): the PNG at 300 dpi and a vector PDF beside
+    it, with TrueType fonts (not Type 3) and no timestamp."""
+    import matplotlib.pyplot as plt
+    with plt.rc_context({"pdf.fonttype": 42}):
+        fig.savefig(path, dpi=300, facecolor=SURFACE)
+        fig.savefig(os.path.splitext(path)[0] + ".pdf", facecolor=SURFACE,
+                    metadata={"CreationDate": None})
+    plt.close(fig)
+    return path
+
+
+def _dots(ax):
+    """Every scatter marker on screen as (x, y, radius), stroke included, padded by 1 pt."""
+    dots, pt = [], ax.figure.dpi / 72
+    for c in ax.collections:
+        rad = ((math.sqrt(c.get_sizes()[0]) + c.get_linewidths()[0]) / 2 + 1) * pt
+        dots += [(x, y, rad) for x, y in ax.transData.transform(c.get_offsets())]
+    return dots
+
+
+def _ratio_guides(ax, lo, hi, dots=(), boxes=()):
+    """Constant-ratio diagonals from 1× up by decades, extended as far as the data spreads. Call
+    it once the limits and the layout are final: a label takes its line's angle on screen and
+    starts near the left end. Given `dots` (`_dots`) and `boxes` (screen Bboxes) it slides along
+    its line until its rotated footprint is clear of them; a label that cannot sit clear and
+    inside the axes is left out (its neighbours name it)."""
+    r = ax.figure.canvas.get_renderer()
+    frame = ax.get_window_extent(r)
+    (x0, y0), (x1, y1) = ax.transData.transform([(lo, lo), (hi, hi)])
+    a = math.atan2(y1 - y0, x1 - x0)
+    cos, sin = math.cos(a), math.sin(a)
+
+    def clear(t):
+        bb = t.get_window_extent(r)
+        if not (frame.x0 <= bb.x0 and bb.x1 <= frame.x1 and frame.y0 <= bb.y0
+                and bb.y1 <= frame.y1) or any(bb.overlaps(b) for b in boxes):
+            return False
+        t.set_rotation(0)                          # the text's own frame: anchor + w x h
+        flat = t.get_window_extent(r)
+        t.set_rotation(math.degrees(a))
+        for x, y, rad in dots:
+            u = (x - flat.x0) * cos + (y - flat.y0) * sin
+            v = (y - flat.y0) * cos - (x - flat.x0) * sin
+            if -rad < u < flat.width + rad and -rad < v < flat.height + rad:
+                return False
+        return True
+
     k = 1
     while lo * k < hi:
         ax.plot([lo, hi], [lo * k, hi * k], "--", color=INK2 if k == 1 else GRID,
-                lw=1.0 if k == 1 else 0.8, zorder=1)
-        y_at = lo * 3 * k
-        if lo < y_at < hi:
-            ax.annotate("1x" if k == 1 else f"{k:,d}x", (lo * 3, y_at), fontsize=7.5,
-                        color=INK2, xytext=(2, 3), textcoords="offset points", rotation=29)
+                lw=0.8 if k == 1 else 0.6, zorder=1)
+        x = lo * 3
+        while x < hi:                              # 2.5 pt above the line, along it
+            t = ax.annotate(f"{k:,d}×", (x, x * k), fontsize=7.5, color=INK2,
+                            xytext=(-2.5 * sin, 2.5 * cos), textcoords="offset points",
+                            rotation=math.degrees(a), rotation_mode="anchor", va="bottom")
+            if clear(t):
+                break
+            t.remove()
+            x *= 10 ** 0.125
         k *= 10
 
 
+def _row_label(name, rare, depth):
+    """A legend entry in the paper tables' words, "Sequential, rare, $T$=25"; a combinational
+    set (T=1, nothing unrolled) carries no depth."""
+    pin = "rare" if rare else "theirs"
+    return f"{name}, {pin}" + (f", $T$={depth}" if (depth or 1) > 1 else "")
+
+
+def _cells_scatter(plt, groups, drop, note, xlabel, ylabel, path):
+    """The two all-cells scatters, drawn for print: no title (the caption carries the
+    encoding), log-log over ONE range on both axes, so 1× is the identity and a constant ratio a
+    diagonal, with the legend framed in the empty corner below 1×. `groups` is
+    [(label, colour, marker, hollow, xs, ys)] in the table's row order. What it does not draw is
+    left to the caption and printed here, with the dots per legend row."""
+    fig, ax = _fig(plt, PRINT_W, PRINT_H)
+    ax.grid(True, which="major", color=GRID, lw=0.5, alpha=0.7)
+    vals = [v for *_, xs, ys in groups for v in xs + ys]
+    lo, hi = min(vals) * 0.4, max(vals) * 2.5
+    for label, color, marker, hollow, xs, ys in groups:
+        ax.scatter(xs, ys, s=20, marker=marker, facecolors="none" if hollow else color,
+                   edgecolors=color if hollow else SURFACE, linewidth=0.9 if hollow else 0.5,
+                   zorder=3, label=label)
+    ax.set_xscale("log")
+    ax.set_yscale("log")
+    ax.set_xlim(lo, hi)
+    ax.set_ylim(lo, hi * 0.9)
+    ax.set_xlabel(xlabel, fontsize=9, color=INK2)
+    ax.set_ylabel(ylabel, fontsize=9, color=INK2)
+    ax.tick_params(which="minor", color=GRID)
+    fig.tight_layout(pad=0.3)
+    leg = ax.legend(loc="lower right", fontsize=8, labelcolor=INK2, frameon=True,
+                    facecolor=SURFACE, framealpha=0.9, edgecolor=GRID, borderaxespad=0.3,
+                    borderpad=0.4, labelspacing=0.35, handlelength=1.0, handletextpad=0.4)
+    leg.get_frame().set_linewidth(0.5)
+    leg.set_zorder(5)                              # above the points
+    dots = _dots(ax)
+    frame = leg.get_window_extent(fig.canvas.get_renderer())
+    _ratio_guides(ax, lo, hi, dots=dots, boxes=[frame])
+    hidden = sum(frame.x0 - d < x < frame.x1 + d and frame.y0 - d < y < frame.y1 + d
+                 for x, y, d in dots)
+    excl = [f"{drop[b]} {note[b]}" for b in note if drop.get(b)]
+    print(f"  {os.path.basename(path)}: {len(dots)} dots ("
+          + ", ".join(f"{g[0].replace('$', '')}: {len(g[4])}" for g in groups) + ")"
+          + ("; not drawn: " + ", ".join(excl) if excl else "")
+          + (f"; WARNING: the legend covers {hidden} dot(s), move it" if hidden else ""))
+    return _save_print(fig, path)
+
+
 SET_COLOR = {"demotic": C_ABC, "rcs": C_TSEITIN}
+SET_NAME = {"demotic": "ISCAS-85", "rcs": "Sequential"}      # Table 1's Set column, as printed
 
 
 def fig_cmsgen_sps_scatter(plt, rival_paths, out_dir):
-    """Every Table 1 cell of the campaign on ONE picture: CMSGen's samples/s (x) against GPAP's
-    (y), log-log — the companion to Table 1 that `sps_scatter_rivals.png` is to Table 2. Colour =
-    benchmark set, marker = task, filled = the paper's depth, hollow = the T=50 appendix; tasks
-    are never pooled, so there is no geomean. Classification is `rival_cms_cells`, IMPORTED."""
-    pts, drop = [], {}                             # (key, label, tgt, depth, cms, gpap)
+    """Every Table 1 cell of the campaign on ONE picture: CMSGen's samples/s (x) against GpapS's
+    (y), log-log — the paper's figure beside Table 1, as `sps_scatter_rivals.png` is Table 2's.
+    Colour = benchmark set, marker = task, filled = the paper's depth, hollow = the T=50
+    appendix; tasks are never pooled, so there is no geomean. Classification is
+    `rival_cms_cells`, IMPORTED."""
+    row = {s: i for i, (s, _lb, _tg) in enumerate(RIVAL_CMS_SETS)}   # Table 1's row order
+    pts, drop = [], {}                             # (row, key, tgt, depth, cms, gpap)
     for path in rival_paths:
         rows, stem, spec = _rival_payload(path)
         short = (stem or "")[len("rivals_"):] if (stem or "").startswith("rivals_") else stem
         if not rows or short not in _RIVAL_KEY:
             continue                               # e.g. rivals_steps_calibration.json
         key = _RIVAL_KEY[short]
-        label, tgt = next((lb, tg) for s, lb, tg in RIVAL_CMS_SETS if s == short)
+        tgt = next(tg for s, _lb, tg in RIVAL_CMS_SETS if s == short)
         for name, _v, bucket, ours, cms in rival_cms_cells(rows, key):
             if bucket == "ok":
                 depth = next((r.get("cycles") for r in rows if r["name"] == name), None)
-                pts.append((key, label, tgt, depth, cms, ours))
+                pts.append((row[short], key, tgt, depth, cms, ours))
             else:
                 drop[bucket] = drop.get(bucket, 0) + 1
     if len(pts) < 3:
         return None
-    fig, ax = _fig(plt, 7.6, 6.4)
-    ax.grid(True, which="both", color=GRID, lw=0.6, alpha=0.7)
-    lo = min(min(p[4] for p in pts), min(p[5] for p in pts)) * 0.4
-    hi = max(max(p[4] for p in pts), max(p[5] for p in pts)) * 2.5
-    _ratio_guides(ax, lo, hi)
-    groups = sorted({(p[0], p[1], p[2], p[3]) for p in pts},
-                    key=lambda g: (g[0] != "demotic", g[2] != "their pins", g[3] or 0))
-    for key, label, tgt, depth in groups:
-        sub = [p for p in pts if (p[0], p[1], p[2], p[3]) == (key, label, tgt, depth)]
-        hollow = depth == 50
-        ax.scatter([p[4] for p in sub], [p[5] for p in sub], s=46,
-                   facecolors="none" if hollow else SET_COLOR[key],
-                   edgecolors=SET_COLOR[key] if hollow else SURFACE,
-                   marker="o" if tgt == "their pins" else "^", linewidth=1.4 if hollow else 1.1,
-                   zorder=3, label=f"{label} — {tgt}, T={depth} (n={len(sub)})")
-    ax.set_xscale("log")
-    ax.set_yscale("log")
-    ax.set_xlim(lo, hi)
-    ax.set_ylim(lo, hi * 0.9)
-    ax.set_xlabel("CMSGen samples/s (its own sampling wall, --nowrite)", fontsize=9, color=INK2)
-    ax.set_ylabel("GPAP samples/s (steady state, winning config)", fontsize=9, color=INK2)
-    excl = [f"{drop[b]} {CMS_NOTE[b]}" for b in CMS_NOTE if drop.get(b)]
-    _title(ax, "Every GPAP-vs-CMSGen cell at once — samples/s",
-           "one dot per (instance, task, depth); circle = the rival's own pins, triangle = our "
-           "rare pin; hollow = T=50; diagonals = constant ratio"
-           + ("; not plottable: " + ", ".join(excl) if excl else ""))
-    ax.legend(frameon=False, fontsize=8, labelcolor=INK2, loc="lower right")
-    return _save(fig, os.path.join(out_dir, "sps_scatter_cmsgen.png"))
+    groups = []
+    for g in sorted({p[:4] for p in pts}, key=lambda g: (g[0], g[3] or 0)):
+        _row, key, tgt, depth = g
+        sub = [p for p in pts if p[:4] == g]
+        groups.append((_row_label(SET_NAME[key], tgt == "rare", depth), SET_COLOR[key],
+                       "o" if tgt == "their pins" else "^", depth == 50,
+                       [p[4] for p in sub], [p[5] for p in sub]))
+    return _cells_scatter(plt, groups, drop, CMS_NOTE, "CMSGen samples/s", "GpapS samples/s",
+                          os.path.join(out_dir, "sps_scatter_cmsgen.png"))
 
 
-RIVAL_COLOR = {"DEMOTIC": C_TSEITIN, "Recurrent-CircuitSAT": C_ABC, "HTS": C_CMS}
+# a rival wears its benchmark set's colour, so the pair of scatters agrees
+RIVAL_COLOR = {"DEMOTIC": C_ABC, "Recurrent-CircuitSAT": C_TSEITIN, "HTS": C_CMS}
+RIVAL_NAME = {"Recurrent-CircuitSAT": "Recurrent"}           # Table 2's Rival column, as printed
 
 
 def fig_rivals_sps_scatter(plt, rival_paths, out_dir):
     """Every rival cell of the campaign on ONE picture: the rival's unique solutions/s (x)
-    against GPAP's (y), log-log — the rivals' own metric, and the companion to Table 2 that
-    `sps_scatter_all.png` is to Table 1. Colour = rival, marker = task; the two protocols are
+    against GpapS's (y), log-log — the rivals' own metric, and the companion to Table 2 that
+    `sps_scatter_cmsgen.png` is to Table 1. Colour = rival, marker = task; the two protocols are
     never pooled, so there is no geomean. Classification is `rival_cells`, IMPORTED."""
     spec = {stem: (key, rival, proto) for stem, key, rival, proto in RIVALS}
     pts = []                                       # (rival, proto, rival_rate, gpap_rate)
@@ -705,39 +798,21 @@ def fig_rivals_sps_scatter(plt, rival_paths, out_dir):
                 drop[bucket] = drop.get(bucket, 0) + 1
     if len(pts) < 3:
         return None
-    fig, ax = _fig(plt, 7.6, 6.4)
-    ax.grid(True, which="both", color=GRID, lw=0.6, alpha=0.7)
-    lo = min(min(p[2] for p in pts), min(p[3] for p in pts)) * 0.4
-    hi = max(max(p[2] for p in pts), max(p[3] for p in pts)) * 2.5
-    _ratio_guides(ax, lo, hi)
+    groups = []
     for stem, _key, rival, proto in RIVALS:        # RIVALS order = Table 2 row order
         sub = [p for p in pts if p[0] == rival and p[1] == proto]
         if not sub:
             continue
-        hollow = "50" in proto                     # the T=50 appendix rows, hollow
+        m = re.search(r"T\{=\}(\d+)", proto)
+        depth = int(m.group(1)) if m else None
         # the TASK decides the marker: "their ISCAS-85, our rare pin" is our task on their
         # circuits (a `startswith("their")` test drew it as the rival's own task)
-        ax.scatter([p[2] for p in sub], [p[3] for p in sub], s=46,
-                   facecolors="none" if hollow else RIVAL_COLOR[rival],
-                   edgecolors=RIVAL_COLOR[rival] if hollow else SURFACE,
-                   marker="^" if "rare" in proto else "o",
-                   linewidth=1.4 if hollow else 1.1, zorder=3,
-                   label=f"{rival} — {_plain(proto)} (n={len(sub)})")
-    ax.set_xscale("log")
-    ax.set_yscale("log")
-    ax.set_xlim(lo, hi)
-    ax.set_ylim(lo, hi * 0.9)
-    ax.set_xlabel("rival unique solutions/s (its own timer, delivery excluded)",
-                  fontsize=9, color=INK2)
-    ax.set_ylabel("GPAP unique solutions/s (timed rate x distinct fraction)",
-                  fontsize=9, color=INK2)
-    excl = [f"{drop[b]} {RIVAL_NOTE[b]}" for b in RIVAL_NOTE if drop.get(b)]
-    _title(ax, "Every rival cell at once — unique solutions/s",
-           "one dot per (instance, task, depth); circle = the rival's own benchmark task, "
-           "triangle = our rare-target task; hollow = T=50; diagonals = constant ratio"
-           + ("; not plottable: " + ", ".join(excl) if excl else ""))
-    ax.legend(frameon=False, fontsize=8, labelcolor=INK2, loc="lower right")
-    return _save(fig, os.path.join(out_dir, "sps_scatter_rivals.png"))
+        groups.append((_row_label(RIVAL_NAME.get(rival, rival), "rare" in proto, depth),
+                       RIVAL_COLOR[rival], "^" if "rare" in proto else "o", depth == 50,
+                       [p[2] for p in sub], [p[3] for p in sub]))
+    return _cells_scatter(plt, groups, drop, RIVAL_NOTE, "Rival unique solutions/s",
+                          "GpapS unique solutions/s",
+                          os.path.join(out_dir, "sps_scatter_rivals.png"))
 
 
 # --------------------------------------------------------------------------- summary
