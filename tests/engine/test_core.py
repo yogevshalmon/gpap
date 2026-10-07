@@ -1,16 +1,9 @@
-"""The C++ core's own contract: formula build, both entry points, readout, degenerate shapes.
+"""The C ABI's contract: the flush cache, the trajectory kernel, readout, degenerate shapes and
+preconditions.
 
-Two oracles keep this honest, and NEITHER is a second GPU engine:
-
-  * the formula build is checked against `tests/reference/formula.py` — a pure-numpy
-    re-derivation of the structures, which runs on any host;
-  * propagation is checked against `tests/reference/bcp.py` — a pure-Python BCP.
-
-Anything the core emits is additionally verifiable from the outside: a model must satisfy every
-clause, and these tests check that directly rather than trusting either implementation.
-
-(This file once also A/B'd the core against a retired PyTorch/Triton-JIT engine —
-the port gate. That engine is gone; the checks that survived it are the ones below.)
+Whether a fixpoint is RIGHT is tests/engine/test_propagation.py, and whether a formula is built
+right is tests/engine/test_formula.py. Here every model the core emits is checked from the
+outside: it must satisfy every clause.
 """
 import ctypes
 import random
@@ -22,48 +15,13 @@ import torch
 from gpap.engine import _core
 from gpap.engine._core import check
 
-from tests.reference.bcp import assigned_set, ref_bcp
-from tests.reference.formula import ReferenceFormula
+from tests.reference.bcp import assigned_set
 from tests.support import DEV, random_cnf
 
 pytestmark = pytest.mark.gpu
 
 
-# ---------------------------------------------------------------- formula structures
-
-def test_formula_structures_match_the_reference_builder():
-    rng = random.Random(7)
-    for nv, nc in [(6, 10), (40, 120), (200, 900)]:
-        clauses = random_cnf(rng, nv, nc)
-        f = ReferenceFormula.from_clauses(nv, clauses)
-        cf = _core.Formula.from_clauses(nv, clauses)
-
-        assert cf.info.num_vars == f.num_vars
-        assert cf.info.num_clauses == f.num_clauses
-        assert cf.info.num_bin == f.num_bin
-        assert cf.info.num_long == f.num_long
-        off, mid, cls_ = cf.occ()
-        np.testing.assert_array_equal(off, f.occ_offsets)
-        np.testing.assert_array_equal(mid, f.occ_mid)
-        np.testing.assert_array_equal(cls_, f.occ_clauses)
-        sizes, lsum = cf.clause_arrays()
-        np.testing.assert_array_equal(sizes, f.clause_sizes)
-        np.testing.assert_array_equal(lsum, f.init_lit_sum)
-
-
-def test_dimacs_parse_matches_the_reference_parser(tmp_path):
-    rng = random.Random(11)
-    clauses = random_cnf(rng, 30, 80)
-    p = tmp_path / "f.cnf"
-    with open(p, "w") as fh:
-        fh.write("c a comment\np cnf 30 %d\n" % len(clauses))
-        for c in clauses:                       # two clauses per line: the token stream matters
-            fh.write(" ".join(map(str, c)) + " 0 ")
-    f = ReferenceFormula.from_file(str(p))
-    cf = _core.Formula.from_file(str(p))
-    assert (cf.info.num_vars, cf.info.num_clauses) == (f.num_vars, f.num_clauses)
-    np.testing.assert_array_equal(cf.clause_arrays()[0], f.clause_sizes)
-
+# ---------------------------------------------------------------- what Python binds
 
 def test_k_calibration_matches():
     """The sizing model has ONE implementation (cpp/src/calibrate.cpp); Python binds it. This
@@ -85,50 +43,7 @@ def test_envelope_matches():
         assert _core.packed_envelope(nv, ml)[0] == packed_envelope(nv, ml)[0]
 
 
-# ---------------------------------------------------------------- entry point 1
-
-@pytest.mark.parametrize("mode", ["scalar", "wave"])
-def test_apply_matches_the_reference_bcp(mode):
-    """Conflict flags AND the fixpoint itself, row by row, against the pure-Python oracle."""
-    rng = random.Random(3)
-    for trial in range(8):
-        nv, nc = 25, 70
-        clauses = random_cnf(rng, nv, nc, kmin=2)
-        K, L = 16, 3
-        dec = [[rng.randrange(2 * nv) for _ in range(L)] for _ in range(K)]
-
-        core = _core.Engine(_core.Formula.from_clauses(nv, clauses), mode=mode)
-        core.reset(K)
-        core.apply(np.array(dec, dtype=np.int64))
-
-        act, conf = core.flags()
-        np.testing.assert_array_equal(act, ~conf)          # a row is active iff not conflicted
-        asg = core.rows_assignment(np.arange(K, dtype=np.int32))
-        for k in range(K):
-            ref_conflict, ref_asg = ref_bcp(clauses, dec[k])
-            assert bool(conf[k]) == ref_conflict, f"row {k} trial {trial}"
-            if not ref_conflict:
-                assert assigned_set(asg[k]) == ref_asg
-
-
-def test_scalar_and_wave_reach_the_same_fixpoint():
-    """BCP fixpoints are confluent, so the two propagate variants must agree EXACTLY — they
-    differ only in propagation order. This is what licenses the runtime auto-dispatch."""
-    rng = random.Random(19)
-    nv, nc, K = 20, 55, 12
-    clauses = random_cnf(rng, nv, nc, kmin=2)
-    dec = np.array([[rng.randrange(2 * nv)] for _ in range(K)], dtype=np.int64)
-    rows = np.arange(K, dtype=np.int32)
-
-    out = {}
-    for m in ("scalar", "wave"):
-        core = _core.Engine(_core.Formula.from_clauses(nv, clauses), mode=m)
-        core.reset(K)
-        core.apply(dec)
-        out[m] = (core.flags()[1], core.rows_assignment(rows), core.num_propagated())
-    for a, b in zip(out["scalar"], out["wave"]):
-        np.testing.assert_array_equal(a, b)
-
+# ---------------------------------------------------------------- the flush cache
 
 def test_flush_cache_and_units():
     """The formula's own unit clauses are asserted ONCE at construction and broadcast by reset."""
@@ -146,7 +61,7 @@ def test_unsat_units_conflict_every_row():
     assert core.flags()[1].all()
 
 
-# ---------------------------------------------------------------- entry point 2
+# ---------------------------------------------------------------- the trajectory kernel
 
 @pytest.mark.parametrize("mode", ["scalar", "wave"])
 def test_check_sound_agrees_with_an_independent_recount(mode):
@@ -369,6 +284,11 @@ def test_out_of_envelope_formula_builds_but_engine_rejects():
     assert cf.info.shift == 0 and cf.info.num_vars == 40_000
     with pytest.raises(ValueError):
         _core.Engine(cf)
+
+
+def test_small_formulas_take_the_16_bit_split():
+    core = _core.Engine(_core.Formula.from_clauses(4, [[1, 2], [-1, 2], [1, -2], [3, 4]]))
+    assert core.shift == 16
 
 
 def test_wide_split_is_selected_and_sound():
@@ -658,3 +578,33 @@ def test_the_warp_wide_decision_scan_picks_identically(B):
             models_seen += on[0]
     assert compared >= 6 and models_seen > 0, \
         f"fixture proves little: {compared} cells, {models_seen} models"
+
+
+@pytest.mark.parametrize("mode", ["scalar", "wave"])
+@pytest.mark.parametrize("soft", [False, True])
+def test_both_packed_splits_draw_identical_trajectories(mode, soft):
+    """The 8|24 split differs from 16|16 only in how the packed word is divided, so at one seed
+    the two must complete the same rows with the same bits. `force_shift=8` puts formulas the
+    16|16 word could hold on the wide split. The formulas are loose (clause/var ~1, no units
+    after the first) so every one delivers models; two empty sets would compare equal."""
+    rng = random.Random(3)
+    formulas = [(6, [[3], [1, 2, -3], [-1, 4], [-2, -4], [3, -4, 5], [-5, 1], [2, 5, 6],
+                     [-6, -2]])]
+    for _ in range(5):
+        nv = rng.randint(8, 16)
+        formulas.append((nv, random_cnf(rng, nv, nv, kmin=2)))
+    for nv, clauses in formulas:
+        f = _core.Formula.from_clauses(nv, clauses)
+        order = np.arange(nv, dtype=np.int32)
+        got = {}
+        for shift in (16, 8):
+            core = _core.Engine(f, mode=mode, force_shift=shift)
+            assert core.shift == shift
+            core.reset(128)
+            core.trajectory(order, nv, 2, 17, soft=soft)
+            n = core.select_complete(core.pair_mask(None), 0)
+            assert n > 0, f"no models on nv={nv}: the comparison would be vacuous"
+            assert core.check_sound(0) == 0
+            got[shift] = (core.selection_rows(0, n).tobytes(),
+                          core.var_bits(0, np.arange(nv, dtype=np.int32), n).tobytes())
+        assert got[16] == got[8], f"the splits diverged on nv={nv} (mode={mode}, soft={soft})"

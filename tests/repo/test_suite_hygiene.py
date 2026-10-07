@@ -8,7 +8,7 @@ happened here get a guard, because none of them announces itself:
     of them `pytest.skip`ped instead — a real check disappearing in silence);
   * a test with nothing that can raise — no assertion, no `pytest.raises`, no checking helper;
   * a `skipif` MARK on a helper function rather than on a test, which pytest only honours on
-    collected items and which therefore guards nothing (see test_cnf_formula.read_support).
+    collected items and which therefore guards nothing (that is how a support-line helper once guarded nothing).
 
 None of these catches the deepest form — a test whose assertions all hold for the wrong reason
 (the 8|24 A/B comparing the base split against itself, the emission spy watching a call the

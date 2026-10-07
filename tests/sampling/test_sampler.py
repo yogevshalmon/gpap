@@ -22,11 +22,10 @@ def test_sound_basic():
     clauses = [[1, 2], [-1, 3], [-2, -3]]
     smp = GPUSampler.from_clauses(3, clauses, DEV, k_cap=64, seed=1)
     out = smp.sample(2000, decisions_per_round=1, max_chunks=40, collect=True,
-                     verify_clauses=clauses)
+                     verify_clauses=clauses, verify_sound=True)
     assert out["all_valid"], "produced a model that violates the formula"
-    got = {tuple(m) for m in out["models"]}
-    assert got.issubset({(-1, 2, -3), (1, -2, 3)})
-    assert out["n_models"] > 0
+    assert out["sound_check"] == "ok"
+    assert {tuple(m) for m in out["models"]} == {(-1, 2, -3), (1, -2, 3)}
 
 
 @pytest.mark.gpu
@@ -62,8 +61,9 @@ def test_config_portfolio_soft_lookahead():
     clauses = [[1, 2], [-1, 3], [-2, -3]]
     smp = GPUSampler.from_clauses(3, clauses, DEV, k_cap=64, seed=1)
     out = smp.sample(2000, configs=[(True, 1, "soft"), (True, 8, False)], max_chunks=30,
-                     collect=True, verify_clauses=clauses)
+                     collect=True, verify_clauses=clauses, verify_sound=True)
     assert out["all_valid"], "soft-lookahead portfolio produced an invalid model"
+    assert out["sound_check"] == "ok"
     assert out["n_models"] > 0
     assert len(out["dominant_config"]) == 3                      # (rv, B, lookahead)
     assert any("la=soft" in k for k in out["config_breakdown"])  # label carries lookahead
@@ -80,16 +80,58 @@ def test_unsat():
 
 
 @pytest.mark.gpu
+def test_same_seed_draws_the_same_models():
+    """The trajectory is a pure function of the seed and the order, so two samplers at one seed
+    and batch return the same model set."""
+    clauses = [[1, 2, 3], [-1, 4], [-2, -4], [3, -4, 5], [-5, 1]]
+    runs = []
+    for _ in range(2):
+        smp = GPUSampler.from_clauses(5, clauses, DEV, k_cap=128, seed=17)
+        out = smp.sample(500, decisions_per_round=2, max_chunks=8, collect=True,
+                         verify_clauses=clauses)
+        assert out["all_valid"]
+        runs.append(sorted(tuple(m) for m in out["models"]))
+    assert runs[0] and runs[0] == runs[1], "same seed produced different model sets"
+
+
+@pytest.mark.gpu
+def test_retired_lookahead_modes_are_refused():
+    smp = GPUSampler.from_clauses(3, [[1, 2], [-1, 3]], DEV, k_cap=16, seed=1)
+    for la in ("full", "orac", True):
+        with pytest.raises(ValueError):
+            smp.sample(10, configs=[(True, 1, la)], max_chunks=1)
+
+
+@pytest.mark.gpu
+def test_a_decision_round_never_straddles_the_support_boundary(tmp_path):
+    """On a circuit whose support determines everything else, a huge B must keep success near
+    full: deciding completion variables in the same round as support ones collapsed it from
+    100% to 0%."""
+    import os
+
+    from gpap.circuits.bench import build_cnf, parse_bench, write_dimacs
+    from tests.conftest import SEQ_DIR
+    b, support, _, _ = build_cnf(parse_bench(os.path.join(SEQ_DIR, "s386.bench")), T=2, seed=1)
+    p = tmp_path / "s386c2.cnf"
+    write_dimacs(str(p), b, support)
+    smp = GPUSampler.from_cnf_file(str(p), DEV, simplify=True, els=True, k_cap=512, seed=5)
+    out = smp.sample(10 ** 9, configs=[(True, 4096, False)], max_chunks=2, collect=False,
+                     verify_sound=True)
+    assert out["sound_check"] == "ok"
+    assert out["success_rate"] > 0.5, "huge-B success collapsed: phase boundary straddled?"
+
+
+@pytest.mark.gpu
 def test_unsat_via_simplify():
     smp = GPUSampler.from_clauses(1, [[1], [-1]], DEV, k_cap=16, seed=1, simplify=True)
     out = smp.sample(10, max_chunks=5, collect=True)
     assert out["n_models"] == 0
 
 
-
 def _projections(models, support):
     """Full DIMACS models -> 0/1 projections over the 0-based `support`."""
     return {tuple(1 if (v + 1) in set(m) else 0 for v in support) for m in models}
+
 
 def _controlled_formula(seed=3, S=6, nc=4, ng=10, add_forced=True, add_dontcare=True):
     """Small formula with a support of S vars, a few constraints, gate-defined non-support vars,
