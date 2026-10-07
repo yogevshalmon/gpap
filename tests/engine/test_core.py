@@ -114,7 +114,6 @@ def test_trajectory_emits_only_real_models(mode, B):
     assert core.flags()[0][rows].all()
 
 
-
 @pytest.mark.parametrize("mode", ["scalar", "wave"])
 def test_trajectory_counters_agree_with_the_assignment(mode):
     """The counters agree with the assignment (decisions + implications); every reported

@@ -208,7 +208,6 @@ def test_the_python_package_version_is_the_same_number_in_all_three_places():
     assert len(set(found.values())) == 1, f"the package version disagrees with itself: {found}"
 
 
-
 def _export_ignored():
     """Paths `.gitattributes` keeps out of every `git archive` (the artifact packager and
     GitHub's zip download)."""
