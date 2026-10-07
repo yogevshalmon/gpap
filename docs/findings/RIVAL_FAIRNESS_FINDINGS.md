@@ -8,7 +8,7 @@
 > **Rule lives in:** `eval/rivals/rival_common.py`, `eval/artifact/paper_tables.py`,
 > `eval/run_full_eval.sh`, `scripts/build_cmsgen.sh`; restated in `docs/EVAL_RUNBOOK.md` §6 and
 > `docs/BENCHMARKING.md` §4b/§4c.
-> **Gated by:** `tests/test_rival_targets.py`, `tests/test_paper_tables.py`.
+> **Gated by:** `tests/eval/test_rival_targets.py`, `tests/eval/test_paper_tables.py`.
 > **SECTION NUMBERS ARE AN API.** Code, tests and the GENERATED paper prose cite this file by
 > section (`paper_tables.py` emits "§17" into `docs/paper/RESULTS.md`). Sections are in writing
 > order, not numeric order — §10 follows §14 — and are append-only: never renumber one.
@@ -186,7 +186,7 @@ cell with a CMSGen zero (EPFL `ctrl` under ABC, succ 1.0 at 240M samples/s) was 
 outright win. Rule: screen first, then bucket; a degenerate cell leaves through its own column and
 takes no part in the geomean, the zero ledger or the win count; the invariant is
 `inst = n_gm + CMSGen=0 + GPAP=0 + both=0 + no-search + vacuous` (folded into one `excluded`
-column by §17b), pinned by `tests/test_paper_tables.py::test_every_instance_is_counted_exactly_once`.
+column by §17b), pinned by `tests/eval/test_paper_tables.py::test_every_instance_is_counted_exactly_once`.
 
 ---
 
@@ -235,7 +235,7 @@ so Table 2 ran GPAP 1.04–4.8x slower than Table 1 on the same circuits and pin
 Tseitin variables against 41,937 under abc:fast). The "must be Tseitin because the rivals unroll
 the raw circuit themselves" argument was wrong: fairness is same circuit, same task, each tool
 compiling into its own representation; `abc:fast` is function-preserving with the same projected
-solution space (`tests/test_abc_encoder.py`) and its encode wall is `encode_s`, outside every
+solution space (`tests/circuits/test_abc_encoder.py`) and its encode wall is `encode_s`, outside every
 rate. `rival_common.oversize_reason` takes `encoder=` (its host-RAM model was Tseitin's), so every
 seq instance — b19 and s35932 at T=50 included — builds on the 13 GB L4 VM. The coverage run is
 gone from the rival arm (its host reconstruction was the 61 GB OOM); the distinct fraction is
@@ -256,8 +256,8 @@ driver's `cms_*` keys plus host `cpu`/`gpu`. `paper_tables.rival_cms_family` rea
 the rival stages (Table 2's screens first, Table 1's ledger after; absent and crashed are not
 zero) and `rival_prop_rates` Table 3 off the same cells; `verify_artifact.py --rivals` applies
 the bench-stage gates to them. Cost: +60 s of CMSGen per row. The family matrix (`CMS_FAMILIES`)
-is supplementary, never the headline. Gated by `tests/test_rival_targets.py` and
-`tests/test_paper_tables.py`.
+is supplementary, never the headline. Gated by `tests/eval/test_rival_targets.py` and
+`tests/eval/test_paper_tables.py`.
 
 Three gaps closed in the rows the same day: the rival-facing ratio is the steady-state
 `samples_per_s` (excluding preparation as the rival's `model_runtime` excludes its build) — the
@@ -576,7 +576,7 @@ Two harness pieces added for the freeze, neither a protocol change:
   "largest rung that completes" holds on any card; a recorded rival failure has no grant and is
   re-measured, never copied. The walk and the probe were the bulk of a campaign's wall on the
   large circuits and neither is a measurement, so this is what makes a re-run reproducible and
-  cheap. Gated by five tests in tests/test_rival_targets.py (ladder top and start, pinned walk
+  cheap. Gated by five tests in tests/eval/test_rival_targets.py (ladder top and start, pinned walk
   and descent, the harness pinning both halves, the extractor's keys and the never-pin-a-failure
   rule, the committed file's consistency with the ladder).
 

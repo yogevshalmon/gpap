@@ -644,7 +644,7 @@ def simplify_cnf(nv: int, clauses: list, support: list | None):
     i+1, `forced` the DIMACS lits fixed by propagation, `free_support` the 0-based support vars
     neither forced nor in any remaining clause — true don't-cares reconstruction must randomize
     uniformly and never drop. Sound because unit propagation is strictly model-preserving (no
-    VE/BCE-style elimination), given that pinning (tests/test_sampler.py).
+    VE/BCE-style elimination), given that pinning (tests/sampling/test_sampler.py).
     """
     from itertools import chain
     from gpap.sampling.preprocess import unit_closure
@@ -682,7 +682,7 @@ def simplify_cnf_els(nv: int, clauses: list, support: list | None):
     so a smaller formula hits the bottleneck twice. ELS preserves support projections iff
     reconstruction is consistent: a removed variable equals its representative in every model, so
     it must be reconstructed from that rep and never randomized independently — hence one draw
-    per equivalence class (tests/test_sampler.py). Returns (nv_r, clauses_r, support_r, recon),
+    per equivalence class (tests/sampling/test_sampler.py). Returns (nv_r, clauses_r, support_r, recon),
     or None if UNSAT; recon is the resolver used by GPUSampler._reconstruct:
       rep_of[v-1]  : (rep_var, same_polarity) — v takes rep_var's value, negated if not.
       new_of_new   : {rep_var: compacted_idx(1-based)} — reps surviving as decided vars.

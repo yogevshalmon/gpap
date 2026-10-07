@@ -54,7 +54,7 @@ rest (`seed`, `time_limit_s`, `max_chunks`, `max_keep`,
 
 The loop itself lives in the library (`gpap_sampler_*`, `src/sample.cpp`), shared verbatim with the
 Python face, so at one seed and a single config both faces find the *same* models (gated by
-`tests/test_face_parity.py`). `verify` re-checks on device that every returned row satisfies
+`tests/sampling/test_face_parity.py`). `verify` re-checks on device that every returned row satisfies
 every clause; it is a self-test, off by default on every face, and `Sampler::sample` throws if a row
 fails.
 
@@ -168,9 +168,9 @@ Examples: [`examples/sample.cpp`](examples/sample.cpp) (`gpap::Sampler`),
 library from `$GPAP_LIB`, then `$GPAP_BUILD_DIR` (what `scripts/build_core.sh` builds into),
 then `<repo>/build/`, then `<repo>/cpp/build/`, then the copy installed beside the package.
 
-The core's contract is gated by [`tests/test_core.py`](../tests/test_core.py) against two
-independent pure-Python oracles ([`tests/reference_formula.py`](../tests/reference_formula.py),
-[`tests/reference_bcp.py`](../tests/reference_bcp.py)) plus clause-satisfaction checks on every
+The core's contract is gated by [`tests/engine/test_core.py`](../tests/engine/test_core.py) against two
+independent pure-Python oracles ([`tests/reference/formula.py`](../tests/reference/formula.py),
+[`tests/reference/bcp.py`](../tests/reference/bcp.py)) plus clause-satisfaction checks on every
 emitted model, in both kernel modes and both packed splits — not `gpap/engine/formula.py`, a
 facade over `src/formula.cpp`.
 

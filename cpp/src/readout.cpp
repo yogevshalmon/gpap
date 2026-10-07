@@ -283,7 +283,7 @@ extern "C" gpap_status gpap_sat_rows(gpap_engine *e, const int32_t *rows, int32_
 extern "C" gpap_status gpap_packed_rows(gpap_engine *e, const int32_t *rows, int32_t n_rows,
                                         int32_t *out_host) {
     /* RAW words, sum field included, (n, num_long): gpap_sat_rows masks the sum off, which would
-     * hide sum corruption from the CLEAN-mode gate (tests/test_clean_mode.py). */
+     * hide sum corruption from the CLEAN-mode gate (tests/engine/test_clean_mode.py). */
     if (!e || !rows || !out_host || n_rows < 0) return GPAP_ERR_ARG;
     GPAP_TRY(engine_use_ctx(e));
     const int32_t M = e->num_long;

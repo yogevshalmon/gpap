@@ -378,7 +378,7 @@ def rival_vram_budget(fraction: float = None) -> int:
     # `gpap_mem_available`, a cap on a CPU-only machine bounded our side and left the rival at the
     # full fallback, exactly the asymmetry the cap exists to remove; and the first fix clamped the
     # no-card route while the raise route still returned the fallback bare
-    # (tests/test_k_cap.py::test_rival_budget_is_capped_when_the_core_cannot_load).
+    # (tests/engine/test_k_cap.py::test_rival_budget_is_capped_when_the_core_cannot_load).
     try:
         cap = _vram_cap_mib() << 20
     except Exception:                                   # noqa: BLE001 — no torch at all

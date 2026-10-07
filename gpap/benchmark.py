@@ -777,7 +777,7 @@ def _format_header(args, multi_enc, has_circuits, quality):
     """The table header, beside `_format_row` and in the same optional-column order: the only
     thing that makes either right is that the two agree. An overflowing value glues itself to its
     left neighbour rather than erroring, so widening a value means widening its label here in the
-    same edit (tests/test_benchmark_harness.py::TestTableAlignment)."""
+    same edit (tests/cli/test_benchmark_harness.py::TestTableAlignment)."""
     hdr = f"{'instance':<24}"
     if multi_enc:
         hdr += f"{'enc':>10}"

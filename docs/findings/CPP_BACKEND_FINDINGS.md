@@ -115,5 +115,5 @@ torch, a stub `libcuda`), not merely not using it.
 
 Every A/B interleaved in one process or alternated across processes, arms also run reversed:
 this laptop's clocks drift enough that a fixed-order comparison is not evidence. Model counts
-compared exactly. The durable artifacts are `cpp/` and `tests/test_core.py`, which re-proves the
+compared exactly. The durable artifacts are `cpp/` and `tests/engine/test_core.py`, which re-proves the
 core's contract against the pure-Python oracles; the torch engine was deleted 2026-08-08.

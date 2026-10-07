@@ -188,7 +188,7 @@ def _seed_and_propagate(st_row, ab_row, trail_row, dec_ptr, k,
     """The body of entry point 1: seed row k's decisions, propagate to fixpoint, write the row's
     flags and its three counters. Returns `tail`, the trail depth the CLEAN tail needs. Shared by
     _bcp_fixpoint_kernel and _bcp_fixpoint_clean_kernel, which must agree EXACTLY: CLEAN mode's
-    gate (tests/test_clean_mode.py) is that a clean launch reaches state identical to a plain
+    gate (tests/engine/test_clean_mode.py) is that a clean launch reaches state identical to a plain
     one, so a divergence here is a wrong answer, not a slowdown."""
     conflict = B * 0            # runtime-typed int32 scalar (loop-carried)
     tail = B * 0

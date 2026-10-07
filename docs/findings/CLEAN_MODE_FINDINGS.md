@@ -5,7 +5,7 @@
 > **Measured:** 2026-08-21, RTX 4080 Laptop (12 GB, WSL2); confirmed same day on a Colab L4.
 > **Rule lives in:** `cpp/src/engine.cpp` (`gpap_engine_apply_clean`, the reset-lite path),
 > `cpp/src/probe.cpp`, `cpp/kernels/bcp.py`, `cpp/tools/build_kernels.py`, `gpap/engine/_core.py`.
-> **Gated by:** `tests/test_clean_mode.py`.
+> **Gated by:** `tests/engine/test_clean_mode.py`.
 > **Record only:** the four soundness lemmas L1–L4 below. They are per-kernel-version facts with
 > no other home; the test is their tripwire, not their statement.
 
@@ -94,7 +94,7 @@ Data: `$GPAP_RESULTS/clean_mode_l4_20260821/`.
 
 ## The gate
 
-`tests/test_clean_mode.py`: state-identity fuzz against a plain-apply twin and the reference BCP
+`tests/engine/test_clean_mode.py`: state-identity fuzz against a plain-apply twin and the reference BCP
 across both kernels × both splits, the deep-row stream arm, K shrink/grow, every invalidation,
 probe/checker/mining A/B under the env, and `TestCleanModeGuards` with a positive control per
 guard. Verified to fail against a broken tail (walk `tail-1`).

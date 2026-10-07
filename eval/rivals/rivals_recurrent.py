@@ -79,7 +79,7 @@ BENCH_DIR = os.path.join(REPO_ROOT, "benchmarks", "circuits", "bench", "seq")
 # THE KEY IS OUR FILENAME STEM, THEIRS IS THAT WITH DOTS REMOVED (`s208.1` selects their `s2081`),
 # so a mis-transcribed name lands in the else-branch — which is a REAL target needing >= 64
 # outputs, and why an unlisted instance is skipped rather than guessed at. Gated against their
-# source by tests/test_rival_targets.py, which re-derives this dict.
+# source by tests/eval/test_rival_targets.py, which re-derives this dict.
 TARGETS = {
     "s386": ([-1], [1]), "s400": ([-1], [1]), "s526": ([-1], [1]), "s1423": ([-1], [1]),
     "s208.1": ([-1], [1]),                                     # their `s2081`

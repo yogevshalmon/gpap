@@ -14,7 +14,7 @@ formula's own unit propagation left undetermined. The sweep runs in the CORE (`c
 same order; this module only marshals. Hence `ProbeResult.exhausted` is a PROOF of absence, and
 `count()` gives the exact candidate count without generating anything, which is how a caller
 refuses an impossible width. There is deliberately no host-side enumerator here: a second one can
-silently disagree with the one that runs (reference: tests/reference_combinations.py).
+silently disagree with the one that runs (reference: tests/reference/combinations.py).
 """
 from __future__ import annotations
 

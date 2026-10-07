@@ -208,8 +208,8 @@ The cap is a saturation limit, not a safety one: on the cards measured, 4× the 
   fixpoint; a conflicted row's partial state is unspecified (§4).
 - **Every emitted model is verifiable** by anyone: a full assignment satisfying every clause,
   checked on the device before it is returned and re-checkable on the host.
-- **Validated** against a pure-Python reference BCP (`tests/reference_bcp.py`) and a reference
-  formula builder (`tests/reference_formula.py`), in both kernels and both packed splits, plus a
+- **Validated** against a pure-Python reference BCP (`tests/reference/bcp.py`) and a reference
+  formula builder (`tests/reference/formula.py`), in both kernels and both packed splits, plus a
   bit-identical model-count gate that re-runs on every kernel change.
 
 ## 10. Where the evidence lives

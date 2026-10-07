@@ -5,7 +5,7 @@
 > L4 validation run).
 > **Rule lives in:** `gpap/mining.py`, `gpap/sampling/pipeline.py` (`STAGE1_MAX_TUPLES`,
 > `MINE_MIN_CLAUSES`, `MINE_SECONDS`), `cpp/src/probe.cpp`.
-> **Gated by:** `tests/test_mining.py`, including `test_mining_is_kernel_invariant`.
+> **Gated by:** `tests/mining/test_mining.py`, including `test_mining_is_kernel_invariant`.
 > **Record only:** the "follow-ups, deliberately not built" table.
 
 Results and provenance for `gpap.mining` (`gpap mine`, and the mining stage of the default
@@ -22,7 +22,7 @@ trajectories earlier.
 
 Correctness: every mined clause is checked for entailment against an independent SAT solver and
 the augmented formula is checked to have exactly the original model set, on planted formulas and
-random CNFs (`tests/test_mining.py`). Every rewrite of the sweep was gated on bit-identical
+random CNFs (`tests/mining/test_mining.py`). Every rewrite of the sweep was gated on bit-identical
 mined-clause sets on s386-c25, b03-c25 and b09-c25.
 
 ## The sweep lives in the core (2026-08-18)

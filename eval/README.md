@@ -38,7 +38,7 @@ Three roots, and which one a file belongs in follows from how long it lives:
 
 Nothing else names one of those directories: a shell script asks (`python3 -m eval.paths results`)
 rather than recomputing, which is what stopped four derivations of the record root from drifting
-apart. Gated by tests/test_suite_hygiene.py.
+apart. Gated by tests/repo/test_suite_hygiene.py.
 
 ## Reading a number before quoting it
 
