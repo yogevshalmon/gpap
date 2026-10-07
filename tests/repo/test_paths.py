@@ -1,8 +1,6 @@
-"""`gpap/paths.py`: where built tools, fetched benchmarks and scratch files go.
-
-A wrong answer here moves every path in the repo at once. `tmp_dir()`'s fallback (an unusable
-root) and its refusal of a planted symlink are exercised directly, since a healthy box never takes
-either branch. `eval/paths.py` is tested in tests/experiments/test_eval_paths.py."""
+"""`gpap/paths.py`: where built tools, fetched benchmarks and scratch files go. `tmp_dir()`'s
+fallback and symlink refusal are exercised directly, since a healthy box never takes them.
+`eval/paths.py` is tested in tests/experiments/test_eval_paths.py."""
 import os
 
 import pytest
@@ -26,9 +24,8 @@ def test_gpap_home_is_repo_local_and_the_env_var_wins(tmp_path, monkeypatch):
 
 @pytest.mark.parametrize("value", ["~/x", "rel"])
 def test_a_gpap_home_override_is_expanded_and_made_absolute(value, monkeypatch):
-    """A `~` must not become a directory literally named `~`, and a relative root must not
-    depend on the caller's working directory. The eval roots get the same check in
-    tests/experiments/test_eval_paths.py."""
+    """A `~` is expanded and a relative root made absolute, so neither depends on the caller's
+    working directory. tests/experiments/test_eval_paths.py checks the eval roots the same way."""
     monkeypatch.setenv("GPAP_HOME", value)
     got = str(paths.gpap_home())
     assert os.path.isabs(got), f"GPAP_HOME={value!r} stayed relative: {got}"
@@ -55,8 +52,8 @@ def test_scratch_lands_in_the_one_root_and_is_named_for_its_contents(monkeypatch
 
 
 def test_tmp_dir_falls_back_when_the_root_is_unusable(monkeypatch, tmp_path):
-    """The branch that never runs on a healthy box: a read-only shared tool install. Without it the
-    PermissionError surfaced from whatever line happened to open the file."""
+    """An unwritable root (e.g. a read-only shared install) falls back to a writable scratch
+    directory."""
     ro = tmp_path / "readonly"
     ro.mkdir()
     (ro / "tmp").mkdir()
@@ -73,14 +70,13 @@ def test_tmp_dir_falls_back_when_the_root_is_unusable(monkeypatch, tmp_path):
 
 
 def test_tmp_dir_refuses_a_symlink_someone_else_could_have_planted(monkeypatch, tmp_path):
-    """The per-UID name in the shared temp directory is PREDICTABLE, so a symlink sitting there is
-    not ours to write through — it would redirect this run's scratch somewhere readable."""
+    """The per-UID name in the shared temp directory is predictable, so a symlink there may have
+    been planted to redirect our scratch; it is refused."""
     monkeypatch.delenv("GPAP_HOME", raising=False)
     monkeypatch.setattr(paths, "repo_root", lambda: None)          # pretend: installed wheel
     monkeypatch.setattr("tempfile.gettempdir", lambda: str(tmp_path))
-    # The target must EXIST: pointed at nothing, `_writable`'s mkdir fails on the dangling link
-    # and the refusal would happen for the wrong reason — the test then passed with the
-    # symlink guard deleted, which is the failure mode this whole file is about.
+    # The target must exist: a dangling link fails `_writable`'s mkdir, and the test would then
+    # pass without the symlink guard.
     (tmp_path / "elsewhere").mkdir()
     (tmp_path / f"gpap-{os.getuid()}").symlink_to(tmp_path / "elsewhere",
                                                   target_is_directory=True)

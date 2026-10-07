@@ -73,7 +73,7 @@ def test_empty_clause_is_unsat():
 
 
 def test_bcp_unit_propagation():
-    # (~x1 OR x2), (~x2 OR x3) — chain: x1=T -> x2=T -> x3=T
+    # (~x1 OR x2), (~x2 OR x3): chain x1=T -> x2=T -> x3=T
     engine = _engine([[-1, 2], [-2, 3]], num_vars=3, K=1)
     engine.apply_and_propagate(_assum([[ext_lit_to_lit_index(1)]]))
     assert not engine.conflict[0].item()
@@ -83,7 +83,7 @@ def test_bcp_unit_propagation():
 
 
 def test_bcp_conflict_detection():
-    # (x1 OR x2), (~x1), (~x2): units force x1=F,x2=F -> clause 0 empties at the FLUSH
+    # (x1 OR x2), (~x1), (~x2): units force x1=F,x2=F -> clause 0 empties at the flush
     engine = _engine([[1, 2], [-1], [-2]], num_vars=2, K=1)
     assert engine.flush_conflict and engine.conflict[0].item()
 
@@ -122,9 +122,8 @@ def test_already_satisfied_unit():
 
 
 def test_reassume_implied_literal_is_noop():
-    """Regression: assuming a literal the units flush ALREADY implied must not
-    double-count its falsifications (the old bulk path double-decremented sat counts ->
-    garbage forced literals -> FALSE conflicts)."""
+    """Assuming a literal the units flush already implied must not count its falsifications
+    twice; that would corrupt sat counts and produce false conflicts."""
     clauses = [[1], [-1, 2], [-2, 3, 4], [-3, 4, 5]]
     engine = _engine(clauses, num_vars=5, K=4)
     assert engine.assignment[0, 0].item() == 1 and engine.assignment[0, 2].item() == 1
@@ -171,7 +170,7 @@ def test_counters_accumulate():
 
 def test_envelope_rejection():
     f = CnfFormula(DEV)
-    f.init_formula(40_000, [list(range(1, 300))])                # 2N>65535 AND len>255
+    f.init_formula(40_000, [list(range(1, 300))])                # 2N>65535 and len>255
     with pytest.raises(ValueError):
         BCPEngine(f)
 
@@ -192,9 +191,8 @@ def _six_var_engine():
 
 
 def test_check_sets_flat_form():
-    """Entry point 1's batched form on the engine itself: flattened DIMACS literals +
-    offsets, numpy results, the loop in the core. An empty set is legal (it propagates to
-    the units flush) and a pinned tiny chunk must not change any surviving row."""
+    """`check_sets` over flattened DIMACS literals and offsets. An empty set is legal (it
+    yields the flush state), and a tiny chunk gives the same answers."""
     eng = _six_var_engine()
     lits = np.array([1, 2, -1, -2, -3], dtype=np.int32)    # [1,2] | [] | [-1,-2,-3]
     off = np.array([0, 2, 2, 5], dtype=np.int64)
@@ -208,9 +206,8 @@ def test_check_sets_flat_form():
 
 
 def test_check_sets_rejects_offsets_past_the_literal_array():
-    """The binding must bound-check offsets against len(lits) — the core cannot (a C
-    pointer has no length), and without the guard a short array is read past its end and
-    the call SUCCEEDS with answers built from stray memory."""
+    """The binding checks offsets against len(lits); the core cannot, since a C pointer has
+    no length, and would read past the array."""
     eng = _six_var_engine()
     with pytest.raises(ValueError, match="exceeds len"):
         eng.check_sets(np.array([1, 2], dtype=np.int32),

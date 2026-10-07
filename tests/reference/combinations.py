@@ -1,10 +1,8 @@
-"""Host-side reference enumerator for the core's combinatorial probe.
+"""Host-side reference enumerator for the core's combinatorial probe (cpp/src/probe.cpp).
 
-The sweep itself runs in cpp/src/probe.cpp; this exists ONLY so tests can pin that the core
-produces the same candidates in the same order as an independent, obvious implementation — the
-same role tests/reference/bcp.py plays for the kernels. It materializes C(P,k) tuples, which is
-exactly why it is not in the shipping API: at k=3 over an unrolled circuit's free literals that is
-~1e11 tuples.
+Tests use it to check that the core yields the same candidates in the same order as an obvious
+implementation, as tests/reference/bcp.py does for the kernels. It materializes all C(P,k)
+tuples, which is why it is not part of the library.
 """
 from __future__ import annotations
 
@@ -15,10 +13,9 @@ def combinations(pool, size: int, *, distinct_vars: bool = True,
                  max_tuples: int | None = None) -> np.ndarray:
     """Every size-`size` combination of `pool` (DIMACS literals), as an (n, size) array.
 
-    `distinct_vars` (default) drops any tuple holding two literals of the SAME variable: such a
-    tuple is either a repeat or a direct contradiction, so it conflicts for reasons that have
-    nothing to do with the formula. Combinations are ascending in pool position, matching the
-    core's order, so the two paths can be compared candidate for candidate.
+    `distinct_vars` (default) drops tuples with two literals of one variable: such a tuple is a
+    repeat or a contradiction, independent of the formula. Tuples are ascending in pool
+    position, the core's order, so the two can be compared candidate by candidate.
     """
     pool = np.ascontiguousarray(pool, dtype=np.int32).reshape(-1)
     if size < 1:

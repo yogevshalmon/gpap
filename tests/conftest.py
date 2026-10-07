@@ -1,20 +1,15 @@
-"""Shared test fixtures.
+"""Shared test fixtures and the `gpu` skip rule.
 
-The circuit tests must NOT depend on any user-local benchmark tree — the repo bundles the small
-`.bench` sources (benchmarks/circuits/bench/), and this fixture generates the CNFs on demand into
-a session tmp dir. `circuit_cnfs` is a matrix of small instances (seconds to build) that the
-soundness / determinism / A-B / reconstruction / contract tests parametrise over.
+Circuit CNFs are generated at test time from the bundled `.bench` sources
+(benchmarks/circuits/bench/), never from a user-local benchmark tree.
 """
 import os
 
 import pytest
 import torch
 
-#: Every path into the checkout is anchored HERE, never on the process's working directory.
-#: `pytest tests/` from anywhere but the repo root used to fail 32 tests with FileNotFoundError
-#: on hardcoded `benchmarks/...` strings — and one of them (the occ/split check over a real
-#: benchmark) `pytest.skip`ped instead, so from the wrong directory it disappeared in silence
-#: rather than failing. Test modules import these two names.
+#: Paths into the checkout are anchored here, not on the working directory, so the suite runs
+#: from any directory. Test modules import these names.
 REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 BENCH_DIR = os.path.join(REPO_ROOT, "benchmarks", "circuits", "bench")
 SEQ_DIR = os.path.join(BENCH_DIR, "seq")
@@ -38,8 +33,8 @@ def pytest_collection_modifyitems(config, items):
             item.add_marker(skip)
 
 
-# Sequential circuits × unroll depths (kept small for CI) + a deep-cascade c25 (slow), plus two
-# combinational ISCAS-85 circuits pinned to one output (the DEMOTIC-style samplable setup).
+# Small sequential circuits at a few unroll depths, one deeper unroll (b03 at 25 cycles), and two
+# combinational ISCAS-85 circuits with one output pinned.
 _SEQ = ["b03", "b06", "b10", "s386", "s526"]
 _SEQ_CYCLES = [1, 5, 10]
 _COMB = ["c432", "c880"]
@@ -59,8 +54,8 @@ def _emit(out, d, stem, comb, cycles, pin):
 
 @pytest.fixture(scope="session")
 def circuit_cnfs(tmp_path_factory):
-    """Generate the small circuit-CNF matrix once per session. Returns
-    {name: {path, nv, clauses, support(0-based), cycles, comb}}."""
+    """The small circuit-CNF matrix, generated once per session:
+    {name: {path, nv, clauses, support (0-based), labels, cycles, comb}}."""
     d = tmp_path_factory.mktemp("circuit_cnfs")
     out = {}
     for stem in _SEQ:
@@ -68,5 +63,5 @@ def circuit_cnfs(tmp_path_factory):
             _emit(out, d, stem, False, c, None)
     for stem in _COMB:
         _emit(out, d, stem, True, 1, 1)
-    _emit(out, d, "b03", False, 25, None)      # the deep-cascade slow instance
+    _emit(out, d, "b03", False, 25, None)      # the deep unroll
     return out

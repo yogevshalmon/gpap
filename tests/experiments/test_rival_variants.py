@@ -20,8 +20,8 @@ def test_prepare_variant_rejects_unknown(tmp_path):
 
 
 def test_prepare_variant_falls_back_to_raw_when_abc_is_missing(tmp_path, monkeypatch):
-    """A rival must never be compared on a circuit we could not verify: with no abc binary the
-    RAW path comes back, tagged with the reason, rather than a silently different circuit."""
+    """With no abc binary the raw path comes back, tagged with the reason, so a rival is never run
+    on an unverified circuit."""
     import gpap.circuits.abc_backend as ab
     from eval.rivals.rival_common import prepare_variant, variant_note
     monkeypatch.setattr(ab, "abc_available", lambda *a, **k: False)

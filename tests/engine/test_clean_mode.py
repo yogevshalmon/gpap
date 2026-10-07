@@ -1,15 +1,10 @@
-"""CLEAN-mode identity gates (gpap_engine_apply_clean — docs/findings/CLEAN_MODE_FINDINGS.md).
+"""CLEAN mode (gpap_engine_apply_clean; docs/findings/CLEAN_MODE_FINDINGS.md).
 
-THE invariant: a CLEAN launch answers exactly what the plain launch answers — conflict flags on
-EVERY row (confluence makes them exact), counters row for row on the same kernel — and exits with
-every packed row bit-identical to the post-flush baseline, so the next reset() skips the K·M
-broadcast ("reset-lite"). The fuzz is engineered to hit every partial-stop mode the kernels
-have: seed contradictions (the check-then-set path), forced-both-polarities (the wave
-OR-then-check stray-bit case), mid-occurrence-list conflicts, deep chains (the in-kernel
-deep-row guard that streams a row instead), duplicate literals, empty sets, K shrink/grow.
-
-`packed_rows` (raw words, sum field included) is the readout — `sat_rows` masks the sum field,
-which is exactly where a wrong restore could hide.
+A clean launch gives the same conflict flags and counters as a plain launch, and leaves every
+packed row bit-identical to the post-flush baseline, so the next reset() can skip the broadcast
+("reset-lite"). Also: the guards on readouts that would mix baseline and fixpoint state, and the
+callers that use clean mode. The readout is `packed_rows` (raw words); `sat_rows` masks the sum
+field, where a wrong restore could hide.
 """
 
 import random
@@ -38,9 +33,9 @@ def _awkward_sets(rng, nv, n):
 @pytest.mark.parametrize("mode", ["scalar", "wave"])
 @pytest.mark.parametrize("shift", [16, 8])
 def test_state_identity_fuzz(mode, shift):
-    """After every CLEAN launch: packed == the broadcast baseline BIT-EXACT on every row
-    (conflicted rows included), flags/counters == a plain-apply twin, conflict flags == the
-    pure-Python reference BCP. Both kernels, both packed splits."""
+    """After each clean launch every packed row equals the baseline (conflicted rows too),
+    flags and counters equal a plain-apply twin, and conflict flags equal the reference BCP.
+    The sets include duplicates and l/~l pairs to hit each way a launch can stop early."""
     from tests.reference.bcp import lit_idx, ref_bcp
 
     rng = random.Random(11)
@@ -85,14 +80,12 @@ def test_state_identity_fuzz(mode, shift):
 
 @pytest.mark.parametrize("mode", ["scalar", "wave"])
 def test_deep_row_guard_streams_exactly(mode):
-    """An implication chain where one probe assigns EVERY variable pushes the clean tail past
-    the M/8 threshold into the stream-the-row arm — which must restore just as exactly.
+    """A probe that assigns every variable pushes the restore past the M/8 threshold into the
+    stream-the-row path, which must restore exactly too.
 
-    The chain is TERNARY (-v | -v | v+1): a plain binary chain would segregate into implication
-    edges with no packed words at all (that case is test_pure_binary_formula_is_stateless), and
-    this test exists to exercise the LONG-clause restore. The duplicate literal makes each
-    falsification decrement twice, so the chain still forces v+1 exactly as (-v | v+1) does —
-    and each deep probe walks 2(nv-1) long occ entries against M/8 = (nv-1)/8."""
+    The chain is ternary (-v | -v | v+1) so that it has packed words: a binary chain would have
+    none (test_pure_binary_formula_is_stateless). The duplicate literal still forces v+1 as
+    (-v | v+1) would."""
     nv = 400
     clauses = [[-(v), -(v), v + 1] for v in range(1, nv)]    # 1 => 2 => ... => nv, len-3 links
     f = _core.Formula.from_clauses(nv, clauses)
@@ -109,8 +102,8 @@ def test_deep_row_guard_streams_exactly(mode):
 
 
 def test_k_shrink_grow_bookkeeping():
-    """The clean-rows high-water: shrink stays lite (rows beyond the chunk keep their clean
-    state), growth past the high-water broadcasts again — and the state is exact throughout."""
+    """Shrinking K stays lite (rows past the chunk stay clean); growing past the high-water
+    mark broadcasts again. The state is exact throughout."""
     nv = 12
     clauses = [[1, 2, 3], [-1, 4], [-2, -4], [3, -4, 5], [-5, 6]]
     f = _core.Formula.from_clauses(nv, clauses)
@@ -123,7 +116,7 @@ def test_k_shrink_grow_bookkeeping():
     eng.apply_clean(d)
     eng.reset(16)                                    # lite: 64 >= 16
     eng.apply_clean(d[:16])
-    eng.reset(64)                                    # lite: rows 16..64 never lost cleanliness
+    eng.reset(64)                                    # lite: rows 16..64 stayed clean
     full0, lite0 = eng.reset_stats()
     assert (eng.packed_rows(np.arange(64)) == baseline64).all()
     assert lite0 == 3, f"expected exactly the three lite resets, got {lite0}"
@@ -137,9 +130,8 @@ def test_k_shrink_grow_bookkeeping():
 
 @pytest.mark.parametrize("mode", ["scalar", "wave"])
 def test_pure_binary_formula_is_stateless(mode):
-    """A formula of ONLY <=2-literal clauses has num_long == 0: no packed words, no broadcast,
-    nothing for CLEAN to restore — yet propagation, flags, counters, the sat_rows synthesis and
-    reset-lite must all behave exactly as on any other formula."""
+    """A formula of clauses with at most 2 literals has no packed words. Propagation, flags,
+    counters, sat_rows and reset-lite must still behave as on any other formula."""
     from tests.reference.bcp import lit_idx, ref_bcp
 
     nv = 40
@@ -164,9 +156,8 @@ def test_pure_binary_formula_is_stateless(mode):
         exp_conflict, _ = ref_bcp(clauses, [lit_idx(x) for x in dec])
         assert bool(ec[i]) == exp_conflict
 
-    # sat_rows synthesizes every count from the bitmap (there are no words to read): on the
-    # fully-propagated chain row every clause has exactly one non-falsified (= TRUE) literal,
-    # except (1|2) which keeps both.
+    # sat_rows synthesizes counts from the bitmap. On the fully propagated row each chain clause
+    # has one non-falsified literal, and (1|2) keeps both.
     sat = twin.sat_rows(np.array([0], dtype=np.int32))
     assert sat.shape == (1, nv)
     assert sat[0].tolist() == [1] * (nv - 1) + [2]
@@ -176,8 +167,8 @@ def test_pure_binary_formula_is_stateless(mode):
 
 
 def test_plain_apply_and_trajectory_invalidate():
-    """A plain apply and a trajectory both dirty without a restorable record: the next reset
-    must be FULL, and the state after it must again be the baseline."""
+    """A plain apply or a trajectory leaves rows dirty, so the next reset is full and restores
+    the baseline."""
     nv = 10
     clauses = [[1, 2], [-1, 3], [-2, -3], [4, 5, 6]]
     f = _core.Formula.from_clauses(nv, clauses)
@@ -186,7 +177,7 @@ def test_plain_apply_and_trajectory_invalidate():
     baseline = eng.packed_rows(np.arange(8))
     d = np.array([[0]] * 8, dtype=np.int64)
 
-    eng.apply(d)                                     # plain apply -> claim dropped
+    eng.apply(d)                                     # plain apply: rows now dirty
     eng.reset(8)
     assert eng.reset_stats() == (2, 0)               # create-time none; both resets full
     assert (eng.packed_rows(np.arange(8)) == baseline).all()
@@ -194,7 +185,7 @@ def test_plain_apply_and_trajectory_invalidate():
     eng.apply_clean(d)
     eng.reset(8)                                     # lite
     order = np.arange(nv, dtype=np.int32)
-    eng.trajectory(order, n_support=nv, B=1, seed=7)  # trajectory -> claim dropped
+    eng.trajectory(order, n_support=nv, B=1, seed=7)  # trajectory: rows now dirty
     eng.reset(8)
     full, lite = eng.reset_stats()
     assert (full, lite) == (3, 1)
@@ -202,8 +193,8 @@ def test_plain_apply_and_trajectory_invalidate():
 
 
 def test_recache_moves_the_baseline():
-    """assume_units-style recache: the baseline itself changes, so the claim is dropped AND the
-    next clean cycle restores to the NEW baseline."""
+    """recache_flush changes the baseline: the next reset is full, and later clean launches
+    restore to the new baseline."""
     nv = 8
     clauses = [[-1, 2], [-2, 3], [3, 4, 6], [-3, -5]]
     f = _core.Formula.from_clauses(nv, clauses)
@@ -223,11 +214,11 @@ def test_recache_moves_the_baseline():
 
 
 def test_gpap_clean_env_disables(monkeypatch):
-    """GPAP_CLEAN=0 (read at engine create) turns apply_clean into plain apply: state SURVIVES
-    (differs from baseline) and no reset ever goes lite — the A/B lever."""
+    """GPAP_CLEAN=0 (read at engine creation) makes apply_clean a plain apply: the fixpoint
+    state stays and no reset goes lite."""
     monkeypatch.setenv("GPAP_CLEAN", "0")
     nv = 8
-    clauses = [[-1, -1, 2], [-2, -2, 3], [1, 4]]     # ternary links: the dirt lands in WORDS
+    clauses = [[-1, -1, 2], [-2, -2, 3], [1, 4]]     # ternary, so the change lands in packed words
     f = _core.Formula.from_clauses(nv, clauses)
     eng = _core.Engine(f)
     eng.reset(4)
@@ -241,9 +232,8 @@ def test_gpap_clean_env_disables(monkeypatch):
 
 
 # ---------------------------------------------------------------- clean mode guards
-# The state a CLEAN launch leaves behind is asymmetric — packed is the BASELINE, abits are
-# the FIXPOINT — so the calls whose answer would silently come from the wrong half REFUSE.
-# Found by code review: each of these used to return a plausible wrong number.
+# After a clean launch the packed words are the baseline but the bitmap is the fixpoint, so
+# calls whose answer would mix the two refuse.
 
 def _engine_after_clean():
     f = _core.Formula.from_clauses(8, [[-1, 2], [-2, 3], [3, 4], [-3, -5], [1, 6]])
@@ -254,52 +244,50 @@ def _engine_after_clean():
 
 
 def test_recache_flush_refuses_after_clean():
-    """THE dangerous one: caching (baseline packed, fixpoint abits) would bake a
-    self-contradictory flush cache — abits claiming literals TRUE whose clause decrements
-    packed never recorded — and every later launch would propagate from it, undetectably."""
+    """Caching the mixed state would make an inconsistent flush cache that every later launch
+    propagates from."""
     e = _engine_after_clean()
     with pytest.raises(Exception, match="apply_clean|recache"):
         e.recache_flush()
 
 
 def test_packed_derived_readouts_refuse_after_clean():
-    """sat_rows / check_sound answer FROM the packed words, which are the baseline here."""
+    """sat_rows and check_sound read the packed words, which are the baseline here."""
     e = _engine_after_clean()
     with pytest.raises(Exception, match="apply_clean|baseline"):
         e.sat_rows([0, 1])
 
 
 def test_raw_packed_readout_stays_open():
-    """gpap_packed_rows is the documented raw/debug readout and is how the identity gate
-    PROVES the restore happened — guarding it would break the gate."""
+    """gpap_packed_rows is the raw readout the identity tests above rely on, so it is not
+    guarded."""
     e = _engine_after_clean()
     assert e.packed_rows([0, 1]).shape[0] == 2
 
 
 def test_plain_apply_leaves_everything_usable():
-    """Positive control: the guards key off the CLEAN launch, not off clean mode existing."""
+    """Control: the guards key off a clean launch, not off clean mode being enabled."""
     f = _core.Formula.from_clauses(8, [[-1, 2], [-2, 3], [3, 4], [-3, -5], [1, 6]])
     e = _core.Engine(f)
     e.reset(4)
     e.apply(np.array([[0]] * 4, dtype=np.int64))
     assert e.sat_rows([0]).shape == (1, e.num_clauses)
-    e.recache_flush()                                     # must NOT raise
+    e.recache_flush()                                     # must not raise
     assert e.reset_stats()[1] == 0
 
 
 def test_reset_clears_the_divergence():
-    """reset() re-broadcasts abits, so the pair is consistent again and recache is legal."""
+    """reset() restores the bitmap, so the state is consistent and recache is allowed."""
     e = _engine_after_clean()
     e.reset(4)
-    e.recache_flush()                                     # must NOT raise
+    e.recache_flush()                                     # must not raise
     assert e.sat_rows([0]).shape[0] == 1
 
 
 @pytest.mark.parametrize("rows", [1, 3, 8])
 def test_apply_validates_row_count(rows):
-    """MEMORY SAFETY, not politeness: the C side stages K*L int64s, so a short array is read
-    past its end and the garbage becomes literal indices — and an index past 2N makes the
-    kernel write into a LATER row. Both entry points check."""
+    """Both entry points check the row count. The C side reads K*L int64s, so a short array
+    would be read past its end and the garbage used as literal indices."""
     f = _core.Formula.from_clauses(6, [[1, 2], [-1, 3]])
     e = _core.Engine(f)
     e.reset(4)
@@ -310,11 +298,11 @@ def test_apply_validates_row_count(rows):
 
 
 # ---------------------------------------------------------------- consumers
-# The two call sites that opted in, exercised end to end.
+# The callers that use clean mode, end to end.
 
 def test_probe_sweep_identical_and_lite(monkeypatch):
-    """The core probe sweep: identical conflict tuples with CLEAN on vs off, and the ON
-    engine's resets actually went lite after chunk 1 (forced multi-chunk via batch)."""
+    """The probe sweep finds the same conflict tuples with clean mode on and off, and with it
+    on, resets after the first chunk go lite."""
     nv = 8
     clauses = [[1, 2, 3], [-1, -2], [-2, -3], [-1, -3], [4, 5], [-5, 6], [-4, -6, 7]]
     f = _core.Formula.from_clauses(nv, clauses)
@@ -335,10 +323,9 @@ def test_probe_sweep_identical_and_lite(monkeypatch):
 
 
 def test_checker_flags_only_goes_lite(monkeypatch):
-    """AssumptionChecker flags-only calls ride the clean kernel (lite resets, same answers);
-    assignments=True keeps the plain kernel and readable state. (A single carried-over lite
-    at a flags-only -> arrays boundary would be legitimate — the previous clean launch really
-    did leave baseline state — so the arrays half uses a FRESH checker for a crisp zero.)"""
+    """Flags-only AssumptionChecker calls use clean mode (lite resets, same answers);
+    assignments=True uses the plain kernel. The second half uses a fresh checker because the
+    first reset after a clean call is legitimately lite."""
     from gpap.engine.checker import AssumptionChecker
 
     CLAUSES = [[1, 2], [-1, 3], [-2, -3], [4, 5], [-4, 6]]
@@ -350,9 +337,8 @@ def test_checker_flags_only_goes_lite(monkeypatch):
     many = ck.check_assumptions(sets)
     gained = ck.engine._core.reset_stats()[1] - before
     assert torch.equal(one["conflict"], many["conflict"])
-    # Tied to the CHUNK COUNT, not just > 0: the boundary reset alone (the previous call's
-    # last clean apply makes this call's FIRST reset lite) satisfies a bare > 0, so that
-    # form would stay green even if chunking stopped happening entirely.
+    # Compare with the chunk count, not > 0: the first reset is lite anyway (left clean by the
+    # previous call), so > 0 would pass without any chunking.
     n_chunks = -(-len(sets) // 17)
     assert gained >= n_chunks - 1, (
         f"expected ~{n_chunks} lite resets across {n_chunks} chunks, got {gained}")
@@ -366,7 +352,7 @@ def test_checker_flags_only_goes_lite(monkeypatch):
 
 
 def test_mining_identical_under_env(monkeypatch):
-    """gpap.mining end to end: identical clause sets with CLEAN on vs off."""
+    """gpap.mining yields the same clauses with clean mode on and off."""
     from gpap.mining import mine_entailed
 
     clauses = [[-1, 2], [-2, 3], [-1, -3, 4], [-4, 5], [1, 2, 3], [-5, -1, 3]]

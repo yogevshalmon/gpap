@@ -1,26 +1,9 @@
-"""The coverage run's host-RAM bound.
+"""The coverage run's host-RAM bound (`pipeline.cov_batch`).
 
-`sample_clauses(n_cov=...)` collects models and rebuilds them in Python: `sample()` turns the
-kept (rows, N) bit matrix into a list of `nv` ints per row, and `_reconstruct` builds a second
-one to map it back to original variables. MEASURED cost: **72 bytes per (row x variable)**.
-
-`cov_k_cap` bounded ROWS, which is the same thing only while `nv` is small — and it was
-calibrated on formulas of a few thousand variables. On a large one it is not a memory bound at
-all: 2048 rows x 413,451 vars (b14 through the Tseitin encoding the rival path requires; the
-abc:fast encoding the CMSGen table uses is 41,938) x 72 B
-is 61 GB. The process was OOM-killed with no exception to catch, no row written, and every
-instance after it in that sweep silently unmeasured — b14, b17, b18, b20, b21, b22, s35932 all
-went missing from the Recurrent table arm this way.
-
-So the bound is on the PRODUCT, and it is divided by `cov_chunks` because the kept rows
-ACCUMULATE across the run (the coverage call asks the core for an unlimited keep_cap and
-reconstructs every bucket at the end). Budgeting a single chunk left b14 at 5.2 GiB against a
-2 GiB budget — right mechanism, wrong multiplier.
-
-What the cap must NOT do is change the diagnostic it protects. `distinct_frac` is the whole
-point of the coverage run, and it is 1.0 on every instance large enough for the cap to bind
-(the solution space is astronomically larger than the sample), so collecting fewer rows costs
-nothing. The GPU test at the bottom is that claim, measured rather than asserted.
+Collected models are rebuilt as Python ints at `COV_BYTES_PER_CELL` per (row x variable), so the
+bound is on rows x nv, not rows alone. Kept rows accumulate over the run's `cov_chunks` chunks,
+so the budget is divided by them. The cap must not change `distinct_frac`, the number the
+coverage run exists to measure; the GPU test at the bottom checks that.
 """
 import os
 
@@ -32,7 +15,7 @@ GIB = 1 << 30
 
 
 def test_a_row_count_alone_is_not_a_memory_bound():
-    """The regression in one line: the same row ceiling, two formulas, 32x the memory."""
+    """Same row ceiling, two formulas: the larger one gets a smaller batch, and both fit."""
     small, big = 12_926, 413_451                    # b13 and b14, Tseitin at T=25
     assert cov_batch(small, 2048) > cov_batch(big, 2048), \
         "the batch must SHRINK as nv grows — that is the entire fix"
@@ -43,9 +26,8 @@ def test_a_row_count_alone_is_not_a_memory_bound():
 
 @pytest.mark.parametrize("nv", [1, 1_000, 12_926, 413_451, 4_749_526, 50_000_000])
 def test_the_budget_holds_at_every_size_and_the_batch_is_never_zero(nv):
-    """Never 0: a formula too large for the budget must still collect SOMETHING, so the run
-    reports a small coverage sample rather than none — `no-coverage-sample` is a different
-    fact from `not-requested` and consumers branch on it."""
+    """The batch is never 0: a formula too large for the budget still collects a small sample,
+    because `no-coverage-sample` and `not-requested` are different results consumers branch on."""
     n = cov_batch(nv, 2048)
     assert n >= 1
     assert n <= 2048, "cov_k_cap stays an upper bound"
@@ -53,19 +35,17 @@ def test_the_budget_holds_at_every_size_and_the_batch_is_never_zero(nv):
 
 
 def test_the_chunk_multiplier_is_applied():
-    """Kept rows accumulate over `cov_chunks` chunks, so the divisor has to be there. Sabotage
-    check: with the divisor dropped, this is the assertion that fires."""
+    """Kept rows accumulate over `cov_chunks` chunks, so the budget is divided by them."""
     nv = 100_000
     # exact up to the floor division (budget // (per_row * chunks)), so allow one row of slack
     assert abs(cov_batch(nv, 2048, cov_chunks=8) * 2 - cov_batch(nv, 2048, cov_chunks=4)) <= 2
     assert abs(cov_batch(nv, 2048, cov_chunks=1) - 4 * cov_batch(nv, 2048, cov_chunks=4)) <= 4
-    # and it is a real divisor, not a no-op: 4 chunks must buy a materially smaller batch
+    # not a no-op: 4 chunks give a materially smaller batch than 1
     assert cov_batch(nv, 2048, cov_chunks=4) < cov_batch(nv, 2048, cov_chunks=1) / 3
 
 
 def test_a_small_formula_is_untouched():
-    """The cap must not bind where it was never the problem, or every recorded small-instance
-    coverage sample changes size for no reason."""
+    """The cap does not bind on small formulas, so their coverage samples keep their size."""
     assert cov_batch(1_000, 2048) == 2048
     assert cov_batch(3_000, 2048) == 2048
 
@@ -76,9 +56,10 @@ def test_the_budget_is_overridable_for_a_box_that_has_the_ram():
 
 @pytest.mark.gpu
 def test_the_cap_does_not_move_the_diagnostic_it_protects(monkeypatch):
-    """distinct_frac is what the coverage run exists to measure. On a formula big enough for the
-    cap to bind, the space is astronomically larger than the sample, so a smaller sample must
-    give the SAME fraction — otherwise the cap is buying memory with accuracy."""
+    """The cap does not change distinct_frac.
+
+    Where the cap binds, the solution space dwarfs the sample, so the capped and uncapped runs
+    must both report all rows distinct."""
     import gpap.sampling.pipeline as P
     from gpap.circuits.bench import build_cnf, parse_bench
 

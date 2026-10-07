@@ -1,3 +1,5 @@
+"""AssumptionChecker: conflict and propagation answers for batches of assumption sets, the
+chunking that hides K from the caller, input validation, and agreement with the reference BCP."""
 import os
 import random
 
@@ -22,8 +24,6 @@ def test_basic_check():
         [1, 2, 3],     # clause 2 (~x2 OR ~x3) fully falsified -> conflict
         [1, -2, -3],   # clause 1 (~x1 OR x3) fully falsified -> conflict
     ])
-    # `x.item() is True or bool(x)` was the old spelling: the second disjunct makes the
-    # first unreachable, so the strict identity check it looks like was never performed.
     assert bool(results['conflict'][0])
     assert bool(results['conflict'][1])
 
@@ -43,8 +43,7 @@ def test_from_cnf_file():
 
 
 def test_from_clauses_constructor():
-    """The clause-list constructor mirrors the C++ face's Formula::from_clauses route and
-    replaces the two-step `AssumptionChecker(); checker.formula.init_formula(...)` flow."""
+    """`from_clauses` builds a checker in one call, like the C++ face's Formula::from_clauses."""
     ck = AssumptionChecker.from_clauses(3, [[1, 2], [-1, 3], [-2, -3]])
     r = ck.check_assumptions([[1, 2, 3], [2]])
     assert bool(r["conflict"][0]) and not bool(r["conflict"][1])
@@ -60,9 +59,8 @@ def test_propagation_count():
 
 
 def test_state_arrays_are_opt_in():
-    """`assignment` (n, 2N) and `sat_count` (n, M) are what makes a big call expensive —
-    237 MB for 20k sets on a 1.5k-variable formula — so they are returned only when asked
-    for. `conflict` and `num_propagated` are ~5 bytes/set and always present."""
+    """`assignment` (n, 2N) and `sat_count` (n, M) are large, so they are returned only on
+    request; the small `conflict` and `num_propagated` always are."""
     checker = AssumptionChecker()
     checker.formula.init_formula(3, [[1, 2], [-1, 3], [-2, -3]])
     assert set(checker.check_assumptions([[1], [2]])) == {"conflict", "num_propagated"}
@@ -79,17 +77,11 @@ def _formula(checker):
 
 
 def test_chunked_matches_single_chunk_exactly(monkeypatch):
-    """THE contract: how many launches it took must not be observable. Same sets, one chunk
-    vs many, compared element for element and IN INPUT ORDER.
+    """Chunking is not observable: one chunk and many give the same results, in input order.
 
-    Scoped to the rows the engine actually specifies, which is what confluence buys: a row that
-    survives has a UNIQUE BCP fixpoint, so every field of it is reproducible. A row that
-    CONFLICTS stopped as soon as some clause emptied, and which clause that was depends on
-    propagation order — so its partial assignment/counters are unspecified, and only `conflict`
-    itself is. Chunk size can change the propagate kernel (see calibrate.dispatch_mode, whose
-    small-batch term binds on a formula this size), which is exactly how a caller can observe
-    that: measured here, 809/3,282 conflicted rows differ in num_propagated between batch 5,000
-    and batch 97, and 0/1,718 surviving rows differ in anything."""
+    Only `conflict` is compared on every row. A conflicted row's partial state depends on
+    propagation order, and the chunk size can change the kernel (calibrate.dispatch_mode), so
+    its other fields are compared only on surviving rows, whose fixpoint is unique."""
     ck = AssumptionChecker()
     _formula(ck)
     sets = random_assumptions(random.Random(0), 6, 5000, wmax=3)
@@ -105,8 +97,7 @@ def test_chunked_matches_single_chunk_exactly(monkeypatch):
 
 
 def test_more_sets_than_any_chunk(monkeypatch):
-    """A set count far larger than a chunk completes and stays correct — the case that used
-    to require the caller to loop (and to know K to loop over)."""
+    """Many more sets than one chunk holds complete correctly without the caller looping."""
     ck = AssumptionChecker()
     _formula(ck)
     monkeypatch.setattr(ck, "chunk_size", lambda n, max_lits=1: 64)
@@ -129,8 +120,8 @@ def test_chunk_size_is_bounded_and_positive():
 
 
 def test_engine_is_built_once_and_reused():
-    """Rebuilding per call re-uploaded the occurrence CSR and re-ran the units flush — the
-    dominant cost of a small call. Replacing the formula must still be honoured."""
+    """The engine is reused across calls (building it is most of a small call's cost) and
+    rebuilt when the formula is replaced."""
     ck = AssumptionChecker()
     _formula(ck)
     ck.check_assumptions([[1]])
@@ -149,7 +140,7 @@ def test_ragged_and_empty_sets():
 
 
 # ---------------------------------------------------------------- input validation
-# Literal validation is memory safety, not politeness — see checker._flatten.
+# Literal validation is memory safety: see checker._flatten.
 
 def _checker():
     ck = AssumptionChecker()
@@ -164,9 +155,8 @@ def test_out_of_range_literal_raises(lit):
 
 
 def test_bad_literal_cannot_corrupt_another_row():
-    """REGRESSION. Literal 99 on a 3-variable formula is internal index 196, and 196 >> 5 is
-    six words past row 0's single-word bitmap — so row 0's bad assumption used to assign a
-    literal in ROW 6, silently and undetectably."""
+    """Literal 99 on a 3-variable formula is index 196, six bitmap words past row 0, i.e. in
+    row 6. It must raise, and no other row may be touched."""
     ck = _checker()
     with pytest.raises(ValueError):
         ck.check_assumptions([[99]] + [[] for _ in range(7)])
@@ -175,7 +165,7 @@ def test_bad_literal_cannot_corrupt_another_row():
 
 
 def test_empty_input():
-    """No sets = no launch, and correctly-shaped empties rather than a driver error."""
+    """No sets means no launch and correctly shaped empty results."""
     ck = _checker()
     r = ck.check_assumptions([], assignments=True, sat_count=True)
     assert r["conflict"].shape == (0,) and r["num_propagated"].shape == (0,)
@@ -183,19 +173,16 @@ def test_empty_input():
 
 
 def test_oversized_result_is_refused_not_spilled():
-    """`assignments` is (n, 2N) for the caller's own n — chunking cannot shrink it. This box
-    degrades to host RAM instead of failing, so an unmet request must say so.
+    """`assignments` is (n, 2N) for the caller's n, which chunking cannot shrink. A request past
+    the device budget must raise rather than spill to host RAM.
 
-    The ask is sized FROM THE DEVICE's live budget, because that is what the guard compares
-    against. A hardcoded "obviously too big" number is only too big on the card it was
-    written on: 40,000 sets x 200k vars is 16 GiB, which a 12 GiB laptop 4080 refuses and a
-    23.6 GiB L4 happily accepts — the test failed there for the healthiest possible reason
-    (measured 2026-08-21)."""
+    n is derived from the live budget, which the guard compares against, so the request is too
+    big on any card."""
     from gpap.engine.calibrate import gpu_mem_available
     ck = AssumptionChecker()
     ck.formula.init_formula(200_000, [[1, 2]])       # 400 kB of assignment per set
     row_bytes = 2 * 200_000
-    n = int(gpu_mem_available(ck.formula.device) // row_bytes) + 1_000   # over ANY budget
+    n = int(gpu_mem_available(ck.formula.device) // row_bytes) + 1_000   # over the budget
     with pytest.raises(MemoryError, match="assumption sets"):
         ck.check_assumptions([[1]] * n, assignments=True)
 
@@ -220,5 +207,5 @@ def test_matches_the_reference_bcp():
             exp_conflict, exp_assigned = ref_bcp(clauses, [lit_idx(x) for x in s])
             assert bool(got_conflict[i]) == exp_conflict, (trial, i, s)
             if not exp_conflict:
-                # confluence: the assigned-literal SET of a non-conflicted row is unique
+                # confluence: a non-conflicted row's assigned-literal set is unique
                 assert set(np.nonzero(got_assign[i])[0].tolist()) == set(exp_assigned), (trial, i, s)

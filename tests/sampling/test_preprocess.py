@@ -1,10 +1,8 @@
-"""Tests for the kept CPU preprocessing primitives (gpap preprocessing for SAMPLING):
-unit_closure (formula-level unit propagation) and equivalent_literal_substitution (ELS).
+"""Unit tests for the CPU preprocessing primitives: unit_closure and
+equivalent_literal_substitution (ELS).
 
-The full end-to-end ELS soundness gates (projection-set equality vs CaDiCaL enumeration,
-class-consistent reconstruction) live in tests/sampling/test_sampler.py (test_els_*); these are the
-unit-level checks on the primitives themselves. Binary-implication edges are built exactly
-the way simplify_cnf_els builds them: (l1 ∨ l2) ⇒ ¬l1→l2 and ¬l2→l1.
+End-to-end ELS soundness is in tests/sampling/test_sampler.py (test_els_*). Binary edges are
+built the way simplify_cnf_els builds them: (l1 ∨ l2) gives ¬l1→l2 and ¬l2→l1.
 """
 from gpap.sampling.preprocess import equivalent_literal_substitution, unit_closure
 from gpap.engine.formula import ext_lit_to_lit_index
@@ -74,8 +72,8 @@ def test_chain_collapses_to_one_var():
 
 
 def test_equivalence_to_negation_is_unsat():
-    # A class holding both a literal and its negation ⇒ UNSAT. Feed edges making 1≡2 AND
-    # 1≡¬2 (lit indices: 1→0, ¬1→1, 2→2, ¬2→3): union closes 0,1,2,3 into one class.
+    # A class holding both a literal and its negation ⇒ UNSAT. Edges make 1≡2 and 1≡¬2
+    # (lit indices: 1→0, ¬1→1, 2→2, ¬2→3), so union closes 0,1,2,3 into one class.
     edges = [[0, 2], [2, 0], [0, 3], [3, 0]]
     red, var_map, stats = equivalent_literal_substitution([[1, 2], [3]], edges, 3)
     assert stats["status"] == "unsat"

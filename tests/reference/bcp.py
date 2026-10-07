@@ -1,11 +1,9 @@
-"""Pure-Python reference BCP — the semantic oracle for the packed Triton kernels.
+"""Pure-Python reference BCP, the oracle for the engine's kernels.
 
-BCP fixpoints are CONFLUENT: for a given formula + decision set the least fixpoint (and
-whether it conflicts) is unique regardless of propagation order. So this deliberately simple
-occurrence-worklist implementation and the engine's trail-driven kernel must agree exactly on
-  * the conflict flag, and
-  * the assigned-literal set of every NON-conflicted row
-(conflicted rows' partial state is order-dependent and intentionally unspecified).
+BCP fixpoints are confluent: for a formula and a decision set, the fixpoint and whether it
+conflicts do not depend on propagation order. So this simple worklist implementation and the
+engine must agree exactly on the conflict flag and on the assigned literals of every row that did
+not conflict. A conflicted row's partial state depends on order and is not compared.
 """
 from collections import defaultdict
 
@@ -15,9 +13,9 @@ def lit_idx(ext: int) -> int:
 
 
 def ref_bcp(clauses: list, decisions: list[int]) -> tuple[bool, frozenset]:
-    """Unit-propagate `decisions` (internal lit indices, applied in order — duplicates
-    skipped, l/~l contradictions conflict) over `clauses` (DIMACS ext literals), including
-    the formula's own unit clauses. Returns (conflict, assigned lit-index set)."""
+    """Unit-propagate `decisions` (literal indices, applied in order; duplicates are skipped,
+    l and ~l together conflict) over `clauses` (DIMACS literals), including the formula's own
+    unit clauses. Returns (conflict, set of assigned literal indices)."""
     idx_clauses = [[lit_idx(x) for x in c] for c in clauses]
     contains: dict[int, list[int]] = defaultdict(list)
     for ci, lits in enumerate(idx_clauses):
@@ -51,7 +49,7 @@ def ref_bcp(clauses: list, decisions: list[int]) -> tuple[bool, frozenset]:
         if conflict or not work:
             break
         lits = idx_clauses[work.pop()]
-        if any(l in asg for l in lits):       # clause satisfied — never forces
+        if any(l in asg for l in lits):       # satisfied: never forces
             continue
         free = [l for l in lits if (l ^ 1) not in asg]
         if not free:                          # every literal falsified

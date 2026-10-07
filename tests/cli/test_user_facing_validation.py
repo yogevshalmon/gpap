@@ -1,21 +1,6 @@
-"""User-facing input validation, found by exercising the public surface as a user would.
-
-Every case here was a real observed failure before its guard existed:
-
-  * `apply_and_propagate` with a CUDA decisions tensor bypassed the host path's row-count
-    check entirely — a 2-row tensor against K=4 was an out-of-bounds DEVICE read whose garbage
-    became literal indices ("succeeded" silently). The host path validated; the device path
-    did not. Memory safety, not politeness.
-  * `--cycles 0` reached the unroller and died as `KeyError: 'LINE2'` on one circuit and
-    `RecursionError` on another — the wrong error for a plainly invalid input, found only
-    after the (possibly expensive) parse.
-  * a truncated `.aag` died as a bare `IndexError: list index out of range`.
-  * `gpap mine --seconds 0` help said "0 = unbounded" while the implementation treated it as
-    a deadline of now — every width reported `[budget]` with 0 probed. The two meanings of
-    zero produced opposite behaviors in neighboring flags.
-  * top-level `sample_clauses(support=...)` raised a bare IndexError on an out-of-range var —
-    and silently mis-projected when a 1-BASED list happened to stay in range.
-  * `LiteralProbe.probe(size=0)` went all the way to the device for its "bad argument".
+"""Input validation on the public surface: cycle counts, truncated AIGER, `--k-cap`, 0-based
+`support`, the row count on the CUDA apply path, probe sizes, the strict DIMACS parser and
+`--seconds 0`. Each invalid input gets a clear error instead of a crash or a wrong result.
 """
 import pytest
 import torch
@@ -90,9 +75,8 @@ def test_sample_clauses_support_is_validated_as_zero_based():
 
 @pytest.mark.gpu
 def test_device_path_apply_validates_row_count():
-    """The CUDA-tensor fast path must reject a row mismatch exactly like the host path does:
-    apply_dev hands the core a raw pointer it reads K rows from, so a short tensor is an
-    out-of-bounds device read. Before the guard this call 'succeeded'."""
+    """The CUDA-tensor path rejects a row-count mismatch like the host path: apply_dev reads K
+    rows from a raw pointer, so a short tensor would be an out-of-bounds device read."""
     dev = torch.device("cuda")
     f = CnfFormula(dev)
     f.init_formula(6, [[1, 2], [-1, 3]])
@@ -121,10 +105,8 @@ def test_probe_tuples_ragged_input_is_a_clear_error():
 
 # --------------------------------------------------------------------- strict DIMACS parser
 
-# The tokenizer used to DROP anything it did not recognize ("stray character: ignore"), so a
-# corrupted file silently became a DIFFERENT formula — `1 2 frog 0` parsed as (1 2), and a
-# weighted-CNF `w 1 0.9` line became clauses (0.9 tokenizes as literal 0 = a terminator!).
-# Strict on corruption, lenient on structure; both halves are gated here.
+# Strict on corruption, lenient on structure. Skipping unknown tokens would silently parse a
+# different formula: `1 2 frog 0` as (1 2), and `w 1 0.9` as clauses (0.9 reads as literal 0).
 
 PARSER_REJECT = {
     "garbage-token":     "p cnf 3 2\n1 2 frog 0\n-1 3 0\n",
@@ -152,7 +134,7 @@ PARSER_ACCEPT = {
     "crlf-endings":      "p cnf 3 1\r\n1 2 0\r\n",
     "multi-clause-line": "p cnf 3 2\n1 2 0 -1 3 0\n",
     "clause-spans-lines": "p cnf 3 1\n1\n2\n3 0\n",
-    # the QuickSampler/HTS distribution repeats the IDENTICAL header — harmless, accepted
+    # the QuickSampler/HTS benchmark files repeat the identical header
     "identical-dup-hdr": "p cnf 3 1\np cnf 3 1\n1 2 0\n",
 }
 
@@ -178,8 +160,7 @@ def test_dimacs_keeps_structural_leniency(tmp_path, text):
 
 @pytest.mark.gpu
 def test_mine_entailed_seconds_none_is_unbounded():
-    """`seconds=None` (what the CLI now maps `--seconds 0` to) must actually sweep — the CLI
-    help promised "0 = unbounded" while the old passthrough made it a deadline of now."""
+    """`seconds=None` (what `--seconds 0` maps to) sweeps with no deadline."""
     from gpap.mining import mine_entailed
     res = mine_entailed(6, [[1, 2], [-1, 3], [-2, 3]], torch.device("cuda"),
                         widths=(1,), seconds=None)

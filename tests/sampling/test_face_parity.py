@@ -1,11 +1,8 @@
-"""Cross-face parity: the C++ tier-1 Sampler and the Python GPUSampler drive the SAME core
-loop (`gpap_sampler_*`) with the SAME RNG — so at the same seed, single config and batch cap,
-the two faces must find the SAME models, row for row.
+"""Cross-face parity: the C++ tier-1 Sampler and the Python GPUSampler run the same core loop
+(`gpap_sampler_*`) with the same RNG, so at one seed, config and batch they find the same
+models, row for row.
 
-This property is the point of moving the loop into the core: it was impossible before (the two
-faces had independent loops and independent RNGs, and their drift went unnoticed because
-nothing could compare them). A portfolio run is deliberately NOT compared bit-for-bit — the
-bandit selects on measured wall-clock throughput, so its chunk sequence is machine-local.
+Portfolio runs are not compared: the bandit picks configs on measured wall-clock throughput.
 """
 from pathlib import Path
 
@@ -19,15 +16,11 @@ pytestmark = pytest.mark.gpu
 
 
 def test_cpp_and_python_faces_draw_identical_models(circuit_cnfs, tmp_path):
-    """Same formula, seed, config and BATCH => identical model count AND identical kept rows.
+    """Same formula, seed, config and batch give the same model count and the same kept rows.
 
-    The batch is pinned on both sides on purpose. K defaults to the analytic bound over LIVE
-    free VRAM, so it is not a function of the seed: the two faces run in separate processes and
-    a busy card sizes them differently. Left unpinned, this passed only because the instance is
-    small enough for the batch CAP to bind on both — on a smaller card the counts would diverge
-    for a reason that is not a divergence between the faces, which is the opposite of what this
-    file is for. (Rows stay identical either way: a trajectory depends on the seed and its row
-    index, so the narrower run's completions are a prefix of the wider one's.)"""
+    The batch is pinned on both sides because K otherwise comes from live free VRAM, which can
+    differ between the two processes. The rows would still match (a narrower run's rows are a
+    prefix of a wider one's), but the counts would not."""
     from gpap.sampling.sampler import GPUSampler
     need_binary(SAMPLE_BIN)
     cnf = Path(circuit_cnfs["b03-c5"]["path"])
@@ -44,9 +37,7 @@ def test_cpp_and_python_faces_draw_identical_models(circuit_cnfs, tmp_path):
 
     nv, cls, sup = parse_dimacs(cnf)
     assert sup, "expected a `c ind` support on a circuit CNF"
-    # NOT `== ... or r["out_cols"]`: python reads that as `(a == b) or a`, and a non-empty list
-    # is truthy, so the comparison never ran and a column-ORDER divergence between the faces --
-    # exactly what this file exists to catch -- passed green.
+    # The column order must match too.
     assert r["out_cols"] == sorted(set(sup)), \
         f"faces diverged on the projection columns: {r['out_cols'][:8]} vs {sorted(set(sup))[:8]}"
 
@@ -64,7 +55,7 @@ def test_cpp_and_python_faces_draw_identical_models(circuit_cnfs, tmp_path):
 
 
 def test_faces_share_the_calibration(circuit_cnfs):
-    """K and kernel mode come from the same core rules on both faces — pin nothing, compare."""
+    """Unpinned, both faces calibrate the same K from the same core rules."""
     from gpap.sampling.sampler import GPUSampler
     cnf = circuit_cnfs["b03-c5"]["path"]
     smp = GPUSampler.from_cnf_file(cnf, DEV, seed=1)

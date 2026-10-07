@@ -1,12 +1,9 @@
-"""The core sampling loop's own contract (`gpap_sampler_*`, cpp/src/sample.cpp), at the ABI
-level through gpap.engine._core — no GPUSampler, no pipeline.
+"""The core sampling loop (`gpap_sampler_*`, cpp/src/sample.cpp), tested at the ABI through
+gpap.engine._core, with no GPUSampler or pipeline.
 
-The loop this exercises used to be written twice (gpap::Sampler and Python's GPUSampler); it now
-has ONE home, and these tests pin the properties both faces rely on: rows are externally
-verifiable models, a run is a deterministic function of the seed AT A FIXED BATCH (every
-sampler here pins `k_cap`, because K is otherwise the analytic bound over live free VRAM),
-delivery and the soundness self-test stay OFF the sampling clock (and off the RNG stream), and
-each stop valve reports which valve fired.
+Rows are verifiable models; a run is a deterministic function of the seed at a fixed batch
+(every sampler here pins `k_cap`); delivery and the soundness self-test stay off the sampling
+clock and the RNG stream; each stop valve reports which one fired.
 """
 import random
 
@@ -70,13 +67,10 @@ def test_same_seed_same_bits_and_reseed_restarts_the_stream():
 
 
 def test_verify_and_delivery_do_not_touch_the_sampling_stream():
-    """verify=1 and keep_cap>0 must change NOTHING about which models a seed finds — the
-    delivery-shares-the-RNG bug class (`--out` silently changing the run) pinned at the core.
+    """verify and keep_cap change nothing about which models a seed finds.
 
-    The two knobs are varied ONE AT A TIME, and the ROWS are compared, not only the counts: two
-    runs that drew different models can agree on how many they drew, which is exactly the shape
-    the host-side version of this bug had (`--out` shifted every later chunk's permutation and
-    the totals stayed plausible)."""
+    The knobs are varied one at a time, and rows are compared, not only counts: two runs that
+    drew different models can still agree on how many."""
     rng = random.Random(13)
     clauses = random_cnf(rng, 24, 36, kmin=3)
     base = _sampler(clauses, 24, seed=5)
@@ -84,13 +78,13 @@ def test_verify_and_delivery_do_not_touch_the_sampling_stream():
     assert st0.n_models > 0, "fixture produced nothing — the comparisons would be vacuous"
     rows0 = base.bits(0)
 
-    # (a) VERIFY on: same stream, same rows.
+    # (a) verify on: same stream, same rows.
     v = _sampler(clauses, 24, seed=5)
     stv = v.run(400, [B8], keep_cap=-1, verify=True)
     assert (stv.n_models, stv.chunks) == (st0.n_models, st0.chunks)
     assert np.array_equal(v.bits(0), rows0), "the soundness self-test moved the sampling stream"
 
-    # (b) DELIVERY off entirely: no gather at all, still the same run.
+    # (b) delivery off: no gather, same run.
     plain = _sampler(clauses, 24, seed=5).run(400, [B8])
     assert (plain.n_models, plain.chunks) == (st0.n_models, st0.chunks)
 
@@ -117,7 +111,7 @@ def test_keep_cap_bounds_the_bucket_not_the_count():
     st = s.run(400, [B8], keep_cap=50)
     assert st.n_models > 50, "fixture too small to exercise the cap"
     assert s.config_stats(0).kept_rows == 50
-    got = s.bits(0, rows=7)                       # capacity below kept: the FIRST rows, in order
+    got = s.bits(0, rows=7)                       # capacity below kept: the first rows, in order
     assert got.shape == (7, 24)
     assert np.array_equal(got, s.bits(0)[:7]), "a short read must truncate, not resample"
 
@@ -155,12 +149,9 @@ def test_zero_yield_gives_up_after_cold_start_plus_grace():
 
 @pytest.mark.parametrize("soft0", [False, True], ids=["off-to-on", "on-to-off"])
 def test_retry_with_lookahead_flips_once_then_stops(soft0):
-    """The retry FLIPS the risk polarity — it does not turn it on.
+    """The zero-yield retry flips the soft polarity once rather than turning it on.
 
-    Both headers say "flipped", but the loop computed `cfg.soft || retry_soft`, so a config
-    already running soft retried with the IDENTICAL polarity: a second full window of the same
-    trajectory, reported as though the other one had been tried. Parametrized because only the
-    on->off direction can tell the two implementations apart."""
+    Parametrized because only the on-to-off direction tells a flip from `soft || retry`."""
     clauses = [[1, 2], [1, -2], [-1, 2], [-1, -2]]
     s = _sampler(clauses, 2, seed=5)
     st = s.run(100, [(True, 8, soft0)], retry_with_lookahead=True)
@@ -220,16 +211,14 @@ def test_support_phase_and_columns():
 
 
 def test_support_only_stops_after_phase_one():
-    """`support_only` decides phase 1 and nothing else — the "the support determines the rest"
-    mode. Untested until now, and its two outcomes are opposite, so both are pinned.
+    """`support_only` decides phase 1 and nothing else.
 
-    A row is still only counted when it is FULLY assigned, so the knob does not weaken what
-    `n_models` means: on a formula whose support really is an independent support the answer is
-    unchanged, and on one where it is not, phase 2 was the only thing assigning the remainder —
-    so nothing completes and the loop gives up, rather than emitting a half-assigned row.
+    A row counts only when fully assigned. If the support determines the rest, results are
+    unchanged; if not, nothing completes and the loop gives up instead of emitting a
+    half-assigned row. Both outcomes are checked.
     """
-    # (a) x3 == x1 AND x2, then x4 == x3 == x5: deciding {x1, x2} propagates the whole tail, so
-    # phase 2 has nothing left to decide and skipping it must cost NOTHING.
+    # (a) x3 == x1 and x2, x4 == x3 == x5: deciding {x1, x2} propagates the whole tail, so
+    # skipping phase 2 costs nothing.
     det = [[-1, -2, 3], [1, -3], [2, -3], [3, -4], [-3, 4], [4, -5], [-4, 5]]
     for so in (False, True):
         s = _sampler(det, 5, seed=5)
@@ -238,12 +227,11 @@ def test_support_only_stops_after_phase_one():
         assert st.n_models == st.attempts > 0, \
             f"support_only={so}: every trajectory should complete on a determined tail"
         assert rows_satisfy(s.bits(0), det)
-    # NOT compared row for row, deliberately: the phase-2 shuffle draws from the same stream, so
-    # the two settings reach different trajectory seeds and legitimately find different models.
-    # (Checked: with a single-variable tail they DO come out bit-identical, which is how an
-    # equality assertion here would pass for a reason that has nothing to do with the claim.)
+    # Not compared row for row: the phase-2 shuffle draws from the same stream, so the two
+    # settings reach different trajectory seeds and find different models. (With a one-variable
+    # tail they happen to match, which would let an equality check pass for the wrong reason.)
 
-    # (b) an unrelated clause the support does NOT reach: phase 2 was doing the work.
+    # (b) a clause the support does not reach: only phase 2 assigns it.
     loose = [[1, 2], [3, 4]]
     s = _sampler(loose, 4, seed=5)
     s.set_support([0, 1])
@@ -258,12 +246,10 @@ def test_support_only_stops_after_phase_one():
 
 
 def test_zero_k_cap_means_the_library_cap_not_uncapped():
-    """The `{0}` ground rule, on the field where the two readings are furthest apart.
+    """`k_cap=0` resolves to the library cap, not to uncapped (the `{0}` rule).
 
-    `gpap_sampler_create` takes `k_cap` with 0 = the library cap, >0 verbatim, <0 uncapped —
-    so the zero every caller gets by leaving the field alone has to resolve to the DEFAULT, not
-    to "no limit". Reading it the other way is silent: the run still works, it just runs at a
-    batch nobody chose (83x wider on this formula), which is a different experiment.
+    `gpap_sampler_create` reads 0 as the library cap, >0 verbatim, <0 uncapped. The wrong
+    reading fails silently: the run works, at a batch nobody chose.
     """
     rng = random.Random(67)
     clauses = random_cnf(rng, 24, 36, kmin=3)
@@ -291,12 +277,11 @@ def test_set_k_pins_the_batch():
 
 
 def test_a_guard_reports_its_own_failure_not_the_previous_one():
-    """An argument error must EXPLAIN ITSELF.
+    """An argument error reports its own message, not the previous call's.
 
     `gpap_last_error()` is a thread-local that nothing clears, and both faces append it to every
-    non-OK status. A guard that returned a bare code therefore handed the caller the PREVIOUS
-    call's message — measured across sampler objects, so asking `config_stats` before any run
-    was answered with an out-of-range variable in a formula that sampler had never seen.
+    non-OK status, so a guard returning a bare code would surface a stale message, even one from
+    another sampler.
     """
     rng = random.Random(53)
     clauses = random_cnf(rng, 24, 36, kmin=3)
@@ -317,17 +302,11 @@ def test_a_guard_reports_its_own_failure_not_the_previous_one():
 
 
 def test_freeing_the_sampler_does_not_touch_a_dead_engine():
-    """`gpap_sampler_free` must not dereference the engine it BORROWED.
+    """`gpap_sampler_free` does not dereference the engine it borrows.
 
-    The engine-outlives-the-sampler precondition holds by construction in C++ and by reference
-    in Python — but a reference only orders destruction under REFCOUNTING. The cycle collector
-    and interpreter shutdown finalize in arbitrary order, and a traceback that captured a
-    sampler frame is a cycle, so the engine really can go first. `free` used to read
-    `engine->mode` there to hand the kernel choice back: a heap-use-after-free that ASan aborts
-    on and that a plain build would silently get away with.
-
-    Freeing the engine handle first is exactly what the collector can do, so this reproduces it
-    without depending on gc ordering. Under a sanitizer build it is the whole test."""
+    The cycle collector and interpreter shutdown can finalize the engine before the sampler.
+    Freeing the engine handle first reproduces that without depending on gc order; under a
+    sanitizer build that is the whole test."""
     rng = random.Random(59)
     clauses = random_cnf(rng, 24, 36, kmin=3)
     f = _core.Formula.from_clauses(24, clauses)
@@ -335,37 +314,34 @@ def test_freeing_the_sampler_does_not_touch_a_dead_engine():
     s = _core.Sampler(e, k_cap=256, seed=5)
     s.run(200, [B8])                       # a run resolves AUTO, so the sampler holds a pin
     lib = _core.load()
-    lib.gpap_engine_free(e._h)             # the collector got to the engine first
-    e._h = None                            # ...and its own __del__ is now a no-op
+    lib.gpap_engine_free(e._h)             # free the engine first, as the collector can
+    e._h = None                            # so its own __del__ is a no-op
     del s                                  # must free cleanly, reading nothing through e
     import gc
     gc.collect()
 
 
 def test_the_sampler_never_overrides_an_explicit_kernel_pin():
-    """The sampler pins the propagate kernel to its own batch so a short reset elsewhere cannot
-    switch kernels mid-measurement — but only when the choice is ITS to make.
+    """The sampler pins the kernel to its own batch, but never over a caller's pin.
 
-    Once it has pinned, `gpap_engine_auto` is false for its OWN pin too, so "did someone else
-    take the choice" cannot be read off that flag alone; the sampler remembers which kernel it
-    left and stands down as soon as the engine no longer holds it. Without that it re-dispatched
-    over a caller's pin on every set_k, silently changing the kernel under a forced-kernel A/B.
+    After the sampler pins, `gpap_engine_auto` is false for its own pin too, so the sampler
+    remembers which kernel it set and stands down once the engine holds a different one.
     """
     rng = random.Random(61)
-    clauses = random_cnf(rng, 24, 36, kmin=3)                    # tiny M: the sampler resolves SCALAR at a big K
+    clauses = random_cnf(rng, 24, 36, kmin=3)                    # tiny M: scalar at a big K
     f = _core.Formula.from_clauses(24, clauses)
     e = _core.Engine(f)
     assert e.auto_dispatch, "fixture: the engine must start on AUTO"
     s = _core.Sampler(e, seed=1)               # default cap => big batch => scalar for this M
     assert e.mode == "scalar" and not e.auto_dispatch, e.mode
 
-    e.set_mode("wave")                         # the CALLER takes the choice back, after us
+    e.set_mode("wave")                         # the caller re-pins after the sampler
     s.set_k(1024)
     assert e.mode == "wave", "set_k re-dispatched over a caller's pin"
     s.run(100, [B8])
     assert e.mode == "wave", "a run re-dispatched over a caller's pin"
 
-    f2 = _core.Formula.from_clauses(24, clauses)   # pinned BEFORE the sampler exists
+    f2 = _core.Formula.from_clauses(24, clauses)   # pinned before the sampler exists
     e2 = _core.Engine(f2)
     e2.set_mode("wave")
     s2 = _core.Sampler(e2, seed=1)

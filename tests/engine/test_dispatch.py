@@ -33,11 +33,8 @@ def test_auto_is_the_default():
 
 
 def test_auto_dispatches_on_the_clause_count():
-    """The deciding variable is M, not the batch.
-
-    A batch-only rule (`batch < 30 * resident_warps`) only ever worked as a proxy for M, and
-    once K grew, mid-size formulas sat at the batch cap and were all classified scalar. A
-    mid-size formula at a huge batch must come back "wave"."""
+    """The rule keys off M, not the batch alone: a large formula at the batch cap still gets
+    wave."""
     from gpap.engine.calibrate import dispatch_mode, resident_warps
     assert resident_warps(DEV) > 0
     huge = 262_144                                   # the batch cap
@@ -83,8 +80,8 @@ def test_env_var_pins(monkeypatch):
 
 
 def test_auto_dispatch_reports_whether_a_kernel_is_pinned(monkeypatch):
-    """The flag a caller consults before pinning a mode of its own (the sampler does): it
-    must see BOTH pin channels — the env override and an explicit set_mode."""
+    """`auto_dispatch` (read by the sampler before pinning its own mode) sees both ways to
+    pin: an explicit set_mode and the env override."""
     eng = _engine()
     assert eng.auto_dispatch
     eng.set_mode("wave")

@@ -1,9 +1,6 @@
-"""Host-side tests for `gpap bench` (gpap/benchmark.py; no CUDA needed).
-
-Covers the parts of a long unattended sweep that must not be wrong: the packed-envelope
-pre-check that decides whether an instance CAN run at all, the encoder-spec parsing that drives
-the tseitin-vs-abc A/B, and the CMSGen stats/rate accounting (including the killed-run case,
-where the counters come from the last flushed progress line).
+"""Host-side tests for `gpap bench` (gpap/benchmark.py): the packed-envelope pre-check, encoder
+specs, resume keys, CMSGen stats and rate accounting (including killed runs), --help rendering
+and the bench table layout.
 """
 import json
 import os
@@ -45,8 +42,8 @@ def test_packed_envelope_falls_back_to_wide_then_rejects():
 
 
 def test_packed_envelope_guards_the_count_field_of_the_narrow_split():
-    """A clause longer than the sat_count field would carry into the SUM field at construction.
-    Only reachable with repeated literals, but it is the other half of the overflow story."""
+    """A clause longer than the sat_count field would carry into the sum field. Only reachable
+    with repeated literals."""
     assert packed_envelope(10, 65_535)[0] == 16
     assert packed_envelope(10, 65_536)[0] is None
 
@@ -77,8 +74,7 @@ def test_parse_encoder_specs_rejects_nonsense():
 
 
 def test_row_key_separates_encoder_target_and_depth():
-    """The resume key must distinguish every cell of the matrix, or a resumed sweep silently
-    skips rows it never ran."""
+    """The resume key distinguishes every cell, or a resumed sweep skips rows it never ran."""
     base = {"name": "b03.bench", "enc_key": "tseitin", "cycles": 25, "target": "rare"}
     assert _row_key(base) != _row_key({**base, "enc_key": "abc:fast"})
     assert _row_key(base) != _row_key({**base, "cycles": 50})
@@ -86,10 +82,8 @@ def test_row_key_separates_encoder_target_and_depth():
 
 
 def test_resume_refuses_to_mix_armed_and_armless_rows():
-    """A campaign VM whose cmsgen binary failed to restore would resume the stage GPAP-only and
-    append ARMLESS rows to an armed file — and every consumer reading the missing count as a
-    number scores those rows as CMSGen zeros, i.e. phantom wins. The mixed file is refused
-    existence at the producer, whichever direction the mix runs."""
+    """A results file never mixes rows with and without the CMSGen arm, in either direction:
+    consumers read a missing CMSGen count as zero, which scores as a GPAP win."""
     armed = [{"name": "a.cnf", "cms_n_samples": 5, "n_models": 9}]
     armless = [{"name": "a.cnf", "n_models": 9}]
     assert _cms_arm_mismatch(armed, None)                      # armed file, armless run
@@ -98,7 +92,7 @@ def test_resume_refuses_to_mix_armed_and_armless_rows():
     assert _cms_arm_mismatch(armless, None) is None
     # skipped/error rows carry no arm by construction and must not trip the guard
     assert _cms_arm_mismatch([{"name": "x", "skipped": "too big"}], "/bin/cmsgen") is None
-    # a crashed cms run still wrote the arm's keys — that is armed provenance, not armless
+    # a crashed CMSGen run still wrote the arm's keys, so it counts as armed
     assert _cms_arm_mismatch([{"name": "a.cnf", "cms_n_samples": 0, "cms_error": "boom",
                                "n_models": 1}], "/bin/cmsgen") is None
 
@@ -117,8 +111,8 @@ def test_parse_cms_stats_takes_the_LAST_flushed_line():
 
 
 def test_parse_cms_stats_reads_a_pre_maxtime_line_as_not_final():
-    """The `final=` field post-dates the deadline flag, so a line without it must still parse —
-    as NOT exact, which is the safe reading (that binary's counts really are floored)."""
+    """A line without `final=` (a binary older than --maxtime) still parses, as not exact:
+    that binary's counts really are floored."""
     s = _parse_cms_stats("c gpap-stats samples=7000 props=1 decisions=1 conflicts=0 "
                          "cpu_s=0.1 wall_s=0.2\n")
     assert s["samples"] == 7000 and s["final"] is False
@@ -138,8 +132,8 @@ def test_dimacs_header(tmp_path):
     assert _dimacs_header(str(q)) == (None, None)
 
 
-# A stand-in for the patched cmsgen: it advertises the flags in --help and emits the same
-# progress lines, so the harness's detection + accounting can be tested without a C++ build.
+# A stand-in for the patched cmsgen: it advertises the flags in --help and prints the same
+# progress lines, so detection and accounting are testable without a C++ build.
 _FAKE_CMSGEN = textwrap.dedent("""
     import sys, time
     args = sys.argv[1:]
@@ -171,7 +165,7 @@ _FAKE_CMSGEN = textwrap.dedent("""
 
 def _fake_bin(tmp_path, name, maxtime):
     p = tmp_path / f"{name}.py"
-    # str.replace, not str.format: the fake's body is full of f-strings and would fight it
+    # str.replace, not str.format: the fake's body is full of f-string braces
     p.write_text(_FAKE_CMSGEN.replace("__MAXTIME__", repr(bool(maxtime))))
     sh = tmp_path / name
     sh.write_text(f'#!/bin/sh\nexec "{sys.executable}" "{p}" "$@"\n')
@@ -181,14 +175,14 @@ def _fake_bin(tmp_path, name, maxtime):
 
 @pytest.fixture()
 def fake_cmsgen(tmp_path):
-    """The current patched binary: --nowrite, --statsevery AND --maxtime."""
+    """The current patched binary: --nowrite, --statsevery and --maxtime."""
     return _fake_bin(tmp_path, "cmsgen", True)
 
 
 @pytest.fixture()
 def fake_cmsgen_no_maxtime(tmp_path):
-    """A patched binary from BEFORE the deadline flag — the two capabilities are probed
-    separately, and this one's counts are floored to the --statsevery cadence when killed."""
+    """An older patched binary without --maxtime; when killed, its counts are floored to the
+    --statsevery cadence."""
     return _fake_bin(tmp_path, "cmsgen_old", False)
 
 
@@ -204,15 +198,13 @@ def test_cmsgen_run_nowrite_counts_from_the_stats_line(fake_cmsgen, tmp_path):
     assert r["mode"] == "nowrite" and r["patched"] is True
     assert r["n_samples"] == 5000 and r["models"] == []
     assert r["samples_per_s"] > 0
-    # implications = propagations - decisions, the same definition as the GPAP column, over
-    # CMSGen's own SAMPLING wall — the same denominator samples_per_s uses, which is what keeps
-    # the propagation identity (samples/s ratio = impl/s ratio / impl-per-sample ratio) exact.
+    # implications = propagations - decisions (as in the GPAP column), over CMSGen's sampling
+    # wall, the same denominator as samples_per_s, so the propagation identity stays exact.
     assert r["implications_per_s"] == pytest.approx(
         (5000 * 10 - 5000 * 3) / r["sampling_wall_s"], rel=1e-6)
     assert r["count_exact"] is True                    # the run finished; the count is CMSGen's
-    # The two rates differ ONLY in the wall they divide by: CMSGen's own sampling clock, and the
-    # whole subprocess. Table 1 pairs the first with GPAP's steady state and the second with its
-    # wall_total, so that neither column charges one side for getting ready and not the other.
+    # The two rates differ only in their wall: CMSGen's sampling clock (paired with GPAP's steady
+    # state) and the whole subprocess (paired with GPAP's wall_total).
     assert r["samples_per_s"] == pytest.approx(5000 / r["sampling_wall_s"], rel=1e-9)
     assert r["samples_per_s_e2e"] == pytest.approx(5000 / r["wall_s"], rel=1e-9)
 
@@ -229,10 +221,8 @@ def test_cmsgen_run_write_mode_parses_models_and_removes_the_file(fake_cmsgen, t
 
 
 def test_cmsgen_run_timeout_keeps_partial_progress(fake_cmsgen, tmp_path, monkeypatch):
-    """A killed CMSGen must still score what it produced — otherwise a hard instance reads 0.
-
-    It must ALSO say that the count is not exact: a kill lands between two --statsevery lines,
-    so what survives is the last multiple of the cadence."""
+    """A killed CMSGen still scores what it produced, and marks the count not exact: it is the
+    last multiple of the --statsevery cadence."""
     cnf = tmp_path / "f.cnf"
     cnf.write_text("p cnf 3 1\n1 2 3 0\n")
     real_run = subprocess.run
@@ -249,10 +239,8 @@ def test_cmsgen_run_timeout_keeps_partial_progress(fake_cmsgen, tmp_path, monkey
 
 
 def test_maxtime_makes_the_count_exact_instead_of_a_cadence_multiple(fake_cmsgen, tmp_path):
-    """THE flooring regression. The 2026-08-23 campaign killed CMSGen on its budget and kept the
-    last `--statsevery` line, so every one of its 174 timed-out counts was a multiple of 1000
-    and 81 read as a clean zero. With the deadline enforced by CMSGen itself the final count is
-    its own, and lands wherever the budget lands."""
+    """With --maxtime CMSGen stops itself, so its final count is exact and lands wherever the
+    budget lands, not on a --statsevery multiple (RIVAL_FAIRNESS_FINDINGS.md §7)."""
     cnf = tmp_path / "f.cnf"
     cnf.write_text("p cnf 3 1\n1 2 3 0\n")
     r = cmsgen_run(str(cnf), fake_cmsgen, 10_000_000, str(tmp_path), write=False, timeout=0.3)
@@ -264,8 +252,8 @@ def test_maxtime_makes_the_count_exact_instead_of_a_cadence_multiple(fake_cmsgen
 
 def test_maxtime_capability_is_probed_separately_from_nowrite(fake_cmsgen,
                                                               fake_cmsgen_no_maxtime, tmp_path):
-    """An older patched binary has --nowrite but no deadline; it must still run, and its counts
-    must be marked non-exact so verify_artifact can refuse to publish them as zeros."""
+    """An older binary with --nowrite but no --maxtime still runs, and its counts are marked
+    not exact so verify_artifact can refuse them as zeros."""
     from gpap.benchmark import cmsgen_supports_maxtime
     assert cmsgen_supports_nowrite(fake_cmsgen_no_maxtime) is True
     assert cmsgen_supports_maxtime(fake_cmsgen_no_maxtime) is False
@@ -286,9 +274,8 @@ def test_cmsgen_run_missing_binary_is_an_error_row_not_a_crash(tmp_path):
 # --------------------------------------------------------------------- driver plumbing
 
 def test_bench_driver_skips_an_oversized_instance_and_still_writes_json(tmp_path):
-    """--max-clauses is the wall-time guard for a sweep: the row is recorded as skipped (with the
-    reason) and the run continues. Exercised through the real main() so the JSON contract is
-    covered too; no GPU is touched because the instance never reaches the sampler."""
+    """--max-clauses records an oversized instance as skipped, with the reason, and the sweep
+    goes on. Runs the real main() to cover the JSON; the instance never reaches the GPU."""
     cnf = tmp_path / "big.cnf"
     cnf.write_text("p cnf 10 999999\n1 2 0\n")
     out = tmp_path / "res.json"
@@ -301,12 +288,8 @@ def test_bench_driver_skips_an_oversized_instance_and_still_writes_json(tmp_path
 
 
 # ---------------------------------------------------------------- cli help renders
-# Every --help screen must actually render.
-#
-# argparse runs `%`-expansion over help strings, so a literal `%` in prose (a percentage —
-# exactly what this repo's help text is full of) raises at FORMAT time, not at parse time. The
-# result is a subcommand whose --help crashes with a TypeError while every real invocation of it
-# works, so nothing else in the suite can see it. `gpap mine --help` shipped broken this way.
+# argparse %-formats help strings only when rendering, so a literal `%` in help text crashes
+# --help with a TypeError while every real invocation works.
 
 @pytest.mark.parametrize("sub", ["sample", "mine", "bench", "circuit2cnf", "info"])
 def test_subcommand_help_renders(sub):
@@ -326,9 +309,8 @@ def test_top_level_help_renders():
 
 
 # ---------------------------------------------------------------- quality pass metrics
-# The quality pass's two metrics, now that they live in the suite driver rather than the
-# library: distinct-projection COUNTING and 2-wise COVERAGE. Neither is a uniformity test —
-# that claim is `eval/uniformity/`'s (barbarik + the exact-oracle fuzz).
+# Distinct-projection counting and 2-wise coverage. Neither is a uniformity test; that lives in
+# eval/uniformity/.
 
 def test_two_wise_vectorized_matches_bruteforce():
     import itertools
@@ -352,9 +334,7 @@ def test_two_wise_vectorized_matches_bruteforce():
 
 
 def test_distinct_projections_counts_the_projection_not_the_model():
-    """Two models that agree on the SUPPORT are one distinct sample — that is the whole
-    point of the metric, and the reason it is computed over the support rather than the
-    full assignment."""
+    """Two models that agree on the support are one distinct sample."""
     from gpap.benchmark import distinct_projections
 
     sup = [1, 2]
@@ -364,22 +344,11 @@ def test_distinct_projections_counts_the_projection_not_the_model():
 
 
 # ---------------------------------------------------------------- table alignment
-# The bench table's two layout invariants, over every combination of optional columns.
-#
-# Three width bugs have shipped in this file, in TWO distinct classes, and each class needs
-# its own check:
-#
-#   SAME TOTAL WIDTH  the three sim-baseline branches must agree on their field widths. One of
-#                     them kept the pre-widening `rej/s` width, shifting `amp`/`krn`/`snd` and
-#                     every CMSGen column 4 characters left on exactly the rows where the
-#                     instance was not a circuit.
-#   NO GLUED CELLS    a value that exactly FILLS its right-aligned field leaves no separating
-#                     space and runs into its left neighbour (`5.0e-01143,498,947` for `p_acc`
-#                     + a 9-digit accepted/s; `0.1s12,234,239` for `t_enc` + an 8-digit unique
-#                     rate). Total width is unchanged, so the first check cannot see it — but
-#                     two glued cells are ONE whitespace token instead of two, and neither the
-#                     header labels nor the row's own cells contain spaces, so comparing token
-#                     counts against the header detects it without restating a single width.
+# Two layout invariants of the bench table, over every combination of optional columns:
+#   same total width  every row branch (e.g. the three sim-baseline shapes) matches the header.
+#   no glued cells    a value that exactly fills its right-aligned field runs into its left
+#                     neighbour at the same total width. Labels and cells hold no spaces, so a
+#                     token count against the header detects it.
 
 class _TableArgs:                                   # only the flags the formatters read
     def __init__(self, **kw):
@@ -387,12 +356,9 @@ class _TableArgs:                                   # only the flags the formatt
         self.__dict__.update(kw)
 
 
-# At the wide end of the range campaigns ACTUALLY produce — a mid-range row would pass
-# while the suite's own output did not, and a max-out-every-field row would demand widths
-# for numbers we never print. `unique_sps_est` and `accepted_per_s` are the two values
-# observed gluing (b03-c4: `0.1s12,234,239`; a 9-digit accepted/s under `p_acc`); the rest
-# are the documented maxima from `_format_header` (rates 6e7 samples/s, M 1e6 on a b14-c25
-# tseitin unroll, sols 1e7, the documented ceiling, plus the `<` chunk-capped marker).
+# A row at the wide end of what campaigns produce: a mid-range row can pass while real output
+# glues, and a row maxing every field would demand widths we never print. `unique_sps_est` and
+# `accepted_per_s` are values seen gluing; the rest are the maxima `_format_header` documents.
 _TABLE_ROW = {
     "name": "registerlesSwap-c50", "enc_key": "abc:fast", "nv": 999_999, "M": 1_000_000,
     "support": 65536, "gpap_sps": 62_345_678.0, "gpap_sps_e2e": 51_234_567.0,
@@ -420,13 +386,9 @@ def test_row_width_matches_header_width(multi_enc, has_circuits, quality, flags)
 
     args = _TableArgs(**flags)
     hdr = _format_header(args, multi_enc, has_circuits, quality)
-    # Three sim_baseline shapes, because they are three separate format branches and only
-    # one of them was ever exercised by a manual eyeball.
-    # succ is varied with them: `succ%` renders through `fmt_pct`, whose small end is the
-    # widest string it produces ("4e-07%" fills the field exactly), and a row pinned at 100%
-    # never exercises the width the column is sized for. 3.6e-9 is below every recorded rate,
-    # so the gate holds at the small end of what `fmt_pct` can be ASKED to render rather than
-    # at the smallest yet seen (docs/findings/CLI_DELIVERY_FINDINGS.md §7 has the range).
+    # The three sim_baseline shapes are separate format branches. succ varies with them because
+    # `fmt_pct` is widest at its small end ("4e-07%" fills the field); 3.6e-9 is below every
+    # recorded rate (docs/findings/CLI_DELIVERY_FINDINGS.md §7).
     for sim, succ in product((None,
                               {"hits": 7, "p_accept": 4.9e-4, "accepted_per_s": 162_912_098.0},
                               {"hits": 0, "p_accept_lt": 1e-9}),
@@ -441,9 +403,8 @@ def test_row_width_matches_header_width(multi_enc, has_circuits, quality, flags)
 
 
 def test_both_invariants_actually_fire():
-    """A gate nobody has seen fail is a gate that might be checking nothing. Each check is
-    shown rejecting the shape it exists for — one row too long, one row with a glued cell
-    that is exactly the right length."""
+    """Each layout check rejects the shape it exists for: a row too long, and a row of the
+    right length with a glued cell."""
     from gpap.benchmark import _format_header, _format_row
 
     args = _TableArgs(sim_baseline=True)
@@ -452,8 +413,8 @@ def test_both_invariants_actually_fire():
     over = dict(_TABLE_ROW, amplification=2047.0,
                 sim_baseline={"hits": 1, "p_accept": 0.5, "accepted_per_s": 1e14})
     assert len(_format_row(over, args, False, False, False)) > len(hdr)
-    # (b) EXACTLY filling the field: same total width, one token short. This is the shape
-    #     the length check cannot see, and it is what shipped twice.
+    # (b) exactly filling the field: same total width, one token short, which the length
+    #     check cannot see.
     glued = dict(_TABLE_ROW, amplification=2047.0,
                  sim_baseline={"hits": 1, "p_accept": 0.5,
                                "accepted_per_s": 162_912_098.0 * 1000})  # 15 chars w/ commas

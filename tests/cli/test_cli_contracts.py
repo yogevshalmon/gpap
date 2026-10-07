@@ -1,10 +1,6 @@
-"""What the CLI PROMISES, pinned.
-
-Every case here is a defect the CLI shipped with, and each one is the kind that lies quietly
-rather than crashing: a flag that reports a bound it cannot apply, an output file with more rows
-in it than the run produced models, a proof of UNSAT printed as "0 models, sound=True". The
-engine was right in all of them — these are contracts of the print/plumbing layer, so they are
-tested at that layer.
+"""Contracts of the CLI's print and plumbing layer: argument validation, mining budgets,
+delivery and accounting, UNSAT reporting, the soundness tri-state, writers and defaults shared
+across faces. Each guards a failure that would mislead rather than crash.
 """
 import numpy as np
 import pytest
@@ -27,35 +23,34 @@ UNSAT = "p cnf 1 2\n1 0\n-1 0\n"
 # ------------------------------------------------------------------ argument validation (host)
 
 @pytest.mark.parametrize("argv", [
-    ["sample", "X", "-n", "0"],                     # ran a full chunk and reported millions
+    ["sample", "X", "-n", "0"],
     ["sample", "X", "-n", "-5"],
-    ["sample", "X", "--time-limit", "-1"],          # printed "0 models" with no cause given
+    ["sample", "X", "--time-limit", "-1"],
     ["sample", "X", "--cycles", "0"],
     ["sample", "X", "--n-cov", "-1"],
     ["sample", "X", "--max-samples", "-1"],
-    ["mine", "X", "--max-tuples", "-1"],            # meant "unbounded", warned "over budget"
+    ["mine", "X", "--max-tuples", "-1"],
     ["mine", "X", "--seconds", "-1"],
-    ["sample", "X", "--time-limit", "nan"],         # nan < lo is False, so it passed every bound
+    ["sample", "X", "--time-limit", "nan"],         # nan < lo is False, so it passes any bound
     ["sample", "X", "--time-limit", "inf"],         # a cap that means "never" is not a cap
     ["mine", "X", "--seconds", "nan"],
-    ["bench", "X", "--time-limit", "0"],            # 0 would ALSO be the rival's timeout
+    ["bench", "X", "--time-limit", "0"],            # 0 would also be the rival's timeout
 ])
 def test_degenerate_numbers_are_refused_at_parse_time(tmp_path, argv):
     argv = [a if a != "X" else _cnf(tmp_path, SMALL) for a in argv]
     with pytest.raises(SystemExit) as e:
         cli_main(argv)
-    assert e.value.code != 0          # argparse error, not a run that quietly did something odd
+    assert e.value.code != 0          # an argparse error, not a run
 
 
 def test_missing_input_and_output_dir_fail_before_any_work(tmp_path, monkeypatch):
-    """...and WITHOUT a GPU. These are facts about the arguments, so the check runs ahead of the
-    device precondition; stubbing CUDA away is how we pin that ordering, which is also what makes
-    this test valid in the host-only lane."""
+    """A missing input or output directory is refused before the device check; CUDA is stubbed
+    away to pin that order."""
     monkeypatch.setattr(torch.cuda, "is_available", lambda: False)
     with pytest.raises(SystemExit) as e:
         cli_main(["sample", str(tmp_path / "nope.cnf")])
     assert "does not exist" in str(e.value)
-    # `mine` used to open --out only at the very end, losing a whole sweep to a typo.
+    # `mine` checks its --out directory before the sweep, not after.
     with pytest.raises(SystemExit) as e:
         cli_main(["mine", _cnf(tmp_path, SMALL), "--out", str(tmp_path / "no" / "dir" / "x.cnf")])
     assert "--out" in str(e.value) and "does not exist" in str(e.value)
@@ -64,11 +59,8 @@ def test_missing_input_and_output_dir_fail_before_any_work(tmp_path, monkeypatch
 # ------------------------------------------------------------------ mining budget + accounting
 
 def test_the_default_mining_path_never_caps_width_1():
-    """`mine_entailed` applies a ceiling to width 1 too — which is what `gpap mine --max-tuples`
-    asks for, and a hazard everywhere else: the per-width lookup falls back to DEFAULT_MAX_TUPLES,
-    so a dict without a key for width 1 silently truncates the backbone fixpoint on the DEFAULT
-    sampling path, at a fraction of one round on a large unroll. No flag, no warning, and fewer
-    mined units. Found by mutation: removing the `1: 0` survived the entire suite."""
+    """The pipeline's mining budgets leave width 1 unbounded. A budget dict without an explicit
+    `1: 0` falls back to DEFAULT_MAX_TUPLES and silently truncates the backbone fixpoint."""
     from gpap.mining import _ceiling
     from gpap.sampling.pipeline import STAGE1_MAX_TUPLES, STAGE2_MAX_TUPLES
     for name, budget in (("STAGE1", STAGE1_MAX_TUPLES), ("STAGE2", STAGE2_MAX_TUPLES)):
@@ -79,14 +71,14 @@ def test_the_default_mining_path_never_caps_width_1():
 
 @pytest.mark.gpu
 def test_max_tuples_binds_at_width_1(tmp_path):
-    """It was hardcoded to unbounded, while the plan line warned the ceiling was exceeded."""
+    """`max_tuples` binds at width 1, and a truncated sweep says so."""
     from gpap.mining import mine_entailed
     from gpap.engine import read_dimacs
     nv, cls, _ = read_dimacs(_cnf(tmp_path, SMALL))
     dev = torch.device("cuda")
     r = mine_entailed(nv, cls, dev, widths=(1,), max_tuples=2, seconds=None)
     assert r.probed[1] <= 2
-    assert not r.exhausted[1]                       # a truncated sweep is NOT a proof of absence
+    assert not r.exhausted[1]                       # a truncated sweep is not a proof of absence
     assert 1 in r.skipped                           # ...and says so
     full = mine_entailed(nv, cls, dev, widths=(1,), max_tuples=0, seconds=None)
     assert full.exhausted[1] and full.probed[1] > 2  # 0 still means unbounded
@@ -94,8 +86,8 @@ def test_max_tuples_binds_at_width_1(tmp_path):
 
 @pytest.mark.gpu
 def test_width_1_totals_are_reconcilable_with_the_pool(tmp_path):
-    """`candidates[1]` is a SUM over fixpoint rounds, so it can exceed one round's pool. That is
-    only readable if the round count comes with it — it printed as a bare "of N candidates"."""
+    """`candidates[1]` sums over fixpoint rounds, so it can exceed one round's pool; the round
+    count is reported with it."""
     from gpap.mining import mine_entailed
     from gpap.engine import read_dimacs
     from gpap.engine.probe import LiteralProbe
@@ -105,7 +97,7 @@ def test_width_1_totals_are_reconcilable_with_the_pool(tmp_path):
     per_round = LiteralProbe(nv, cls, dev).count(None, 1)
     assert r.rounds[1] >= 1
     assert r.candidates[1] <= per_round * r.rounds[1]
-    # and the cross-width total is gone from the summary line (it divided incomparable counts)
+    # the summary line has no cross-width total (it would mix incomparable counts)
     assert "of" not in r.summary().split("probed")[-1].split("in")[0]
 
 
@@ -113,8 +105,7 @@ def test_width_1_totals_are_reconcilable_with_the_pool(tmp_path):
 
 @pytest.mark.gpu
 def test_never_writes_more_samples_than_models_delivered(tmp_path, capsys):
-    """The output pass used to re-sample from scratch, so a run capped at 2,990 models wrote the
-    full 5,000 requested — and did it outside every reported wall."""
+    """The output file holds no more rows than the run delivered models, or than -n."""
     out = str(tmp_path / "s.bits")
     cli_main(["sample", _cnf(tmp_path, SMALL), "-n", "300", "--out", out, "--k-cap", "64"])
     txt = capsys.readouterr().out
@@ -126,11 +117,8 @@ def test_never_writes_more_samples_than_models_delivered(tmp_path, capsys):
 
 @pytest.mark.gpu
 def test_delivery_delivers_what_it_collected(tmp_path):
-    """The LOWER bound, which the upper-bound test above cannot see.
-
-    Found by mutation: silently dropping half of every collected block survived the whole suite,
-    because every existing assertion was of the form `rows <= something`. A delivery path that
-    quietly under-delivers is exactly as wrong as one that over-delivers, and reads as success."""
+    """The lower bound: a run that met its target delivers every requested row. The upper-bound
+    test above cannot see under-delivery."""
     from gpap.sampling.pipeline import sample_file
     info = sample_file(_cnf(tmp_path, SMALL), torch.device("cuda"), n_time=4000, out_cap=1500,
                        k_cap=64, seed=5, time_limit=60.0, mine=False)
@@ -141,9 +129,8 @@ def test_delivery_delivers_what_it_collected(tmp_path):
 
 @pytest.mark.gpu
 def test_delivery_bound_holds_when_a_valve_other_than_the_clock_stops_the_run(tmp_path):
-    """`--time-limit` is not the only way a run ends short (max_chunks, the zero-progress stop).
-    Bounding the top-up by the REMAINING TIME alone left those cases free to sample the full
-    request afterwards — the original defect, reachable by another door."""
+    """The delivery bound also holds when a valve other than --time-limit ends the run
+    (max_chunks, the zero-progress stop)."""
     from gpap.sampling.pipeline import sample_file
     info = sample_file(_cnf(tmp_path, SMALL), torch.device("cuda"), n_time=1_000_000,
                        out_cap=5000, k_cap=64, time_limit=30.0, max_chunks=2, mine=False)
@@ -155,29 +142,21 @@ def test_delivery_bound_holds_when_a_valve_other_than_the_clock_stops_the_run(tm
 @pytest.mark.parametrize("extra", [{}, {"n_cov": 300}, {"verify_sound": True}],
                          ids=["off", "cov", "verify"])
 def test_phases_account_for_the_whole_reported_wall(tmp_path, extra):
-    """`phases` summed to more than `wall_total_s` by exactly the output pass, which was stamped
-    into one and left out of the other — so the honest e2e rate read ~1.5x high.
-
-    The `verify` case is the same hole one field along: `verify_sound_s` was subtracted from the
-    timed phase and billed to NO phase, so the sum fell SHORT by the self-test on every run of a
-    campaign (VERIFY_SOUND=1 is the eval default) while `sps_e2e_total` still carried it."""
+    """`phases` sums to `wall_total_s` with and without the opt-in readouts (--n-cov,
+    --verify-sound), which are billed to `phases_diag` instead."""
     from gpap.sampling.pipeline import sample_file
     info = sample_file(_cnf(tmp_path, SMALL), torch.device("cuda"), n_time=300, out_cap=300,
                        k_cap=64, time_limit=30.0, mine=False, **extra)
-    # The opt-in READOUTS (--n-cov, --verify-sound) are billed to `phases_diag`, outside
-    # `wall_total_s` — parametrized because the invariant first held only in the one
-    # configuration the test happened to use.
     assert sum(info["phases"].values()) == pytest.approx(info["wall_total_s"], rel=0.05)
-    # ...and an opt-in readout must be VISIBLE in phases_diag, not merely absent from `phases`:
-    # billing it to neither would satisfy the sum above while losing the cost entirely.
+    # The readout must show up in phases_diag: billing it nowhere would also pass the sum above.
     if extra.get("verify_sound"):
         assert info["phases_diag"]["verify_sound"] == pytest.approx(info["verify_sound_s"])
 
 
 @pytest.mark.gpu
 def test_emitted_rows_come_from_one_config(tmp_path):
-    """Collecting during the timed run must not turn the output into a MIXTURE of the bandit's
-    arms — the rows are bucketed per config and only the winner's are returned."""
+    """Rows collected during the timed run come from one config (the winner's), never a mixture
+    of the bandit's arms."""
     from gpap.sampling.pipeline import sample_file, CIRCUIT_PORTFOLIO
     info = sample_file(_cnf(tmp_path, SMALL), torch.device("cuda"), n_time=500, out_cap=200,
                        k_cap=64, time_limit=30.0, configs=CIRCUIT_PORTFOLIO)
@@ -187,25 +166,21 @@ def test_emitted_rows_come_from_one_config(tmp_path):
 
 @pytest.mark.gpu
 def test_unsat_is_reported_as_a_proof_not_as_zero_models(tmp_path, capsys):
-    """An UNSAT formula printed "0 models ... sound=True", indistinguishable from a satisfiable
-    instance the sampler merely failed on. Both detectors were already in hand."""
+    """An UNSAT formula is reported as UNSAT, not as "0 models"."""
     cli_main(["sample", _cnf(tmp_path, UNSAT, "u.cnf"), "-n", "10"])
     out = capsys.readouterr().out
-    # ONCE: construction proves it here, and the CLI has a second site for the formula only
-    # MINING proves unsatisfiable — the two must not both fire on the same run.
+    # Once: construction proves it here, and the CLI's second site (UNSAT found by mining) must
+    # not also fire.
     assert out.count("UNSAT") == 1
-    # ...and NOT also marked '<' (a safety valve cut the run short of -n): 0 models is the
-    # complete answer here, so `chunk_capped` excludes it and both printers agree.
+    # Not marked '<' (cut short of -n): 0 models is the complete answer, so `chunk_capped`
+    # excludes it.
     assert "0<" not in out
 
 
 def test_zero_models_on_a_satisfiable_formula_says_why(tmp_path, capsys, monkeypatch):
-    """0 models on a SATISFIABLE formula is a real outcome — GPAP discards conflicted trajectories
-    instead of backtracking — but it printed as a bare 0 with no hint of what to change, and read
-    identically to UNSAT. Driven through the print layer with a crafted result: forcing a genuine
-    0%-success instance small enough for a unit test is not possible (B=1 solves the tight little
-    ones), and the contract under test is what the CLI SAYS about that state, not how to reach it.
-    """
+    """0 models on a satisfiable formula (GPAP discards conflicted trajectories) prints a hint
+    and does not read as UNSAT. Uses a stubbed result: no unit-test-sized instance reliably gets
+    0% success."""
     from gpap.sampling import pipeline
 
     def _fake(path, device, **kw):
@@ -228,9 +203,8 @@ def test_zero_models_on_a_satisfiable_formula_says_why(tmp_path, capsys, monkeyp
 
 @pytest.mark.gpu
 def test_each_phase_is_printed_where_it_happened(tmp_path, capsys):
-    """Mining runs BEFORE the timed run and the formula is built before either, but both lines
-    were read off the returned dict and printed under the throughput — so the console said the
-    sampler mined after it finished sampling. The pipeline reports them through `progress=`."""
+    """The formula and mining lines print before the throughput line, in the order they happen
+    (the pipeline reports them through `progress=`)."""
     cli_main(["sample", _cnf(tmp_path, SMALL), "-n", "10", "--mine", "on"])
     out = capsys.readouterr().out.splitlines()
     where = {k: next(i for i, ln in enumerate(out) if k in ln)
@@ -240,11 +214,9 @@ def test_each_phase_is_printed_where_it_happened(tmp_path, capsys):
 
 @pytest.mark.gpu
 def test_a_formula_only_mining_refutes_is_reported_as_unsat(tmp_path, capsys):
-    """The REAL path behind the test below. Every 3-literal clause over 3 variables: construction
-    cannot refute it (no units, no equivalences), but mining fails every literal, so the rebuilt
-    formula's unit flush conflicts and the run is UNSAT — a fact that only exists after mining.
-    The stub below pins the CLI's half; this pins the pipeline's, which reported the
-    construction-time value and turned the proof into a silent "0 models"."""
+    """Every 3-literal clause over 3 variables: construction cannot refute it, but mining fails
+    every literal, so UNSAT is known only after mining. The real-pipeline half of the stubbed
+    test below."""
     cnf = "p cnf 3 8\n" + "".join(f"{a} {b} {c} 0\n"
                                   for a in (1, -1) for b in (2, -2) for c in (3, -3))
     cli_main(["sample", _cnf(tmp_path, cnf, "u3.cnf"), "-n", "10", "--mine", "on"])
@@ -255,11 +227,8 @@ def test_a_formula_only_mining_refutes_is_reported_as_unsat(tmp_path, capsys):
 
 
 def test_unsat_proved_after_construction_is_still_printed(tmp_path, capsys, monkeypatch):
-    """The UNSAT proof is printed from the `progress` callback, which fires at CONSTRUCTION —
-    but mining can prove it later (every literal failing yields both polarities as units, and the
-    rebuilt formula's flush conflicts), and that formula must not go out as a silent "0 models".
-    Driven through the print layer: the state is "construction said satisfiable, the run says
-    UNSAT", which is what the CLI has to notice."""
+    """UNSAT proved after construction (by mining) is still printed, once. Stubbed so that
+    construction reports satisfiable and the run reports UNSAT."""
     from gpap.sampling import pipeline
 
     def _fake(path, device, progress=None, **kw):
@@ -280,14 +249,8 @@ def test_unsat_proved_after_construction_is_still_printed(tmp_path, capsys, monk
 
 
 # ------------------------------------------------------------- the soundness tri-state
-
-# ---------------------------------------------------------------- sound verdict
-# `pipeline.sound_verdict` / `merge_sound_check` — THE reader and THE fold.
-#
-# Every consumer branches on the string: the bench table, the CLI, the Colab driver, the rival
-# harnesses and paper_tables all import these two. They replaced six open-coded comparisons, of
-# which only two handled the legacy key — so a resumed campaign reported a fully verified sweep
-# as "not run", and a legacy FAILURE as a non-verdict. Neither function had a test.
+# `pipeline.sound_verdict` reads a row's verdict and `merge_sound_check` folds two. Every
+# consumer (bench table, CLI, Colab driver, rival harnesses, paper_tables) imports them.
 
 def test_the_three_states_are_read_back_verbatim():
     from gpap.sampling.pipeline import SOUND_BAD, SOUND_OFF, SOUND_OK, sound_verdict
@@ -296,8 +259,7 @@ def test_the_three_states_are_read_back_verbatim():
 
 
 def test_a_row_with_no_verdict_at_all_reads_off_not_ok():
-    """"not run" is not "passed". This is the conflation the tri-state exists to prevent, so
-    an unrecognised value has to land on `off` rather than being taken at face value."""
+    """A missing or unrecognised verdict reads as `off`: "not run" is not "passed"."""
     from gpap.sampling.pipeline import SOUND_OFF, sound_verdict
     assert sound_verdict({}) == SOUND_OFF
     assert sound_verdict({"sound_check": "yes"}) == SOUND_OFF     # junk is not a verdict
@@ -305,19 +267,17 @@ def test_a_row_with_no_verdict_at_all_reads_off_not_ok():
 
 
 def test_the_legacy_bool_is_a_verdict_in_both_directions():
-    """Rows recorded before 2026-08-30 carry `gpu_sound: bool` and checked unconditionally,
-    so the bool IS the verdict there — including when it is False, which is the half that was
-    being read as "no verdict"."""
+    """Legacy rows carry `gpu_sound: bool` from a check that always ran, so the bool is the
+    verdict, False included."""
     from gpap.sampling.pipeline import SOUND_BAD, SOUND_OK, sound_verdict
     assert sound_verdict({"gpu_sound": True}) == SOUND_OK
     assert sound_verdict({"gpu_sound": False}) == SOUND_BAD
-    # a row carrying both keys is a NEW row; the new key wins
+    # a row with both keys is a new row; the new key wins
     assert sound_verdict({"sound_check": SOUND_OK, "gpu_sound": False}) == SOUND_OK
 
 
 def test_unsound_dominates_the_merge():
-    """The timed and coverage runs are folded into one published verdict. Preferring either
-    run's "ok" printed it beside the other's non-zero `unsound_rows`."""
+    """Folding the timed and coverage verdicts: UNSOUND dominates, then evidence beats absence."""
     from gpap.sampling.pipeline import SOUND_BAD, SOUND_OFF, SOUND_OK, merge_sound_check
     assert merge_sound_check(SOUND_OK, SOUND_BAD) == SOUND_BAD
     assert merge_sound_check(SOUND_BAD, SOUND_OK) == SOUND_BAD    # order must not matter
@@ -333,12 +293,8 @@ def test_unsound_dominates_the_merge():
 
 @pytest.mark.gpu
 def test_verify_requested_but_never_reached_reads_off(tmp_path):
-    """`--verify-sound` on a run that COMPLETES NOTHING must report "off", not "ok".
-
-    The check runs per chunk over the rows that chunk completed, so a 0%-success run never calls
-    it — and publishing that as a pass is the same conflation one state along: an un-run check
-    printed as a passing one. `sound_rows_checked` is the evidence, so it must be 0 with it.
-    """
+    """`--verify-sound` on a run that completes nothing reports "off", not "ok": the check runs
+    over completed rows, so it never ran, and `sound_rows_checked` is 0."""
     from gpap.sampling.sampler import GPUSampler
     smp = GPUSampler.from_clauses(1, [[1], [-1]], torch.device("cuda"), k_cap=16, seed=1)
     out = smp.sample(10, max_chunks=5, collect=False, verify_sound=True)
@@ -353,13 +309,11 @@ def test_verify_requested_but_never_reached_reads_off(tmp_path):
     (7, 5, np.uint8, 1),
     (5000, 11, np.uint8, 1),          # crosses the block boundary
     (500, 37, np.int32, 1),           # a caller's own int array
-    (300, 11, np.uint8, 255),         # NONZERO-IS-TRUE: a 0/255 mask, not a 0/1 one
+    (300, 11, np.uint8, 255),         # nonzero is true: a 0/255 mask
 ])
 def test_dimacs_writer_matches_the_reference_tokens(tmp_path, n, c, dtype, scale):
-    """Vectorised, and it must stay token-identical to the row loop it replaced — INCLUDING that
-    loop's coercion. The vectorised form indexes a length-2 table with the matrix values, so any
-    value outside {0,1} became an IndexError where `row.astype(bool)` had accepted it; `!= 0`
-    restores it. Found by mutation: dropping the `!= 0` survived a suite that only fed 0/1."""
+    """The vectorised writer is token-identical to a per-row loop, including reading any nonzero
+    value as true (it indexes a length-2 table, so values outside {0,1} need the `!= 0`)."""
     from gpap.sampling.output import write_dimacs
     rng = np.random.default_rng(n)
     m = ((rng.random((n, c)) > 0.5).astype(dtype)) * scale
@@ -372,10 +326,8 @@ def test_dimacs_writer_matches_the_reference_tokens(tmp_path, n, c, dtype, scale
 
 
 def test_bench_forwards_every_flag_it_declares(tmp_path, monkeypatch):
-    """`_cmd_bench` hand-copies flags into an argv for the driver, and that is exactly how
-    `--allow-soft` went missing: declared on the parser, accepted by the driver, never passed
-    between them. Asserted on the argv the driver actually receives — a source-text check would
-    pass on the comment alone, and says nothing about the other flags copied the same way."""
+    """`gpap bench` passes every flag it declares through to the driver. `_cmd_bench` copies
+    them into an argv by hand, so the check is on the argv the driver receives."""
     from gpap import benchmark
     seen = {}
     monkeypatch.setattr(benchmark, "main", lambda argv: seen.update(argv=argv))
@@ -393,9 +345,8 @@ def test_bench_forwards_every_flag_it_declares(tmp_path, monkeypatch):
 
 @pytest.mark.gpu
 def test_out_cap_does_not_change_the_run(tmp_path):
-    """Delivery must not perturb SAMPLING. The projection that fills `--out` draws random bits for
-    don't-care columns; sharing the sampler's generator made `--out` shift every later chunk's
-    permutation and seed, so the same command at the same --seed found different models."""
+    """`--out` does not change which models a seed finds: the projection draws its don't-care
+    bits from its own generator, not the sampler's."""
     from gpap.sampling.pipeline import sample_file, portfolio
     dev = torch.device("cuda")
     cnf = _cnf(tmp_path, SMALL)
@@ -407,9 +358,8 @@ def test_out_cap_does_not_change_the_run(tmp_path):
 
 @pytest.mark.gpu
 def test_emitted_rows_are_sound(tmp_path):
-    """The delivery path CHANGED — rows now come off the timed run's chunks, per config, and may
-    be spliced with a top-up. test_output.py gates soundness on `sample_bits`, which is no longer
-    the path `gpap sample --out` takes, so the flagship claim needs a gate on this one too."""
+    """Every row on the `gpap sample --out` path (timed-run chunks, per config) extends to a full
+    model. test_output.py covers `sample_bits`, which is a different path."""
     from pysat.formula import CNF
     from pysat.solvers import Solver
     from gpap.sampling.pipeline import sample_file
@@ -420,23 +370,15 @@ def test_emitted_rows_are_sound(tmp_path):
     assert len(mat) > 0
     clauses = [[1, 2], [-1, 3]]
     s = Solver(name="cadical195", bootstrap_with=CNF(from_clauses=clauses))
-    for row in mat:                      # every emitted row must EXTEND to a full model
+    for row in mat:                      # every emitted row must extend to a full model
         assert s.solve(assumptions=[v if b else -v for v, b in zip(cols, row)])
     s.delete()
 
 
 def test_the_two_faces_agree_on_the_decision_batch_default():
-    """B has ONE default, and every face has to spell it the same.
-
-    `GPUSampler.sample` defaulted to B=1 while `gpap::SampleOptions::batch`, `sample_bits`,
-    `sample_clauses(b=)`, `gpap bench --b` and DEFAULT_PORTFOLIO's first entry all said 8 — so a
-    direct library caller silently got a different sampler from the one the pipeline, the CLI
-    and the C++ face all run, on the knob that is both a throughput AND a uniformity lever.
-    Nothing catches that by construction: it is five independent literals, so it needs a test.
-
-    Reads the C++ default out of the header text on purpose — no CUDA, no build required, and
-    the header is the thing an out-of-tree C++ caller actually gets.
-    """
+    """Every face has the same default decision batch B, which sets both throughput and
+    uniformity. The values are independent literals, so only a test keeps them equal. The C++
+    default is read from the header text: no build needed, and it is what C++ callers compile."""
     import inspect
     import re
     from pathlib import Path
@@ -464,17 +406,10 @@ def test_the_two_faces_agree_on_the_decision_batch_default():
 
 
 def test_no_face_turns_on_the_soft_polarity_by_itself():
-    """The Barbarik-rejected soft polarity is OPT-IN on EVERY face, and there are three doors.
-
-    Python's is `--allow-soft` (gated by test_sampler.py::test_soft_is_not_in_any_default_
-    portfolio). The other two are defaults, so nothing catches them by construction: the C++
-    `SampleOptions::retry_with_lookahead`, which shipped as `auto_retry = true` — the flip runs
-    the OTHER polarity, so on a config the bandit left at plain that retry IS soft — and the
-    ctypes binding's own keyword default, which is what every Python caller gets.
-
-    Read out of the header text on purpose, like the decision-batch default beside it: no CUDA,
-    no build, and the header is what an out-of-tree C++ caller actually compiles against.
-    """
+    """The Barbarik-rejected soft polarity is opt-in on every face. `--allow-soft` is covered by
+    test_sampler.py::test_soft_is_not_in_any_default_portfolio; this checks the C++
+    `SampleOptions::retry_with_lookahead` default (read from the header) and the ctypes binding's
+    keyword default. On a plain config the retry runs the other polarity, which is soft."""
     import inspect
     import re
     from pathlib import Path
@@ -488,30 +423,25 @@ def test_no_face_turns_on_the_soft_polarity_by_itself():
         "gpap::SampleOptions turns the soft-polarity retry on by default (the auto_retry bug)"
     assert inspect.signature(_core.Sampler.run).parameters["retry_with_lookahead"].default \
         is False, "the Python binding's own default enables it"
-    # ...and the rename is the guard the ground rule asks for: a caller of the OLD name must not
-    # still compile, or the reversal is invisible to everyone who only relinks. Matched as a
-    # DECLARATION, not as a mention — the header explains the rename in prose right above the
-    # field, and a bare substring search reads that explanation as the bug.
+    # The rename is the guard: code using the old name must fail to compile. Matched as a
+    # declaration, because the header mentions the old name in prose.
     assert not re.search(r"^\s*bool\s+auto_retry\b", hpp, re.M), \
         "the old field name is declared again — a silent flip for callers who only relink"
 
 
 @pytest.mark.gpu
 def test_full_models_honours_the_same_row_ceiling_as_the_bit_path(tmp_path):
-    """`gpap.sample(..., full_models=True)` returned a whole COVERAGE CHUNK regardless of what
-    was asked for — `n=50, max_samples=10` came back with 2,048 models, while the bit path
-    honoured the same two numbers exactly. A chunk is the smallest unit of work, so the overshoot
-    is intrinsic; what was wrong is that only one of the two return shapes was capped."""
+    """`full_models=True` honours `max_samples` like the bit path. A chunk can overshoot the
+    request, so both return shapes must be capped."""
     import gpap
     cls = [[1, 2], [-1, 3]]
     bits, bi = gpap.sample_clauses(4, cls, n=50, max_samples=10)
     models, mi = gpap.sample_clauses(4, cls, n=50, max_samples=10, full_models=True)
-    # Both COLLECTED something first — otherwise `<= 10` would hold on two empty results and
-    # this would be a test of nothing (the trap the C++ review already caught once).
+    # Both runs collected rows, or `<= 10` would hold on empty results.
     assert bi["n_models"] and mi["n_collected"], "precondition: the run produced rows to cap"
-    # The ceiling is exact on both shapes: min(what was asked for, what was collected).
+    # The ceiling is exact on both shapes: min(asked, collected).
     assert len(bits) == min(10, bi["n_models"]) == 10
     assert len(models) == min(10, mi["n_collected"]) == 10
-    # ...and an EXPLICIT collection request still wins over the default ceiling.
+    # An explicit collection request still wins over the default ceiling.
     more, xi = gpap.sample_clauses(4, cls, n=50, max_samples=10, full_models=True, n_cov=3000)
     assert len(more) == min(3000, xi["n_collected"]) > 10

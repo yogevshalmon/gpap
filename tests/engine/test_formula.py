@@ -1,9 +1,8 @@
-"""Literal indexing, the reference formula build, and the shipped CnfFormula facade.
+"""Literal indexing, the reference formula build, the core's DIMACS parser and builder, and the
+CnfFormula facade.
 
-The reference build (tests/reference/formula.py) runs on any host, so this file keeps DIMACS
-parsing and structure construction covered on machines with no libgpap; tests/engine/test_core.py is
-where the core is compared against the reference entry for entry. The facade tests at the bottom
-gate on the core being present, since the shipped CnfFormula has no other builder.
+The reference tests (tests/reference/formula.py) run without libgpap; the rest need the core and
+compare it against the reference.
 """
 import ctypes
 import os
@@ -43,14 +42,14 @@ def test_negation():
 
 # ---------------------------------------------------------------- reference occurrence lists
 def test_basic_construction():
-    # SIMPLE segregates as: clause 0 (~1|2) BIN pair (1,2); clause 1 (1|~2|3) LONG id 0;
-    # clause 2 (~1|~2) BIN pair (1,3); clause 3 (~3) UNIT lit 5 -> NO occ entry.
+    # SIMPLE splits as: clause 0 (~1|2) binary pair (1,2); clause 1 (1|~2|3) long id 0;
+    # clause 2 (~1|~2) binary pair (1,3); clause 3 (~3) unit lit 5, with no occ entry.
     f = ReferenceFormula.from_clauses(3, SIMPLE)
     assert (f.num_bin, f.num_long) == (2, 1)
     assert f.bin_pairs == [(1, 2), (1, 3)]
     assert f.unit_lits == [5]
 
-    # binary prefix: payload = the OTHER literal setting l TRUE forces
+    # binary prefix: payload = the other literal, which setting l TRUE forces
     assert f.occ_bin(0).tolist() == [2, 3]  # x1 TRUE: clause 0 forces x2, clause 2 forces ~x2
     assert f.occ_bin(3).tolist() == [1]     # x2 FALSE: clause 0 forces ~x1
     assert f.occ_bin(2).tolist() == [1]     # x2 TRUE: clause 2 forces ~x1
@@ -58,10 +57,9 @@ def test_basic_construction():
     assert f.occ_long(1).tolist() == [0]    # x1 FALSE falsifies +1 in long clause 0
     assert f.occ_long(2).tolist() == [0]    # x2 TRUE falsifies -2 in long clause 0
     assert f.occ_long(5).tolist() == [0]    # x3 FALSE falsifies +3 in long clause 0
-    # the unit clause (~3) contributes NO entry: occ[4] is empty
+    # the unit clause (~3) adds no entry: occ[4] is empty
     assert f.occ(4).tolist() == []
-    # RAW storage carries the binary tag (the sign bit) so a kernel can classify an entry
-    # from the value it already loaded; occ_bin() above is the masked view.
+    # raw storage carries the binary tag (the sign bit); occ_bin() above is the masked view
     from tests.reference.formula import BIN_TAG
     assert f.occ(0).tolist() == [2 | BIN_TAG, 3 | BIN_TAG]
     assert all(x < 0 for x in f.occ(0).tolist())      # binaries tagged
@@ -100,8 +98,8 @@ def test_empty_clause_is_dropped_and_flagged():
 
 
 # ---------------------------------------------------------------- cnf formula facade
-# The shipped CnfFormula is a facade over the core's builder — no CUDA needed to BUILD
-# (formula construction is host-side C++), so these run wherever the library exists.
+# CnfFormula is a facade over the core's builder. Construction is host-side C++, so these build
+# on a CPU device.
 
 @pytest.mark.gpu
 def test_init_formula_adopts_the_core_build():
@@ -127,8 +125,7 @@ def test_parse_cnf_file():
 
 
 # ---------------------------------------------------------------- read dimacs
-# `read_dimacs` is THE list-of-lists entry point (the core's parser + clause read-back) —
-# it is what replaced the third-party parser, so its fidelity is what licenses that removal.
+# `read_dimacs` returns clauses as lists of literals, via the core's parser and clause read-back.
 
 @pytest.mark.gpu
 def test_matches_the_reference_parser_as_clause_sets(tmp_path):
@@ -161,10 +158,8 @@ def test_empty_clause_is_reappended(tmp_path):
 
 @pytest.mark.gpu
 def test_header_n_wins_over_max_var_used(tmp_path):
-    """A header that declares MORE variables than the clauses use is honoured — the
-    parser's rule, so `c ind`-only support variables keep their slots. Pinned because the
-    third-party parser this replaced recounted from the clauses (nv would read 10 here),
-    which silently drops declared-but-unconstrained sampling variables."""
+    """A header declaring more variables than the clauses use is honoured, so support
+    variables that appear in no clause keep their slots."""
     from gpap.engine import read_dimacs
     p = tmp_path / "h.cnf"
     p.write_text("p cnf 20 2\n1 10 0\n-10 2 0\n")
@@ -174,8 +169,8 @@ def test_header_n_wins_over_max_var_used(tmp_path):
 
 @pytest.mark.gpu
 def test_support_lines_c_ind_and_cr(tmp_path):
-    """Both header conventions, and the CORE parse must agree with the pure-Python scanner
-    (`parse_independent_support`) — the gate that keeps the two parsers one."""
+    """Both support-line conventions; the core's parse agrees with the Python scanner
+    `parse_independent_support`."""
     from gpap.engine import read_dimacs
     from gpap.sampling import parse_independent_support
     p = tmp_path / "s.cnf"
@@ -187,10 +182,8 @@ def test_support_lines_c_ind_and_cr(tmp_path):
 
 @pytest.mark.gpu
 def test_a_directory_is_an_error_not_a_process_abort(tmp_path):
-    """fopen("rb") SUCCEEDS on a directory on Linux and ftell then reports LONG_MAX. Sizing
-    the read buffer from it threw std::length_error out through the extern "C" boundary,
-    where there is no handler — so `gpap sample <a directory>` called std::terminate() and
-    core-dumped the whole process, the host's included. The ABI promises a gpap_status."""
+    """On Linux fopen succeeds on a directory and ftell reports LONG_MAX. The core must return
+    a gpap_status, not throw through the C boundary and abort the process."""
     with pytest.raises(_core.GpapError) as e:
         _core.Formula.from_file(str(tmp_path))
     assert e.value.status == 4                                  # GPAP_ERR_IO
@@ -198,10 +191,8 @@ def test_a_directory_is_an_error_not_a_process_abort(tmp_path):
 
 @pytest.mark.gpu
 def test_a_non_seekable_stream_parses_its_actual_bytes(tmp_path):
-    """A FIFO (also /dev/stdin and a <(...) process substitution) has no ftell size: it
-    returns -1, the sized read was skipped, and the caller got the EMPTY formula back with
-    GPAP_OK — zero variables, trivially satisfiable, no warning. Same silent-different-
-    formula failure the tokenizer is strict about, one layer down."""
+    """A FIFO (like /dev/stdin or <(...)) has no ftell size. Its bytes must be parsed, not
+    replaced by the empty formula."""
     import os
     import threading
     text = "p cnf 3 3\n1 2 0\n-1 3 0\n2 -3 0\n"
@@ -217,9 +208,8 @@ def test_a_non_seekable_stream_parses_its_actual_bytes(tmp_path):
 
 @pytest.mark.gpu
 def test_a_file_ftell_sizes_as_empty_is_still_read(tmp_path):
-    """procfs/sysfs report st_size == 0 while having content, so ftell says 0 and the old
-    reader parsed nothing. Not a CNF, but it must be REJECTED rather than accepted as the
-    empty formula — the distinction the fix is about."""
+    """procfs files report size 0 but have content. This one is not a CNF, so it must be
+    rejected, not read as the empty formula."""
     with pytest.raises(_core.GpapError) as e:
         _core.Formula.from_file("/proc/self/status")
     assert e.value.status == 4                                  # read, then refused as non-DIMACS
@@ -227,7 +217,7 @@ def test_a_file_ftell_sizes_as_empty_is_still_read(tmp_path):
 
 @pytest.mark.gpu
 def test_an_empty_file_is_still_the_empty_formula(tmp_path):
-    """The other side of the same fix: a genuinely empty file is legal, not an error."""
+    """A truly empty file is the empty formula, not an error."""
     p = tmp_path / "empty.cnf"
     p.write_text("")
     info = _core.Formula.from_file(str(p)).info
@@ -235,15 +225,10 @@ def test_an_empty_file_is_still_the_empty_formula(tmp_path):
 
 
 # ---------------------------------------------------------------- occ tag and split agree
-# The binary/long split is read TWO different ways, and they must never disagree.
-#
-# `_wave_propagate` classifies an occ entry from the SIGN BIT of the payload it has already
-# loaded (`pay_v < 0`), because gathering that segment's `occ_mid` again would be a third
-# shuffle gather in the engine's hottest loop. `_clean_packed` and the scalar `_propagate` use
-# `occ_mid[l]` instead. A binary entry that landed at or above `occ_mid` would be a long clause
-# to the restore (which would index `init_ptr` with a NEGATIVE payload) and a binary to wave —
-# an out-of-bounds device write that no readout could attribute. Nothing else states the
-# coupling, so it is pinned here rather than left implied by the array comparison.
+# The binary/long split is read two ways that must agree. `_wave_propagate` classifies an occ
+# entry by the sign bit of its payload (saving a gather in the hot loop); `_clean_packed` and the
+# scalar `_propagate` use `occ_mid[l]`. A binary entry at or above `occ_mid` would make the
+# restore index `init_ptr` with a negative payload, an out-of-bounds device write.
 
 def _check(f):
     import numpy as np
@@ -259,10 +244,8 @@ def _check(f):
         assert np.all(longs < num_long), f"long payload past num_long at {lit}"
 
 
-#: Shapes where one of the formula's vectors is EMPTY. Reading them back used to be
-#: undefined behaviour: `std::vector::data()` on an empty vector may be nullptr and
-#: `memcpy(dst, nullptr, 0)` is UB at any length — UBSan flags it, and two of the three
-#: copies in gpap_formula_occ carried an `!empty()` guard while the third did not.
+#: Shapes where one of the formula's vectors is empty. Reading those back must not memcpy from
+#: `data()` of an empty vector, which may be nullptr (UB at any length).
 _DEGENERATE = [
     (4, [[1, 2], [-1, 3, 4], [2], [-2, -3], [1, 2, 3, 4]]),
     (3, [[1, 1], [1, -1], [2, -2, 3], [3, 3, 3]]),       # dup / tautological
@@ -282,16 +265,14 @@ def test_on_mixed_and_degenerate_formulas():
 
 @pytest.mark.gpu
 def test_every_read_back_accessor_survives_an_empty_vector():
-    """Not just occ(): the same null-source memcpy sat in gpap_formula_clause_arrays, and
-    gpap_formula_support had the guard. Touch them ALL on the shapes that empty them — the
-    failure is invisible without a sanitizer, so this exists to be run under one."""
+    """Call every read-back accessor on the shapes that empty its vectors. The null-source
+    memcpy is only visible under a sanitizer, so this test is meant to run under one."""
     for nv, clauses in _DEGENERATE:
         f = _core.Formula.from_clauses(nv, clauses)
         offsets, mid, occ = f.occ()
         sizes, sums = f.clause_arrays()
         back = f.clauses()
-        # NOT `... or nv == 0`: that disjunct short-circuited the assertion to True on
-        # the (0, []) row, i.e. on the one degenerate shape this table exists for.
+        # No `or nv == 0` escape: the (0, []) row must be checked too.
         assert len(offsets) == 2 * nv + 1
         assert len(sizes) == len(sums) == f.info.num_clauses == len(back)
         assert [sorted(c) for c in back] == [sorted(c) for c in clauses if c]
@@ -309,10 +290,8 @@ def test_on_a_real_benchmark():
 
 
 def read_support(path):
-    """The 0-based independent support the core parsed out of `c ind` / `cr`.
-
-    `Formula.support` is a method on the facade; this goes at the ABI so the parser is what is
-    under test. Shared by both support-line test classes."""
+    """The 0-based independent support the core parsed from `c ind` / `cr`, read through the
+    ABI so the parser itself is under test."""
     f = _core.Formula.from_file(str(path))
     n = ctypes.c_int32(0)
     _core.load().gpap_formula_support(f._h, None, ctypes.byref(n))
@@ -325,14 +304,9 @@ def read_support(path):
 
 
 # ---------------------------------------------------------------- support line is bounded by its line
-# REGRESSION. The `c ind` scanner stopped at `line_end` by testing the CURSOR, but strtol
-# skips leading whitespace including \r and \n — so any cursor left short of the newline
-# (one \r on a CRLF file, or one trailing space) parsed straight past it and pulled the NEXT
-# line's first literal into the independent support.
-#
-# Silent, and it enlarges the projection set of every CRLF-formatted benchmark by one variable
-# per `c ind` line. Nothing under benchmarks/ triggers it (410 `c ind` files, all LF), which is
-# exactly why it survived: it is only reachable from an externally supplied CNF.
+# strtol skips leading whitespace, including \r and \n. A `c ind` scan that stops short of the
+# newline (a \r on a CRLF file, a trailing space) must not read the next line's first literal
+# into the support. The bundled benchmarks are all LF, so only these tests reach it.
 
 def _support_of_bytes(tmp_path, raw):
     p = tmp_path / "s.cnf"
@@ -362,18 +336,9 @@ def test_a_cr_line_is_bounded_too(tmp_path):
 
 
 # ---------------------------------------------------------------- support line ranges
-# `c ind` / `cr` values get the SAME range discipline as literals.
-#
-# They did not, and the parser is otherwise strict about a file silently becoming a different
-# formula. `c ind 4294967297` wrapped through an int32 cast into variable 1; a value past
-# INT64 range came back as support index **-2**, and LONG_MIN reached `-v` — undefined
-# behaviour, the same trap gpap_internal.hpp documents for literals one width down (LONG_MIN
-# is exactly representable, so strtol does not flag it). A negative index is not merely wrong:
-# this ABI documents its output as 0-based variable indices, and only one downstream consumer
-# happened to filter them.
-#
-# Out-of-range values are DROPPED, not refused, matching the parser's existing policy for a
-# support variable the header never declared — `c ind` is a comment line and tools write junk
+# `c ind` / `cr` values get the same range checks as literals: no int32 wrap, no negative index,
+# no `-v` on LONG_MIN (see gpap_internal.hpp). Out-of-range values are dropped, not refused, as
+# for a support variable past the header's N: `c ind` is a comment line and tools write junk
 # there.
 
 def _support_of_line(tmp_path, line):
@@ -384,8 +349,8 @@ def _support_of_line(tmp_path, line):
 
 @pytest.mark.gpu
 @pytest.mark.parametrize("line", [
-    "c ind 4294967297 0",              # wraps through int32 -> used to be variable 1
-    "c ind 9223372036854775808 0",     # past int64 -> used to be support index -2
+    "c ind 4294967297 0",              # would wrap through int32 to variable 1
+    "c ind 9223372036854775808 0",     # past int64
     "c ind -9223372036854775808 0",    # LONG_MIN: -v is UB, and strtol does not flag it
     "c ind -2147483648 0",             # INT32_MIN, the same trap one width down
     "c ind 99 0",                      # in range for int32, past the header's N

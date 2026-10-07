@@ -1,13 +1,6 @@
-"""End-to-end validation of the C++ tier-1 API (`gpap::Sampler`, `gpap::AssumptionChecker`,
-`gpap::Prober`).
-
-The C++ side is deliberately thin — a sampling loop over the engine — so the comprehensive
-checking lives here: run the built example binaries and verify their output against the
-pure-Python reference BCP. That covers the whole tier-1 path (auto-K, kernel dispatch,
-support-first decision order, chunk loop, selection gather, DIMACS conversion) from the outside,
-exactly as a new C++ consumer would exercise it.
-
-Skipped unless `cmake --build build` has produced the examples (scripts/build_core.sh).
+"""The C++ tier-1 API (`gpap::Sampler`, `gpap::AssumptionChecker`, `gpap::Prober`) and the raw
+C ABI, tested by running the built example binaries and checking their output against the
+reference BCP. Skipped unless the examples are built (scripts/build_core.sh).
 """
 import re
 import subprocess
@@ -27,25 +20,19 @@ pytestmark = pytest.mark.gpu
 
 
 def _extends_to_model(clauses, row) -> bool:
-    """Is the formula satisfiable with `row`'s literals asserted? This is the DEFINITION of a
-    valid projected sample, decided rather than approximated."""
+    """Is the formula satisfiable with `row`'s literals asserted? The exact definition of a
+    valid projected sample."""
     from pysat.solvers import Solver
     with Solver(name="minisat22", bootstrap_with=clauses) as s:
         return s.solve(assumptions=list(row))
 
 
 def _assert_rows_are_models(rows, clauses, num_vars, support):
-    """Every emitted row must EXTEND to a full model.
+    """Every emitted row extends to a full model.
 
-    Propagating the row must not conflict, and then every clause must be satisfied. That second
-    check is exact for a FULL assignment, and stronger than necessary for a projection: BCP is
-    incomplete, so an independent support fixes a model semantically without necessarily
-    *deriving* it, and a valid projection could in principle leave clauses merely non-falsified.
-    Measured on every instance this suite uses (circuit Tseitin, a deep unroll, and a projected
-    `sk_` CNF) the fixpoint does satisfy all of them — GPAP only emits rows that were already
-    fully assigned — so the strong check is the one that runs and it catches far more than
-    "did not conflict". Where it does not hold we decide the real question with a SAT call
-    instead of failing a legitimate sample."""
+    The row must propagate without conflict and the fixpoint must satisfy every clause. For a
+    projection BCP may leave clauses only non-falsified, so there a SAT call decides whether
+    the row extends to a model."""
     assert rows, "sampler emitted nothing"
     for row in rows:
         assert row, "empty solution row"
@@ -66,8 +53,8 @@ def _assert_rows_are_models(rows, clauses, num_vars, support):
 
 
 def test_extends_to_model_helper():
-    """The projected-sample fallback, exercised directly — on our instances BCP always closes
-    the formula, so without this the branch would never run anywhere."""
+    """The SAT fallback, tested directly because BCP closes the formula on the instances
+    above, so the fallback never runs there."""
     # x1=TRUE forces x2 both ways => no extension; x1=FALSE extends fine.
     both_ways = [[-1, 2], [-1, -2]]
     assert not _extends_to_model(both_ways, [1])
@@ -113,11 +100,10 @@ def test_cpp_sampler_projected_support(circuit_cnfs, tmp_path):
 
 
 def test_cpp_sampler_is_deterministic(circuit_cnfs, tmp_path):
-    """Same seed, same solutions; different seed, not.
+    """Same seed, same solutions; different seed, different solutions.
 
-    "A function of the seed" holds at a fixed BATCH, which is what running both arms in one
-    process on one card gives us here — K is auto-sized from live free VRAM, so it is not itself
-    a function of the seed (see gpap.h, and test_face_parity, which pins it across processes)."""
+    This needs a fixed batch. K is sized from free VRAM, which is not part of the seed; the runs
+    here share a card and a moment; tests/sampling/test_face_parity.py pins K across processes."""
     need_binary(SAMPLE_BIN)
     cnf = Path(circuit_cnfs["b03-c5"]["path"])
     a, _ = run_sample_example(cnf, tmp_path / "a", n=800, seed=11)
@@ -128,12 +114,10 @@ def test_cpp_sampler_is_deterministic(circuit_cnfs, tmp_path):
 
 
 def test_cpp_assumption_checker():
-    """The example's tutorial sets, checked against the reference BCP.
+    """The example's printed answers match the reference BCP.
 
-    This gates the EXAMPLE as well as the library: it is what a new user reads first, so its
-    printed answers have to be right, not merely plausible. Each non-conflicted row is printed
-    as `xN=T` / `xN=F` / `xN=free`, which must match the reference fixpoint exactly — `free`
-    included, since "BCP did not determine this" is the claim the example makes about it."""
+    Each non-conflicted row prints `xN=T` / `xN=F` / `xN=free`, and all three must match the
+    reference fixpoint, `free` included."""
     need_binary(ASSUME_BIN)
     r = subprocess.run([str(ASSUME_BIN)], capture_output=True, text=True, timeout=120)
     assert r.returncode == 0, r.stderr
@@ -169,8 +153,8 @@ def _probe(cnf: Path, width: int):
 
 
 def test_probe_finds_the_same_failed_literals_as_python(tmp_path):
-    """The C++ face and the Python face are two skins on ONE core sweep, so they must agree on
-    the clause SET — not merely on how many were found."""
+    """The C++ and Python faces run the same core sweep, so they find the same clauses, not
+    just the same number."""
     from gpap.mining import mine_entailed
 
     # x1 -> x2 and x1 -> ~x2, so assuming x1 conflicts: (~x1) is entailed. Same for x4 via x5.
@@ -184,36 +168,30 @@ def test_probe_finds_the_same_failed_literals_as_python(tmp_path):
                  for line in out.splitlines() if "entailed: (" in line}
     res = mine_entailed(7, clauses, DEV, widths=(1,), seconds=30.0)
     py_units = {c[0] for c in res.clauses if len(c) == 1}
-    # (-1) and (-4) are the planted ones; (3) falls out too, because assuming -3 forces 4 through
-    # (3|4), and 4 forces both 5 and -5. All three are reachable in a SINGLE width-1 sweep, so
-    # this compares the two faces and not Python's extra fixpoint iteration.
+    # (-1) and (-4) are planted; (3) follows because -3 forces 4 through (3|4), and 4 forces 5
+    # and -5. All three come from one width-1 sweep, so Python's extra fixpoint rounds add
+    # nothing here.
     assert cpp_units == py_units == {-1, 3, -4}, (cpp_units, py_units)
     assert "exhaustive" in out, "a complete width-1 sweep must report itself as a proof"
 
 
 def test_probe_bounds_an_impossible_width_without_enumerating_it(tmp_path):
-    """REGRESSION: the ceiling has to be checked against an EXACT count computed without
-    generating anything. Enumerating first and measuring afterwards OOM-killed the process — at
-    width 3 over a few thousand free literals the enumeration is ~1e11 tuples.
+    """The budget is checked against an exact count computed before anything is generated;
+    enumerating a huge width first would exhaust memory.
 
-    It gates the CONTRACT, not a wording: at the default budget `max_tuples` is a WORK BUDGET,
-    so the sweep probes that many, KEEPS every clause it found, and reports itself as not
-    exhaustive. This assertion used to be `"refused" in out` — which passed against an example
-    that printed the word "refused" directly above 2.5 million clauses it had just delivered, so
-    the test was pinning the misstatement rather than catching it."""
+    `max_tuples` is a work budget: the sweep probes that many, keeps every clause it found, and
+    reports itself as not exhaustive."""
     nv = 400
     clauses = [[i, -(i + 1)] for i in range(1, nv)]
     cnf = tmp_path / "wide.cnf"
     cnf.write_text("p cnf %d %d\n" % (nv, len(clauses))
                    + "".join(" ".join(map(str, c)) + " 0\n" for c in clauses))
     out = _probe(cnf, 3)
-    # the exact count, computed up front — the thing that must not be reached by enumerating
+    # the exact count, computed without enumerating
     assert "width 3: 84694400 candidate tuples" in out, out
     probed, total = re.search(r"probed (\d+) of (\d+)", out).groups()
-    # The example sets BOTH a 5M ceiling and a 10s deadline, and probe.cpp overwrites the stop
-    # reason with DEADLINE when the clock wins — which it can on a slower card or under ASan. So
-    # assert the property (the sweep stopped SHORT of `total`, and says so) rather than which
-    # budget got there first; `total` never being enumerated is what this test is really for.
+    # The example sets a 5M ceiling and a 10 s deadline, and either can stop the sweep first
+    # (slow card, ASan), so assert that it stopped short of `total` and says so.
     assert 0 < int(probed) <= 5_000_000 < int(total), out
     assert "exhaustive" not in out, "a budgeted sweep is not a proof"
     assert ("stopped at max_tuples" in out) or ("deadline" in out), out
@@ -230,13 +208,10 @@ def _c_api(*args, timeout=300):
 
 
 def test_c_api_example_checks_both_entry_points_through_the_raw_abi():
-    """`cpp/examples/c_api.c` is the reference for `gpap/gpap.h` and the only consumer in the tree
-    that touches the ABI with no C++ wrapper: 0-based variables, caller-owned buffers,
-    `gpap_status` returns. CI checked that it LINKS and nothing ever ran it, so every one of those
-    conventions was unexercised — a header change that broke them would have shipped green.
-
-    The example self-checks (it exits non-zero unless x1=TRUE reaches a fixpoint and x1=FALSE
-    conflicts), so the assertion is its exit status plus the verdict it printed."""
+    """`cpp/examples/c_api.c` is the only in-tree consumer of `gpap/gpap.h` without the C++
+    wrapper (0-based variables, caller-owned buffers, `gpap_status` returns). It checks itself
+    (x1=TRUE reaches a fixpoint, x1=FALSE conflicts), so the test reads its exit status and
+    verdict."""
     r = _c_api()
     assert r.returncode == 0, f"gpap_c_api failed:\n{r.stdout}\n{r.stderr}"
     assert "PASS" in r.stdout, r.stdout
@@ -245,11 +220,11 @@ def test_c_api_example_checks_both_entry_points_through_the_raw_abi():
 
 
 def test_c_api_sampling_models_satisfy_the_formula(tmp_path):
-    """The ABI's readout path (`gpap_select_complete` -> `gpap_var_bits`) against the clauses.
+    """The ABI readout path (`gpap_select_complete` -> `gpap_var_bits`), checked on the host.
 
-    The example prints its own soundness verdict off `gpap_check_sound`, which is the DEVICE's
-    answer; this re-derives it on the host from the printed bits, so a readout that gathered the
-    wrong columns cannot agree with itself. Under 32 variables, so no model is truncated."""
+    The example's own verdict comes from the device (`gpap_check_sound`); re-checking the
+    printed bits here catches a readout that gathered the wrong columns. Under 32 variables, so
+    no model is truncated."""
     # 8 variables, and every clause length the packed word distinguishes (unit, binary, long).
     clauses = [[1, 2, 3], [-1, -2], [4, 5], [-4, -5], [6], [-7, 8], [7, -8], [2, -3, 5]]
     nv = 8

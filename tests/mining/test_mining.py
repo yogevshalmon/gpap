@@ -1,9 +1,7 @@
 """The tuple-probe primitive (gpap.engine.probe) and entailed-clause mining (gpap.mining).
 
-The safety property that matters is ENTAILMENT: every clause mining returns must already follow
-from the formula, so adding it leaves the model set exactly unchanged. That is checked here the
-only way worth checking it — against an independent SAT solver, on the actual clauses, not by
-re-running our own propagation.
+Every mined clause must be entailed, so adding it leaves the model set unchanged. That is
+checked with an independent SAT solver, not by re-running our own propagation.
 """
 import itertools as it
 import random
@@ -32,7 +30,7 @@ def _brute_models(nv, clauses):
 
 
 def _entailed_binaries(nv, mods):
-    """Every binary clause true in every model — the ORACLE's notion of entailed, no engine."""
+    """Every binary clause true in every model: the oracle's notion of entailed, no engine."""
     lits = [s * v for v in range(1, nv + 1) for s in (1, -1)]
     out = []
     for i, a in enumerate(lits):
@@ -45,13 +43,9 @@ def _entailed_binaries(nv, mods):
 # ------------------------------------------------------------------ the enumerator
 
 # ---------------------------------------------------------------- combinations
-# The REFERENCE enumerator (tests/reference/combinations.py), not shipping code.
-#
-# It is here to pin the core's candidate order against an independent implementation — the same
-# role tests/reference/bcp.py plays for the kernels. It used to live in `gpap.engine.probe` as a public
-# helper "for callers that filter candidates before probing"; that caller was measured at 65s to
-# drop 0 of 122M and deleted, leaving a second enumerator in the shipping face with nothing to
-# do but drift. Literals are DIMACS here, as everywhere else.
+# The reference enumerator (tests/reference/combinations.py), checked against itertools. It
+# pins the core's candidate order the way tests/reference/bcp.py pins the kernels. Literals
+# are DIMACS.
 
 def test_pairs_match_itertools():
     import itertools
@@ -70,8 +64,8 @@ def test_triples_match_itertools():
 
 
 def test_same_variable_pairs_are_dropped():
-    """A pool of literals holds both polarities, and (l, ~l) conflicts for reasons that have
-    nothing to do with the formula — probing it proves only the tautology (l | ~l)."""
+    """(l, ~l) conflicts regardless of the formula, so probing it proves only the tautology
+    (l | ~l)."""
     got = combinations([1, -1, 2, -2], 2).tolist()
     assert [1, -1] not in got and [2, -2] not in got
     assert len(got) == 4                                   # the four cross-variable pairs
@@ -118,32 +112,29 @@ def test_exhausted_is_a_proof_of_absence():
 
 
 def test_pool_defaults_to_every_free_literal():
-    """`pool=None` is the "all the lits" case, and must equal passing them explicitly."""
+    """`pool=None` probes every free literal, the same as passing them explicitly."""
     p = LiteralProbe(3, _PROBE_CLAUSES, DEV)
     assert p.probe(size=2).total == p.probe(p.free_literals(), size=2).total
 
 
 def test_count_matches_the_sweep_without_generating_it():
-    """The ceiling is checked against count(), so count() must be the number a sweep probes.
-    REGRESSION: the ceiling used to be compared against an already-materialized enumeration,
-    which cannot protect against the case it exists for — at width 3 over a real circuit's
-    free literals that array is ~1e11 tuples and the process was OOM-killed reaching it."""
+    """count() equals the number a sweep probes. The ceiling is checked against count() so a
+    huge width is refused before any enumeration is materialized."""
     p = LiteralProbe(3, _PROBE_CLAUSES, DEV)
     for k in (1, 2, 3):
         assert p.count(size=k) == p.probe(size=k).total
 
 
 def test_count_saturates_instead_of_wrapping():
-    """A wrapped count would compare BELOW a ceiling and let through the very sweep the
-    ceiling exists to refuse."""
+    """A wrapped count would compare below the ceiling and let through the sweep it should
+    refuse."""
     p = LiteralProbe(400, [[1, 2], [-1, 3]], DEV)
     assert p.count(size=3) > 10**7
 
 
 def test_max_tuples_is_a_work_budget():
-    """`max_tuples` says how many candidates to PROBE — it does not cancel the sweep. Every
-    conflict found is a genuine entailed clause whatever went unprobed, so partial results
-    beat no results; only `exhausted` is lost, and it says so."""
+    """`max_tuples` caps how many candidates are probed; it does not cancel the sweep. Partial
+    results are still entailed; only `exhausted` is lost, and the result says so."""
     p = LiteralProbe(3, _PROBE_CLAUSES, DEV)
     r = p.probe(size=2, budget=ProbeBudget(max_tuples=2))
     assert r.probed == 2 and r.total == 12
@@ -151,8 +142,8 @@ def test_max_tuples_is_a_work_budget():
 
 
 def test_refuse_over_max_is_opt_in():
-    """...but a caller who only wants an answer it can call a PROOF can ask for nothing
-    instead of a prefix."""
+    """`refuse_over_max` probes nothing instead of a prefix, for a caller that needs an
+    exhaustive answer."""
     p = LiteralProbe(3, _PROBE_CLAUSES, DEV)
     r = p.probe(size=2, budget=ProbeBudget(max_tuples=2, refuse_over_max=True))
     assert r.probed == 0 and r.total == 12 and r.stopped == "max_tuples"
@@ -182,8 +173,7 @@ def test_unsat_formula_probes_nothing():
 
 
 def test_chunked_matches_single_launch():
-    """A sweep split across launches must give exactly the same answer. The chunk size is the
-    core's business, so it is set explicitly here rather than monkeypatched."""
+    """A sweep split across launches gives the same answer as one launch."""
     rng = random.Random(3)
     clauses = random_cnf(rng, 12, 40, kmin=2, kmax=3)
     p = LiteralProbe(12, clauses, DEV)
@@ -196,8 +186,8 @@ def test_chunked_matches_single_launch():
 
 
 def test_rejects_out_of_range_literals():
-    """An index past the row's bitmap makes the kernel write into a LATER ROW's words, so one
-    bad tuple would silently corrupt a different tuple's answer."""
+    """An index past the row's bitmap would write into a later row's words and corrupt another
+    tuple's answer, so it is refused."""
     p = LiteralProbe(3, _PROBE_CLAUSES, DEV)
     with pytest.raises(RuntimeError, match="out of range"):
         p.probe([99], size=1)
@@ -216,7 +206,7 @@ def _models(clauses):
 
 def _check_entailed(nv, clauses, pool=None, **kw):
     """Every mined clause must be entailed, and the augmented formula must have exactly the
-    original models — verified with an independent SAT solver."""
+    original models, checked with an independent SAT solver."""
     from pysat.solvers import Minisat22
     res = mine_entailed(nv, clauses, DEV, pool=pool, **kw)
     for cl in res.clauses:
@@ -234,8 +224,7 @@ def test_planted_backbone_and_pair():
     # (-5|-6) is entailed via x7: (-5,-6,7),(-5,-6,-7)
     clauses = [[1, 2], [1, -2], [-1, -3, -4], [-1, -3, 4],
                [-5, -6, 7], [-5, -6, -7], [5, 6, 8], [2, 8, -5]]
-    # `pool` is DIMACS LITERALS, so both polarities of x5 and x6 are named explicitly. That
-    # is the point of the literal API: a caller can ask about one side only by naming one.
+    # `pool` is DIMACS literals, so both polarities of x5 and x6 are named explicitly.
     res = _check_entailed(8, clauses, pool=[5, -5, 6, -6])
     assert res.by_width.get(1, 0) >= 2, res.by_width      # units (1) and (-3) at least
     mined = {tuple(sorted(c)) for c in res.clauses}
@@ -243,8 +232,8 @@ def test_planted_backbone_and_pair():
 
 
 def test_pool_polarity_is_honoured():
-    """Naming ONE polarity probes only that side — the reason the pool is literals and not
-    variables. (5, 6) proves (-5 | -6); (-5, -6) is a different question entirely."""
+    """Naming one polarity probes only that side. (5, 6) proves (-5 | -6); (-5, -6) asks a
+    different question."""
     clauses = [[-5, -6, 7], [-5, -6, -7], [5, 6, 8], [2, 8, -5]]
     both = _check_entailed(8, clauses, pool=[5, -5, 6, -6], widths=(2,))
     one = _check_entailed(8, clauses, pool=[5, 6], widths=(2,))
@@ -262,14 +251,11 @@ def test_random_formulas_stay_model_preserving():
         with Minisat22(bootstrap_with=clauses) as s:
             if not s.solve():
                 continue                                  # UNSAT input: mining may derive it
-        # DIMACS literals, both polarities of the first few variables. It used to be
-        # `range(min(nv, 6))`, which starts at 0 — not a literal at all, silently dropped by
-        # the free-variable filter, so the pool was one variable short and one-sided.
+        # both polarities of the first few variables, as DIMACS literals (from 1; 0 is not one)
         k = min(nv, 6)
         pool = [sign * v for v in range(1, k + 1) for sign in (1, -1)]
         mined += len(_check_entailed(nv, clauses, pool=pool).clauses)
-    # `_check_entailed` compares model sets only when something WAS mined, so a miner that
-    # returned nothing would satisfy every assertion in it, ten times over.
+    # `_check_entailed` compares model sets only when something was mined, so require that.
     assert mined, "nothing was mined on any instance: the entailment check never ran"
 
 
@@ -281,8 +267,8 @@ def test_widths_are_selectable():
 
 
 def test_max_tuples_skips_rather_than_truncates():
-    """A truncated width would prove nothing about what it did not reach, so a width over
-    its ceiling is skipped outright and SAYS so."""
+    """A width over its `max_tuples` ceiling is skipped and listed in `skipped`, since a
+    truncated width proves nothing about what it did not reach."""
     clauses = [[1, 2], [-1, 3], [-2, -3], [4, 5], [-4, 6], [-5, -6]]
     res = mine_entailed(6, clauses, DEV, widths=(1, 2), max_tuples={2: 1})
     assert 2 in res.skipped and "candidates" in res.skipped[2]
@@ -310,9 +296,8 @@ def test_result_summary_is_readable():
 # ------------------------------------------------------------------ the CLI
 
 # ---------------------------------------------------------------- mine CLI
-# `gpap mine` — the face a user actually reaches for. Run as a subprocess, because what is
-# being checked is the command's contract (flags, exit status, files it writes), not a Python
-# call.
+# `gpap mine`, run as a subprocess: these check the command's contract (flags, exit status,
+# files written), not a Python call.
 
 def _run(*argv, cwd=None):
     import subprocess
@@ -344,8 +329,7 @@ def test_mines_and_writes_a_strengthened_formula(tmp_path):
     import json
     info = json.loads(stats.read_text())
     assert info["by_width"]["1"] >= 1 and info["clauses"]
-    # the strengthened file is the original plus what was proven, and every proven clause is
-    # ENTAILED — so the two formulas have the same models. Checked, not asserted.
+    # every proven clause must be entailed, so the strengthened formula has the same models
     from pysat.solvers import Minisat22
     for cl in info["clauses"]:
         with Minisat22(bootstrap_with=clauses) as s:
@@ -369,9 +353,8 @@ def test_pool_rejects_nonsense_instead_of_guessing(tmp_path):
 
 
 def test_huge_width_probes_its_budget_and_reports_coverage(tmp_path):
-    """An enormous width must still DO the work asked for. It reports how much of the space
-    it covered, so "nothing entailed here" is distinguishable from "we barely started" —
-    and it never materializes the enumeration (which OOM-killed the process)."""
+    """A huge width probes its budget without materializing the enumeration, and reports its
+    coverage so "nothing entailed" is distinguishable from "barely started"."""
     nv = 300
     cnf = _cnf(tmp_path, nv, [[i, -(i + 1)] for i in range(1, nv)])
     txt = _run(cnf, "--width", "3", "--max-tuples", "1000", "--seconds", "20")
@@ -380,14 +363,9 @@ def test_huge_width_probes_its_budget_and_reports_coverage(tmp_path):
 
 
 # ---------------------------------------------------------------- probe dispatch
-# The probe path must get the kernel dispatch, like every other consumer of the engine.
-#
-# REGRESSION. `LiteralProbe` pinned "scalar" when the sweep was ported to the core, because the
-# dispatch lived in the two WRAPPERS (BCPEngine.plan_for / gpap::Engine::plan_for) and the sweep
-# calls the C ABI directly. That is the same hole the batched-assumption path had until
-# for a while, and it cost 1.28x (M=14.5k) to 2.20x (M=219k) on the sweep. The
-# fix was to resolve GPAP_MODE_AUTO inside gpap_engine_reset — one place every entry point
-# passes through — so this test is about WHERE the rule lives, not about which kernel wins.
+# The probe sweep calls the C ABI directly and still gets the kernel dispatch, because
+# GPAP_MODE_AUTO resolves inside gpap_engine_reset, which every entry point passes through.
+# These tests check where the rule lives, not which kernel wins.
 
 def test_probe_dispatches_by_clause_count(monkeypatch):
     monkeypatch.delenv("GPAP_KERNEL", raising=False)
@@ -424,14 +402,12 @@ def test_env_var_pins(monkeypatch):
 
 
 # ---------------------------------------------------------------- subsumption
-# REGRESSION: mining must not emit clauses that a shorter known clause already implies.
-#
-# They are sound (still entailed) but useless, and they make the formula bigger — which slows
-# every later propagation, the exact opposite of why anyone mines. Checking only for an EXACT
-# duplicate let 1,504 of them through on b03-c25 (1,511 ternaries where 7 are useful).
+# Mining must not emit a clause that a shorter known clause implies: it is entailed but useless,
+# and it enlarges the formula, slowing every later propagation. An exact-duplicate check is not
+# enough; every subset is checked.
 
 def test_subsumed_clauses_are_not_emitted():
-    # (-1 | -2) is given. Any triple containing it -- (-1 | -2 | x) -- is implied by it.
+    # (-1 | -2) is given, so any triple (-1 | -2 | x) is implied by it.
     clauses = [[-1, -2], [1, 3], [2, 3], [-3, 4], [-3, -4], [5, 6], [-5, 6], [5, -6]]
     res = mine_entailed(8, clauses, DEV, widths=(1, 2, 3), seconds=30.0)
     assert res.clauses, "nothing mined — a filter that dropped EVERYTHING would pass this"
@@ -447,8 +423,8 @@ def test_subsumed_clauses_are_not_emitted():
 
 
 def test_coverage_is_reported_so_empty_is_readable():
-    """`0 clauses` from an exhaustive sweep and `0 clauses` from 0.0002% of one mean opposite
-    things. The result must let a caller tell them apart."""
+    """`0 clauses` from an exhaustive sweep and from a tiny fraction of one mean opposite
+    things, so the result reports coverage."""
     nv = 400
     clauses = [[i, -(i + 1)] for i in range(1, nv)]
     partial = mine_entailed(nv, clauses, DEV, widths=(3,), seconds=5.0, max_tuples=500)
@@ -461,22 +437,16 @@ def test_coverage_is_reported_so_empty_is_readable():
 
 
 # ---------------------------------------------------------------- subsumption filter
-# `mining._Subsumption`: the ONE redundancy filter, and it runs on the host.
+# `mining._Subsumption` is the only redundancy filter. It runs on the host, where the formula is
+# known; there is no filter in the engine (docs/findings/MINING_FINDINGS.md).
 #
-# There used to be a second one inside the engine (`skip_subsumed`: drop a conflict the assumed
-# literals alone caused). It was sound, but worth 0.0-0.3% of the result buffer on every instance
-# measured, while costing an int32 per row and a branch in the innermost loop of both propagate
-# kernels — so it was removed and this is what remains. Redundancy is a property of a CLAUSE
-# against a FORMULA, so the host is where it belongs: that is where the formula is known.
-#
-# The reference is the formula REDUCED by the engine's baseline, not the input clauses. Mining
+# Its reference is the formula reduced by the engine's baseline, not the input clauses. Mining
 # folds proven units into the flush, so an input (a | b | c) whose `c` the baseline falsified
-# acts as a binary constraint; a conflict on (~a, ~b) then proves (a | b), which no INPUT clause
-# subsumes. Testing against the raw input let 17 such clauses through on b03-c25.
+# acts as a binary; a conflict on (~a, ~b) then proves (a | b), which no input clause subsumes.
 
 def test_drops_only_what_the_baseline_makes_redundant():
-    """(-1 | -2 | 3) with 3 forced FALSE by the flush is a binary constraint during the sweep,
-    so assuming (1, 2) proves (-1 | -2) — entailed, and subsumed by the RESIDUE only."""
+    """(-1 | -2 | 3) with 3 forced false by the flush acts as a binary during the sweep, so the
+    proved (-1 | -2) is subsumed by its residue, though by no input clause."""
     clauses = [[-3], [-1, -2, 3], [4, 5], [-4, 5], [4, -5]]
     p = LiteralProbe(5, clauses, DEV)
     assert -3 in p.assigned_literals().tolist(), "the flush must have settled 3"
@@ -489,19 +459,17 @@ def test_drops_only_what_the_baseline_makes_redundant():
 
 
 def test_keeps_a_two_clause_inference():
-    """A clause proved by RESOLUTION between two clauses is not subsumed and must survive.
+    """A clause proved by resolution of two clauses is not subsumed and is kept.
 
-    (-1|-2|3) and (-1|-2|-3) each go unit under (1, 2) and force opposite literals, proving
-    (-1|-2). Nothing subsumes it. An in-engine filter that keyed on how EARLY the conflict came
-    threw 28 such clauses away on b03-c25 before it was removed."""
+    (-1|-2|3) and (-1|-2|-3) both go unit under (1, 2) and force opposite literals, proving
+    (-1|-2)."""
     clauses = [[-1, -2, 3], [-1, -2, -3], [4, 5], [-4, 5], [4, -5]]
     res = mine_entailed(5, clauses, DEV, widths=(1, 2), seconds=30.0)
     assert [-2, -1] in [sorted(c) for c in res.clauses]
 
 
 def test_fuzz_never_emits_a_subsumed_clause():
-    """The property mining promises, on random formulas: nothing it returns is subsumed by the
-    formula it was mined from (reduced by the baseline), and everything it returns is entailed."""
+    """On random formulas, no mined clause is subsumed by the baseline-reduced formula."""
     rng = random.Random(11)
     checked = 0
     for _ in range(40):
@@ -520,18 +488,15 @@ def test_fuzz_never_emits_a_subsumed_clause():
             if len(t) > 1:                      # width 1 is provably never subsumed
                 checked += 1
                 assert not sub.subsumes(t), f"emitted {t}, which the formula subsumes"
-    # Most of these random formulas mine units only, and a unit is skipped above — so
-    # without this the loop can run 40 instances and test the filter on nothing.
+    # Most of these formulas mine units only, which the loop skips, so require one wide clause.
     assert checked, "the fuzz produced no wide clause: the subsumption check never ran"
 
 
 def test_mining_is_kernel_invariant():
-    """What mining RETURNS must not depend on which propagate kernel ran.
+    """What mining returns does not depend on which propagate kernel ran.
 
-    It did once: the engine-side filter read the implication counter, which is order-dependent
-    on conflicted rows, so wave and scalar dropped different subsets and b03-c25 emitted 3,096
-    clauses under scalar against 3,113 under wave. With the filter on the host, over a formula
-    both kernels agree on, the answer is the same by construction — pinned here anyway."""
+    The implication counter is order-dependent on conflicted rows, so no filter may read it; the
+    host filter works on a formula both kernels agree on."""
     clauses = [[-4], [-1, -2, 4], [-1, -3, 4], [5, 6], [-5, 6], [5, -6], [2, 3], [1, 7]]
     out = {}
     for mode in ("scalar", "wave"):
@@ -548,11 +513,9 @@ def test_mining_is_kernel_invariant():
 
 
 # ---------------------------------------------------------------- mining work metrics
-# Mining reports what the ENGINE did, not only what it found.
-#
-# clauses/s and probes/s both depend on the instance (how many clauses it entails, how quickly a
-# tuple conflicts). Implications/s is hardware work, so it is the number that compares across
-# instances, GPUs and engine changes — the same reason the sampler reports it.
+# Mining reports what the engine did, not only what it found. Clauses/s and probes/s depend on
+# the instance; implications/s is engine work, so it compares across instances, GPUs and engine
+# changes.
 
 def test_implications_are_counted_and_rated():
     clauses = [[1, 2], [-1, 3], [-2, -3], [3, 4], [-4, 5], [-4, -5], [6, 7], [-6, 7]]
@@ -563,8 +526,8 @@ def test_implications_are_counted_and_rated():
 
 
 def test_implications_survive_the_probe_rebuild():
-    """The probe is REBUILT between widths when a wide tier proves something, which resets the
-    engine's counters — they must be banked first or the total silently loses a width."""
+    """The probe is rebuilt between widths when a wide tier proves something, which resets the
+    engine counters; they must be banked first or the total loses a width."""
     clauses = [[1, 2], [1, -2], [-1, -3, -4], [-1, -3, 4],
                [-5, -6, 7], [-5, -6, -7], [5, 6, 8], [2, 8, -5]]
     one = mine_entailed(8, clauses, DEV, widths=(1,), seconds=30.0)
@@ -574,9 +537,8 @@ def test_implications_survive_the_probe_rebuild():
 
 
 def test_width_one_skips_the_vacuous_subsumption_check():
-    """A width-1 unit cannot be subsumed: it came from probing ~u, which was probed only
-    because it was free, so u was not already a unit. Skipping the check must not change the
-    output — this pins the invariant, since the fast path assumes it."""
+    """A width-1 unit cannot be subsumed: ~u was probed only because it was free, so u was not
+    already a unit. The fast path that skips the check relies on this."""
     clauses = [[-1, 2], [-1, -2], [3, 4], [-4, 5], [-4, -5], [6, 7]]
     res = mine_entailed(7, clauses, DEV, widths=(1,), seconds=30.0)
     formula_units = {c[0] for c in clauses if len(c) == 1}
@@ -586,16 +548,11 @@ def test_width_one_skips_the_vacuous_subsumption_check():
 
 
 # ---------------------------------------------------------------- mining pipeline defaults
-# The pipeline's mining GATES — the two knobs a user is told about, checked to do what the
-# help text says. Both were wrong at some point and both were invisible when wrong: a gate that
-# silently declines to mine looks exactly like an instance with nothing to mine.
+# The pipeline's mining gates do what the help text says. A gate that wrongly declines to mine
+# looks exactly like an instance with nothing to mine.
 
 def test_mine_on_forces_past_the_size_gate():
-    """`--mine on` is documented as forcing; `auto` respects MINE_MIN_CLAUSES.
-
-    They used to be identical, because the thing `on` bypassed was the ABC provenance gate —
-    since deleted — while the SIZE gate applied to both. So on any formula below the
-    threshold `--mine on` quietly did nothing at all."""
+    """`--mine on` forces mining below MINE_MIN_CLAUSES; `auto` respects the gate."""
     from gpap.sampling import pipeline
 
     assert pipeline.MINE_MIN_CLAUSES > 0
@@ -611,10 +568,10 @@ def test_mine_on_forces_past_the_size_gate():
 
 
 def test_the_keep_if_it_helps_guard_reports_its_decision(circuit_cnfs):
-    """The guard reports what it decided, and the run is SOUND either way.
+    """The keep-if-it-helps guard reports `kept`/`gain` consistently, and the run is sound.
 
-    Whichever way it goes the model set is unchanged — mined clauses are entailed — so this
-    pins the bookkeeping (`kept`/`gain` present and consistent), not the direction."""
+    Mined clauses are entailed, so the decision cannot change the model set; this checks the
+    bookkeeping, not the direction."""
     c = circuit_cnfs["b03-c25"]
     info = sample_clauses(c["nv"], c["clauses"], c["support"], DEV, n_time=2000,
                           time_limit=30.0, mine=True, verify_sound=True)
@@ -630,15 +587,12 @@ def test_the_keep_if_it_helps_guard_reports_its_decision(circuit_cnfs):
 # -------------------------------------------- the `derivable` drop level (_derivable_mask)
 
 # ---------------------------------------------------------------- derivable
-# `drop="derivable"`: a clause propagation can already do EVERY job of.
-#
-# The quantifier is the whole content of the filter — a clause `(l1|...|lk)` forces `lj` when
-# the other k-1 literals are false, and only when propagation covers ALL k of those directions
-# does dropping it cost the consumer nothing. See docs/findings/MINING_FINDINGS.md.
+# `drop="derivable"` drops a clause only when propagation already does every job it does. A
+# clause (l1|...|lk) forces lj when the other k-1 literals are false; all k directions must be
+# covered. See docs/findings/MINING_FINDINGS.md.
 
 def test_a_transitively_derivable_clause_is_detected():
-    """(-1|3) is entailed and NOT subsumed, but 1 propagates 3 through (-1|2) and (-2|3) --
-    i.e. 1 -> 2 -> 3 -- so unit propagation produces the clause on demand."""
+    """(-1|3) is entailed and not subsumed, but propagation derives it through 1 -> 2 -> 3."""
     cls = [[-1, 2], [-2, 3], [4, 5]]
     mask = _derivable_mask([[-1, 3], [4, 5]], cls, 5, DEV)
     assert bool(mask[0]), "(-1|3) is derivable through the chain 1 -> 2 -> 3"
@@ -652,8 +606,8 @@ def test_a_genuine_clause_survives():
 
 
 def test_units_are_never_marked_derivable():
-    """A mined unit (u) came from probing ~u, which was probed only because it was FREE — so
-    propagation cannot already force u, and the test would be vacuous."""
+    """A mined unit u came from probing ~u, which was free, so propagation cannot already
+    force u."""
     mask = _derivable_mask([[1], [2]], [[1, 2], [-1, 3], [2, -3]], 3, DEV)
     assert not mask.any()
 
@@ -669,12 +623,11 @@ def test_drop_levels_are_a_ladder():
 
 
 def test_what_it_drops_really_is_covered_in_every_direction():
-    """The property the filter promises, against an oracle that shares no code with the engine.
+    """Every marked clause is covered in every direction, checked with the reference BCP.
 
-    A marked clause must be REPLACEABLE: for every one of its literals, assuming the others
-    false must already conflict or force it. The candidates are every ENTAILED binary clause,
-    computed by brute force over the truth table — so the fuzz feeds the filter exactly the
-    population it is meant to thin, without asking the engine what is entailed."""
+    For each literal, assuming the others false must conflict or force it. The candidates are
+    the entailed binaries from a brute-force truth table, so no engine code decides what is
+    entailed."""
     from tests.reference.bcp import lit_idx, ref_bcp
 
     rng = random.Random(7)
@@ -701,13 +654,11 @@ def test_what_it_drops_really_is_covered_in_every_direction():
 
 
 def test_a_one_way_implication_is_kept():
-    """The case that makes the quantifier matter, small enough to read by hand.
+    """A clause covered in only one direction is kept.
 
-    Probing 1 gives 5 and 6, and only THEN does (-5|-6|2) go unit and force 2 — so (-1|2) is
-    entailed. The reverse does not propagate: assuming -2 leaves (-5|-6), not a unit, so -1 is
-    never forced. One direction covered, one not, and the clause has to stay — dropping it
-    would remove a propagation the consumer had."""
+    Probing 1 forces 5 and 6, then (-5|-6|2) forces 2, so (-1|2) is entailed. Assuming -2
+    leaves (-5|-6), not a unit, so -1 is never forced; dropping the clause would lose that."""
     base = [[-1, 5], [-1, 6], [-5, -6, 2], [3, 4]]
     assert not bool(_derivable_mask([[-1, 2]], base, 6, DEV)[0])
-    # ...while a clause whose BOTH directions propagate is still dropped
+    # a clause covered in both directions is still dropped
     assert bool(_derivable_mask([[-1, 3]], [[-1, 2], [-2, 3], [4, 5]], 5, DEV)[0])

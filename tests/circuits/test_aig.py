@@ -1,14 +1,7 @@
-"""Native AIGER (.aig/.aag) input support.
-
-Load-bearing claims:
-  * the CNF that `build_cnf_aig` emits describes EXACTLY the input sequences whose simulation
-    reproduces the pinned target (checked by brute force over all 2^(PI*T) sequences);
-  * `simulate_aig` agrees with `bench.simulate` on the same circuit across formats;
-  * the ABC route on an AIG input yields the same projected solution set as the native route;
-  * AIGER reset values are honoured (0/1) or safely rejected (`x`, and reset-1 under ABC).
-
-Handwritten-`aag` tests run everywhere; cross-format tests need an `abc` binary and skip
-without one (scripts/build_abc.sh).
+"""Native AIGER (.aig/.aag) input: `build_cnf_aig` matches brute-force simulation, `simulate_aig`
+agrees with `bench.simulate`, the ABC route preserves projections, and latch resets are honoured
+(0/1) or rejected (`x`, and reset-1 under ABC). Cross-format tests skip without an `abc` binary
+(scripts/build_abc.sh).
 """
 import itertools
 import os
@@ -38,7 +31,7 @@ o0 y
 # Same circuit with the latch RESET to 1.
 AAG_SEQ_R1 = AAG_SEQ.replace("6 10\n", "6 10 1\n")
 
-# Combinational: y = a AND b (no latches — unrolling must clamp to T=1).
+# Combinational: y = a AND b. No latches, so unrolling clamps to T=1.
 AAG_COMB = """aag 3 2 0 1 1
 2
 4
@@ -98,8 +91,8 @@ def test_uninitialized_latch_rejected(tmp_path):
 
 
 def test_binary_writer_roundtrip(tmp_path):
-    """write_aiger_binary -> read_aiger must preserve circuit BEHAVIOUR (simulation equality on
-    every input sequence) and the I/O symbol names, across renumbering/topo-sorting."""
+    """write_aiger_binary -> read_aiger preserves behaviour on every input sequence and the I/O
+    names, across renumbering."""
     from gpap.circuits.aiger import write_aiger_binary
     src = read_aiger(_write(tmp_path, "t.aag", AAG_SEQ))
     p = str(tmp_path / "t.aig")
@@ -140,8 +133,8 @@ def _bench_to_aig(tmp_path, name):
 
 @needs_abc
 def test_simulate_aig_matches_bench_simulate(tmp_path):
-    """Binary parse + latch semantics: simulate the ABC-written .aig of b06 and the original
-    .bench side by side (I/O matched BY NAME — ABC may reorder)."""
+    """The ABC-written .aig of b06 simulates like the original .bench. I/O is matched by name,
+    since ABC may reorder it."""
     import random
     from gpap.circuits.bench import parse_bench, simulate
     aig = read_aiger(_bench_to_aig(tmp_path, "b06"))
@@ -180,8 +173,8 @@ def test_abc_route_on_aig_input_preserves_projections(tmp_path):
 
 @needs_abc
 def test_abc_route_on_ascii_aag_input(tmp_path):
-    """ABC's read_aiger does NOT accept ASCII `aag`; the abc route must still work on .aag input
-    (it rewrites the parsed circuit as canonical binary first) and preserve the projection set."""
+    """ABC's read_aiger rejects ASCII `aag`, so the abc route rewrites the circuit as binary
+    first; the projection set must be preserved."""
     from gpap.circuits.abc_backend import build_cnf_abc_aig
     p = _write(tmp_path, "t.aag", AAG_SEQ)
     aig = read_aiger(p)

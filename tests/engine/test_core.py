@@ -1,9 +1,8 @@
-"""The C ABI's contract: the flush cache, the trajectory kernel, readout, degenerate shapes and
-preconditions.
+"""The core's C ABI: the flush cache, the trajectory kernel, readout, degenerate shapes and
+preconditions. Every emitted model is checked against the clauses outside the engine.
 
-Whether a fixpoint is RIGHT is tests/engine/test_propagation.py, and whether a formula is built
-right is tests/engine/test_formula.py. Here every model the core emits is checked from the
-outside: it must satisfy every clause.
+Fixpoint correctness is tests/engine/test_propagation.py; the formula build is
+tests/engine/test_formula.py.
 """
 import ctypes
 import random
@@ -24,9 +23,7 @@ pytestmark = pytest.mark.gpu
 # ---------------------------------------------------------------- what Python binds
 
 def test_k_calibration_matches():
-    """The sizing model has ONE implementation (cpp/src/calibrate.cpp); Python binds it. This
-    asserts the binding actually reaches it rather than reintroducing a second copy — which is
-    what this test used to be gating, back when the arithmetic was written out twice."""
+    """Python's compute_k_safe is the binding of cpp/src/calibrate.cpp, not a second copy."""
     from gpap.engine.calibrate import compute_k_safe as py_k
     for M, N in [(4407, 1701), (109432, 42051), (201437, 77151)]:
         for budget in (1 << 30, 6 << 30):
@@ -36,8 +33,8 @@ def test_k_calibration_matches():
 
 
 def test_envelope_matches():
-    """Same two-copies story as the K model: the packed splits are declared in
-    cpp/src/runtime.cpp and mirrored in Python so a suite driver can pre-check without CUDA."""
+    """The packed-split envelope in cpp/src/runtime.cpp and its Python mirror (used to
+    pre-check formulas without CUDA) agree."""
     from gpap.engine.bcp_engine import packed_envelope
     for nv, ml in [(10, 3), (32767, 5), (33000, 5), (40000, 300), (9_000_000, 3)]:
         assert _core.packed_envelope(nv, ml)[0] == packed_envelope(nv, ml)[0]
@@ -46,7 +43,7 @@ def test_envelope_matches():
 # ---------------------------------------------------------------- the flush cache
 
 def test_flush_cache_and_units():
-    """The formula's own unit clauses are asserted ONCE at construction and broadcast by reset."""
+    """The formula's unit clauses are asserted once at construction and broadcast by reset."""
     clauses = [[1], [-1, 2], [-2, 3], [4, 5]]
     core = _core.Engine(_core.Formula.from_clauses(5, clauses))
     assert not core.flush_conflict
@@ -65,19 +62,12 @@ def test_unsat_units_conflict_every_row():
 
 @pytest.mark.parametrize("mode", ["scalar", "wave"])
 def test_check_sound_agrees_with_an_independent_recount(mode):
-    """The soundness check has TEETH, gated against a SECOND computation of the same fact.
+    """`check_sound` counts the same unsound rows as a host recount from `sat_rows`, over a mix
+    of conflicted and surviving rows.
 
-    `check_sound() == 0` is evidence only if the kernel can say otherwise, and since the check is
-    opt-in now (`verify_sound`) that evidence is the only reason to pay for it. So instead of
-    trusting a 0, recompute the verdict on the host from `sat_rows` — which reports every clause
-    kind in the ORIGINAL order, long words and bitmap-synthesized binaries alike — over a mixed
-    bag of rows (some conflicted, some not) and require the two to agree row for row.
-
-    Note what does NOT prove this: pointing the check at conflicted rows and expecting them all
-    to be unsound. A row can conflict by a CONTRADICTORY PUSH (some literal forced to both
-    polarities) having emptied nothing, and on the scalar kernel that is how nearly every
-    conflict surfaces — a falsified long clause is normally caught one decrement earlier, when
-    it goes unit and forces a literal whose negation is already set."""
+    Expecting every conflicted row to be unsound would be wrong: a row can conflict by forcing
+    both polarities of a literal without emptying any clause, which is how most conflicts show
+    up on the scalar kernel."""
     rng = random.Random(11)
     nv, nc, K = 40, 90, 256
     clauses = random_cnf(rng, nv, nc, kmin=2)          # kmin=2 -> exercise the binary pair path
@@ -90,7 +80,7 @@ def test_check_sound_agrees_with_an_independent_recount(mode):
 
     rows = np.arange(K, dtype=np.int32)
     sat = core.sat_rows(rows)                            # (K, M) non-falsified count per clause
-    want = int((sat.min(axis=1) == 0).sum())             # rows with SOME emptied clause
+    want = int((sat.min(axis=1) == 0).sum())             # rows with some emptied clause
     core.selection_set(core.SCRATCH_SLOT, rows)
     assert core.check_sound(core.SCRATCH_SLOT) == want
     assert want > 0, "this fixture must actually contain unsound rows, or it proves nothing"
@@ -99,8 +89,8 @@ def test_check_sound_agrees_with_an_independent_recount(mode):
 @pytest.mark.parametrize("mode", ["scalar", "wave"])
 @pytest.mark.parametrize("B", [1, 8])
 def test_trajectory_emits_only_real_models(mode, B):
-    """THE soundness gate: every row the selection reports must satisfy every clause, checked
-    outside the engine. Also pins the on-device check (`check_sound`) against that verdict."""
+    """Every selected row satisfies every clause, checked outside the engine, and
+    `check_sound` agrees."""
     rng = random.Random(5)
     nv, nc, K, seed = 60, 150, 512, 1234567
     clauses = random_cnf(rng, nv, nc, kmin=3)
@@ -127,8 +117,8 @@ def test_trajectory_emits_only_real_models(mode, B):
 
 @pytest.mark.parametrize("mode", ["scalar", "wave"])
 def test_trajectory_counters_agree_with_the_assignment(mode):
-    """decs + implications == literals assigned; the counters are what every reported
-    propagation rate is derived from, so they must not be free-floating."""
+    """The counters agree with the assignment (decisions + implications); every reported
+    propagation rate is derived from them."""
     rng = random.Random(23)
     nv, nc, K = 40, 110, 256
     clauses = random_cnf(rng, nv, nc, kmin=3)
@@ -146,14 +136,9 @@ def test_trajectory_counters_agree_with_the_assignment(mode):
 
 @pytest.mark.parametrize("entry", ["trajectory", "apply"])
 def test_a_zero_width_launch_does_not_report_the_previous_one(entry):
-    """The per-launch counters describe THE LAST CALL, and reset() does not clear them — so the
-    degenerate launch (an empty decision order, a zero-width apply) has to clear them itself or
-    it publishes the PREVIOUS launch's propagation as its own. Both entry points grew the same
-    early return for the same degenerate formula (one whose variables unit propagation already
-    determined) and only apply zeroed; the trajectory reported stale counters until 2026-09-01.
-
-    It fails against the unfixed library, not merely passes against this one: the first launch
-    is asserted to have produced non-zero work, so `all zero` afterwards is a real transition."""
+    """Per-launch counters describe the last call and reset() does not clear them, so an empty
+    launch (empty order, zero-width apply) must clear them itself. The priming launch must do
+    work, so that the zeros afterwards mean something."""
     nv, K = 12, 8
     clauses = [[1, 2, 3], [-1, 4], [-2, -4], [3, -4, 5], [-5, 6], [-6, 7, 8]]
     core = _core.Engine(_core.Formula.from_clauses(nv, clauses))
@@ -177,8 +162,8 @@ def test_a_zero_width_launch_does_not_report_the_previous_one(entry):
 @pytest.mark.slow
 @pytest.mark.parametrize("name", ["b03-c25", "b06-c10", "s386-c10"])
 def test_circuit_models_are_sound(circuit_cnfs, name):
-    """The same gate at production scale: an unrolled circuit CNF, support-first decision order,
-    production-shaped K. Every emitted row must satisfy every clause of the real instance."""
+    """Emitted rows satisfy every clause on unrolled circuit CNFs, with a support-first order
+    and a realistic K."""
     if name not in circuit_cnfs:
         pytest.skip(f"{name} not in the generated matrix")
     inst = circuit_cnfs[name]
@@ -204,12 +189,10 @@ def test_circuit_models_are_sound(circuit_cnfs, name):
 
 
 # ---------------------------------------------------------------- degenerate shapes
-# Each of these was a real bug found while porting: the flush cache used a null packed pointer
-# as its "not built yet" sentinel (which M == 0 also produces), the core rejected num_vars == 0,
-# and it rejected an empty decision order. All three are reachable through simplification.
+# No clauses, no variables, an empty decision order: all reachable after simplification.
 
 def test_m0_formula_resets_every_row():
-    """A formula with no clauses: reset must still restore ALL K rows, not just row 0."""
+    """With no clauses, reset still restores all K rows, not just row 0."""
     core = _core.Engine(_core.Formula.from_clauses(4, []))
     core.reset(2)
     core.apply(np.array([[0], [3]], dtype=np.int64))       # lit indices: +x1 and -x2
@@ -220,7 +203,7 @@ def test_m0_formula_resets_every_row():
 
 
 def test_zero_variable_formula():
-    """Unit propagation / ELS can determine EVERY variable, leaving an empty formula."""
+    """Unit propagation or ELS can fix every variable, leaving an empty formula."""
     cf = _core.Formula.from_clauses(0, [])
     assert cf.info.num_vars == 0 and cf.info.num_clauses == 0
     core = _core.Engine(cf)
@@ -231,8 +214,8 @@ def test_zero_variable_formula():
 
 
 def test_zero_column_readout_is_a_noop():
-    """Gathering ZERO variables is legal: the sampler's collect path asks for all N variables,
-    and after ELS/unit-propagation N can be 0."""
+    """Gathering zero variables is legal: the sampler asks for all N variables, and N can be 0
+    after simplification."""
     core = _core.Engine(_core.Formula.from_clauses(0, []))
     core.reset(4)
     n = core.select_complete(core.pair_mask(None), 0)
@@ -241,11 +224,9 @@ def test_zero_column_readout_is_a_noop():
 
 
 def test_readout_never_writes_past_the_caller_buffer():
-    """The three gathers take an explicit row CAPACITY and write min(capacity, selection).
-
-    Without it their output size was only *implied* by the selection count, so a caller whose
-    count was stale by one chunk silently overflowed the heap. Asking for fewer rows than are
-    selected must truncate — and truncate to the FIRST rows, not to arbitrary ones."""
+    """The three gathers take an explicit row capacity and write min(capacity, selection), so a
+    stale count cannot overflow the caller's buffer. Fewer rows than selected truncates to the
+    first rows."""
     rng = random.Random(77)
     nv = 12
     clauses = random_cnf(rng, nv, 18, kmin=3)
@@ -263,7 +244,7 @@ def test_readout_never_writes_past_the_caller_buffer():
     np.testing.assert_array_equal(core.var_bits(0, cols, half), full_bits[:half])
     np.testing.assert_array_equal(core.assignment_rows(0, half), full_asg[:half])
     np.testing.assert_array_equal(core.selection_rows(0, half), full_rows[:half])
-    # Asking for MORE than exists is also safe: the extra rows are simply not written.
+    # Asking for more than exists is safe too: the extra rows are not written.
     assert core.var_bits(0, cols, n + 5).shape == (n + 5, nv)
 
 
@@ -278,9 +259,9 @@ def test_empty_decision_order_is_a_noop():
 
 
 def test_out_of_envelope_formula_builds_but_engine_rejects():
-    """The packed split is the ENGINE's choice: shape queries still work on a formula that no
-    split fits, and suite drivers catch a ValueError from the engine to skip the instance."""
-    cf = _core.Formula.from_clauses(40_000, [list(range(1, 300))])   # 2N>65535 AND len>255
+    """The packed split is the engine's choice: shape queries work on a formula no split fits,
+    and the engine raises ValueError (suite drivers skip on it)."""
+    cf = _core.Formula.from_clauses(40_000, [list(range(1, 300))])   # 2N>65535 and len>255
     assert cf.info.shift == 0 and cf.info.num_vars == 40_000
     with pytest.raises(ValueError):
         _core.Engine(cf)
@@ -308,25 +289,18 @@ def test_wide_split_is_selected_and_sound():
 
 # ---------------------------------------------------------------- ABI preconditions
 
-# NOTE — there is deliberately NO test here that feeds gpap_engine_apply an out-of-range literal
-# and watches it corrupt a later row. Demonstrating that hazard REQUIRES an index past 2N (any
-# smaller one stays inside its own row's bitmap words), and the propagate loop dereferences the
-# popped literal as `occ_off[lit]`, `occ_mid[lit]`, `occ_off[lit+1]` — arrays of exactly 2N and
-# 2N+1 entries. So the demonstration is an unbounded out-of-bounds DEVICE read whose garbage
-# bounds then drive a store; it passes here only because the driver hands back zeroed padding,
-# and a CUDA_ERROR_ILLEGAL_ADDRESS is sticky for the context, i.e. it would cascade-fail every
-# later GPU test in the process rather than failing alone.
-#
-# The guarantee that actually matters is that the PACKAGED faces validate before any launch, and
-# that is gated twice, safely: tests/engine/test_assumption_checker.py (test_out_of_range_literal_raises
-# over five bad literals, plus test_bad_literal_cannot_corrupt_another_row) and
-# tests/mining/test_mining.py::test_rejects_out_of_range_literals. The raw ABI's precondition is stated
-# in gpap.h.
+# There is deliberately no test feeding gpap_engine_apply an out-of-range literal. Showing the
+# hazard needs an index past 2N, which makes the kernel read the occ arrays out of bounds; a
+# CUDA_ERROR_ILLEGAL_ADDRESS is sticky for the context and would fail every later GPU test. The
+# packaged faces validate literals before any launch, gated in
+# tests/engine/test_assumption_checker.py and
+# tests/mining/test_mining.py::test_rejects_out_of_range_literals. gpap.h states the raw ABI's
+# precondition.
 
 
 def test_n_support_past_the_order_length_is_refused():
-    """n_support is the end of decision phase 1 and the kernel walks `order` up to it, so
-    n_support > P was an out-of-bounds read of the caller's buffer that still returned OK."""
+    """The kernel walks `order` up to n_support, so n_support past the order length (or
+    negative) must be refused."""
     nv = 8
     core = _core.Engine(_core.Formula.from_clauses(nv, [[1, 2, 3], [-1, 4], [5, 6, 7], [-5, 8]]))
     core.reset(4)
@@ -339,8 +313,8 @@ def test_n_support_past_the_order_length_is_refused():
 
 
 def test_an_order_entry_past_num_vars_is_refused_on_the_host_face():
-    """Same cross-row write as the apply hazard, via `ab_row + (v >> 4)` — and here the check is
-    free, because gpap_engine_trajectory is already walking the array to stage it."""
+    """An order entry past num_vars would write into another row (`ab_row + (v >> 4)`). The
+    host face checks it while staging the array."""
     nv = 8
     core = _core.Engine(_core.Formula.from_clauses(nv, [[1, 2, 3], [-1, 4], [5, 6, 7], [-5, 8]]))
     core.reset(4)
@@ -350,27 +324,22 @@ def test_an_order_entry_past_num_vars_is_refused_on_the_host_face():
         core.trajectory(bad, n_support=nv, B=4, seed=7)
 
 
-@pytest.mark.slow          # ~1.2 GB of VRAM: the slice loop only engages past 256 MB
+@pytest.mark.slow          # large: the slice loop only engages past 256 MB
 def test_readout_slicing_matches_an_unsliced_read():
-    """`var_bits` / `assignment_rows` SLICE the readout so the (rows, cols) host transient stays
-    under `kReadoutSliceBytes` (256 MB, cpp/src/engine.cpp). The loop only engages when
-    rows > 256MB/cols — a wide formula with many rows — which no other test reaches, so the
-    row-pointer offsetting and the per-slice copy-back were unexercised.
-
-    A wide, nearly-free formula gets there cheaply: 2N past the 16|16 envelope forces the 8|24
-    split as a bonus."""
+    """`var_bits` and `assignment_rows` read in slices so the host buffer stays under
+    `kReadoutSliceBytes` (256 MB, cpp/src/engine.cpp). Slicing only engages when
+    rows > 256MB/cols, so this uses a wide, nearly free formula (which also takes the 8|24
+    split)."""
     nv = 100_000                                  # 2N = 200,000 -> wide split, small slice step
     clauses = [[v, -(v + 1)] for v in range(1, 400)]
     core = _core.Engine(_core.Formula.from_clauses(nv, clauses))
     step = max(32, (256 << 20) // nv) // 32 * 32
-    # ONE slice plus a short tail is all the boundary arithmetic needs, and the buffers here are
-    # (K x nv) and (K x 2N) BYTES on the host: at 3 slices this test allocated 2.4 GB, which is
-    # not a cost a unit test should impose (and it is what stalled the suite under ASan).
+    # One slice plus a short tail is enough to cross a boundary; the host buffers are
+    # (K x nv) and (K x 2N) bytes, so keep K small.
     K = step + 96
     core.reset(K)
-    # A TRAJECTORY first, so the rows actually DIFFER. Straight after reset every row holds the
-    # same broadcast baseline, and then a slicing loop that dropped its row-pointer offset would
-    # compare equal to itself and this test would prove nothing.
+    # Run a trajectory first so rows differ. After a reset every row is the same baseline, and
+    # a slice loop that dropped its row offset would still compare equal.
     core.trajectory(np.arange(nv, dtype=np.int32), nv, 64, 20260831)
     rows = np.arange(K, dtype=np.int32)
     core.selection_set(core.SCRATCH_SLOT, rows)
@@ -379,8 +348,7 @@ def test_readout_slicing_matches_an_unsliced_read():
     sliced = core.var_bits(core.SCRATCH_SLOT, cols, K)
     assert sliced.shape == (K, nv)
     assert K > step, f"precondition: {K} rows must exceed the {step}-row slice"
-    # NON-VACUITY: rows on either side of a slice boundary must be distinguishable, or a loop
-    # that ignored the offset would pass by comparing identical rows.
+    # Rows on either side of the boundary must differ, or an ignored offset would go unseen.
     assert not np.array_equal(sliced[0], sliced[step]), "rows must differ across the boundary"
 
     piece = max(1, step // 4)                     # each request below the slice threshold
@@ -389,8 +357,7 @@ def test_readout_slicing_matches_an_unsliced_read():
         ref = core.var_bits(1, cols, min(piece, K - r0))
         assert np.array_equal(ref, sliced[r0:r0 + len(ref)]), f"slice boundary at row {r0}"
 
-    # assignment_rows runs the same loop at 2N columns, so its step is half — K already crosses
-    # it twice. Read a bounded prefix: the point is the boundary, not the volume.
+    # assignment_rows has 2N columns, so its step is half; read just past one boundary.
     step2 = max(32, (256 << 20) // (2 * nv)) // 32 * 32
     rows2 = min(K, step2 + 96)
     assert rows2 > step2, "precondition: assignment_rows must cross a slice too"
@@ -403,17 +370,12 @@ def test_readout_slicing_matches_an_unsliced_read():
 @pytest.mark.parametrize("mode", ["scalar", "wave"])
 @pytest.mark.parametrize("shift", [16, 8])
 def test_a_row_never_writes_outside_itself(mode, shift):
-    """Device-side spill detector. `compute-sanitizer` ships with the CUDA toolkit, which this
-    project deliberately does not require, so there is no device memcheck to lean on — and every
-    kernel does raw per-row pointer arithmetic (`st_row + c`, `ab_row + (lit >> 5)`,
-    `trail_row + tail`).
+    """A device-side check for cross-row writes, since compute-sanitizer (CUDA toolkit) is not
+    a dependency and the kernels do raw per-row pointer arithmetic.
 
-    A row whose decisions are ALL padding does no work: the seed loop assigns nothing, the trail
-    stays empty, and neither its packed words nor its bitmap are touched. Interleaving such
-    CANARY rows among rows doing deep propagation turns any cross-row write into a visible
-    change. The detector is known to fire: aiming an out-of-range literal index at a canary's
-    bitmap words trips exactly that canary (see
-    test_an_out_of_range_apply_literal_corrupts_a_DIFFERENT_row, which is the same mechanism)."""
+    A row whose decisions are all padding touches neither its packed words nor its bitmap.
+    Interleaving such canary rows with rows doing deep propagation makes any write into another
+    row visible."""
     from tests.reference.bcp import lit_idx
 
     nv = 300
@@ -451,14 +413,9 @@ def test_a_row_never_writes_outside_itself(mode, shift):
 
 @pytest.mark.parametrize("mode", ["scalar", "wave"])
 def test_probe_returns_exactly_the_conflicting_tuples(mode):
-    """The probe's SET, not just its counts. Existing coverage checks the candidate arithmetic
-    (`gpap_probe_count` vs a binomial), the ceiling, and that width-1 agrees with the Python
-    miner — but nothing compares the returned tuples against an independent decision procedure.
-    Brute-force every k-subset through the reference BCP and require set equality, at both
-    `same_var` settings and three widths.
-
-    An `exhausted` sweep is the only one this can be asked of: it is what licenses "these are ALL
-    of them", which is exactly the claim under test."""
+    """The probe returns exactly the conflicting tuples: brute-force every k-subset through the
+    reference BCP and compare sets, for both `same_var` settings and three widths. Only an
+    exhausted sweep claims to have found all of them, so only those are compared."""
     import itertools
 
     from tests.reference.bcp import lit_idx, ref_bcp
@@ -502,11 +459,8 @@ def test_probe_returns_exactly_the_conflicting_tuples(mode):
 
 
 def test_a_slot_with_no_selection_yields_nothing_not_the_uninitialized_mask():
-    """`gpap_engine_reset` sets a slot's count to 0 to say "nothing selected this chunk", and
-    `ensure_rows` used to overwrite that by COMPACTING THE MASK — device memory that
-    `DevBuf::reserve` never zeroes and only `gpap_select_complete` fills. A slot nobody had
-    selected into therefore produced arbitrary row indices, and `gpap_check_sound` on it
-    pronounced a verdict over rows the caller never chose."""
+    """After reset a slot selects nothing, so reading it must not compact the uninitialized
+    mask into arbitrary row indices, and `gpap_check_sound` on it covers zero rows."""
     nv = 40
     clauses = [[1, 2, 3], [-1, 4], [5, 6, 7], [-5, 8]] + [[i, -(i + 1)] for i in range(9, nv)]
     core = _core.Engine(_core.Formula.from_clauses(nv, clauses))
@@ -525,27 +479,21 @@ def test_a_slot_with_no_selection_yields_nothing_not_the_uninitialized_mask():
     assert np.all(buf == -7), f"the library wrote into an unselected slot: {buf[:8].tolist()}"
     unsound = ctypes.c_int32(-1)
     check(_core.load().gpap_check_sound(core._h, 0, 0, ctypes.byref(unsound)), "sound")
-    assert unsound.value == 0            # over ZERO rows, not over compacted garbage
+    assert unsound.value == 0            # over zero rows
     assert core.select_complete(mask, 0) == 0     # and the real answer is 0 before a trajectory
 
 
 @pytest.mark.parametrize("B", [1, 8, 64])
 def test_the_warp_wide_decision_scan_picks_identically(B):
-    """`bcp.py` claims the warp-wide decision scan makes "bit-identical picks" — the same first B
-    still-free variables in `order`, the same per-(chunk, row, var) polarity hash — and that claim
-    is the whole reason VSCAN is ON by default in the wave kernel. It was checked only for
-    LAUNCHABILITY (tests/engine/test_kernel_table.py runs every vscan value and asserts the cubin
-    exists); nothing compared results.
-
-    Compare the model SETS, not the counts: identical counts from different picks would pass."""
+    """The warp-wide decision scan (VSCAN, on by default in the wave kernel) picks the same
+    variables and polarities as the scalar scan, so wave with and without it and the scalar
+    kernel draw the same models. Compare the model sets, not counts."""
     rng = random.Random(808)
     compared = models_seen = 0
     for trial in range(4):
         nv = rng.randint(30, 120)
-        # Clause/var ~0.7: deciding 64 variables in ONE round conflicts almost every
-        # trajectory on a tightly constrained formula, and a cell with no models compares two
-        # empty sets. The non-vacuity assertion at the end catches that, so keep the fixture
-        # loose enough for every B to deliver.
+        # Clause/var ~0.7 keeps the formula loose enough that B=64 still yields models; a cell
+        # with none would compare two empty sets.
         clauses = [[rng.choice([1, -1]) * v
                     for v in rng.sample(range(1, nv + 1), rng.choice([2, 3, 3, 4]))]
                    for _ in range(max(2, (7 * nv) // 10))]
@@ -568,11 +516,8 @@ def test_the_warp_wide_decision_scan_picks_identically(B):
         for seed in (7, 20260901):
             on, off, scalar = run("wave", 1, seed), run("wave", -1, seed), run("scalar", 0, seed)
             assert on == off, f"wave vscan on/off diverged (B={B}, nv={nv}, seed={seed})"
-            # The model SETS, not the counts, here too. The decision sequence is a function of
-            # `order`, the still-free set and the per-(chunk, row, var) polarity hash, and the
-            # still-free set is a BCP fixpoint — so the two kernels must pick identically and
-            # complete the same ROWS, not merely as many of them. (Checked over 24 cells before
-            # tightening this: 0 disagreements on the selected rows or their bits.)
+            # Decisions depend only on `order`, the free set (a BCP fixpoint) and the polarity
+            # hash, so the two kernels complete the same rows with the same bits.
             assert on == scalar, f"wave and scalar diverged on the models (B={B}, nv={nv})"
             compared += 1
             models_seen += on[0]
@@ -583,10 +528,9 @@ def test_the_warp_wide_decision_scan_picks_identically(B):
 @pytest.mark.parametrize("mode", ["scalar", "wave"])
 @pytest.mark.parametrize("soft", [False, True])
 def test_both_packed_splits_draw_identical_trajectories(mode, soft):
-    """The 8|24 split differs from 16|16 only in how the packed word is divided, so at one seed
-    the two must complete the same rows with the same bits. `force_shift=8` puts formulas the
-    16|16 word could hold on the wide split. The formulas are loose (clause/var ~1, no units
-    after the first) so every one delivers models; two empty sets would compare equal."""
+    """The 8|24 and 16|16 splits differ only in how the packed word is divided, so at one seed
+    they complete the same rows with the same bits. The formulas are loose so each yields
+    models; two empty sets would compare equal."""
     rng = random.Random(3)
     formulas = [(6, [[3], [1, 2, -3], [-1, 4], [-2, -4], [3, -4, 5], [-5, 1], [2, 5, 6],
                      [-6, -2]])]

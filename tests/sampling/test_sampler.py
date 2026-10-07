@@ -1,12 +1,8 @@
-"""Soundness + simplification-legitimacy tests for the GPU BCP-completion sampler.
+"""Soundness and simplification tests for GPUSampler.
 
-The load-bearing correctness claim: unit-propagation simplification (simplify_cnf) preserves the
-set of valid SUPPORT PROJECTIONS, so sampling the simplified formula and reconstructing yields the
-same distribution support as sampling the original. These tests enumerate the exact projection set
-(via CaDiCaL) and check GPAP against it, with and without simplification.
-
-Sampling tests need CUDA (the engine is packed-kernel-only); the pure-host simplify/ELS
-classification tests run anywhere."""
+Simplification (unit closure, ELS) must preserve the set of valid support projections. The
+exact set is enumerated with CaDiCaL and compared with what GPAP samples, with and without
+simplification. The simplify/ELS classification tests are host-only."""
 import random
 
 import pytest
@@ -30,16 +26,12 @@ def test_sound_basic():
 
 @pytest.mark.gpu
 def test_wide_decision_rounds_are_accepted_and_sound():
-    """B is NOT capped, and must not be: the trail is sized by the VARIABLE count alone.
+    """B has no ceiling: the trail is sized by the variable count alone.
 
-    Every trail push is deduplicated against the assignment bitmap (l and ~l share a word), so a
-    variable can contribute at most one entry however many literals one round decides — the cap
-    is N + slack for ANY B. That is not a curiosity: `B >= |support|` decides the whole support
-    in one round, which is exactly the configuration behind the "exactly uniform by rejection
-    sampling" property (barbarik's `bsup` arm, tests/experiments/test_uniformity_fuzz.py). A ceiling on B
-    would silently remove it.
-
-    Gated with B past the old 64-wide trail floor AND past the variable count itself."""
+    Every trail push is deduplicated against the assignment bitmap, so a variable adds at most
+    one entry for any B. `B >= |support|` is the exactly-uniform configuration (barbarik's `bsup`
+    arm, tests/experiments/test_uniformity_fuzz.py), so a cap on B would remove it. B = 64/65
+    straddle a former fixed trail size; N and 4N go past the variable count."""
     rng = random.Random(7)
     N, M = 200, 60                                  # loose: most assignments satisfy it
     clauses = [[v if rng.random() < 0.5 else -v
@@ -55,9 +47,8 @@ def test_wide_decision_rounds_are_accepted_and_sound():
 
 @pytest.mark.gpu
 def test_config_portfolio_soft_lookahead():
-    # The circuit portfolio uses 3-tuple configs (random_var, B, lookahead) including "soft"
-    # risk-polarity. Every produced model must satisfy the formula, and the reported dominant/
-    # breakdown must reflect the extended (rv, B, lookahead) tuple shape.
+    # 3-tuple configs (random_var, B, lookahead), including soft: every model satisfies the
+    # formula, and the reported dominant config and breakdown keep the 3-tuple shape.
     clauses = [[1, 2], [-1, 3], [-2, -3]]
     smp = GPUSampler.from_clauses(3, clauses, DEV, k_cap=64, seed=1)
     out = smp.sample(2000, configs=[(True, 1, "soft"), (True, 8, False)], max_chunks=30,
@@ -104,9 +95,8 @@ def test_retired_lookahead_modes_are_refused():
 
 @pytest.mark.gpu
 def test_a_decision_round_never_straddles_the_support_boundary(tmp_path):
-    """On a circuit whose support determines everything else, a huge B must keep success near
-    full: deciding completion variables in the same round as support ones collapsed it from
-    100% to 0%."""
+    """With a support that determines everything else, a huge B keeps success high: one
+    decision round must not mix support and completion variables."""
     import os
 
     from gpap.circuits.bench import build_cnf, parse_bench, write_dimacs
@@ -168,13 +158,13 @@ def test_simplify_cnf_classifies_forced_and_dontcare():
 
 @pytest.mark.gpu
 def test_simplify_preserves_projection_set():
-    """The decisive legitimacy check: valid support projections are identical with/without
-    simplification, and GPAP-simplified covers exactly that set (sound + complete)."""
+    """Sampling with and without simplification both cover exactly the valid support
+    projections (sound and complete)."""
     nv, clauses, sup = _controlled_formula(seed=7)
     exact = enumerate_projections(clauses, [v + 1 for v in sup])
     assert len(exact) > 1
 
-    # GPAP WITHOUT simplification
+    # without simplification
     smp_plain = GPUSampler.from_clauses(nv, clauses, DEV, k_cap=512, seed=2, support=sup)
     op = smp_plain.sample(60_000, decisions_per_round=1, max_chunks=120, collect=True,
                           verify_clauses=clauses, support=sup)
@@ -182,7 +172,7 @@ def test_simplify_preserves_projection_set():
     assert op["all_valid"]
     assert plain_projs.issubset(exact)
 
-    # GPAP WITH simplification — reconstruct, verify vs ORIGINAL clauses, compare projection set
+    # with simplification: reconstruct, verify against the original clauses, compare sets
     smp_simp = GPUSampler.from_clauses(nv, clauses, DEV, k_cap=512, seed=2, support=sup,
                                        simplify=True)
     osr = smp_simp.sample(60_000, decisions_per_round=1, max_chunks=120, collect=True,
@@ -196,8 +186,8 @@ def test_simplify_preserves_projection_set():
 
 
 def _equiv_formula(seed=5, S=6):
-    """Formula with explicit binary equivalences: s2≡s3, s4≡s5 (support vars) and g≡s1 (a non-support
-    gate var). ELS must collapse each pair to one variable, and reconstruction must keep them EQUAL."""
+    """Formula with binary equivalences s2≡s3, s4≡s5 (support) and g≡s1 (a non-support gate).
+    ELS must collapse each pair, and reconstruction must keep the pair equal."""
     rng = random.Random(seed)
     clauses, sup, var = [], list(range(1, S + 1)), S + 1
     for _ in range(4):                                  # base constraints among the support
@@ -215,7 +205,7 @@ def test_els_removes_variables():
     assert res is not None
     nv_r, cl_r, sup_r, recon = res
     assert nv_r < nv, "ELS removed no variables despite explicit equivalences"
-    # s3 (var3) and s5 (var5) are equivalent to s2/s4 → must map to a representative, not themselves
+    # s3 and s5 must map to a representative, not to themselves
     rep_of = recon["rep_of"]
     assert rep_of[2][0] != 3 or rep_of[1][0] != 2, "s2/s3 equivalence not collapsed"
     assert all(1 <= abs(l) <= nv_r for c in cl_r for l in c)
@@ -223,9 +213,9 @@ def test_els_removes_variables():
 
 @pytest.mark.gpu
 def test_els_preserves_projection_set():
-    """ELS-reduced sampling reconstructs models that (a) satisfy the ORIGINAL formula and (b) cover
-    EXACTLY the valid support-projection set — the strongest soundness gate (an inconsistent
-    reconstruction of equivalent vars would emit an invalid projection and fail the subset check)."""
+    """ELS-reduced sampling reconstructs models that satisfy the original formula and cover
+    exactly the valid support projections. An inconsistent reconstruction of equivalent vars
+    would emit an invalid projection and fail the subset check."""
     nv, clauses, sup = _equiv_formula(seed=8)
     exact = enumerate_projections(clauses, [v + 1 for v in sup])
     assert len(exact) > 1
@@ -240,7 +230,7 @@ def test_els_preserves_projection_set():
 
 @pytest.mark.gpu
 def test_els_equivalent_vars_stay_equal():
-    """The consistency requirement: s2≡s3 and s4≡s5 must be EQUAL in every reconstructed model."""
+    """s2≡s3 and s4≡s5 are equal in every reconstructed model."""
     nv, clauses, sup = _equiv_formula(seed=3)
     smp = GPUSampler.from_clauses(nv, clauses, DEV, k_cap=512, seed=4, support=sup, els=True)
     out = smp.sample(20_000, decisions_per_round=1, max_chunks=60, collect=True)
@@ -253,8 +243,7 @@ def test_els_equivalent_vars_stay_equal():
 
 @pytest.mark.gpu
 def test_fully_determined_formula_m0():
-    """A formula that simplification reduces to ZERO clauses (everything unit-forced or equivalence-
-    collapsed) must still sample without crashing — the BCP engine handles M=0 (empty clause set)."""
+    """A formula that simplifies to zero clauses (M=0) still samples, with forced vars pinned."""
     # all-unit clauses → unit closure determines every var → 0 remaining clauses
     clauses = [[1], [-2], [3], [4]]
     sup = [0, 1, 2, 3]
@@ -271,8 +260,8 @@ def test_fully_determined_formula_m0():
 
 @pytest.mark.gpu
 def test_b_larger_than_num_vars():
-    """decisions_per_round B can exceed the (post-simplify) variable count on tiny formulas —
-    the in-kernel decision pick must exhaust the order instead of erroring."""
+    """B may exceed the variable count; the decision pick exhausts the order instead of
+    erroring."""
     clauses = [[1, 2], [-1, -2]]                       # 2 vars, 2 models
     smp = GPUSampler.from_clauses(2, clauses, DEV, k_cap=64, seed=1)
     out = smp.sample(200, decisions_per_round=8, max_chunks=10, collect=True, verify_clauses=clauses)
@@ -281,7 +270,7 @@ def test_b_larger_than_num_vars():
 
 @pytest.mark.gpu
 def test_simplify_dontcare_both_polarities():
-    """A don't-care support var must take BOTH polarities across samples (uniform), not be pinned."""
+    """A don't-care support var takes both polarities across samples."""
     nv, clauses, sup = _controlled_formula(seed=11)
     dc = sup[-1]  # 0-based don't-care support var
     smp = GPUSampler.from_clauses(nv, clauses, DEV, k_cap=512, seed=4, support=sup, simplify=True)
@@ -293,9 +282,8 @@ def test_simplify_dontcare_both_polarities():
 # --------------------------------------------------------------------- portfolio configs
 
 def test_portfolio_configs_are_tuple_compatible():
-    """The portfolios are `SamplingConfig` NamedTuples (self-describing enums).
-    They must still BE the `(random_var, B, lookahead)` triples every consumer has always read,
-    or the refactor silently changed behaviour."""
+    """Portfolio `SamplingConfig` NamedTuples still behave as the `(random_var, B, lookahead)`
+    triples that consumers read."""
     from gpap.sampling.pipeline import (CIRCUIT_PORTFOLIO, DEFAULT_PORTFOLIO, Lookahead,
                                         SOFT_CONFIG, SamplingConfig, VarOrder)
     for c in (*CIRCUIT_PORTFOLIO, *DEFAULT_PORTFOLIO, SOFT_CONFIG):
@@ -311,9 +299,8 @@ def test_portfolio_configs_are_tuple_compatible():
 
 
 def test_soft_is_not_in_any_default_portfolio():
-    """`soft` biases the distribution (Barbarik rejects it on 64 of 65 circuits, docs/findings/
-    UNIFORMITY_FINDINGS.md), and the bandit selects on throughput with no uniformity term — so it
-    must never arrive without the caller asking for it."""
+    """`soft` biases the distribution (docs/findings/UNIFORMITY_FINDINGS.md) and the bandit
+    selects on throughput alone, so no default portfolio includes it."""
     from gpap.sampling.pipeline import (CIRCUIT_PORTFOLIO, DEFAULT_PORTFOLIO, Lookahead,
                                         SOFT_CONFIG, portfolio)
     for name in ("circuit", "default"):
@@ -325,8 +312,7 @@ def test_soft_is_not_in_any_default_portfolio():
 
 @pytest.mark.gpu
 def test_config_breakdown_keys_stay_legacy_formatted():
-    """The results-JSON config keys must not gain the enum repr — rows recorded before the enums
-    existed are compared against new ones."""
+    """Results-JSON config keys keep the pre-enum format, so old and new rows compare."""
     from gpap.sampling.pipeline import portfolio
     smp = GPUSampler.from_clauses(4, [[1, 2], [-1, 3], [-2, -3], [2, 3, 4]], DEV, k_cap=256,
                                   seed=1)
@@ -339,20 +325,11 @@ def test_config_breakdown_keys_stay_legacy_formatted():
 
 @pytest.mark.gpu
 def test_timed_run_never_gathers_a_model_to_the_host():
-    """EMISSION SYMMETRY: the timed run must not pay to deliver its samples.
+    """The timed run never gathers a model row to the host (emission symmetry).
 
-    Every rival in the paper is timed on generation alone — CMSGen through the patch's
-    `--nowrite`, the gradient samplers because their own `timer` wraps the descent loop only.
-    Ours holds because `collect=False` asks the core for `keep_cap=0`, so no chunk ever gathers
-    a row; the writer and the coverage pass run after the clock stops. Assert it instead of
-    trusting the flag: `eval/rivals/check_emission_symmetry.py` checks the same property
-    statically on the rival side, and this is its GPAP half.
-
-    The spy goes on the CORE sampler's `bits`, because that is where the gather lives now. It
-    used to go on `engine.var_bits`, which the sampling path stopped calling when the loop moved
-    into libgpap — measured, a `collect=True` run that reconstructed 256 models called it ZERO
-    times, so the trap could not fire in either branch and this test passed on nothing. Hence
-    the positive control below: the spy must be shown firing when rows really are gathered.
+    Rivals are timed on generation alone, so `collect=False` asks the core for `keep_cap=0`.
+    This is the GPAP half of eval/rivals/check_emission_symmetry.py. The spy sits on the core
+    sampler's `bits`, where the gather happens; the `collect=True` run shows it can fire.
     """
     from gpap.sampling.pipeline import Lookahead
     smp = GPUSampler.from_clauses(4, [[1, 2], [-1, 3], [-2, -3], [2, 3, 4]], DEV, k_cap=256,
