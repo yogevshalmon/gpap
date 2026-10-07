@@ -203,7 +203,7 @@ split per formula (16|16 for 2N ≤ 65535; 8|24 "wide" for 2N ≤ 0xFFFFFF with 
 
 ```bash
 scripts/build_core.sh                 # build libgpap; `gpap info` verifies
-pytest -m "not gpu and not slow"      # host-side smoke; engine tests need CUDA and self-skip
+pytest -m "not gpu and not slow"      # host-side smoke; `core` tests need libgpap and self-skip
 pytest                                # default suite: engine, apps, repo (slow = deep unrolls)
 pytest tests/experiments                     # the eval layer's tests (CI runs them as a separate step)
 

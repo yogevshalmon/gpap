@@ -52,10 +52,9 @@ the naive `n_gates * T * batch * 4` undercounts real peak 2–6x.
 Rule (`rival_common.run_at_batch`, `fit_batch`, `BATCH_LADDER`): the largest rung of the ladder
 the rival completes, walked down from the top (30,000,000 since §17), rejected only on
 feasibility — OOM, driver refusal, or not finishing inside the wall budget — never on throughput;
-one measured configuration per cell; a timeout is a result and is never retried smaller. The
-one-rung-up probe (a best-of-two, the trap §8 forbids) was removed 2026-09-03; the walk starts at
-the top, not at our model's rung (§16). Rungs tried are recorded as `batch_sweep`, the budget as
-`vram_budget_bytes`.
+one measured configuration per cell. The one-rung-up probe (a best-of-two, the trap §8 forbids)
+was removed 2026-09-03; the walk starts at the top, not at our model's rung (§16). Rungs tried
+are recorded as `batch_sweep`, the budget as `vram_budget_bytes`.
 
 Cost, L4 re-run 2026-08-25/26 (74 rows, 0.80 of free VRAM = 17.5 GiB on every row): DEMOTIC
 their pins 4.9x → 4.6x, our rare pins 6,176.4x → 4,344.1x; Recurrent their table 8.4x → 6.1x,
@@ -232,7 +231,7 @@ records `portfolio` and `adaptive` so the asymmetry is in the data, not a captio
 `abc` binary the arm is an error row. The harness had called `bench.build_cnf` with no encoder,
 so Table 2 ran GPAP 1.04–4.8x slower than Table 1 on the same circuits and pins, unlabelled
 (T=25, their pins, seed 5, 20 s, bandit: b13 2.19x, b04 1.25x, b12 1.04x, b14 4.80x — 413,451
-Tseitin variables against 41,937 under abc:fast). The "must be Tseitin because the rivals unroll
+Tseitin variables against 41,938 under abc:fast). The "must be Tseitin because the rivals unroll
 the raw circuit themselves" argument was wrong: fairness is same circuit, same task, each tool
 compiling into its own representation; `abc:fast` is function-preserving with the same projected
 solution space (`tests/circuits/test_abc_encoder.py`) and its encode wall is `encode_s`, outside every
