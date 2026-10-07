@@ -5,6 +5,7 @@ root) and its refusal of a planted symlink are exercised directly, since a healt
 either branch. `eval/paths.py` is tested in tests/experiments/test_eval_paths.py."""
 import os
 
+import pytest
 
 from gpap import paths
 
@@ -21,6 +22,19 @@ def test_gpap_home_is_repo_local_and_the_env_var_wins(tmp_path, monkeypatch):
     for accessor, leaf in ((paths.bin_dir, "bin"), (paths.src_dir, "src"),
                            (paths.benchmarks_dir, "benchmarks"), (paths.tmp_dir, "tmp")):
         assert accessor() == tmp_path / "elsewhere" / leaf, f"{leaf} did not follow the root"
+
+
+@pytest.mark.parametrize("value", ["~/x", "rel"])
+def test_a_gpap_home_override_is_expanded_and_made_absolute(value, monkeypatch):
+    """A `~` must not become a directory literally named `~`, and a relative root must not
+    depend on the caller's working directory. The eval roots get the same check in
+    tests/experiments/test_eval_paths.py."""
+    monkeypatch.setenv("GPAP_HOME", value)
+    got = str(paths.gpap_home())
+    assert os.path.isabs(got), f"GPAP_HOME={value!r} stayed relative: {got}"
+    assert "~" not in got, f"GPAP_HOME={value!r} kept a literal tilde: {got}"
+    if value.startswith("~"):
+        assert got == os.path.expanduser(value)
 
 
 def test_scratch_lands_in_the_one_root_and_is_named_for_its_contents(monkeypatch, tmp_path):

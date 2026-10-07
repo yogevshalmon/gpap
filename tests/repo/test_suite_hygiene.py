@@ -309,7 +309,7 @@ def test_only_the_paths_modules_name_a_managed_directory():
     Scanned: tracked `.py` and `.sh`. A workflow YAML is not — `.github/workflows/ci.yml`
     links against a `/tmp/libcuda.so` stub it generates, which is right for an ephemeral
     runner with no checkout to outlive, and is deliberately none of these roots."""
-    exempt = set(_MANAGED.values()) | {"tests/repo/test_suite_hygiene.py", "tests/repo/test_paths.py",
+    exempt = set(_MANAGED.values()) | {"tests/repo/test_suite_hygiene.py",
                                        "tests/experiments/test_eval_paths.py"}
     bad = []
     for rel in _tracked(".py"):
