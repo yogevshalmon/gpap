@@ -6,7 +6,7 @@
 > ([../paper/README.md](../paper/README.md)). **Quote no number from this file.**
 > **Measured:** 2026-08-03/04, Colab NVIDIA L4 (24 GB, 58 SM, sm_89).
 > **Rule lives in:** the screens and the zero ledger are `eval/artifact/paper_tables.py`
-> (`zero_search`, `tiny_space`, `VACUOUS_PINS`), gated by `tests/eval/test_paper_tables.py`.
+> (`zero_search`, `tiny_space`, `VACUOUS_PINS`), gated by `tests/experiments/test_paper_tables.py`.
 > **Record only:** the price of the uniformity-safe default (§4).
 >
 > Three inputs have moved: the rival rows predate the parallelism-grant and step-count rules

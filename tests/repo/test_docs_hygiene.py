@@ -156,7 +156,7 @@ def test_every_findings_file_opens_with_its_status_block(path):
 
 #: The shapes of a path that names one machine, mirrored from eval/artifact/check_leaks.sh: that
 #: script gates the SHIPPED tree, this test the checkout, and bash and Python cannot share one
-#: definition — so each names the other. tests/eval/test_artifact_gate.py proves the script refuses each.
+#: definition — so each names the other. tests/experiments/test_artifact_gate.py proves the script refuses each.
 _LEAK_SHAPES = (r"/home/[a-z][\w.-]*/", r"/Users/[A-Za-z][\w.-]*/",
                 r"-home-[a-z][\w.-]*-", r"/claude-[0-9]+/")
 

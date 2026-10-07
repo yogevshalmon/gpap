@@ -23,7 +23,7 @@ jobs:
       - name: CPU smoke suite (GPU tests auto-skip off-CUDA)
         run: pytest -m "not gpu and not slow" -q
       - name: Eval-layer tests (not in the default run)
-        run: pytest tests/eval -m "not gpu and not slow" -q
+        run: pytest tests/experiments -m "not gpu and not slow" -q
 
   build-core:
     # The engine core builds WITHOUT a GPU and WITHOUT the CUDA toolkit: triton cross-compiles

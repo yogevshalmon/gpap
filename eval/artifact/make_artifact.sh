@@ -192,7 +192,7 @@ find "$STAGE" -type d \( -name __pycache__ -o -name .pytest_cache -o -name .ruff
 # the path it was handed (a committed slide table, `emission_audit.txt`, three Barbarik error
 # rows), and the third had a shape the first version of this check — one `/home/` pattern inline
 # here — did not know. The shapes now live in ONE place, `check_leaks.sh` (gated by
-# tests/eval/test_artifact_gate.py); the generators are fixed at the source
+# tests/experiments/test_artifact_gate.py); the generators are fixed at the source
 # (`eval/paths.py::display_path`) and this is what says they stay fixed — over the STAGED BYTES,
 # like the verdict above, because that is what a reviewer receives. `GPAP_ARTIFACT_DENYLIST=<file>`
 # adds literal strings (a name, a hostname) that cannot be spelled in a script that ships.

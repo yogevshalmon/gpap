@@ -91,7 +91,7 @@ scripts/                   # build_core.sh, build_abc.sh, build_cmsgen.sh (+ cms
 docs/findings/             # INSIGHTS.md (settled-results index) + *_FINDINGS.md
 tests/                     # pytest; circuit CNFs generated from benchmarks/circuits/bench/ at test time
   engine/ sampling/ mining/ circuits/ cli/ repo/   # the default run (pyproject `testpaths`)
-  eval/                    # the experiment layer's tests: `pytest tests/eval`, never by default
+  experiments/             # the eval layer's tests: `pytest tests/experiments`, never by default
   reference/               # the pure-Python oracles (bcp.py, formula.py, combinations.py)
 .gpap/                     # DISPOSABLE MACHINERY, one root for it: built/fetched tools, sources,
                            #   benchmark sets, and `tmp/` — ALL scratch, every layer. Gitignored,
@@ -205,7 +205,7 @@ split per formula (16|16 for 2N ≤ 65535; 8|24 "wide" for 2N ≤ 0xFFFFFF with 
 scripts/build_core.sh                 # build libgpap; `gpap info` verifies
 pytest -m "not gpu and not slow"      # host-side smoke; engine tests need CUDA and self-skip
 pytest                                # default suite: engine, apps, repo (slow = deep unrolls)
-pytest tests/eval                     # the eval layer's tests (CI runs them as a separate step)
+pytest tests/experiments                     # the eval layer's tests (CI runs them as a separate step)
 
 gpap info
 gpap sample formula.cnf -n 50000 --out samples.out --stats run.json
@@ -376,7 +376,7 @@ skipped/errored instance; read it before quoting a geomean.
 - **The zero ledger is symmetric and must add up.** CMSGen-zero → `ratio=inf`, GPAP-zero →
   `ratio=0.0`, both-zero → `ratio=None` (the last two are falsy; never branch on `ratio` alone).
   Invariants: `inst = n + CMSGen=0 + GPAP=0 + excluded` (Table 1) and `cells = n + rival=0 +
-  GPAP=0 + failed + excluded` (Table 2), pinned by tests/eval/test_paper_tables.py. Every reason a
+  GPAP=0 + failed + excluded` (Table 2), pinned by tests/experiments/test_paper_tables.py. Every reason a
   cell carries no ratio is the one `excluded` column, itemised by name (`excl_names`); there is
   no thin-denominator floor (a tool that scored anything is scored; cells under
   `THIN_DENOMINATOR = 30` events are named in the caveats); no `paper set` column. Table 1 and

@@ -9,7 +9,7 @@
 > on `sound_check` in `cpp/include/gpap/gpap.h` and `.hpp`, and `eval/uniformity/` — which makes
 > the claims the library does not: `metrics.py` (statistics), `fuzz_uniformity.py` (exact
 > oracle), `barbarik_gpap.py` + `barbarik_screen.py` + `barbarik_table.py` (the certificate).
-> **Gated by:** `tests/eval/test_uniformity_fuzz.py`, `tests/sampling/test_sampler.py`.
+> **Gated by:** `tests/experiments/test_uniformity_fuzz.py`, `tests/sampling/test_sampler.py`.
 > **SECTION NUMBERS ARE AN API** — cited from `gpap/`, `cpp/`, `eval/`, the tests and the
 > generated paper prose. Append; never renumber.
 
@@ -453,7 +453,7 @@ The 2026-08-28 rows are in `.experiments/barbarik_20260828/`: 92 generated insta
 the cost screen, 66 pass the control. `--sampler spur` (must Accept) and `--config soft` (must
 Reject) are the two controls; a table without both is not evidence. `--draw iid` re-runs any
 GPAP arm with one chunk per sample, the independence premise barbarik's guarantee is stated
-under. `tests/eval/test_uniformity_fuzz.py` gates the invariants (oracle self-consistency, both
+under. `tests/experiments/test_uniformity_fuzz.py` gates the invariants (oracle self-consistency, both
 controls, soundness at every B, `B >= |support|` indistinguishable from uniform on every generated
 instance) in under 1 s; it deliberately does not gate small-B uniformity, a documented property of
 the algorithm class rather than a defect.

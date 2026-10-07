@@ -273,7 +273,7 @@ it is correct. The measurement that settled a design decision lives in
 ```bash
 pytest                             # the engine, the applications and repo checks (GPU tests skip off-CUDA)
 pytest -m "not gpu and not slow"   # portable smoke suite, no GPU needed
-pytest tests/eval                  # the experiment layer's tests, not part of the default run
+pytest tests/experiments                  # the experiment layer's tests, not part of the default run
 ```
 
 ## Evaluation

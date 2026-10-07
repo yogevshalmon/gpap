@@ -310,7 +310,7 @@ def test_only_the_paths_modules_name_a_managed_directory():
     links against a `/tmp/libcuda.so` stub it generates, which is right for an ephemeral
     runner with no checkout to outlive, and is deliberately none of these roots."""
     exempt = set(_MANAGED.values()) | {"tests/repo/test_suite_hygiene.py", "tests/repo/test_paths.py",
-                                       "tests/eval/test_eval_paths.py"}
+                                       "tests/experiments/test_eval_paths.py"}
     bad = []
     for rel in _tracked(".py"):
         if rel in exempt:
@@ -421,10 +421,10 @@ def test_the_no_git_fallback_sees_what_git_sees():
 
 def test_the_default_run_covers_every_test_directory_but_eval():
     """`testpaths` lists the default directories one by one, so a new one would silently never
-    run. Every directory holding tests is either listed or is `tests/eval`."""
+    run. Every directory holding tests is either listed or is `tests/experiments`."""
     block = re.search(r"^testpaths\s*=\s*\[(.*?)\]", (REPO / "pyproject.toml").read_text(),
                       re.M | re.S).group(1)
     listed = set(re.findall(r'"([^"]+)"', block))
     holding = {p.parent.relative_to(REPO).as_posix() for p in TESTS.rglob("test_*.py")}
-    assert holding - listed == {"tests/eval"}, f"not in the default run: {holding - listed}"
+    assert holding - listed == {"tests/experiments"}, f"not in the default run: {holding - listed}"
     assert listed <= holding, f"testpaths names a directory with no tests: {listed - holding}"
