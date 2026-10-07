@@ -1,12 +1,7 @@
-"""The reporting rules that decide what a paper claims — pinned by synthetic stage JSONs.
+"""The reporting rules behind the paper's tables, pinned on hand-built stage JSONs.
 
-Every rule here exists because its absence produced a flattering number in something we had
-already published (docs/findings/L4_EVAL_FINDINGS.md §2). The failures were mechanical, not
-deliberate, which is exactly why a test is the right guard: reading the aggregation code did not
-catch them, and a plausible-looking table is indistinguishable from a correct one.
-
-No GPU, no data files — the fixtures are hand-built rows, so a rule change shows up as a test
-diff rather than a silently different geomean months later.
+Each rule stops a table that looks right from flattering us (docs/findings/L4_EVAL_FINDINGS.md §2).
+No GPU and no data files, so a rule change shows up as a test diff.
 """
 import json
 import os
@@ -46,21 +41,20 @@ def stage(tmp_path, stem, rows, **payload):
 # --------------------------------------------------------------------- the symmetric zero ledger
 
 def test_zero_ledger_is_symmetric_and_sums(tmp_path):
-    """THE bug: a GPAP-zero row has ratio 0.0 and a both-zero row None — both falsy, so branching
-    on `ratio` dropped them entirely while CMSGen-zero rows (inf) were counted as wins. 38 of
-    their zeros were shown; 3 of ours and 11 mutual ones were invisible."""
+    """A GPAP-zero row (ratio 0.0) and a both-zero row (None) are falsy, so branching on `ratio`
+    alone drops them while CMSGen-zero rows (inf) count as wins. Each zero gets its own bucket."""
     d = stage(tmp_path, "s", [
         row("win.bench"),                                   # both sampled, we win
         row("theirzero.bench", cms=0, cms_sps=0),           # CMSGen silent -> our win
-        row("ourzero.bench", models=0, sps=0),              # WE are silent  -> our loss
+        row("ourzero.bench", models=0, sps=0),              # we are silent  -> our loss
         row("bothzero.bench", models=0, sps=0, cms=0, cms_sps=0),
     ])
     v = cms_family(d, "s", "tseitin")
     assert (v["inf"], v["gpap0"], v["both0"]) == (1, 1, 1)
     assert v["gpap0_names"] == ["ourzero"] and v["both0_names"] == ["bothzero"]
-    # the ledger must balance: geomean instances + each zero bucket == instance count
+    # geomean instances + each zero bucket == instance count
     assert v["n_gm"] + v["inf"] + v["gpap0"] + v["both0"] == v["inst"] == 4
-    # our loss is in the denominator of wins but is not a win; a mutual zero is neither
+    # our loss counts in the win denominator; a mutual zero is in neither
     assert v["wins"] == 2 and v["n"] == 3
 
 
@@ -74,25 +68,22 @@ def test_gpap_zero_is_not_silently_a_win(tmp_path):
 # --------------------------------------------------------------------- zero-search degeneracy
 
 def test_zero_search_detected_and_excluded(tmp_path):
-    """Samples emitted with no decisions AND no implications mean the support is free after
-    propagation — no search happened, so the ratio measures the instance. The best-encoder rule
-    actively PREFERS these cells because they carry the family's top ratio."""
-    free = row("free.bench", sps=1e9, dec=0, impl=0)        # 100,000x, and entirely degenerate
+    """Samples with no decisions and no implications mean the support is free after propagation:
+    no search happened, so the ratio measures the instance and the cell leaves the geomean."""
+    free = row("free.bench", sps=1e9, dec=0, impl=0)        # 100,000x, all degenerate
     assert zero_search(free) and not zero_search(row("ok.bench"))
     d = stage(tmp_path, "s", [free] + [row(f"i{i}.bench") for i in range(3)])
     v = cms_family(d, "s", "tseitin")
     assert v["free"] == 1 and v["free_names"] == ["free"]
     assert v["gm"] == pytest.approx(100.0)                   # the three honest cells only
-    assert v["gm_withfree"] > v["gm"]                        # and we report what it would inflate to
+    assert v["gm_withfree"] > v["gm"]                        # what it would inflate to
 
 
 def test_encoders_are_separate_rows_and_neither_selects_the_other(tmp_path):
-    """No best-of-encoders rule. It used to pick, per instance, the encoder with the highest
-    `ratio` — making the published statistic its own argmax key, so CMSGen's number chose which
-    of our runs was reported (measured: 1.24-1.33x on the sequential families). It also actively
-    preferred degenerate cells: on EPFL `ctrl` Tseitin samples at 2.0M/s with succ 0.07 while ABC
-    collapses the output cone to succ 1.0 at 240M/s with no search at all, and the argmax took
-    the second. Each encoder is now its own row, screened on its own merits."""
+    """No best-of-encoders selection: picking the encoder with the highest `ratio` lets CMSGen's
+    number choose which of our runs is reported, and favours degenerate cells (ABC's `ctrl`
+    searches nothing). Each encoder is its own row, screened on its own
+    (docs/findings/RIVAL_FAIRNESS_FINDINGS.md §8)."""
     d = stage(tmp_path, "s", [
         row("ctrl.aig", "tseitin", sps=2e6),
         row("ctrl.aig", "abc:fast", sps=2.4e8, dec=0, impl=0),
@@ -109,12 +100,9 @@ def test_encoders_are_separate_rows_and_neither_selects_the_other(tmp_path):
 
 
 def test_every_instance_is_counted_exactly_once(tmp_path):
-    """`inst` = n + CMSGen=0 + GPAP=0 + excluded, under Table 1. It was FALSE on 6 of 7 families:
-    the degenerate cells were dropped from the geomean but left inside `inst` and inside `wins`,
-    so a reader adding the columns up came out short. Since 2026-09-07 every reason a cell
-    carries no ratio — a screen, a both-zero, a refusal — is ONE printed column, itemised by
-    name in the text (the user's rule: the main table is too wide with a column per reason);
-    the per-reason counts stay in the dict and must still sum to it."""
+    """Table 1's ledger: `inst` = n + CMSGen=0 + GPAP=0 + excluded. Every reason a cell has no
+    ratio (a screen, a both-zero, a refusal) goes in the one `excluded` column, named in the text;
+    the per-reason counts must sum to it (docs/findings/RIVAL_FAIRNESS_FINDINGS.md §9)."""
     d = stage(tmp_path, "seq-c25-rare", [
         row("a.bench"), row("b.bench"),                       # 2 in the geomean
         row("c.bench", cms=0, cms_sps=0),                     # CMSGen=0
@@ -123,7 +111,7 @@ def test_every_instance_is_counted_exactly_once(tmp_path):
         row("f.bench", dec=0, impl=0),                        # no-search   -> excluded
         row("b02.bench", sps=1e8),                            # vacuous pin -> excluded
         row("g.bench", support=5),                            # tiny space  -> excluded
-        row("h.bench", cms=13, cms_sps=0.2),                  # 13 CMSGen samples: SCORED, named
+        row("h.bench", cms=13, cms_sps=0.2),                  # 13 CMSGen samples: scored, and named
     ])
     v = cms_family(d, "seq-c25-rare", "tseitin")
     assert v["inst"] == 9
@@ -131,18 +119,15 @@ def test_every_instance_is_counted_exactly_once(tmp_path):
     assert v["excl"] == v["both0"] + v["free"] + v["vac"] + v["tiny"] == 4
     assert v["excl_names"] == {"vac": ["b02"], "free": ["f"], "tiny": ["g"], "both0": ["e"]}
     assert v["thin_names"] == ["h"] and v["thin_cells"] == [("h", 13)]
-    # and the win count is over the same rows, not over the pre-screen set
+    # wins are counted over the same rows, not the pre-screen set
     assert v["n"] == v["n_gm"] + v["inf"] + v["gpap0"] == 5
     assert v["wins"] == 4                                     # a, b, h and the CMSGen-zero
 
 
 def test_a_thin_denominator_is_scored_and_disclosed_not_screened(tmp_path):
-    """Until 2026-09-07 a CMSGen count under 30 left Table 1 through a `CMSGen<30` column and a
-    rival count under 30 left Table 2 through `rival<30` — one floor, both sides, conservative
-    (every cell it removed was a large win of ours). The user's rule replaced the floor: a tool
-    that scored ANYTHING is scored, as the rival papers' own tables print rates of 0.1 unique/s.
-    What survives is the DISCLOSURE — the cell is named with its count in the aggregate the
-    caveats print — and Table 3 stays over exactly the rows Table 1 scores."""
+    """A tool that scored anything is scored: a count under `THIN_DENOMINATOR` stays in the
+    geomean and is named with its count for the caveats. Table 3 covers exactly the rows Table 1
+    scores (docs/findings/RIVAL_FAIRNESS_FINDINGS.md §17b)."""
     import json as _json
 
     from eval.artifact.paper_tables import (THIN_DENOMINATOR, rival_cms_family,
@@ -156,16 +141,15 @@ def test_a_thin_denominator_is_scored_and_disclosed_not_screened(tmp_path):
     assert v["thin_cells"] == [("b14", 13)] and v["thin_names"] == ["b14"]
     assert "cms_thin" not in v and "excl" in v
     assert v["n_gm"] + v["inf"] + v["gpap0"] + v["excl"] == v["inst"] == 3
-    # and Table 3 is over the SAME rows — the one thing the identity can catch
+    # Table 3 is over the same rows
     p = rival_prop_rates(str(tmp_path), "recurrent_rare", "rcs")
     assert p["n"] == v["n_gm"] == 3
 
 
 
 def test_a_cell_whose_sign_is_inside_gpap_seed_band_is_a_tie_not_a_win(tmp_path):
-    """`wins 20/20` beside a caveat calling two of those cells ties contradicted itself. A cell
-    whose ratio at our slowest and fastest seed straddles 1.0 is counted in `ties`, and `wins`
-    excludes it; a clear loss stays a loss."""
+    """A cell whose ratio at our slowest and fastest seed straddles 1.0 is a tie, not a win;
+    a clear loss stays a loss."""
     import json as _json
 
     from eval.artifact.paper_tables import rival_family, seed_band, straddles
@@ -188,11 +172,8 @@ def test_a_cell_whose_sign_is_inside_gpap_seed_band_is_a_tie_not_a_win(tmp_path)
 
 
 def test_the_circuit_variant_sentence_is_read_off_the_rows(tmp_path):
-    """The methods paragraph said every rival was handed the ABC-simplified netlist AS WELL AS
-    the raw one and scored on whichever suited it — over a campaign whose 82 rows were all
-    `variant: abc`. A fairness procedure asserted and not performed. The sentence must come
-    from the rows: one variant on every row names that variant and says the axis was not run;
-    two variants says the tie-break was applied."""
+    """The methods sentence on circuit variants is read off the rows: one variant on every row
+    names it and says the raw-netlist axis was not run; two variants say the tie-break applied."""
     import json as _json
     import types
 
@@ -215,10 +196,8 @@ def test_the_circuit_variant_sentence_is_read_off_the_rows(tmp_path):
 
 
 def test_a_rival_failure_is_described_as_a_budget_statement(tmp_path):
-    """Every Recurrent 'failure' of the 2026-09-04 campaign was one thing — the initialization
-    budget expiring — and the caveat called them 'instances the rival cannot process', which our
-    own §11 measurement contradicts (`b14` initializes at a longer cap and delivers). A cell
-    that did not finish inside OUR budget is a statement about the budget."""
+    """A rival cell that did not initialize inside our budget is described as a statement about
+    the budget, not as an instance the rival cannot process."""
     import json as _json
     import types
 
@@ -239,9 +218,7 @@ def test_a_rival_failure_is_described_as_a_budget_statement(tmp_path):
 
 
 def test_the_markdown_and_latex_ledger_prose_state_the_same_sum():
-    """The LaTeX caption gained `+ unsat` and the Markdown paragraph did not — the third time a
-    rule fixed in one emitter was not carried to its twin. Every bucket the tables print must
-    appear in BOTH prose formulas."""
+    """Every bucket the tables print appears in both the Markdown and the LaTeX ledger formula."""
     import inspect
 
     from eval.artifact import paper_tables
@@ -255,20 +232,14 @@ def test_the_markdown_and_latex_ledger_prose_state_the_same_sum():
     # Table 2: cells = n + rival=0 + GPAP=0 + rival failed + excluded, in both emitters
     assert "`cells` = `n` + rival=0 + GPAP=0 + rival failed + excluded" in src
     assert r"\text{R}{=}0 + \text{G}{=}0 + \text{failed} + \text{excl.}$" in src
-    # and the algebraic-identity caveat lives in both Table 3 texts
+    # the algebraic-identity caveat is in both Table 3 texts
     assert src.count("ALGEBRAIC") >= 2, "the Table 3 caveat is in one emitter only"
 
 
 def test_tiny_solution_space_is_screened_in_BOTH_tables(tmp_path):
-    """A space smaller than the sample request is enumerated, not sampled — both tools saturate
-    it and the ratio is a race between startup costs. ISCAS-85 `c17` has 5 inputs = 32 points:
-    DEMOTIC finds 19 of them at 14 unique/s against GPAP's 640k/s, a 45,520x cell that alone
-    lifts the DEMOTIC-native geomean from 2.7x to ~6.5x. DEMOTIC's own Table II carves it out
-    ("a minimum of 1000 distinct solutions (except c17)").
-
-    Screened SYMMETRICALLY, and it does not flatter us: in Table 2 it removes a huge win, while
-    in Table 1 the same instance was DRAGGING the combinational geomean down (1,620x -> 1,348x),
-    so the screen gives that number back. A screen that only ever helped would be suspect."""
+    """A solution space smaller than the sample request is enumerated, not sampled, so the ratio
+    is a race between startup costs. Both tables screen it (DEMOTIC's own Table II excludes
+    `c17`); in Table 2 that removes a large win of ours."""
     assert tiny_space({"support": 5}) and not tiny_space({"support": 36})
     assert tiny_space({"demotic": {"num_inputs": 5}}, "demotic")
     assert not tiny_space({"demotic": {"num_inputs": 36}}, "demotic")
@@ -293,17 +264,13 @@ def test_tiny_solution_space_is_screened_in_BOTH_tables(tmp_path):
 
 
 def test_rival_table_scores_every_measured_instance_and_has_no_paper_subset_column(tmp_path):
-    """Table 2 runs every b*/s* circuit the campaign can process (user's rule, 2026-09-03) and
-    scores every cell that ran — ONE population per row. The geomean over the subset the
-    rival's own paper evaluates used to be printed beside it (`paper set`) and was dropped on
-    2026-09-07 (the user's rule: "we take the rival benchmarks, that's it, we test on the whole
-    set"): no second number a reader could mistake for the headline, and no measured cell is
-    ever dropped for being outside a paper's table."""
+    """Table 2 scores every measured cell as one population per row. There is no `paper set`
+    column, and no cell is dropped for being outside the rival paper's own table."""
     rows = [
         {"name": "s386", "variant": "raw", "rcs": {"unique_per_s": 10.0},
          "gpap": {"unique_per_s_est": 100.0, "n_models": 5}},          # in their Table II
         {"name": "b03", "variant": "raw", "rcs": {"unique_per_s": 1.0},
-         "gpap": {"unique_per_s_est": 1000.0, "n_models": 5}},         # NOT in it: a 1,000x cell
+         "gpap": {"unique_per_s_est": 1000.0, "n_models": 5}},         # not in it: a 1,000x cell
     ]
     (tmp_path / "rivals_r.json").write_text(json.dumps({"rows": rows}))
     v = rival_family(str(tmp_path), "r", "rcs")
@@ -313,12 +280,8 @@ def test_rival_table_scores_every_measured_instance_and_has_no_paper_subset_colu
 
 
 def test_vacuous_pin_is_detected_per_row_not_by_a_name_list(tmp_path):
-    """`VACUOUS_PINS` was a hardcoded {b02,b05,b07,s526} — correct only while the instance list
-    stood still. Running the FULL sequential family brought in `b19`, whose pin is a tautology
-    (sim_baseline p_accept == 1.0 at both depths and both targets), and it entered the geomean as
-    a 491x cell measuring nothing: seq-c25-rare read 72.1x instead of 64.7x.
-
-    The signal is in the row already, so use it."""
+    """A vacuous pin is read off the row (`p_accept == 1.0`), not only a fixed name list, so a new
+    instance with a tautological pin (`b19` here) cannot enter the geomean."""
     assert vacuous_pin({"sim_baseline": {"p_accept": 1.0}})
     assert not vacuous_pin({"sim_baseline": {"p_accept": 0.5}})
     assert vacuous_pin({"p_accept": 1.0})                    # rival rows carry it top-level
@@ -335,10 +298,8 @@ def test_vacuous_pin_is_detected_per_row_not_by_a_name_list(tmp_path):
 
 
 def test_table_3_screens_the_same_rows_as_table_1(tmp_path):
-    """'Every column must use the SAME rows' — the propagation table filtered on the old name
-    list while Table 1 moved to the measured screens, so a vacuous or tiny-space instance could
-    sit in the engine row and not the sampler row (or the reverse). The identity in Table 3 is
-    only meaningful over the same set the ratio is computed on."""
+    """Table 3 applies Table 1's screens; its identity only holds over the rows the ratio is
+    computed on."""
     rows = [row(f"i{i}.bench") for i in range(3)]
     rows.append(row("b19.bench", sps=1e8, sim_baseline={"p_accept": 1.0}))
     rows.append(row("tiny.bench", support=5))
@@ -352,8 +313,8 @@ def test_table_3_screens_the_same_rows_as_table_1(tmp_path):
 # --------------------------------------------------------------------- the propagation identity
 
 def test_propagation_identity_closes(tmp_path):
-    """samples/s ratio == (impl/s ratio) / (impl-per-sample ratio). Algebra, so it can only fail
-    if the columns are aggregated over different rows — which is what broke EPFL by 3x."""
+    """samples/s ratio == (impl/s ratio) / (impl-per-sample ratio). This is algebra, so it fails
+    only if the columns are aggregated over different rows."""
     rows = [row(f"i{i}.bench", sps=10.0 ** (5 + i), impl=1e9, cms_impl=2e6 * (i + 1))
             for i in range(4)]
     d = stage(tmp_path, "s", rows)
@@ -362,8 +323,8 @@ def test_propagation_identity_closes(tmp_path):
 
 
 def test_propagation_columns_share_one_row_set(tmp_path):
-    """An instance that propagates hard but emits NOTHING (EPFL `bar`) must not enter the
-    implications ratio while being absent from work-per-sample."""
+    """An instance that propagates but emits nothing (like EPFL `bar`) must not enter the
+    implications ratio while missing from work-per-sample."""
     d = stage(tmp_path, "s", [row(f"i{i}.bench") for i in range(3)]
               + [row("bar.aig", models=0, sps=0, impl=1e9)])
     p, v = prop_rates(d, "s", "tseitin"), cms_family(d, "s", "tseitin")
@@ -374,15 +335,14 @@ def test_propagation_columns_share_one_row_set(tmp_path):
 # --------------------------------------------------------------------- rivals, same rules
 
 def test_rival_zero_buckets_are_symmetric(tmp_path):
-    """A cell where NEITHER side scored was being credited to us as a win (DEMOTIC-miter 18/18,
-    HTS 14/15)."""
+    """A rival cell where neither side scored is not a win for us."""
     rows = [
         {"name": "c432", "variant": "raw", "demotic": {"unique_per_s": 10.0},
          "gpap": {"unique_per_s_est": 100.0}},                       # our win
         {"name": "c499", "variant": "raw", "demotic": {"unique_per_s": 0.0},
          "gpap": {"unique_per_s_est": 100.0}},                       # rival silent -> our win
         {"name": "c880", "variant": "raw", "demotic": {"unique_per_s": 10.0},
-         "gpap": {"unique_per_s_est": 0.0}},                         # WE are silent -> our loss
+         "gpap": {"unique_per_s_est": 0.0}},                         # we are silent -> our loss
         {"name": "c1355", "variant": "raw", "demotic": {"unique_per_s": 0.0},
          "gpap": {"unique_per_s_est": 0.0}},                         # neither -> nobody's win
         {"name": "c1908", "variant": "raw", "demotic": {"error": "timeout"}, "gpap": {}},
@@ -395,9 +355,9 @@ def test_rival_zero_buckets_are_symmetric(tmp_path):
 
 
 def test_rival_unmeasured_unique_is_not_a_gpap_zero(tmp_path):
-    """`unique_per_s_est` is None/0 when the OFF-timing coverage run collected nothing, which is
-    NOT "GPAP produced nothing" — the timed run's `n_models` says that. Reading the first as the
-    second published b11-c25 (42 models at a rare pin, ~15x the rival) as an outright LOSS."""
+    """`unique_per_s_est` is None or 0 when the off-timing coverage run collected nothing. That is
+    not a GPAP zero, which the timed run's `n_models` decides; reading it as one turns a win into
+    a loss."""
     rows = [
         {"name": "b11", "variant": "raw", "hts": {"unique_per_s": 0.05},        # not measured
          "gpap": {"unique_per_s_est": None, "unique_est_status": "no-coverage-sample",
@@ -414,14 +374,13 @@ def test_rival_unmeasured_unique_is_not_a_gpap_zero(tmp_path):
     assert v["nomeas"] == 2, "both the new and the legacy shape must be recognised"
     assert v["gpap0"] == 1, "a real zero is still a loss"
     assert v["n"] == 2 and v["wins"] == 1     # only w has a comparable ratio; z is the loss
-    # the columns must still add up to the cells
+    # the columns add up to the cells
     assert 1 + v["zero"] + v["gpap0"] + v["both0"] + v["nomeas"] + v["errors"] == v["cells"]
 
 
 def test_rival_zero_search_cell_is_screened_not_scored(tmp_path):
-    """A rival cell whose GPAP side did NO search (zero decisions, zero implications, models
-    emitted) measures the instance, not either sampler — a seed-mismatched b13 cell once carried
-    a 4.7e9x ratio this way. It leaves through its own `free` column, exactly as in Table 1."""
+    """A rival cell whose GPAP side did no search (zero decisions and implications, models
+    emitted) measures the instance, not either sampler. It leaves through `free`, as in Table 1."""
     rows = [
         {"name": "c432", "variant": "raw", "demotic": {"unique_per_s": 10.0},
          "gpap": {"unique_per_s_est": 100.0, "n_models": 5,
@@ -441,9 +400,8 @@ def test_rival_zero_search_cell_is_screened_not_scored(tmp_path):
 
 
 def test_rival_misaligned_row_is_excluded_and_counted(tmp_path):
-    """Table 2's text says constraint alignment is VERIFIED per row (`pin_check_ok`). A row that
-    FAILED that check compared two different tasks; whatever its ratio measures, it is not the
-    samplers — so it must leave through its own bucket, not sit silently inside the geomean."""
+    """A row that failed the per-row constraint-alignment check (`pin_check_ok`) compared two
+    different tasks, so it leaves through the exclusion column instead of entering the geomean."""
     rows = [
         {"name": "c432", "variant": "raw", "pin_check_ok": True,
          "demotic": {"unique_per_s": 10.0}, "gpap": {"unique_per_s_est": 100.0}},
@@ -455,12 +413,12 @@ def test_rival_misaligned_row_is_excluded_and_counted(tmp_path):
     assert v["misaligned"] == 1
     assert v["gm"] == pytest.approx(10.0) and v["n"] == 1, \
         "a row that failed the alignment check entered the ledger"
-    # it leaves through the one printed exclusion column, and the text names it
+    # it leaves through the one printed exclusion column, named in the text
     assert v["excl"] == 1 and v["excl_names"] == {"misaligned": ["c880"]}
 
 
 def test_rival_retry_row_replaces_rather_than_appends(tmp_path):
-    """A resumed harness re-emits a row; appending gave 25 rows in an 18-instance file."""
+    """A resumed harness re-emits a row; the later row replaces the earlier one."""
     rows = [
         {"name": "a", "variant": "raw", "hts": {"error": "no pycryptosat"}, "gpap": {}},
         {"name": "a", "variant": "raw", "hts": {"unique_per_s": 10.0},
@@ -473,9 +431,8 @@ def test_rival_retry_row_replaces_rather_than_appends(tmp_path):
 
 def test_rival_vacuous_pin_is_screened_like_table_1(tmp_path):
     """s526/b02/b05/b07 have constant last-cycle outputs at T=25, so pinning them is a tautology
-    and every sampler scores ~100%. Table 1 has always screened them; the rival table did not,
-    which was invisible while no vacuous instance was in the rival set — and became live when the
-    set became each rival's OWN published one (Recurrent's Table II includes s526)."""
+    and every sampler scores ~100%. Table 2 screens them as Table 1 does (Recurrent's own set
+    includes s526)."""
     rows = [
         {"name": "s386", "variant": "raw", "rcs": {"unique_per_s": 10.0},
          "gpap": {"unique_per_s_est": 100.0, "n_models": 5}},
@@ -487,16 +444,14 @@ def test_rival_vacuous_pin_is_screened_like_table_1(tmp_path):
     assert v["vacuous"] == 1, "the vacuous pin entered the rival ledger"
     assert v["n"] == 1 and v["gm"] == pytest.approx(10.0), \
         "the tautological cell moved the geomean"
-    # and the ledger still accounts for every cell exactly once
+    # the ledger still counts every cell exactly once
     assert (v["n"] + v["both0"] + v["nomeas"] + v["errors"] + v["free"] + v["misaligned"]
             + v["vacuous"]) == v["cells"]
 
 
 def test_rival_vacuous_pin_is_screened_before_the_rival_error_bucket(tmp_path):
-    """`b19` at T=25 is vacuous (measured p_accept 1.0) AND Recurrent-CircuitSAT fails to
-    initialize on it. Screens come before buckets in Table 2 exactly as in Table 1: with the
-    error bucket first, Table 1 counted b19 as vacuous while Table 2 booked the same row as a
-    rival failure — one stage, two ledgers (caught on the 2026-09-03 L4 campaign)."""
+    """Screens come before buckets in Table 2 as in Table 1: `b19` is both a vacuous pin and a
+    rival init failure, and both tables must book it as vacuous."""
     from eval.artifact.paper_tables import rival_cms_family
     rows = [rrow("s386", p_acc=0.05),
             rrow("b19", p_acc=1.0, rcs={"error": "did not initialize: a 1-step start_point probe"})]
@@ -512,11 +467,9 @@ def test_rival_vacuous_pin_is_screened_before_the_rival_error_bucket(tmp_path):
 
 
 def test_rival_gpap_that_produced_nothing_is_a_zero_not_unmeasured(tmp_path):
-    """`b01` under Recurrent's own target at T=25 (p_accept < 7e-8): GPAP delivered 0 models in
-    3 x 60 s, so no kept row and no distinct fraction — `unique_est_status` "no-sample-rows".
-    That is a GPAP ZERO (the rival's depth-pooled count found 30), not "unmeasured": the
-    unmeasured bucket is for a run that DID deliver models and could not estimate its distinct
-    fraction, which is what its caveat says. Caught on the 2026-09-03 L4 campaign."""
+    """A GPAP run that delivered no models (`unique_est_status` "no-sample-rows") is a GPAP zero.
+    The unmeasured bucket is for a run that delivered models but could not estimate its distinct
+    fraction."""
     rows = [rrow("s386", p_acc=0.05), rrow("b01", p_acc=0.0, p_accept_lt=7e-8, models=0)]
     rows[1]["gpap"]["unique_est_status"] = "no-sample-rows"
     rows[1]["rcs"] = {"unique_per_s": 3.66, "unique": 30, "unique_at_T": 0, "num_inputs": 40}
@@ -529,11 +482,9 @@ def test_rival_gpap_that_produced_nothing_is_a_zero_not_unmeasured(tmp_path):
 
 
 def test_rival_scatter_only_plots_cells_the_table_scores(tmp_path):
-    """The rival unique/s scatter classifies cells through `rival_cells`, imported — so a cell
-    Table 2 screens out (an unmeasured unique/s estimate, a failed rival run) must not become a
-    dot. The probe is the figure's 3-comparable-cell floor: with 2 ok rows plus 2 screened rows,
-    an implementation that plotted everything it loaded would see 4 points and draw; returning
-    None proves the screen ran before the count."""
+    """The rival scatter classifies cells through `rival_cells`, so a cell Table 2 screens out is
+    not plotted. The figure needs 3 comparable cells, so with 2 scored and 2 screened rows it
+    must draw nothing."""
     matplotlib = pytest.importorskip("matplotlib")
     matplotlib.use("Agg")
     import matplotlib.pyplot as plt
@@ -546,7 +497,7 @@ def test_rival_scatter_only_plots_cells_the_table_scores(tmp_path):
     screened = [
         {"name": "c1355", "variant": "raw", "demotic": {"unique_per_s": 10.0, "num_inputs": 41},
          "gpap": {"unique_per_s_est": None, "unique_est_status": "no-coverage-sample",
-                  "n_models": 42}},                             # unmeasured — NOT a GPAP zero
+                  "n_models": 42}},                             # unmeasured, not a GPAP zero
         {"name": "c1908", "variant": "raw", "demotic": {"error": "timeout"}, "gpap": {}},
     ]
     p = tmp_path / "rivals_demotic_native.json"
@@ -560,11 +511,9 @@ def test_rival_scatter_only_plots_cells_the_table_scores(tmp_path):
 
 
 def test_the_cmsgen_figures_classify_through_table_1s_rule(tmp_path):
-    """The GPAP-vs-CMSGen figures over the rival rows (Table 1's row, drawn; every Table 1 cell
-    at once) classify through `rival_cms_cells`, imported — so a vacuous pin or a refused
-    instance never becomes a dot, and the dumbbell's subtitle geomean is Table 1's. Same probe
-    as the rival scatter: the all-cells figure's 3-comparable-cell floor must count only what
-    the table scores."""
+    """The GPAP-vs-CMSGen figures classify through `rival_cms_cells`, so a vacuous pin or a
+    refused instance is not plotted and the dumbbell's geomean is Table 1's. Same 3-cell probe
+    as the rival scatter."""
     matplotlib = pytest.importorskip("matplotlib")
     matplotlib.use("Agg")
     import matplotlib.pyplot as plt
@@ -588,9 +537,8 @@ def test_the_cmsgen_figures_classify_through_table_1s_rule(tmp_path):
 # --------------------------------------------------------------- summary.md, the same ledger
 
 def test_summary_md_counts_zeros_the_papers_way(tmp_path):
-    """`summary.md`'s win column used to test `ratio >= 1`, which counts a CMSGen-zero row
-    (ratio == inf) as a win while showing no CMSGen=0 column at all — their zeros inside our
-    wins, ours in a column, the exact asymmetry the paper's ledger exists to prevent."""
+    """`summary.md` uses the paper's zero ledger: CMSGen=0 and GPAP=0 each get a column, so
+    CMSGen's zeros are not hidden inside our wins."""
     from eval.eval_plots import write_summary
     stage(tmp_path, "s", [
         row("win.bench"),                                     # finite win
@@ -612,9 +560,8 @@ def test_summary_md_counts_zeros_the_papers_way(tmp_path):
 
 
 def test_a_gpap_only_sweep_is_not_a_string_of_cmsgen_zero_wins(tmp_path):
-    """ABSENT is not ZERO: rows from a GPAP-only sweep (no --cmsgen) carry no cms arm at all,
-    and reading the missing key as "CMSGen scored 0" published `wins 10/10 | CMSGen=0: 10` over
-    a tool that never ran — found live on the 2026-09-02 engine-A/B campaign's summary.md."""
+    """Absent is not zero: rows from a GPAP-only sweep (no --cmsgen) carry no CMSGen arm and
+    must not read as CMSGen scoring 0."""
     from eval.eval_plots import write_summary
     gpap_only = []
     for i in range(3):
@@ -643,28 +590,25 @@ def _armless(name, **kw):
 
 
 def test_a_mixed_arm_stage_does_not_mint_phantom_cmsgen_zero_wins(tmp_path):
-    """The stage-level absent-vs-zero guard is not enough: a campaign resumed on a VM where the
-    cmsgen binary failed to restore appends ARMLESS rows to an armed file, the stage passes
-    "does anything here have an arm?", and every armless row falls into the CMSGen=0 bucket as
-    a win over a tool that never ran. The screen must be per ROW."""
+    """The absent-vs-zero screen is per row, not per stage: a resumed campaign can append armless
+    rows to an armed file, and those must not become CMSGen=0 wins."""
     d = stage(tmp_path, "s", [
         row("win.bench"),                                   # both ran, we win
-        row("realzero.bench", cms=0, cms_sps=0),            # CMSGen RAN and scored 0: a real win
+        row("realzero.bench", cms=0, cms_sps=0),            # CMSGen ran and scored 0: a real win
         _armless("neverran.bench"),                         # the comparison never happened
     ])
     v = cms_family(d, "s", "tseitin")
     assert v["inf"] == 1, "the armless row was minted into a CMSGen=0 win"
     assert v["noarm"] == 1 and v["noarm_names"] == ["neverran"]
     assert v["wins"] == 2 and v["n"] == 2
-    # the ledger still balances once the excluded row's own count is added back
+    # the ledger balances with the excluded row's count added back
     assert (v["n_gm"] + v["inf"] + v["gpap0"] + v["both0"] + v["free"] + v["vac"]
             + v["noarm"]) == v["inst"] == 3
 
 
 def test_a_crashed_cmsgen_is_not_a_zero_win(tmp_path):
-    """cmsgen_run records a spawn failure (missing binary, bad glibc on a fresh VM) as
-    cms_n_samples=0 plus cms_error. Scoring that zero as "CMSGen sampled nothing" publishes a
-    broken environment as a stage of outright wins — the floored-count trap's sibling."""
+    """A CMSGen spawn failure is recorded as cms_n_samples=0 plus cms_error. It is an error, not a
+    zero win."""
     d = stage(tmp_path, "s", [
         row("crashed.bench", cms=0, cms_sps=0.0, cms_error="FileNotFoundError: cmsgen"),
         row("ok.bench"),
@@ -685,8 +629,8 @@ def _verify(*argv):
 
 
 def test_verify_artifact_fails_a_mixed_arm_stage(tmp_path):
-    """paper_tables SCREENS a mixed stage; the verifier must FAIL it — the fix is re-running
-    the armless cells, not publishing around them."""
+    """paper_tables screens a mixed-arm stage; the verifier fails it, since the fix is to re-run
+    the armless cells."""
     stage(tmp_path, "s", [row("win.bench"), _armless("neverran.bench")])
     r = _verify(tmp_path)
     assert r.returncode == 1 and "MIXED CMSGen provenance" in r.stdout, r.stdout
@@ -700,13 +644,11 @@ def test_verify_artifact_fails_a_crashed_cmsgen_row(tmp_path):
 
 
 def test_verify_artifact_rederives_the_recheck_claim(tmp_path):
-    """--recheck used to be accepted and IGNORED — the 'VERIFIED per row, enforced by nobody'
-    shape. The verifier must re-derive the deterministic-match claim from the raw rows and fail
-    on a mismatch."""
+    """`--recheck` is re-derived from the raw rows; a mismatch in a deterministic field fails."""
     orig, rec = tmp_path / "orig", tmp_path / "rec"
     orig.mkdir(), rec.mkdir()
     stage(orig, "s", [row("a.bench"), row("b.bench")])
-    stage(rec, "s", [row("a.bench"), row("b.bench", M=999)])       # b re-measured a DIFFERENT M
+    stage(rec, "s", [row("a.bench"), row("b.bench", M=999)])       # b re-measured a different M
     r = _verify(orig, "--recheck", rec)
     assert r.returncode == 1 and "DETERMINISTIC" in r.stdout, r.stdout
     stage(rec, "s", [row("a.bench"), row("b.bench")])              # now they agree
@@ -716,8 +658,8 @@ def test_verify_artifact_rederives_the_recheck_claim(tmp_path):
 
 
 def test_verify_artifact_names_a_stage_that_never_wrote_its_json(tmp_path):
-    """A stage that crashes before writing its JSON leaves no other trace: the drivers print
-    their completion markers unconditionally and every other check only sees files that exist."""
+    """A stage that crashed before writing its JSON leaves no other trace, so the verifier names
+    the missing stages."""
     stage(tmp_path, "sk", [row("x.cnf", enc=None)])
     r = _verify(tmp_path)
     assert r.returncode == 0
@@ -726,10 +668,8 @@ def test_verify_artifact_names_a_stage_that_never_wrote_its_json(tmp_path):
 
 
 def test_uniformity_screens_subcube_instances(tmp_path):
-    """The campaign's own summary excludes full-subcube instances from its medians (the
-    don't-care filler, not the config under test, draws the bits there — two configs return
-    bit-identical statistics). Table 4 must apply the SAME screen, or the paper's median can
-    disagree with the tool that produced the data."""
+    """Table 4 excludes full-subcube instances, as the uniformity campaign's own summary does:
+    there the don't-care filler, not the config under test, draws the bits."""
     from eval.artifact.paper_tables import uniformity
     rows = [
         {"kind": "circuit", "meta": {"subcube": False},
@@ -747,8 +687,8 @@ def test_uniformity_screens_subcube_instances(tmp_path):
 
 
 def test_prop_rates_has_no_row_when_every_cell_is_degenerate(tmp_path):
-    """Table 3 must describe the runs Table 1 kept. When the screens remove EVERY cell of a
-    family, the honest Table 3 row is no row — not a quiet fallback to the screened cells."""
+    """When the screens remove every cell of a family, Table 3 has no row for it rather than
+    falling back to the screened cells."""
     d = stage(tmp_path, "s", [row("b02.bench"), row("b05.bench")])       # all vacuous pins
     assert prop_rates(d, "s", "tseitin") is None
 
@@ -767,23 +707,22 @@ def test_vacuous_pins_excluded_only_where_present(tmp_path):
 # ------------------------------------------------- the e2e column: who is charged for setup
 
 def timed_row(name, *, sps=1e6, cms_sps=1e4, pre=0.5, wall_total=2.0, **kw):
-    """A cell whose GPAP side spent `pre` of its end-to-end wall PREPARING (parse/construct/ELS/
-    warmup/mining) rather than sampling."""
+    """A cell whose GPAP side spent fraction `pre` of its end-to-end wall preparing (parse,
+    construct, ELS, warmup, mining) rather than sampling."""
     r = row(name, **kw)
     r["wall_total_s"] = wall_total
     r["phases"] = {"parse": 0.0, "construct": pre * wall_total, "warmup": 0.0,
                    "mine": 0.0, "rebuild": 0.0, "recheck": 0.0,
                    "timed": (1 - pre) * wall_total}
-    # what benchmark.py records: the e2e rate is models/wall_total, so the e2e ratio is the
-    # steady-state one scaled by the fraction of the wall that was actually sampling
+    # as benchmark.py records it: e2e rate = models / wall_total, i.e. the steady-state ratio
+    # scaled by the sampling share of the wall
     r["ratio_e2e"] = (sps * (1 - pre)) / cms_sps
     return r
 
 
 def test_e2e_column_charges_gpap_for_its_own_preprocessing(tmp_path):
-    """CMSGen's rate is samples/subprocess-wall — its parse and setup are already inside it. So a
-    table that scores GPAP on its steady-state sampling rate alone charges one side and not the
-    other; `gm_e2e` must exist beside `gm` and must be lower by exactly the preparation share."""
+    """CMSGen's rate already includes its setup, so `gm_e2e` charges GPAP for its preparation too
+    and is lower than `gm` by exactly the preparation share."""
     d = stage(tmp_path, "seq-c25-rare",
               [timed_row("a", pre=0.5), timed_row("b", pre=0.5)])
     v = cms_family(d, "seq-c25-rare", "tseitin")
@@ -794,9 +733,8 @@ def test_e2e_column_charges_gpap_for_its_own_preprocessing(tmp_path):
 
 
 def test_pre_frac_is_a_median_not_an_average_of_ratios(tmp_path):
-    """One instance whose formula takes seconds to build must not drag the whole family's
-    reported preparation share — the column is a median over cells, like every other spread
-    number in these tables."""
+    """`pre_frac` is a median over cells, so one slow-to-build instance does not set the family's
+    preparation share."""
     rows = [timed_row("a", pre=0.1), timed_row("b", pre=0.1), timed_row("c", pre=0.9)]
     v = cms_family(stage(tmp_path, "seq-c25-rare", rows), "seq-c25-rare", "tseitin")
     assert v["pre_frac"] == pytest.approx(0.1)
@@ -805,9 +743,9 @@ def test_pre_frac_is_a_median_not_an_average_of_ratios(tmp_path):
 # ------------------------------------------------- the parallelism grant handed to the rivals
 
 def test_batch_is_sized_to_the_same_share_of_the_card_we_take():
-    """A rival's unique/s is near-proportional to the batch we hand it (measured: DEMOTIC c1355
-    1k -> 1M is 564x), so the batch is the parallelism grant, not a detail of their setup. The
-    rule is the one GPAP uses on itself — the largest that fits in 0.80 of free VRAM."""
+    """A rival's unique/s is near-proportional to its batch, so the batch is a parallelism grant
+    (docs/findings/RIVAL_FAIRNESS_FINDINGS.md §2). `fit_batch` uses the rule GPAP uses on itself:
+    the largest batch that fits the VRAM budget."""
     from eval.rivals.rival_common import GRAPH_BYTES, fit_batch
     budget = 8 << 30
     # 1000 gates x 25 frames of DEMOTIC graph: budget / (work x bytes-per-row)
@@ -818,19 +756,16 @@ def test_batch_is_sized_to_the_same_share_of_the_card_we_take():
 
 
 def test_batch_never_returns_something_that_cannot_run():
-    """A formula so wide that not even the smallest rung fits must still yield a runnable batch —
-    the rival reporting an OOM is a result; the harness handing it 0 is a bug."""
+    """When no rung fits, the batch is still the smallest rung: a rival OOM is a result, a batch
+    of 0 is a harness bug."""
     from eval.rivals.rival_common import BATCH_LADDER, fit_batch
     assert fit_batch(10 ** 12, "recurrent", budget_bytes=1 << 20) == BATCH_LADDER[0]
 
 
 def test_the_rival_is_granted_the_largest_rung_that_runs_not_the_modelled_one():
-    """THE grant rule (2026-09-04). Our VRAM model was measured at num_steps=10 and we run
-    num_steps=1, so it predicts LOW — and a gradient sampler's unique/s is near-proportional to
-    its batch, so predicting low takes the rival's score away. Measured on the L4 the day before
-    the 2026-09-03 campaign: the modelled rung under-grants c880 1.53x, c2670 2.12x, c3540 1.85x,
-    c7552 3.87x. That campaign shipped exactly that under-grant. The walk now starts at the TOP
-    of the ladder, and the model's opinion decides nothing."""
+    """The grant is the largest ladder rung that runs, walked down from the top. Our VRAM model
+    predicts low and its rung under-grants the rival, so the model decides nothing here
+    (docs/findings/RIVAL_FAIRNESS_FINDINGS.md §16)."""
     from eval.rivals.rival_common import run_at_batch
     calls = []
 
@@ -846,10 +781,9 @@ def test_the_rival_is_granted_the_largest_rung_that_runs_not_the_modelled_one():
 
 
 def test_run_at_batch_is_one_measurement_per_instance():
-    """Rungs are rejected on FEASIBILITY — OOM, driver refusal, or not finishing inside the wall
-    budget — never on throughput, and exactly one rung is ever measured. That is what separates
-    this from the one-rung-up probe removed on 2026-09-03, which kept the bigger rung when it
-    also ran FASTER: a best-of-two over the rival's batch."""
+    """Rungs are rejected on feasibility (OOM, driver refusal, not finishing inside the wall
+    budget), never on throughput, and exactly one rung is measured. Keeping a bigger rung because
+    it ran faster would be a best-of-two over the rival's batch."""
     from eval.rivals.rival_common import run_at_batch
     calls = []
 
@@ -864,12 +798,10 @@ def test_run_at_batch_is_one_measurement_per_instance():
 
 
 def test_the_first_run_of_a_process_is_discarded():
-    """The first GPU run of a session is ~3.3x slow (CUDA context, autotuning, clocks), and
-    whichever instance goes first eats all of it: `c1355` was published at 0.25x of its warm rate
-    on 2026-09-03 for exactly this reason. One discarded run per (tool, process) — per PROCESS,
-    because the supervisor resumes in a fresh interpreter after every VM reclaim. The warmup
-    batch is TINY (256): the cold start is batch-independent, and a big warmup batch paid an
-    O(circuit) model build that on s15850.1 at T=50 was 1,073 s of discarded work per VM."""
+    """The first GPU run of a process is slow (CUDA context, autotuning, clocks), so one small
+    warmup run per (tool, process) is discarded. Per process, because the supervisor resumes in
+    a fresh interpreter after every VM reclaim; small, because the cold start does not depend on
+    the batch."""
     import eval.rivals.rival_common as rc
     rc._WARMED.discard("toolX")
     calls = []
@@ -883,9 +815,8 @@ def test_the_first_run_of_a_process_is_discarded():
 
 
 def test_the_warmup_uses_the_short_timeout_closure_when_one_is_given():
-    """The discarded warmup fires `warmup_run`, not the measured `run`, so the caller can warm at
-    a short timeout — a big circuit's graph build makes even a discarded run cost ~1,000 s, and
-    re-paying that on every VM reclaim starved the T=50 heavy cells (2026-09-07)."""
+    """The discarded warmup goes through `warmup_run`, not the measured `run`, so the caller can
+    cap it at a short timeout: a large circuit's graph build makes even a discarded run costly."""
     import eval.rivals.rival_common as rc
     rc._WARMED.discard("toolW")
     warmed, measured = [], []
@@ -899,10 +830,8 @@ def test_the_warmup_uses_the_short_timeout_closure_when_one_is_given():
 # ------------------------------------------------- mirroring: results only exist once local
 
 def test_mirror_accepts_every_artifact_type_not_just_json(tmp_path):
-    """A rented VM dies with its disk, so a result exists only once mirrored — and the mirror
-    must not silently DROP an artifact because of how it validates it. Validating every file as
-    JSON (which colab_supervisor did until 2026-08-25) discards non-JSON artifacts entirely: the
-    GPAP-arm cache tarball, the one thing that makes a rival-side re-run cheap, never landed."""
+    """A rented VM's disk dies with it, so a result exists only once mirrored. The mirror
+    validates by file type, so non-JSON artifacts such as the GPAP-arm cache tarball are kept."""
     import json
     import tarfile
     from eval.colab.colab_supervisor import _intact
@@ -916,8 +845,8 @@ def test_mirror_accepts_every_artifact_type_not_just_json(tmp_path):
 
 
 def test_mirror_rejects_a_download_caught_mid_write(tmp_path):
-    """The check it replaced was there for a reason: a file copied while the VM was writing it
-    reads back truncated, and a truncated result must never replace a good local copy."""
+    """A file copied while the VM was writing it reads back truncated and must not replace a good
+    local copy."""
     import json
     import tarfile
     from eval.colab.colab_supervisor import _intact
@@ -934,11 +863,9 @@ def test_mirror_rejects_a_download_caught_mid_write(tmp_path):
 
 
 def test_a_timeout_steps_down_but_the_probe_is_bounded():
-    """A rung the rival cannot FINISH with was not granted to it, so a timeout steps down like an
-    OOM — recording it as the rival's result is how a granted-too-large cell reads as a rival
-    failure. But the walk must stay bounded: measured on the L4, HTS's three tseitin cells
-    stepped 1M -> 1,000 at the full 300 s cap on every rung, ~40 min per cell. Past
-    `probe_budget_s` the walk jumps straight to the modelled rung and says so."""
+    """A rung the rival cannot finish was not granted to it, so a timeout steps down like an OOM.
+    The walk stays bounded: past `probe_budget_s` it jumps to the modelled rung and records the
+    truncation in the row."""
     from eval.rivals.rival_common import run_at_batch
     calls = []
 
@@ -956,11 +883,9 @@ def test_a_timeout_steps_down_but_the_probe_is_bounded():
 
 # --------------------------------------------------------------- one home for the screens
 
-#: The rules that decide which cells a published number is computed over. They live in
-#: `eval/artifact/paper_tables.py` ONCE and every other consumer imports them; nothing enforced
-#: it, and "the second tool re-derived the first tool's rule" is the failure mode the whole file
-#: above exists for — a re-derivation drifts silently, and the two tables then disagree about
-#: what was excluded while both look correct.
+#: The rules that decide which cells a published number covers. They are defined once, in
+#: `eval/artifact/paper_tables.py`, and imported everywhere else: a re-derived copy drifts
+#: silently, and two tables then disagree about what was excluded.
 SCREENS = ["zero_search", "select_cells", "cms_family", "prop_rates", "rival_family",
            "encoders_in", "unique_unmeasured", "sound_failed"]
 
@@ -971,7 +896,7 @@ def _eval_modules():
 
 
 def test_each_screening_rule_is_defined_exactly_once_across_eval():
-    """A second definition anywhere under eval/ is the drift itself, whatever it is called."""
+    """A second definition anywhere under eval/ is drift, whatever it is called."""
     import ast
 
     home = Path(_REPO_ROOT) / "eval" / "artifact" / "paper_tables.py"
@@ -988,11 +913,8 @@ def test_each_screening_rule_is_defined_exactly_once_across_eval():
 
 @pytest.mark.parametrize("mod", ["slide_tables.py", "soft_price_tables.py"])
 def test_the_other_generators_import_the_paper_rules_rather_than_restating_them(mod):
-    """The deck and the soft-price sweep must be the SAME aggregation, by construction.
-
-    They print numbers a reader compares against the paper's, so a private copy of `cms_family`
-    in either one is a table that can quietly diverge from the one it is supposed to mirror.
-    """
+    """The deck and soft-price tables import `cms_family`, so their numbers cannot diverge from
+    the paper's."""
     import ast
 
     root = Path(_REPO_ROOT)
@@ -1004,12 +926,12 @@ def test_the_other_generators_import_the_paper_rules_rather_than_restating_them(
         f"{mod} does not import the paper's family aggregation — is it re-deriving it?"
 
 
-# ---------------------------------------------------------------- Table 1 on the rival rows (the converged protocol)
+# ---------------------------------------------------------------- Table 1 on the rival rows
 
 def rrow(name, *, models=1000, sps=1e6, cms=1000, cms_sps=1e4, p_acc=0.01, dec=1e6, impl=1e8,
          cms_impl=1e6, cms_dec=1e5, arm=True, **extra):
-    """A rival-stage row of the converged protocol: the rival, the GPAP arm and the CMSGen arm
-    on ONE CNF. A tool that emitted nothing has a zero rate (as it does in a real row)."""
+    """A rival-stage row: the rival, the GPAP arm and the CMSGen arm on one CNF. A tool that
+    emitted nothing has a zero rate, as in a real row."""
     sps = sps if models else 0.0
     cms_sps = cms_sps if cms else 0.0
     r = {"name": name, "variant": "raw", "cycles": 25, "p_accept": p_acc, "support": 40,
@@ -1029,10 +951,9 @@ def rrow(name, *, models=1000, sps=1e6, cms=1000, cms_sps=1e4, p_acc=0.01, dec=1
 
 
 def test_table_1_is_read_off_the_rival_rows_with_table_2s_screens_and_table_1s_ledger(tmp_path):
-    """The converged protocol: Table 1 (GPAP vs CMSGen) comes from the SAME files and cells as
-    Table 2, screened first (vacuous / no-search / tiny), then the symmetric zero ledger with
-    absent-is-not-zero and crashed-is-not-zero, and the rival paper's own subset beside the
-    whole set. Every instance is counted exactly once and a reader can add the columns up."""
+    """Table 1 (GPAP vs CMSGen) comes from the same files and cells as Table 2: screened first
+    (vacuous, no-search, tiny), then the symmetric zero ledger, where absent and crashed are not
+    zero. Every instance is counted once and the columns add up."""
     from eval.artifact.paper_tables import (RIVAL_CMS_SETS, RIVALS, rival_cms_family,
                                             rival_prop_rates)
 
@@ -1040,11 +961,11 @@ def test_table_1_is_read_off_the_rival_rows_with_table_2s_screens_and_table_1s_l
         "Tables 1 and 2 must name the same stages"
     rows = [rrow("s386", sps=1e6, cms_sps=1e4),               # finite 100x, in their paper
             rrow("b12", sps=2e5, cms_sps=1e4),                #  finite 20x, in their paper
-            rrow("b04", sps=5e4, cms_sps=1e4),                #  finite  5x, NOT in their paper
+            rrow("b04", sps=5e4, cms_sps=1e4),                #  finite  5x, not in their paper
             rrow("b11", cms=0),                               # CMSGen=0: a win, no ratio
             rrow("b03", models=0),                            # GPAP=0: a loss, no ratio
             rrow("b13", models=0, cms=0),                     # both=0
-            rrow("b19", p_acc=1.0),                           # vacuous pin: screened FIRST
+            rrow("b19", p_acc=1.0),                           # vacuous pin: screened first
             rrow("b10", dec=0, impl=0),                       # no-search: screened
             rrow("b01", arm=False),                           # absent is not zero
             rrow("b09", cms=0, cms_error="OSError: boom"),    # a crash is not a zero
@@ -1071,15 +992,15 @@ def test_table_1_is_read_off_the_rival_rows_with_table_2s_screens_and_table_1s_l
     assert v["gm_e2e"] == pytest.approx(v["gm"] / 1.8) and v["pre_frac"] == pytest.approx(0.5)
     assert v["depth"] == "T=25" and v["encoder"] == "abc:fast" and v["patched"] is True
     assert v["cores"] == ["libgpap 0.3.0+abc"] and v["unsound"] == 0 and v["cpu"] == "x"
-    # Table 3 over the SAME cells: the identity closes because every column shares one row set
+    # Table 3 over the same cells, so the identity closes
     p = rival_prop_rates(str(tmp_path), "recurrent_rare", "rcs")
     assert p["n"] == 3 and p["encoder"] == "abc:fast"
     assert p["ratio"] / p["work"] == pytest.approx(v["gm"])
 
 
 def test_a_rivals_only_sweep_has_no_table_1_and_a_refusal_is_not_a_zero(tmp_path):
-    """No CMSGen arm anywhere -> no Table 1 row (not a column of CMSGen zeros); a GPAP-side
-    refusal (oversize / envelope / encode failure) is an error, in no column."""
+    """With no CMSGen arm anywhere there is no Table 1 row, not a column of CMSGen zeros. A
+    GPAP-side refusal (oversize, envelope, encode failure) is an error, not a zero."""
     from eval.artifact.paper_tables import rival_cms_family
 
     (tmp_path / "rivals_demotic_native.json").write_text(json.dumps(
@@ -1095,9 +1016,8 @@ def test_a_rivals_only_sweep_has_no_table_1_and_a_refusal_is_not_a_zero(tmp_path
 
 
 def test_verify_artifact_gates_the_cmsgen_arm_on_rival_rows(tmp_path):
-    """A campaign with no `gpap bench` directory at all is legitimate now (Table 1 comes off the
-    rival rows), and the SAME gates apply there: a clean stage passes; a floored zero, a
-    mixed-arm stage and a crashed subprocess each FAIL."""
+    """Table 1 can come from rival rows alone, under the same gates: a clean stage passes; a
+    floored zero, a mixed-arm stage and a crashed CMSGen each fail."""
     riv = tmp_path / "riv"
     riv.mkdir()
     f = riv / "rivals_recurrent_rare.json"
@@ -1119,11 +1039,8 @@ def test_verify_artifact_gates_the_cmsgen_arm_on_rival_rows(tmp_path):
 
 
 def test_the_generator_survives_a_stage_whose_every_cell_is_degenerate(tmp_path):
-    """A rival stage where the only measured cell is a no-search cell (b13 at a shallow T
-    collapses to a 2-clause CNF under ABC) has no geomean at all; the caveat that quotes 'what
-    the geomean would read with them in' formatted None and crashed the whole generator on the
-    first campaign directory of the converged protocol. The generator must still write both
-    files, with the stage's Table 1 row present and its no-search count stated."""
+    """A stage whose only cell is screened as no-search has no geomean. The generator must still
+    write both files, with that stage's Table 1 row present and its no-search count stated."""
     import subprocess
 
     riv = tmp_path / "riv"
@@ -1147,15 +1064,9 @@ def test_the_generator_survives_a_stage_whose_every_cell_is_degenerate(tmp_path)
 
 
 def test_table_2_has_one_clock_the_rivals_own_and_no_end_to_end_column(tmp_path):
-    """Protocol v1.0 (2026-09-06, RIVAL_FAIRNESS_FINDINGS.md §17). The rival-facing ratio is
-    GPAP's STEADY-STATE unique/s over the rival's own metric — it excludes construction, mining
-    and warm-up, as the rival's model_runtime excludes its model build — and that is the ONLY
-    clock Table 2 has. An end-to-end column across an in-process sampler and a subprocess
-    gradient tool had four definitions in three review rounds (0.8x, 7.6x, 20.9x, 11.8x on the
-    same rows) and measured process start-up on cells whose real work is under a second; it is
-    removed by rule, not redefined. The rows below carry every wall field the old column read,
-    and nothing may read them: the aggregate has no e2e key, the Markdown and LaTeX headers no
-    e2e column, and the steady-state ratio is unchanged by the walls."""
+    """Table 2 has one clock: GPAP's steady-state unique/s over the rival's own metric, both
+    excluding model build (RIVAL_FAIRNESS_FINDINGS.md §17). The rows carry every wall field an
+    e2e column would read, and nothing may read them; Table 1 keeps its e2e column."""
     import os
     import subprocess
     import sys
@@ -1204,10 +1115,9 @@ def test_verify_artifact_fails_a_rival_row_whose_samples_break_the_circuit(tmp_p
 
 
 def test_tiny_space_reads_the_solution_count_not_the_input_hypercube():
-    """`c1355` under the rare pin: 41 input bits (2^41 points) yet 0.56 distinct in 1,000 kept
-    rows — ~700 solutions, a space both tools ENUMERATE. The old screen read the hypercube and
-    let it through; the estimate is now the minimum of the hypercube, p_accept x hypercube (or
-    its upper bound when no hit was observed) and the count the repeat rate implies."""
+    """The tiny-space screen reads the solution count, not the input hypercube (`c1355` under the
+    rare pin: 41 input bits, ~700 solutions). The estimate is the minimum of the hypercube,
+    p_accept x hypercube (its upper bound when no hit was seen) and the repeat-rate count."""
     from eval.artifact.paper_tables import solution_space_estimate, tiny_space
     from eval.rivals.rival_common import space_from_distinct
 
@@ -1230,14 +1140,11 @@ def test_tiny_space_reads_the_solution_count_not_the_input_hypercube():
     assert not tiny_space({"support": 41}), "no evidence: the hypercube, as before"
 
 
-# ---------------------------------------------- the 2026-09-04 referee pass, screen by screen
+# ---------------------------------------------- one run per row, exact counts, more screens
 
 def test_the_whole_delivered_set_is_deduplicated_not_a_window():
-    """Both rivals dedup EXACTLY, over their whole output, off their own clock: Recurrent calls
-    `torch.unique(dim=0)` per depth, DEMOTIC once its timer stops. We estimated a distinct
-    fraction from 1,000 rows and applied it to runs delivering up to 1,048,576 models — and the
-    "bias bounded at 7e-4" claim that rested on it bounded the collision rate INSIDE the window,
-    not the run's distinct fraction. `exact_distinct` is the same quantity theirs is."""
+    """Both rivals deduplicate their whole output exactly, off their own clock, so
+    `exact_distinct` does the same over every delivered row instead of estimating from a window."""
     import numpy as np
     from eval.rivals.rival_common import exact_distinct
 
@@ -1249,9 +1156,8 @@ def test_the_whole_delivered_set_is_deduplicated_not_a_window():
 
 
 def test_a_published_row_is_one_run_not_a_field_wise_median():
-    """Medianing every column independently publishes a row no execution produced: on the
-    2026-09-03 campaign 138 field/cell combinations came from a different seed than the row's
-    own rate, and Table 3 then divided one seed's implications by another seed's models."""
+    """A row is one run. Medianing each field independently publishes a row no execution
+    produced, and Table 3 would divide one seed's implications by another seed's models."""
     from eval.rivals.rival_common import median_run
 
     runs = [{"seed": 5, "sps": 10.0, "n_models": 111, "impl": 1.0},
@@ -1264,10 +1170,8 @@ def test_a_published_row_is_one_run_not_a_field_wise_median():
 
 
 def test_a_proved_unsat_cell_is_screened_before_any_zero():
-    """`b01` under Recurrent's own target is unreachable at exactly T=25 (their sampler runs to
-    50 and pools every depth), so the 2026-09-03 campaign booked a GPAP=0 LOSS against a solution
-    that does not exist. Proved-UNSAT is a fact about the instance and gets its own column;
-    `None` (unasked, or unresolved inside the budget) is never read as satisfiable."""
+    """A cell proved UNSAT at its depth is a fact about the instance, not a GPAP=0 loss, and gets
+    its own bucket. `None` (unasked, or unresolved inside the budget) is not a proof."""
     from eval.artifact.paper_tables import rival_cells
 
     row = rrow("b01", models=0, cms=0, p_acc=0.0)
@@ -1284,10 +1188,8 @@ def test_a_proved_unsat_cell_is_screened_before_any_zero():
 
 
 def test_the_circuit_variant_scored_is_the_one_better_for_the_rival():
-    """We hand GPAP an ABC-optimized CNF; the rival must be able to have the ABC-optimized
-    CIRCUIT. Where a stage holds both variants the table takes the rival's better one — the same
-    tie-break `num_steps` uses — instead of pooling both, which would count every instance twice.
-    """
+    """Where a stage holds both circuit variants, the table scores the one better for the rival
+    (the tie-break `num_steps` uses) instead of counting the instance twice."""
     from eval.artifact.paper_tables import rival_cells
 
     raw = rrow("c880", sps=1e6)
@@ -1302,17 +1204,15 @@ def test_the_circuit_variant_scored_is_the_one_better_for_the_rival():
 
 
 def test_a_nearly_free_cell_is_screened_like_a_free_one():
-    """`c432` under the rare pin leaves 4 effective variables and delivers a model per 1.08
-    IMPLICATIONS, against a next-lowest surviving cell of 44.1 — and being a hair off an exact
-    zero, it passed the knife-edge screen and became the ENTIRE DEMOTIC-rare geomean at 89,786x.
-    A sampler doing at most one implication per solution is reading bits out of a hypercube."""
+    """A cell doing about one implication per model is reading bits out of a hypercube, so the
+    zero-search screen is a threshold, not an exact zero (`c432` under the rare pin)."""
     from eval.artifact.paper_tables import zero_search
 
     near_free = {"n_models": 933_900, "sps": 1.079e8, "decisions_per_s": 3.16e8,
-                 "implications_per_s": 1.176e8}                    # 1.09 impl / model, as measured
+                 "implications_per_s": 1.176e8}                    # 1.09 implications per model
     assert zero_search(near_free), "the c432-shaped cell is still in the geomean"
-    # the threshold sits in a two-order gap: the next unscreened cell on that campaign is b13 at
-    # 44.1 implications per model, so any value in (1.09, 44.1) gives the same partition
+    # the next unscreened cell measured 44.1 implications per model, so any threshold in
+    # (1.09, 44.1) gives the same partition
     real = {"n_models": 50_000, "sps": 1e5, "decisions_per_s": 1e6, "implications_per_s": 4.41e6}
     assert not zero_search(real), "a cell doing 44 implications per model is not free"
     exact_zero = {"n_models": 10, "sps": 1e5, "decisions_per_s": 0, "implications_per_s": 0}
@@ -1320,12 +1220,8 @@ def test_a_nearly_free_cell_is_screened_like_a_free_one():
 
 
 def test_the_emitted_latex_ledger_sums_to_the_cell_count(tmp_path):
-    """THE check a referee performs in ten seconds. Both LaTeX captions assert that their columns
-    account for every instance, and on the 2026-09-03 campaign neither did: the emitter dropped
-    `tiny` and `vacuous` from Table 1 (11 vs 10, 29 vs 24) and `n`, `tiny` and `vacuous` from
-    Table 2, so `89,786.0x` printed with nothing saying it was one cell. The Markdown emitter was
-    correct throughout — only the artifact that goes into the paper was wrong, which is exactly
-    why this asserts on the emitted file rather than on the dicts behind it."""
+    """Every ledger row of the emitted LaTeX sums to its cell count. This parses the file rather
+    than the dicts behind it, because the LaTeX and Markdown emitters can drift apart."""
     import json
     import re
     import subprocess
@@ -1352,7 +1248,7 @@ def test_the_emitted_latex_ledger_sums_to_the_cell_count(tmp_path):
         if not line.startswith("    ") or "&" not in line or "multicolumn" in line:
             continue
         col = [c.strip() for c in line.strip().rstrip("\\\\").split("&")]
-        # Table 1 (2026-09-07 shape, no encoder column when every row shares one):
+        # Table 1 (no encoder column when every row shares one):
         #   family depth targets inst n ratio e2e pre% wins C=0 G=0 excl.  ->  inst = n+C0+G0+excl
         # Table 3's rows have 12 cells too; their 4th is the encoder, Table 1's is `inst`.
         if col[0].startswith(("ISCAS", "ITC")) and len(col) == 12 and re.fullmatch(r"\d+", col[3]):
@@ -1370,14 +1266,9 @@ def test_the_emitted_latex_ledger_sums_to_the_cell_count(tmp_path):
 
 
 def test_the_generated_methodology_text_describes_the_harness_that_exists():
-    """The tables carry their own methods paragraph, and it is the paper's. It described the
-    SUPERSEDED harness for one release — "stepping down a rung only if the driver refuses the
-    size ... a timeout recorded as the result" and "a FIXED 1,000 ... rows for the distinct-
-    fraction estimate" — both true before 2026-09-04 and false after, so regenerating the tables
-    would have shipped a methods section that misdescribed the run that produced them.
-
-    Prose cannot be gated by re-derivation, so it is gated by absence: the phrases that describe
-    the old rules must not reappear, and the ones naming the current rules must be present."""
+    """The generated methods paragraph describes the current harness. Prose cannot be
+    re-derived, so it is gated by phrases: the old rules' wording is absent and the current
+    rules' wording present."""
     import inspect
 
     from eval.artifact import paper_tables
@@ -1397,11 +1288,9 @@ def test_the_generated_methodology_text_describes_the_harness_that_exists():
 
 
 def test_the_rival_calibration_evidence_is_printed_not_just_pointed_at(tmp_path):
-    """The methods prose says the papers' values are "measured beside" the shipped setting. For
-    one release that measurement lived only in `rivals_steps_calibration.json`, a file the tables
-    named and never read — so RESULTS.md could not say whether the setting the campaign used was
-    the better one FOR THE RIVAL. The generator now prints every arm, its ratio to the pinned arm
-    and the verdict, from the same run that prints the tables."""
+    """The generator prints the rival step calibration (every arm, its ratio to the pinned arm,
+    the verdict), so the results show whether the pinned setting was the better one for the
+    rival."""
     import inspect
     import json as _json
 
@@ -1430,15 +1319,13 @@ def test_the_rival_calibration_evidence_is_printed_not_just_pointed_at(tmp_path)
                    "**FLIP**: 10 measured faster than the pinned 1",  # demotic's, printed not acted on
                    "EVIDENCE, not configuration"]:
         assert needle in md, f"calibration section lacks {needle!r}:\n{md}"
-    # ...and build() actually emits it under --rivals (source-inspected: build has no return)
+    # build() emits it under --rivals (checked in the source: build returns nothing)
     assert "rival_calibration(args.rivals)" in inspect.getsource(paper_tables.build)
 
 
 def test_the_e2e_column_belongs_to_the_same_run_as_the_rate_it_is_paired_with():
-    """A row is ONE execution, and every column of it must come from that execution. `_gpap_e2e`
-    took its own median across seeds while `sps`/`unique_per_s_est` came from the picked run, so
-    Table 1's e2e ratio and Table 2's e2e column mixed two different seed selections inside one
-    quotient — the field-wise-median defect, reappearing in a derived quantity."""
+    """`_gpap_e2e` reads the e2e rate of the run picked for `sps`, not its own median across
+    seeds, so a ratio never mixes two seed selections."""
     from eval.artifact.paper_tables import _gpap_e2e
 
     g = {"sps": 500.0, "sps_e2e": 400.0,
@@ -1451,13 +1338,9 @@ def test_the_e2e_column_belongs_to_the_same_run_as_the_rate_it_is_paired_with():
 
 
 def test_a_rival_that_found_a_handful_of_solutions_is_scored_and_disclosed(tmp_path):
-    """Until 2026-09-07 a rival count under 30 left Table 2 through `rival<30`: DEMOTIC found ONE
-    solution on `c880` under the rare pin (ratio 7,209,624x) and FOUR on `c3540` (86,202x), and
-    the floor kept both out — conservative, every cell it removed a huge win of ours. The
-    user's rule replaced the floor: the rival papers' own tables print rates of 0.1 unique/s,
-    so a rival that scored anything is scored. The cell enters the geomean; what survives is the
-    DISCLOSURE — `rival_family` names it with its count and ratio, the caveats print it, and a
-    row standing on one or two such cells is flagged as an illustration."""
+    """A rival that found only a few solutions is scored, not floored out: the cell enters the
+    geomean and `rival_family` names it with its count and ratio for the caveats. A rival that
+    found nothing stays a zero."""
     from eval.artifact.paper_tables import THIN_DENOMINATOR, rival_cells, rival_family
 
     def cell(name, n_unique, ups):
@@ -1471,10 +1354,10 @@ def test_a_rival_that_found_a_handful_of_solutions_is_scored_and_disclosed(tmp_p
         "a rival that scored anything is scored (2026-09-07)"
     (_, _, ok_bucket, o2, r2), = rival_cells([cell("c2670", THIN_DENOMINATOR * 10, 500.0)], "rcs")
     assert ok_bucket == "ok" and o2 / r2 > 0
-    # a rival that found NOTHING is a different thing — an outright win, not a thin denominator
+    # a rival that found nothing is an outright win, not a thin denominator
     (_, _, zero_bucket, _, _), = rival_cells([cell("c499", 0, 0.0)], "rcs")
     assert zero_bucket == "rival0", "a rival zero must stay an outright win"
-    # ...and the aggregate discloses the thin cell by name, count and ratio
+    # the aggregate names the thin cell with its count and ratio
     rows = [cell("c880", 1, 1.2), cell("c2670", THIN_DENOMINATOR * 10, 500.0)]
     (tmp_path / "rivals_demotic_comb_rare.json").write_text(json.dumps(rows))
     v = rival_family(str(tmp_path), "demotic_comb_rare", "rcs")
@@ -1485,14 +1368,10 @@ def test_a_rival_that_found_a_handful_of_solutions_is_scored_and_disclosed(tmp_p
 
 
 def test_the_table_generators_import_without_torch_or_numpy():
-    """TIER 1 OF THE ARTIFACT IS CPU-ONLY, and this is what makes that true.
-
-    A reviewer regenerating every table from the frozen JSONs must not need a CUDA wheel: the
-    generators are pure JSON readers. They reach the soundness verdict through `gpap.verdict`, a
-    stdlib-only leaf, precisely because `gpap.sampling.pipeline` — and indeed any module under
-    `gpap.sampling`, whose package `__init__` builds the sampler — drags torch and numpy in.
-    Asserting it in a SUBPROCESS with those modules blocked, because this interpreter has them
-    installed and would import them happily either way (the check would then prove nothing)."""
+    """The table generators import without torch, numpy, triton or matplotlib, so the tables can
+    be regenerated on a CPU-only machine. They reach the soundness verdict through the
+    stdlib-only `gpap.verdict`, since anything under `gpap.sampling` imports torch. Checked in a
+    subprocess with those modules blocked, because this interpreter has them installed."""
     import subprocess
     import sys
 

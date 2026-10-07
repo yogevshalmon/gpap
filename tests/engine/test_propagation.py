@@ -61,7 +61,7 @@ def test_fixpoint_matches_the_reference(mode, shift):
 
 
 def _free_decisions(rng, engine, K, B, contradict_rows=()):
-    """(K, B) literal indices over distinct FREE variables per row, as the sampler decides.
+    """(K, B) literal indices over distinct free variables per row, as the sampler decides.
     Rows in `contradict_rows` get an l/~l pair instead, to take the conflict path."""
     asg = engine.assignment.cpu()
     dec = np.full((K, B), -1, dtype=np.int64)

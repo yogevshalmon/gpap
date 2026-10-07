@@ -14,10 +14,8 @@ REPO = paths.repo_root()
 @pytest.mark.parametrize("value", ["~/x", "rel"])
 @pytest.mark.parametrize("var", ["GPAP_HOME", "GPAP_RESULTS", "GPAP_EXPERIMENTS"])
 def test_every_root_override_is_expanded_and_made_absolute(var, value, monkeypatch):
-    """ALL THREE roots, one normalization. They had three: raw, a `~` had a shell `mkdir -p` a
-    directory literally NAMED `~`, and a relative root resolved against whatever directory the
-    caller happened to stand in. Parametrized over the roots because the bug was that they
-    differed — testing one proves nothing about the others."""
+    """All three roots expand `~` and resolve a relative override to an absolute path, the same
+    way. Parametrized over the roots because each has its own code path."""
     from eval import paths as ev
     ask = {"GPAP_HOME": lambda: str(paths.gpap_home()),
            "GPAP_RESULTS": ev.results_root,
@@ -44,11 +42,9 @@ def test_the_three_roots_stay_distinct_and_the_record_is_outside_the_checkout(mo
 
 
 def test_results_root_and_display_path_survive_a_symlinked_checkout(tmp_path):
-    """`realpath` is load-bearing, not decorative: reached through a symlink from another cwd, an
-    imported module's `__file__` KEEPS the symlink, so a lexical parent lands in a different tree —
-    and `display_path` then failed its prefix match and demoted a `$GPAP_RESULTS/...` provenance
-    header to a bare basename. Both are asserted through the symlink, because on a plain checkout
-    the lexical and physical answers coincide and this proves nothing."""
+    """Through a symlinked checkout, `__file__` keeps the symlink, so the roots must use
+    `realpath`; otherwise `display_path` misses its prefix match. Run through a symlink because on
+    a plain checkout the lexical and physical paths coincide."""
     link = tmp_path / "checkout"
     link.symlink_to(REPO, target_is_directory=True)
     env = {k: v for k, v in os.environ.items() if k not in ("GPAP_RESULTS", "GPAP_EXPERIMENTS")}
@@ -66,15 +62,12 @@ def test_results_root_and_display_path_survive_a_symlinked_checkout(tmp_path):
 
 
 def test_display_path_ships_a_var_prefix_or_a_bare_basename_and_nothing_else(monkeypatch):
-    """Two generators leaked a home directory into a published artifact before this existed, so the
-    guarantee is: a path under a known root becomes `$VAR/...`, and anything else is reduced to ONE
-    component — never a local directory tree, which is what carries a username.
-
-    `/` is the one input that comes back as itself: there is no basename to fall back to, and it
-    discloses nothing, so it is allowed rather than special-cased in the function."""
+    """A path under a known root becomes `$VAR/...`; anything else is reduced to its basename, so
+    no local directory (which can carry a username) ships. `/` comes back as itself: it has no
+    basename and discloses nothing."""
     from eval.paths import display_path
-    # An inherited $GPAP_RESULTS pointing at an ancestor of the checkout would make the repo
-    # paths below match the RECORD root first and render `$GPAP_RESULTS/...`.
+    # An inherited $GPAP_RESULTS at an ancestor of the checkout would match the repo paths below
+    # first and render them as `$GPAP_RESULTS/...`.
     monkeypatch.delenv("GPAP_RESULTS", raising=False)
     assert display_path(str(REPO / "eval" / "paths.py")) == "$GPAP_REPO/eval/paths.py"
     for outside in ("/etc/passwd", "/var/tmp/somebody/secret.json",
@@ -86,9 +79,8 @@ def test_display_path_ships_a_var_prefix_or_a_bare_basename_and_nothing_else(mon
 
 
 def test_the_vm_layout_is_the_vms_and_reads_its_override_at_call_time(monkeypatch):
-    """Reading the LOCAL `$GPAP_HOME` for a VM path pointed a download at a directory that exists
-    only on this machine. `/root/.gpap` — the wrong default it was given next — exists on no
-    machine the bootstrap builds."""
+    """The VM's `.gpap` path is derived from the VM repo layout, never from the local
+    `$GPAP_HOME`, and `GPAP_VM_ROOT` is read at call time."""
     from eval import paths as ev
     monkeypatch.delenv("GPAP_VM_ROOT", raising=False)
     monkeypatch.delenv("GPAP_VM_REPO", raising=False)

@@ -1,25 +1,16 @@
-"""Invariants of the DOCUMENTATION — the ones whose breakage is silent.
-
-`docs/` is not prose beside the code: the engine, the eval layer, the public C headers and the
-GENERATED paper text all cite it, and they cite it by file and by SECTION NUMBER. A pointer that
-no longer resolves does not fail anything — it just quietly stops being evidence. Four such
-pointers were found rotting on 2026-09-11: `INTEGRATION.md`, cited three times, had never existed
-in this repository at all, and `docs/paper/KERNEL_AB.md` was still named by its own generator and
-by the finding it belonged to nine days after being deleted.
-
-What is mechanical is checked here:
+"""Invariants of the documentation whose breakage is silent. Code, the eval layer and the
+generated paper cite `docs/` by file and section number, and a dead pointer fails nothing.
 
   * a doc path named anywhere in the source trees exists;
   * a `FINDINGS.md §N` citation resolves to a real section of that file;
-  * every findings file opens with its status block, so nobody has to guess whether a number in
-    it is current, which card produced it, and whether the code still carries the rule;
-  * no absolute home path or username reaches a tracked file (one lived in a committed
-    `docs/slides/l4_results.tex` for a month, and `make_artifact.sh` would have shipped it);
-  * a relative Markdown link resolves.
+  * every findings file opens with its status block;
+  * no absolute home path or username reaches a tracked file;
+  * a relative Markdown link resolves;
+  * the INSIGHTS.md table lists every findings file and nothing else;
+  * the package version is the same in its three declarations;
+  * no shipped file names a path that `.gitattributes` keeps out of archives.
 
-What it does NOT check is whether a doc is TRUE. A finding whose numbers have been superseded
-still passes every check here; that is what the status block is for, and reading is what enforces
-it. Host-only: this reads files, it runs nothing.
+None of this checks whether a doc is true. Host-only: it reads files and runs nothing.
 """
 import pathlib
 import re
@@ -31,35 +22,32 @@ from tests.conftest import REPO_ROOT
 REPO = pathlib.Path(REPO_ROOT)
 FINDINGS = REPO / "docs" / "findings"
 
-#: Trees whose files may cite a doc. `docs/` itself is included: a findings file citing a dead
-#: sibling is the same defect as code citing one.
+#: Trees whose files may cite a doc, `docs/` included.
 SOURCE_TREES = ("cpp", "gpap", "eval", "scripts", "tests", "examples", "docs")
 #: ...plus the front doors, which are not in any tree.
 ROOT_DOCS = ("README.md", "ARTIFACT.md", "CLAUDE.md")
 SOURCE_SUFFIXES = (".py", ".c", ".h", ".cpp", ".hpp", ".sh", ".md", ".tex", ".toml", ".cff")
 
-#: A path mentioned in prose or code that we require to exist. Deliberately narrow: `docs/...`
-#: and the two front doors are OURS, so a dead one is always our bug, whereas a bare
-#: `gpap/sampling/` in a sentence is not worth the false positives.
+#: A path that must exist. Narrow on purpose: a dead `docs/...` or front-door path is always our
+#: bug, while matching any source path in prose would give false positives.
 DOC_PATH = re.compile(r"(?<![\w/.])(docs/[\w./*-]*[\w/*]|ARTIFACT\.md|cpp/README\.md)")
-#: `*` is in the class so an interpolated segment lands INSIDE the match and the wildcard
-#: test below sees it; leaving it out truncates the match and hides the wildcard.
-#: `NAME_FINDINGS.md §12b` / `UNIFORMITY_FINDINGS.md §4b` — the citation form used everywhere.
+#: `*` is in the class so an interpolated segment stays inside the match, where the wildcard
+#: test below skips it.
+#: The citation form, e.g. `UNIFORMITY_FINDINGS.md §4b`.
 CITATION = re.compile(r"([A-Z][A-Z0-9_]*_FINDINGS\.md)\s*§\s*(\d+[a-z]?)")
 #: A heading that OPENS a section: `## 4.`, `### 16b.`, `## §16`, `## 4b —`.
 HEADING = re.compile(r"^#{2,4}\s*§?\s*(\d+[a-z]?)\b", re.M)
 #: Every relative Markdown link target, minus anchors and absolute URLs.
 MD_LINK = re.compile(r"\[[^\]]*\]\(([^)#>]+?)(?:\s+\"[^\"]*\")?\)")
 
-#: The fields the status block must carry, in the order a reader needs them.
+#: The fields the status block must carry.
 REQUIRED_FIELDS = ("**Status:**", "**Measured:**")
-#: ...and one of these, which is the distinction the directory exists to draw: is this file
-#: evidence for a rule the CODE carries, or is it the only place the thing is written down?
+#: ...and one of these: is the file evidence for a rule the code carries, or the only record?
 PROVENANCE_FIELDS = ("**Rule lives in:**", "**Record only:**")
 
 
 def _tracked_files():
-    """Every file we are willing to police, as (path, text). Binaries and vendored trees out."""
+    """Every policed file as (path, text); binaries and vendored trees excluded."""
     out = []
     for tree in SOURCE_TREES:
         for p in sorted((REPO / tree).rglob("*")):
@@ -70,12 +58,8 @@ def _tracked_files():
 
 
 def _readable(path):
-    """The file's text as a READER sees it, not as the syntax around it is written.
-
-    LaTeX escapes an underscore (`UNIFORMITY\\_FINDINGS.md`) and Python interpolates a path
-    (`f"docs/assets/animation/gpap_propagate_{...}.gif"`). Both name a real thing; neither
-    matches a raw path regex. Unescaping and marking interpolation as the wildcard it already is
-    keeps this check about dead pointers rather than about quoting.
+    """The file's text as a reader sees it: LaTeX escapes (`\\_`, `\\&`) undone and each
+    interpolated `{...}` replaced by the wildcard `*`, so escaped and f-string paths still match.
     """
     text = path.read_text(encoding="utf-8", errors="replace")
     if path.suffix == ".tex":
@@ -88,21 +72,16 @@ def _findings_files():
 
 
 def test_every_doc_path_named_in_the_tree_exists():
-    """A citation that does not resolve is not a weaker pointer, it is no pointer at all.
-
-    This is the check that would have caught `INTEGRATION.md` on the day it was written, and
-    `docs/paper/KERNEL_AB.md` on the day the table was deleted.
-    """
+    """Every `docs/...` and front-door path named in the tree exists."""
     dead = []
     for path, text in _tracked_files():
         if path.name == pathlib.Path(__file__).name:
-            continue            # this file names the dead paths on purpose, as the history
+            continue            # this file may name dead paths as examples
         for m in DOC_PATH.finditer(text):
             target = m.group(1).rstrip(".,;:")
             if (REPO / target).exists():
                 continue
-            # `docs/paper/RESULTS.md` is generated into the checkout; a glob or a shell variable
-            # inside the path is a pattern, not a claim about one file.
+            # a glob or shell variable in the path is a pattern, not one file
             if any(c in target for c in "*$<"):
                 continue
             line = text[:m.start()].count("\n") + 1
@@ -113,12 +92,8 @@ def test_every_doc_path_named_in_the_tree_exists():
 
 
 def test_every_findings_section_citation_resolves():
-    """Section numbers are an API.
-
-    `eval/artifact/paper_tables.py` emits "RIVAL_FAIRNESS_FINDINGS.md §17" into the GENERATED
-    `docs/paper/RESULTS.md`, and tests assert against section numbers by hand. So renumbering a
-    section silently rewrites what a published sentence points at. Sections are append-only; this
-    is the guard that says so out loud.
+    """Every findings section citation names a real section. Generated paper text cites
+    section numbers, so sections are append-only: renumbering would silently repoint citations.
     """
     dead = []
     for path, text in _tracked_files():
@@ -138,10 +113,8 @@ def test_every_findings_section_citation_resolves():
 
 @pytest.mark.parametrize("path", _findings_files(), ids=lambda p: p.name)
 def test_every_findings_file_opens_with_its_status_block(path):
-    """Status, date and card, and whether the code carries the rule — before the first claim.
-
-    Without it a reader cannot tell a live measurement from a superseded one, and both look
-    equally authoritative. Three files in this directory hold numbers that must NOT be quoted.
+    """Each findings file states its status, when and where it was measured, and whether the
+    code carries the rule, before its first claim, so a superseded number is not read as live.
     """
     head = path.read_text().split("\n## ", 1)[0]
     missing = [f for f in REQUIRED_FIELDS if f not in head]
@@ -154,20 +127,16 @@ def test_every_findings_file_opens_with_its_status_block(path):
         f"is written down). That distinction is what makes the file safe to delete, or not.")
 
 
-#: The shapes of a path that names one machine, mirrored from eval/artifact/check_leaks.sh: that
-#: script gates the SHIPPED tree, this test the checkout, and bash and Python cannot share one
-#: definition — so each names the other. tests/experiments/test_artifact_gate.py proves the script refuses each.
+#: Path shapes that name one machine, mirrored from eval/artifact/check_leaks.sh (which gates the
+#: shipped tree; this test gates the checkout). tests/experiments/test_artifact_gate.py proves
+#: the script refuses each.
 _LEAK_SHAPES = (r"/home/[a-z][\w.-]*/", r"/Users/[A-Za-z][\w.-]*/",
                 r"-home-[a-z][\w.-]*-", r"/claude-[0-9]+/")
 
 
 def test_no_tracked_file_carries_an_absolute_home_path():
-    """A committed `/home/<user>/...` is a leak and a lie: it names a machine nobody else has.
-
-    `docs/slides/l4_results.tex` carried one for a month, written there by a generator, and
-    `eval/artifact/make_artifact.sh` archives HEAD — so it would have shipped to reviewers. The
-    second leak found had no `/home/` in it: an agent's scratch directory with the home path
-    flattened into its name. Hence shapes, not one pattern.
+    """No tracked file names a path on one machine. Checked as several shapes, since a home
+    path can also appear flattened into a scratch directory's name.
     """
     leaks = []
     for path, text in _tracked_files():
@@ -203,13 +172,9 @@ def test_every_relative_markdown_link_resolves():
 
 
 def test_the_findings_index_lists_every_findings_file_and_nothing_else():
-    """INSIGHTS.md is the way in. A file missing from it is a file nobody will read; a row
-    pointing at a deleted file is a promise the directory does not keep.
-
-    Only the TOPIC TABLE counts, not a passing mention in a paragraph. The table is the
-    navigational contract — it is what says whether a file is current evidence or historical
-    record — and a file cited only in prose has no such row. Matching prose links too made this
-    check toothless: dropping a file's table row left it green.
+    """INSIGHTS.md's topic table links every findings file and no missing one. Only table rows
+    count: a file linked only from prose has no status row, and counting prose would hide a
+    dropped row.
     """
     index = (FINDINGS / "INSIGHTS.md").read_text()
     rows = [ln for ln in index.splitlines() if ln.startswith("|")]
@@ -222,15 +187,9 @@ def test_the_findings_index_lists_every_findings_file_and_nothing_else():
 
 
 def test_the_python_package_version_is_the_same_number_in_all_three_places():
-    """`pyproject.toml`, `gpap/__init__.py` and `CITATION.cff` each state the package version.
-
-    Three copies of one number drift, and the one that drifts is the one nobody installs from:
-    a `CITATION.cff` a release forgot is a citation to the wrong software.
-
-    NOT the same number as libgpap's. `cpp/CMakeLists.txt` carries the C ABI version (0.3.0,
-    SOVERSION 1) with its own break history, and `gpap_version()` returns that one. Conflating
-    them would erase the ABI signal, so they are deliberately independent and this check does not
-    look at CMake.
+    """`pyproject.toml`, `gpap/__init__.py` and `CITATION.cff` state the same package version.
+    libgpap's ABI version (cpp/CMakeLists.txt, returned by `gpap_version()`) is independent on
+    purpose and not checked here.
     """
     import ast
     init, proj_f, cite_f = (REPO / "gpap" / "__init__.py"), (REPO / "pyproject.toml"), \
@@ -242,8 +201,8 @@ def test_the_python_package_version_is_the_same_number_in_all_three_places():
     proj = re.search(r"^version = \"([^\"]+)\"", proj_f.read_text(), re.M)
     cite = re.search(r"^version: (\S+)", cite_f.read_text(), re.M)
     assert pkg and proj and cite, "a version declaration went missing entirely"
-    # Labels derived from the anchored paths, not written out: a literal like "gpap/__init__.py"
-    # both drifts and trips tests/repo/test_suite_hygiene.py's working-directory detector.
+    # Labels come from the anchored paths: a literal "gpap/__init__.py" would trip
+    # test_suite_hygiene.py's relative-path check.
     found = {str(init.relative_to(REPO)): pkg, str(proj_f.relative_to(REPO)): proj.group(1),
              str(cite_f.relative_to(REPO)): cite.group(1)}
     assert len(set(found.values())) == 1, f"the package version disagrees with itself: {found}"
@@ -251,8 +210,8 @@ def test_the_python_package_version_is_the_same_number_in_all_three_places():
 
 
 def _export_ignored():
-    """The paths `.gitattributes` keeps out of every archive `git archive` makes — which is what
-    the artifact packager and GitHub's zip download both are."""
+    """Paths `.gitattributes` keeps out of every `git archive` (the artifact packager and
+    GitHub's zip download)."""
     out = []
     for line in (REPO / ".gitattributes").read_text().splitlines():
         body = line.split("#")[0].strip()
@@ -262,14 +221,8 @@ def _export_ignored():
 
 
 def test_no_shipped_file_names_a_path_no_archive_carries():
-    """An `export-ignore` line deletes a file from every archive while leaving it in the
-    checkout, so a reference to it reads fine here and dangles for everyone who receives the
-    tarball — the same dead-path class as the deleted `INTEGRATION.md`, reintroduced from the
-    other end, and invisible to the test above because that one only checks that a path exists
-    HERE.
-
-    So: whatever `.gitattributes` withholds from archives may not be named by anything that
-    ships. Adding an `export-ignore` line is therefore also a promise to reword its references.
+    """No shipped file names an `export-ignore` path: the reference resolves in the checkout but
+    dangles in every archive, which the path-exists check above cannot see.
     """
     ignored = _export_ignored()
     assert ignored, "no export-ignore entries — this gate would assert nothing"

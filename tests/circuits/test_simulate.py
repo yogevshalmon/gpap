@@ -1,9 +1,6 @@
-"""Bit-parallel simulation (gpap/circuits/simulate.py): the rejection-sampling baseline,
-rare-target selection, and the encoder-independent sample check.
-
-The load-bearing invariant: `_run_bench`/`_run_aig` must agree BIT-FOR-BIT with the scalar
-reference simulators (`bench.simulate` / `aig2cnf.simulate_aig`) that define the pinned-target
-semantics — everything else (p_accept, rare_target, simulate_check) rides on that equality.
+"""Bit-parallel simulation (gpap/circuits/simulate.py): the rejection baseline, rare-target
+selection and the sample check. Everything rests on `_run_bench`/`_run_aig` agreeing bit for bit
+with the scalar reference simulators that define the pinned-target semantics.
 """
 import itertools
 
@@ -96,8 +93,8 @@ def test_bitparallel_aig_matches_reference_exhaustive(aig_circ):
 
 
 def test_p_accept_exact_on_combinational_and(tmp_path):
-    # y = AND(a, b): p_accept is exactly 3/4 (target 0) or 1/4 (target 1) — the estimate must
-    # land within binomial noise of whichever the seed-random target picked.
+    # y = AND(a, b): p_accept is 3/4 (target 0) or 1/4 (target 1); the estimate must land
+    # within binomial noise of the one the seed picked.
     p = tmp_path / "and.bench"
     p.write_text("INPUT(a)\nINPUT(b)\nOUTPUT(y)\ny = AND(a, b)\n")
     from gpap.circuits.bench import parse_bench, random_target
@@ -122,8 +119,7 @@ def test_rare_target_is_rarer_and_consistent(bench_circ):
 
 
 def test_rare_target_cnf_is_sat_with_matching_projections(tmp_path):
-    # AND of 3 inputs: rare pattern is y=1 (p=1/8) with exactly ONE solution — the rare-target
-    # CNF must be SAT and its full solution set must be that single assignment.
+    # AND of 3 inputs: the rare pattern is y=1 (p=1/8), which has exactly one solution.
     p = tmp_path / "and3.bench"
     p.write_text("INPUT(a)\nINPUT(b)\nINPUT(c)\nOUTPUT(y)\ny = AND(a, b, c)\n")
     from itertools import product
@@ -180,7 +176,7 @@ def test_simulate_check_through_pipeline_bits(tmp_path, bench_circ):
 
 
 def test_vacuous_pin_reads_p_accept_one(tmp_path):
-    # constant output: every pattern accepted — the degenerate end of the spectrum
+    # constant output: every pattern is accepted
     p = tmp_path / "const.bench"
     p.write_text("INPUT(a)\nOUTPUT(y)\nn1 = AND(a)\nn2 = NOT(a)\nn3 = OR(n1, n2)\ny = BUFF(n3)\n")
     r = sim_baseline(str(p), 1, seed=5, n_min=1 << 16, budget_s=0.1, hard_cap_s=1.0)

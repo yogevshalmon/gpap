@@ -1,18 +1,6 @@
-"""The uniformity statistics the evaluation layer runs on (`eval/uniformity/metrics.py`).
-
-They are NOT part of the library: a uniformity number is a CLAIM about a distribution, and the
-honest ones need either the whole solution set (enumeration) or conditional sampling (Barbarik).
-What is pinned here is the machinery those claims rest on:
-
-  chi2_sf          — against table values (no scipy dependency to compare to at runtime).
-  uniformity_stats exact mode — accepts genuinely uniform multinomial counts, rejects a
-                   planted skew (deterministic RNG; thresholds far from the noise floor).
-  collision mode   — l2_ratio flags a heavy repeat pattern with |S| unknown; collision-free
-                   samples report the birthday floor.
-  enumerate_projections — the exact-mode input: complete vs capped, and it must say which.
-
-The campaign that uses them end to end is tests/experiments/test_uniformity_fuzz.py (and, at full size,
-eval/uniformity/fuzz_uniformity.py).
+"""The uniformity statistics in `eval/uniformity/metrics.py`: `chi2_sf` against table values,
+`uniformity_stats` in exact and collision mode, and `enumerate_projections` (complete vs capped).
+The end-to-end use is tests/experiments/test_uniformity_fuzz.py.
 """
 import numpy as np
 import pytest
@@ -37,7 +25,7 @@ def test_exact_mode_accepts_uniform_and_rejects_skew():
     u = uniformity_stats(uni.tolist(), n, S=S)
     assert u["mode"] == "exact" and u["p"] > 0.01 and u["tv"] < 0.05
 
-    w = np.array([3.0] * (S // 2) + [1.0] * (S // 2))     # 3:1 skew — far past the noise floor
+    w = np.array([3.0] * (S // 2) + [1.0] * (S // 2))     # 3:1 skew, far past the noise floor
     skew = rng.multinomial(n, w / w.sum())
     u2 = uniformity_stats(skew.tolist(), n, S=S)
     assert u2["p"] < 1e-6 and u2["tv"] > 0.2
@@ -55,14 +43,14 @@ def test_single_solution_space():
 
 
 def test_empty_sample_is_its_own_mode():
-    """"nothing collected" is not "uniform" — a caller must be able to tell them apart."""
+    """An empty sample reports its own mode, not "uniform"."""
     u = uniformity_stats([], 0)
     assert u["mode"] == "empty" and u["n"] == 0
 
 
 # ------------------------------------------------------------------------------ collision mode
 def test_collision_mode_flags_heavy_skew_without_S():
-    # 1000 samples: one value repeated 500x + 500 singletons -> l2_ratio >> 1 for ANY |S|
+    # 1000 samples: one value repeated 500x + 500 singletons -> l2_ratio >> 1 for any |S|
     counts = [500] + [1] * 500
     u = uniformity_stats(counts, 1000)
     assert u["mode"] == "collision" and u["l2_ratio"] > 100
@@ -75,7 +63,7 @@ def test_collision_mode_collision_free_reports_birthday_floor():
 
 
 def test_collision_mode_mild_repeats_consistent():
-    # 2000 samples over ~1900 distinct with doubletons only — small l2_ratio, no flag
+    # 2000 samples over ~1900 distinct with doubletons only: small l2_ratio, no flag
     counts = [2] * 100 + [1] * 1800
     u = uniformity_stats(counts, 2000)
     assert u["l2_ratio"] < 1.5 and "consistent" in u["note"]

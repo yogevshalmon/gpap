@@ -1,21 +1,19 @@
-"""Invariants of the TEST SUITE itself — the ones whose breakage is silent.
+"""Invariants of the test suite and repo layout whose breakage is silent (a broken test usually
+stops testing rather than failing):
 
-A broken test does not usually fail; it stops testing. The three shapes that have actually
-happened here get a guard, because none of them announces itself:
+  * no test reaches into the checkout by a path relative to the working directory;
+  * every test can fail (an assertion, `pytest.raises` or a checking helper);
+  * no skip mark sits on a helper, where pytest ignores it;
+  * the conftest path anchors exist;
+  * every repo-root constant resolves to the repo root;
+  * only the two paths modules name a managed directory;
+  * every internal import resolves;
+  * every shell ask for a path is guarded against an empty answer;
+  * the no-git file walk sees what git sees;
+  * the default pytest run covers every test directory except tests/experiments.
 
-  * a path into the checkout written relative to the PROCESS's working directory, so the suite
-    only passes from the repo root (32 tests died with FileNotFoundError from `tests/`, and one
-    of them `pytest.skip`ped instead — a real check disappearing in silence);
-  * a test with nothing that can raise — no assertion, no `pytest.raises`, no checking helper;
-  * a `skipif` MARK on a helper function rather than on a test, which pytest only honours on
-    collected items and which therefore guards nothing (that is how a support-line helper once guarded nothing).
-
-None of these catches the deepest form — a test whose assertions all hold for the wrong reason
-(the 8|24 A/B comparing the base split against itself, the emission spy watching a call the
-sampler no longer makes). Those are found by reading, and by making each gate fail on demand;
-what is mechanical is checked here.
-
-Host-only: this reads the test sources, it does not run them.
+A test whose assertions hold for the wrong reason is not caught here. Host-only: this reads
+sources and runs nothing.
 """
 import ast
 import os
@@ -30,21 +28,16 @@ from tests.conftest import REPO_ROOT
 #: The checkout.
 REPO = pathlib.Path(REPO_ROOT)
 TESTS = REPO / "tests"
-#: The directories a test may want to reach into. `tests/conftest.py` exports REPO_ROOT /
-#: BENCH_DIR / SEQ_DIR / COMB_DIR; a bare relative string used as a WHOLE path is the bug.
+#: Directories a test may reach into. `tests/conftest.py` exports REPO_ROOT / BENCH_DIR /
+#: SEQ_DIR / COMB_DIR; a bare relative string used as a whole path is the bug.
 CHECKOUT_DIRS = ("benchmarks/", "eval/", "scripts/", "cpp/", "gpap/", "build/", "docs/")
 
 
 def _unanchored_path_strings(path):
-    """String literals that name a checkout path and are NOT joined onto an anchor.
+    """String literals that name a checkout path and are not joined onto an anchor.
 
-    Parsing rather than grepping, for two reasons. The prose in these files talks about
-    `benchmarks/circuits/...` and `scripts/build_abc.sh` constantly, so a text search reads every
-    mention as a use — docstrings are dropped here explicitly. And a FRAGMENT is legitimate:
-    `Path(__file__).resolve().parents[1] / "cpp/include/gpap/gpap.hpp"` is anchored, and so is
-    anything handed to `os.path.join(SEQ_DIR, ...)`. Only a literal standing on its own as a path
-    depends on the working directory, so operands of `/` and non-leading `join` arguments are
-    excluded — leaving exactly the shape that broke.
+    Parsed rather than grepped, so docstrings (which mention such paths) are skipped, and so are
+    fragments joined onto an anchor: operands of `/` and non-leading `join` arguments.
     """
     tree = ast.parse(path.read_text())
     skip = set()
@@ -55,10 +48,10 @@ def _unanchored_path_strings(path):
                 and body and isinstance(body[0], ast.Expr) \
                 and isinstance(body[0].value, ast.Constant):
             skip.add(id(body[0].value))
-        # `<anchor> / "fragment"` (pathlib) — either operand
+        # `<anchor> / "fragment"` (pathlib): either operand
         if isinstance(node, ast.BinOp) and isinstance(node.op, ast.Div):
             skip.update({id(node.left), id(node.right)})
-        # `os.path.join(<anchor>, "fragment", ...)` — everything after the first argument
+        # `os.path.join(<anchor>, "fragment", ...)`: every argument after the first
         if isinstance(node, ast.Call) and getattr(node.func, "attr", None) == "join":
             skip.update(id(a) for a in node.args[1:])
     return [(n.lineno, n.value) for n in ast.walk(tree)
@@ -67,12 +60,9 @@ def _unanchored_path_strings(path):
 
 
 def test_no_test_reaches_into_the_checkout_by_a_relative_path():
-    """Paths are anchored on `tests/conftest.py`'s REPO_ROOT, never on `os.getcwd()`.
-
-    `pytest tests/` run from anywhere but the repo root used to fail 32 tests outright and skip a
-    33rd — the occ/split check over a real benchmark, which looks for `benchmarks/sampling/*.cnf`
-    and calls `pytest.skip("no benchmark CNFs in the checkout")` when it finds none. A check that
-    turns itself off when it cannot find its input is the worst version of this: green, and gone.
+    """Paths are anchored on `tests/conftest.py`'s REPO_ROOT, never on the working directory, so
+    the suite passes from anywhere. Otherwise a test that skips when its input is missing would
+    silently stop running.
     """
     offenders = []
     for path in sorted(TESTS.rglob("*.py")):
@@ -85,9 +75,8 @@ def test_no_test_reaches_into_the_checkout_by_a_relative_path():
 
 
 def test_the_relative_path_detector_actually_fires(tmp_path):
-    """...and it must be able to see one, or the check above passes on its own blind spot.
-
-    Both shapes at once: the bare literal must be reported and the anchored fragment must not."""
+    """The detector reports a bare literal and ignores anchored fragments, so the check above is
+    not blind."""
     src = tmp_path / "t.py"
     src.write_text('import os\n'
                    'A = "benchmarks/circuits/bench/seq/b03.bench"\n'
@@ -97,23 +86,19 @@ def test_the_relative_path_detector_actually_fires(tmp_path):
     assert [v for _, v in got] == ["benchmarks/circuits/bench/seq/b03.bench"], got
 
 
-#: Tests where "it did not raise" IS the assertion, so there is nothing to assert. Named rather
-#: than pattern-matched: the list is short, and each entry is a claim someone has to defend.
+#: Tests where not raising is the whole claim. Named rather than pattern-matched, so each entry
+#: has to be justified.
 NO_ASSERT_BY_DESIGN = {
-    # freeing the sampler after its engine must not touch freed memory — ASan is the oracle
+    # freeing the sampler after its engine must not touch freed memory (ASan is the oracle)
     "test_freeing_the_sampler_does_not_touch_a_dead_engine",
-    # the parser must ACCEPT these files; anything it returns is fine
+    # the parser must accept these files; what it returns does not matter
     "test_dimacs_keeps_structural_leniency",
 }
 
 
 def test_every_test_can_actually_fail():
-    """A test with no assertion, no `pytest.raises` and no checking helper cannot fail.
-
-    That is the terminal form of the bug this file is about: it runs, it is green, and it is not
-    a test. `assert*`-named calls (numpy's array comparisons) and `_check*` helpers count — they
-    raise on mismatch — and the handful where an absent exception really is the whole claim are
-    named in NO_ASSERT_BY_DESIGN above.
+    """Every test has an assertion, a `pytest.raises` or a checking helper (`assert*` and
+    `_check*` calls count), or is listed in NO_ASSERT_BY_DESIGN.
     """
     toothless = []
     for path in sorted(TESTS.rglob("test_*.py")):
@@ -135,9 +120,7 @@ def test_every_test_can_actually_fail():
 
 
 def test_no_skip_mark_sits_on_a_helper_where_pytest_cannot_see_it():
-    """pytest honours marks on COLLECTED items only. On a plain helper a `@pytest.mark.skipif`
-    is inert decoration, so the guard it looks like silently is not one — which is how a helper
-    that needs libgpap came to raise GpapError on every caller on a tree with no library."""
+    """pytest honours marks only on collected tests, so a skip mark on a helper guards nothing."""
     offenders = []
     for path in sorted(TESTS.rglob("*.py")):
         for node in ast.walk(ast.parse(path.read_text())):
@@ -156,16 +139,14 @@ def test_no_skip_mark_sits_on_a_helper_where_pytest_cannot_see_it():
 
 @pytest.mark.parametrize("name", ["REPO_ROOT", "BENCH_DIR", "SEQ_DIR", "COMB_DIR"])
 def test_the_anchored_paths_exist(name):
-    """...and the anchors themselves must point at something, or every path built on them is a
-    FileNotFoundError one layer down."""
+    """The conftest anchors point at real directories."""
     from tests import conftest
     assert pathlib.Path(getattr(conftest, name)).is_dir(), name
 
 
-#: Every way this tree spells "the checkout, counted from this file". The depth is written by
-#: hand, so moving a file changes the answer without changing the line — and a spelling missing
-#: from here is a declaration nothing checks, which is how two of them sat wrong. Each
-#: alternative is checked against a sample below, so losing one reddens instead of passing quietly.
+#: Every way this tree spells "the checkout, counted from this file". Depths are written by
+#: hand, so moving a file breaks them silently, and a spelling missing here goes unchecked.
+#: Each alternative is tested against a sample below.
 _ROOT_DECL = re.compile(
     r"^\s*(?P<name>[A-Z_]*(?:ROOT|REPO)[A-Z_]*)\s*=\s*(?:str\()?"
     r"(?:(?:pathlib\.)?Path\(__file__\)\.resolve\(\)"
@@ -175,16 +156,15 @@ _ROOT_DECL = re.compile(
     re.M)
 
 
-#: What the no-git walk steps over: every ignored directory that can hold a `.py` or `.sh` — the
-#: venv, the build trees, the caches and the managed roots (all dot-directories), the egg-info.
-#: Names, not paths, so a nested `build/` or `__pycache__` is pruned wherever it sits. Proven to
-#: agree with git by `test_the_no_git_fallback_sees_what_git_sees`.
+#: What the no-git walk skips: ignored directories that can hold `.py` or `.sh` (dot-directories
+#: and egg-info are skipped separately). Names, not paths, so nested ones are pruned too.
+#: Checked against git by `test_the_no_git_fallback_sees_what_git_sees`.
 _PRUNE = {"__pycache__", "build", "build-asan", "venv", "dist", "node_modules"}
 
 
 def _walk(*suffixes):
-    """The file set WITHOUT git: a walk from the repo root that prunes the ignored trees — for an
-    unpacked artifact or an sdist, where `git ls-files` has no repository to ask."""
+    """The file set without git (an unpacked artifact or sdist): a walk from the repo root that
+    prunes ignored trees."""
     found = set()
     for root, dirs, files in os.walk(REPO):
         dirs[:] = sorted(d for d in dirs
@@ -196,14 +176,9 @@ def _walk(*suffixes):
 
 
 def _tracked(*suffixes):
-    """Files git tracks, filtered by suffix. `git ls-files` rather than `rglob`, so a gate can
-    never redden because of somebody's local `.experiments/` or a third-party checkout under
-    `.gpap/` — a gate that fires on scratch is a gate that gets muted.
-
-    Without a repository — an unpacked artifact, an sdist — git answers nothing, and a scan over
-    zero files asserts nothing: that silence turned four of these gates red (once, green) on
-    exactly the tree reviewers are told to run `pytest` in. So the fallback is the pruned walk
-    above, and the assertion that SOMETHING was found stands on both routes."""
+    """Files git tracks, filtered by suffix, so local scratch never trips a gate. Without a
+    repository it falls back to `_walk`; either way it asserts that something was found, since a
+    scan over zero files checks nothing."""
     try:
         out = subprocess.run(["git", "ls-files"], cwd=REPO, capture_output=True, text=True)
         found = [f for f in out.stdout.split() if f.endswith(suffixes)] if out.returncode == 0 \
@@ -217,17 +192,9 @@ def _tracked(*suffixes):
 
 
 def test_every_repo_root_constant_is_the_repo_root():
-    """A constant named for the checkout that points one directory off is the quietest bug in the
-    tree: `sys.path` still imports (the cwd usually saves it), and every default built on it turns
-    into a directory that simply does not exist, so the driver falls back or skips.
-
-    It has happened here — an `eval/` reorg moved eleven files a level deeper and left their
-    hand-counted depths behind, and a Colab driver still had one resolving to `<repo>/eval`,
-    pointing its `--sampling-dir` and `--circuit-dir` at paths with no files in them. Counted
-    here rather than trusted, for every tracked Python file.
-
-    Each ALTERNATIVE of the pattern must match its sample, because the failure mode of a scan is
-    silence: corrupting one branch of the regex would drop its declarations and still pass."""
+    """Every repo-root constant in a tracked Python file resolves to the repo root. One that is a
+    directory off still imports, but defaults built on it point nowhere, so drivers silently fall
+    back or skip. Each regex alternative must match its sample, or a broken branch would pass."""
     for kind, sample in (
             ("n", "REPO = Path(__file__).resolve().parents[1]"),
             ("chain", "REPO = Path(__file__).resolve().parent.parent"),
@@ -257,33 +224,24 @@ def test_every_repo_root_constant_is_the_repo_root():
     assert not wrong, "repo-root constant does not resolve to the repo root:\n  " + "\n  ".join(wrong)
 
 
-#: The directories GPAP manages, and the ONE module allowed to name each. `gpap/paths.py` owns the
-#: disposable-machinery root; `eval/paths.py` owns the experiments root, the results record and a
-#: rented machine's layout. Both docstrings carry the reasoning; this is the enforcement.
+#: Managed directories and the one module allowed to name each. `gpap/paths.py` owns the
+#: disposable-machinery root; `eval/paths.py` the experiments root, the results record and a
+#: rented machine's layout. Their docstrings give the reasons.
 _MANAGED = {".gpap": "gpap/paths.py", ".experiments": "eval/paths.py",
             "gpap-results": "eval/paths.py", "/content": "eval/paths.py",
             "/tmp": "gpap/paths.py"}
-#: Shell has no owner module — every script ASKS (`python3 -m gpap.paths home`), so any script
-#: re-deriving one of these is the drift this gate exists to stop.
+#: Shell has no owner module: scripts ask (`python3 -m gpap.paths home`), so a script that
+#: re-derives one of these is drift.
 _SHELL_DERIVATIONS = ("${GPAP_HOME:-", "${GPAP_RESULTS:-", "${GPAP_EXPERIMENTS:-")
 
 
 def _is_managed_path(value: str) -> bool:
-    """Is this string a PATH rooted at a managed directory, rather than prose describing one?
+    """Whether this string is a path rooted at a managed directory, rather than prose about one.
 
-    A path literal has no whitespace; prose about a path does. That one discriminator is what lets
-    the token match a whole path COMPONENT — which is what closes `f"{root}/.gpap/bin"`,
-    `root + "/.gpap/bin"` and `"../gpap-results/paper"` — without flagging `gpap/cli.py`'s help
-    text or the README demo's verbatim transcript line, and without a whitelist of prose sites.
-
-    An ABSOLUTE token only counts as a prefix: `/tmp` must not match the bare component `"tmp"`,
-    which is the commonest path component there is and used to make this gate fire on
-    `tmp_path / "tmp"`.
-
-    What it does NOT catch, stated rather than implied: a path assembled at runtime from pieces
-    that are individually innocent, and `tempfile`'s own defaults (no literal to see). The
-    structural rule — paths come from two modules — is the protection; this catches the
-    reintroduction of a literal."""
+    A path literal has no whitespace and prose does, so a token can match any path component
+    (`f"{root}/.gpap/bin"`, `"../gpap-results/paper"`) without flagging help text. An absolute
+    token counts only as a prefix, so `/tmp` does not match the component `"tmp"`. Paths built at
+    runtime from innocent pieces, and `tempfile`'s defaults, are not caught."""
     v = value.strip()
     if not v or any(c.isspace() for c in v):
         return False
@@ -298,17 +256,9 @@ def _is_managed_path(value: str) -> bool:
 
 
 def test_only_the_paths_modules_name_a_managed_directory():
-    """ONE definition per managed directory, enforced rather than documented.
-
-    Every path bug this suite has seen was one shape: a file computed a managed directory itself
-    and its copy of the rule drifted — five scratch conventions, four derivations of the results
-    root, a VM path built from the LOCAL machine's variable. Documenting the rule at each site is
-    what produced three copies of one paragraph, one of them false. So the rule lives in two
-    modules, and their own tests, and nothing else spells it.
-
-    Scanned: tracked `.py` and `.sh`. A workflow YAML is not — `.github/workflows/ci.yml`
-    links against a `/tmp/libcuda.so` stub it generates, which is right for an ephemeral
-    runner with no checkout to outlive, and is deliberately none of these roots."""
+    """Only the two paths modules (and their tests) spell a managed directory; everything else
+    asks them, so no copy of the rule can drift. Scans tracked `.py` and `.sh`, not workflow
+    YAML: CI's `/tmp` libcuda stub lives on an ephemeral runner and is none of these roots."""
     exempt = set(_MANAGED.values()) | {"tests/repo/test_suite_hygiene.py",
                                        "tests/experiments/test_eval_paths.py"}
     bad = []
@@ -338,8 +288,8 @@ def test_only_the_paths_modules_name_a_managed_directory():
                 if d in code:
                     bad.append(f"{rel}:{i}: re-derives {d} — ask `python3 -m gpap.paths`")
             for tok in _MANAGED:
-                # A component, so `OUT=.experiments/x` counts (every driver cd's to the repo first,
-                # so a leading slash was never required); `$OUT/.gpap_cache` does not.
+                # Matched as a component: `OUT=.experiments/x` counts (drivers cd to the repo
+                # first), `$OUT/.gpap_cache` does not.
                 lead = r"(?:^|[\s\"'=:(])" if tok.startswith("/") else r"(?:^|[\s\"'=:(/])"
                 if re.search(lead + re.escape(tok.lstrip("/") if not tok.startswith("/") else tok)
                              + r"(?:/|\"|\}|\s|$)", code):
@@ -348,13 +298,9 @@ def test_only_the_paths_modules_name_a_managed_directory():
 
 
 def test_every_internal_import_resolves():
-    """`from eval.colab_sampling_plots import make_plots` sat in a live driver for three weeks
-    after the module moved to `eval/colab/`, inside an `except Exception` that printed a one-line
-    skip — so the benchmark ran to completion and silently produced no figures. Nothing in the
-    suite looked at import paths, so a reorg could leave them behind invisibly.
-
-    Resolution only: the module must EXIST where the import says. Importing it would need a GPU
-    and a built library."""
+    """Every internal import (gpap, eval, tests) names a module that exists. A stale one inside
+    an `except` that prints a skip fails silently. Resolution only: importing would need a GPU and
+    a built library."""
     import importlib.util
     broken = []
     for rel in _tracked(".py", ".ipynb"):
@@ -372,17 +318,10 @@ def test_every_internal_import_resolves():
 
 
 def test_every_shell_ask_for_a_path_is_guarded():
-    """A shell script that ASKS for a directory must refuse to continue without one.
-
-    These drivers run `set -uo pipefail` deliberately — no `-e`, because a campaign must survive a
-    failing stage — so a failed command substitution leaves the variable EMPTY and execution goes
-    on. `make_artifact.sh` then reached `rm -rf "$OUT/..."` with `OUT=""`, i.e. at the filesystem
-    root: denied for a user, DONE for root, which is what a rented VM is. Pure shell could not fail
-    this way; asking a module introduced it.
-
-    Written because the first attempt at the guards missed four sites — including the campaign
-    driver — and nothing noticed. Under `set -e` the assignment itself aborts, so those scripts are
-    exempt (their failure is loud already, if terse)."""
+    """A shell script that asks a paths module for a directory refuses to continue without one.
+    The drivers run `set -uo pipefail` without `-e` (a campaign must survive a failing stage), so
+    a failed substitution leaves the variable empty and a later `rm -rf "$OUT/..."` would hit the
+    filesystem root. Scripts under `set -euo` abort at the assignment and are exempt."""
     missing = []
     for rel in _tracked(".sh"):
         text = (REPO / rel).read_text(errors="ignore")
@@ -403,13 +342,9 @@ def test_every_shell_ask_for_a_path_is_guarded():
 
 
 def test_the_no_git_fallback_sees_what_git_sees():
-    """An unpacked artifact and an sdist have no `.git`, and `git ls-files` there produced
-    nothing — so four gates in this file failed on exactly the tree reviewers are told to run
-    `pytest` in. The fallback is a walk with a prune list; this is the proof that it scans the
-    same files git does, run wherever git works (where it does not, the fallback is in use and
-    has nothing to be compared against). Compared against tracked PLUS untracked-unignored, which
-    is what a walk that honours the ignore list can see — a file you have not `git add`ed yet is
-    not a discrepancy."""
+    """The no-git walk (used in an unpacked artifact or sdist) sees the files git sees: tracked
+    plus untracked-unignored, since a file not yet added is not a discrepancy. Skipped where git
+    is unavailable, because the fallback is then the one in use."""
     out = subprocess.run(["git", "ls-files", "-co", "--exclude-standard"], cwd=REPO,
                          capture_output=True, text=True)
     if out.returncode != 0 or not out.stdout.strip():
@@ -420,8 +355,8 @@ def test_the_no_git_fallback_sees_what_git_sees():
 
 
 def test_the_default_run_covers_every_test_directory_but_eval():
-    """`testpaths` lists the default directories one by one, so a new one would silently never
-    run. Every directory holding tests is either listed or is `tests/experiments`."""
+    """`testpaths` lists directories one by one, so every directory holding tests is listed,
+    except tests/experiments; a new unlisted one would never run."""
     block = re.search(r"^testpaths\s*=\s*\[(.*?)\]", (REPO / "pyproject.toml").read_text(),
                       re.M | re.S).group(1)
     listed = set(re.findall(r'"([^"]+)"', block))

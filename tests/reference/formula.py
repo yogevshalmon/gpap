@@ -1,43 +1,30 @@
-"""Pure-numpy reference build of the engine's formula structures — the ORACLE for the core.
+"""Pure-numpy reference build of the engine's formula structures, the oracle for
+cpp/src/formula.cpp. tests/engine/test_formula.py builds every structure both ways and compares
+them; the host-only tests also use it to cover DIMACS parsing without libgpap.
 
-`cpp/src/formula.cpp` is THE builder the library ships (one implementation, shared by the Python
-and C++ faces). This module is its independent re-derivation, kept where reference
-implementations live in this repo (`tests/reference/bcp.py` is the same idea for propagation):
-`tests/engine/test_core.py` builds every structure both ways and compares entry for entry, and the
-host-only suite uses it to cover DIMACS parsing on machines with no libgpap at all.
+The structures (docs/ENGINE.md). Only clauses of length >= 3 ("long") get a packed word.
+  * occ CSR (`occ_offsets`, `occ_mid`, `occ_clauses`): for literal l, the clauses holding ~l.
+    Binary entries come first, up to `occ_mid[l]`, with the other literal's index as payload;
+    then long entries, with the long-clause index (0..num_long-1). Unit clauses have no occ
+    entry (the construction flush asserts them). Each part is clause-ascending.
+  * `clause_sizes`: literal count of every kept clause, in input order.
+  * `init_lit_sum`: per-clause sum of literal indices mod 2^32 (the engine masks it to its split).
+  * `bin_pairs` (sorted pairs, input order) and `unit_lits`.
 
-It is deliberately torch-free and device-free: the structures under test are plain arrays, and
-an oracle should carry no machinery of its own.
-
-What a formula compiles to (identical to the core, see docs/ENGINE.md). Clauses are
-SEGREGATED BY LENGTH — only length>=3 ("long") clauses carry a packed word:
-
-  * occ CSR (`occ_offsets`, `occ_mid`, `occ_clauses`): for each literal l, the entries where ~l
-    appears — setting l TRUE falsifies ~l in exactly those clauses. Within a segment, BINARY
-    entries come first (payload = the OTHER literal's index; the whole clause is an implication
-    edge with no per-row state) up to `occ_mid[l]`, then LONG entries (payload = the length>=3
-    clause's re-index, 0..num_long-1). Unit clauses have NO occ entry: the construction flush
-    asserts them into the baseline bitmap. Each kind stays clause-ascending.
-  * `clause_sizes`: literals per clause, ALL kept clauses in input order;
-  * `init_lit_sum`: per-clause SUM of literal indices mod 2^32 (the packed word's initial sum
-    field; the engine masks it down to its split's width, and mod-2^32-then-mod-2^F == mod-2^F);
-  * `bin_pairs` (sorted pairs, input order) and `unit_lits`, the per-kind side lists.
-
-Literal indexing is the 2N scheme: +v -> 2(v-1), -v -> 2(v-1)+1, negation = index ^ 1.
-An EMPTY clause cannot be represented in the counters, so it is dropped from the structures and
-recorded in `has_empty_clause` (the engine turns that flag into an all-rows conflict).
+Literal indices: +v -> 2(v-1), -v -> 2(v-1)+1, negation is index ^ 1. An empty clause is dropped
+and recorded in `has_empty_clause` (the engine makes every row conflict).
 """
 import numpy as np
 from itertools import chain
 
-#: Sign bit the core sets on BINARY occ payloads (GPAP_OCC_BIN_TAG in cpp/include/gpap/gpap.h),
+#: Sign bit the core sets on binary occ payloads (GPAP_OCC_BIN_TAG in cpp/include/gpap/gpap.h),
 #: so a kernel can classify an entry from the value it already loaded.
 BIN_TAG = -0x80000000
 
 
 def flat_lit_arrays(clauses: list) -> tuple:
-    """(lens, lit_idx) int64 numpy arrays for a clause list — ONE flatten and ONE encoding of the
-    2N literal scheme, feeding the occ build, clause_sizes and init_lit_sum alike. Clause c owns
+    """(lens, lit_idx) int64 arrays for a clause list: the one literal encoding that the occ
+    build, clause_sizes and init_lit_sum all read. Clause c owns
     lit_idx[bounds[c] : bounds[c] + lens[c]] where bounds = exclusive cumsum(lens)."""
     M = len(clauses)
     lens = np.fromiter(map(len, clauses), dtype=np.int64, count=M)
@@ -63,9 +50,8 @@ class ReferenceFormula:
         lens, lit_idx = flat_lit_arrays(clauses)
         bounds = np.zeros(self.num_clauses + 1, dtype=np.int64)
         np.cumsum(lens, out=bounds[1:])
-        # Segregated occ build over the NEGATED literal, in explicit loops: this is an ORACLE,
-        # clarity beats speed. Iterating clauses in input order makes each kind's sub-range
-        # clause-ascending — the layout the core's counting sort produces.
+        # Occ build over the negated literal, in plain loops (an oracle favours clarity). Input
+        # order makes each part clause-ascending, as the core's counting sort does.
         num_lits = 2 * self.num_vars
         bins: list = [[] for _ in range(num_lits)]
         longs: list = [[] for _ in range(num_lits)]
@@ -73,8 +59,8 @@ class ReferenceFormula:
         self.unit_lits: list = []
         long_id = 0
         for c in range(self.num_clauses):
-            # SLICE the one vectorised encoding — never re-derive it, or the oracle can end up
-            # self-inconsistent (occ built one way, init_lit_sum the other) and still "pass".
+            # Slice the shared encoding rather than re-deriving it, so occ and init_lit_sum
+            # cannot disagree with each other.
             li = [int(x) for x in lit_idx[bounds[c]:bounds[c + 1]]]
             if len(li) == 1:
                 self.unit_lits.append(li[0])
@@ -102,8 +88,8 @@ class ReferenceFormula:
         self.occ_clauses = (np.asarray(entries, dtype=np.int32) if entries
                             else np.empty(0, dtype=np.int32))
 
-        # Per-clause SUM of literal indices, exact mod 2^32: int64 add, then REINTERPRET the low
-        # 32 bits (a cast could saturate; a view is exact).
+        # Per-clause sum of literal indices mod 2^32: int64 add, then view the low 32 bits (a
+        # cast could saturate; a view is exact).
         M = self.num_clauses
         if M:
             sums = (np.add.reduceat(lit_idx, bounds[:-1]).astype(np.uint64)
@@ -121,10 +107,9 @@ class ReferenceFormula:
 
     @classmethod
     def from_file(cls, cnf_file: str) -> "ReferenceFormula":
-        """Reference DIMACS parser. Token-stream (clauses are 0-terminated, NOT line-based):
-        multiple clauses per line and clauses spanning lines are legal, as is the SATLIB '%'
-        end marker. N = max(header N, highest variable used) so trailing declared variables
-        (e.g. support vars appearing only in `c ind` lines) keep their slots."""
+        """Reference DIMACS parser. Clauses are 0-terminated tokens, not lines, and the SATLIB
+        '%' end marker is accepted. N = max(header N, highest variable used), so declared
+        variables that appear in no clause keep their slots."""
         header_n = 0
         body: list[str] = []
         with open(cnf_file) as f:
@@ -158,8 +143,8 @@ class ReferenceFormula:
         return self.occ_clauses[self.occ_offsets[lit_index]:self.occ_offsets[lit_index + 1]]
 
     def occ_bin(self, lit_index: int) -> np.ndarray:
-        """The binary prefix: OTHER-literal payloads, TAG MASKED OFF (setting lit TRUE forces
-        each of them)."""
+        """The binary prefix as plain literal indices (tag removed); setting lit TRUE forces
+        each of them."""
         seg = self.occ_clauses[self.occ_offsets[lit_index]:self.occ_mid[lit_index]]
         return (seg & ~np.int32(BIN_TAG)).astype(np.int32)
 

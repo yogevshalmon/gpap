@@ -1,11 +1,6 @@
-"""The ABC circuit encoder must not change WHAT WE SAMPLE.
-
-Load-bearing claim: `--encoder abc` (unroll + dc2/fraig via berkeley-abc, then Tseitin its AIG)
-yields a CNF whose set of SUPPORT PROJECTIONS — the primary-input assignments consistent with the
-pinned outputs — is EXACTLY the native Tseitin encoder's. Only internal gate variables differ.
-
-These are CPU tests. They skip when no `abc` binary is present (it is an optional dependency;
-build it with scripts/build_abc.sh).
+"""The ABC encoder (`--encoder abc`) must not change what we sample: its CNF has exactly the
+native Tseitin encoder's set of support projections; only internal gate variables differ.
+CPU tests; they skip without an `abc` binary (scripts/build_abc.sh).
 """
 import os
 
@@ -34,7 +29,7 @@ def test_abc_preserves_projected_solution_set(name, cycles, opt):
     bt, sup_t, tgt_t, lab_t = build_cnf(circ, cycles, seed, pin_outputs=None)
     ba, sup_a, tgt_a, lab_a = build_cnf_abc(circ, path, cycles, seed, pin_outputs=None, opt=opt)
 
-    # Same support ORDER and the same pinned target => the two CNFs must describe the same set.
+    # Same support order and pinned target, so the two CNFs must describe the same set.
     assert lab_t == lab_a
     assert tgt_t == tgt_a
     assert len(sup_t) == len(sup_a)
@@ -48,10 +43,8 @@ def test_abc_preserves_projected_solution_set(name, cycles, opt):
 
 @pytest.mark.parametrize("name,cycles", [("b06", 3), ("b09", 4)])
 def test_abc_pins_a_prefix_from_a_partial_target_like_the_native_encoder(name, cycles):
-    """`pin_outputs=k` reads `target` only for the first k outputs, on BOTH encoders: the rival
-    harnesses hand a partial dict holding just the pinned outputs (their target tables), and the
-    ABC route used to index every output and KeyError on it — so the abc:fast rival arm could
-    not run at all in table mode. Same target, same pins => the same projected solution set."""
+    """With `pin_outputs=k` both encoders read `target` only for the first k outputs, since the
+    rival harnesses pass a partial dict holding just the pinned outputs."""
     path = os.path.join(BENCH, f"{name}.bench")
     circ = parse_bench(path)
     outputs = list(circ[1])
@@ -64,15 +57,14 @@ def test_abc_pins_a_prefix_from_a_partial_target_like_the_native_encoder(name, c
     proj_t = enumerate_projections(bt.clauses, sup_t, limit=200_000)
     proj_a = enumerate_projections(ba.clauses, sup_a, limit=200_000)
     assert proj_t and proj_a == proj_t
-    # And it genuinely pins fewer outputs than pinning all of them would.
+    # Pinning every output gives at most as many projections.
     ball = build_cnf_abc(circ, path, cycles, 3, pin_outputs=None, opt="fast", target=full)[0]
     assert len(enumerate_projections(ball.clauses, sup_a, limit=200_000)) <= len(proj_a)
 
 
 @pytest.mark.parametrize("name,cycles", [("b01", 4), ("b10", 3), ("b03", 3)])
 def test_abc_encoder_is_smaller_and_short_clauses(name, cycles):
-    """ABC's AIG encoding should not be larger, and must emit only 2- and 3-literal clauses
-    (plus unit pins) — that uniformity is what the sum-trick BCP / packed kernel want."""
+    """ABC's AIG encoding is no larger than the native one and has no clause over 3 literals."""
     path = os.path.join(BENCH, f"{name}.bench")
     circ = parse_bench(path)
     bt, _s, _t, _l = build_cnf(circ, cycles, 3, pin_outputs=None)
@@ -82,8 +74,8 @@ def test_abc_encoder_is_smaller_and_short_clauses(name, cycles):
 
 
 def test_abc_unroll_matches_our_simulator():
-    """ABC's `zero; frames -F T -i` must reproduce our reset-state-0 unroll exactly: pin the
-    outputs to OUR simulated target and the ABC CNF must still be satisfiable."""
+    """ABC's `zero; frames -F T -i` matches our reset-0 unroll: pinned to our simulated target,
+    the ABC CNF is satisfiable and its model replays to that target."""
     path = os.path.join(BENCH, "b10.bench")
     circ = parse_bench(path)
     inputs, outputs, _d, _g = circ
@@ -93,22 +85,21 @@ def test_abc_unroll_matches_our_simulator():
     assert s.solve(), "ABC CNF UNSAT under a reachable simulated target — unroll semantics differ"
     m = set(s.get_model())
     s.delete()
-    # The model's primary inputs, replayed through OUR simulator, must reproduce the pinned target.
+    # Replay the model's primary inputs through our simulator.
     bits = {v: (v in m) for v in sup}
     in_seq = [{inp: bits[sup[i * T + t]] for i, inp in enumerate(inputs)} for t in range(T)]
     assert simulate(circ, in_seq, T) == target
 
 
 # --------------------------------------------------------------------------------------------
-# Circuit-level simplification (.bench -> ABC -> .bench) — the RIVAL-fairness path.
-# The GPU rivals unroll .bench themselves, so they must be offered the same ABC-optimized circuit
-# GPAP's abc arm gets. That swap is only legitimate if the circuit is unchanged as a function.
+# Circuit-level simplification (.bench -> ABC -> .bench) gives the rivals, which unroll .bench
+# themselves, the same ABC-optimized circuit. Valid only if the circuit's function is unchanged.
 
 @pytest.mark.parametrize("name", ["b03", "b06", "b10", "s386"])
 @pytest.mark.parametrize("target_mode", ["random", "rare"])
 def test_simplify_bench_abc_is_equivalent(tmp_path, name, target_mode):
-    """The simplified copy must accept EXACTLY the same input sequences: identical stimuli in,
-    bit-identical acceptance words out (not merely the same acceptance rate)."""
+    """The simplified copy accepts exactly the same input sequences: identical stimuli give
+    bit-identical acceptance words, not just the same rate."""
     from gpap.circuits.abc_backend import bench_equiv_check, simplify_bench_abc
     src = os.path.join(BENCH, f"{name}.bench")
     dst = str(tmp_path / f"{name}_abc.bench")
@@ -121,13 +112,8 @@ def test_simplify_bench_abc_is_equivalent(tmp_path, name, target_mode):
 
 
 def test_bench_equiv_check_catches_a_sabotaged_copy_at_a_rare_pin(tmp_path):
-    """The gate must not be able to pass by comparing nothing.
-
-    At a `rare` target the acceptance probability is below 1/(n_words*64), so BOTH acceptance
-    words are all-zero and comparing only them returns ok=True whatever the circuit does — every
-    ABC row of the recorded ISCAS-85 rival campaign passed that way (hits [0, 0, 32768]). The
-    check therefore compares every primary output; this pins that a functional change is caught
-    even in the regime where the acceptance half is vacuous."""
+    """A one-gate change is caught even at a rare pin. There both acceptance words are all zero,
+    so comparing only them would pass any circuit; the check also compares every output."""
     from gpap.circuits.abc_backend import bench_equiv_check
     src = os.path.join(COMB_DIR, "c432.bench")
     lines, done, out = open(src).read().splitlines(), False, []
@@ -146,8 +132,8 @@ def test_bench_equiv_check_catches_a_sabotaged_copy_at_a_rare_pin(tmp_path):
 
 
 def test_simplify_bench_abc_output_is_parseable_and_primitive(tmp_path):
-    """The emitted .bench must use only primitives every consumer here understands (ours and both
-    circuit-level rivals' parsers): AND / NOT / BUF / DFF — never abc's LUT/DFFRSE."""
+    """The emitted .bench uses only AND / NOT / BUF / DFF, which our parser and both
+    circuit-level rivals' parsers accept, never abc's LUT/DFFRSE."""
     import re
     from gpap.circuits.abc_backend import simplify_bench_abc
     src = os.path.join(BENCH, "b03.bench")
@@ -159,18 +145,16 @@ def test_simplify_bench_abc_output_is_parseable_and_primitive(tmp_path):
     assert circ[2], "latches vanished — the sequential structure must survive"
     text = open(dst).read()
     assert "LUT" not in text and "DFFRSE" not in text
-    # every signal name must be a valid Python identifier: DEMOTIC exec's generated source
+    # every signal name is a Python identifier (DEMOTIC execs generated source)
     for tok in re.findall(r"^\s*([^=\s#]+)\s*=", text, re.M):
         assert re.fullmatch(r"[A-Za-z_]\w*", tok), tok
-    # ...and the header must not contain the substrings their line classifier keys on
+    # the header line holds none of the keywords their line classifier looks for
     assert not any(k in text.splitlines()[0] for k in ("INPUT", "OUTPUT", "DFF", "="))
 
 
 def test_abc_paths_survive_a_space(tmp_path):
-    """abc splits its script on whitespace, so an unquoted path with a space in it became two
-    arguments: the command wrote nothing and the caller reported "abc produced no framed AIG".
-    It binds on the USER's circuit path, and — since the intermediates live in `<repo>/.gpap/tmp`
-    — on a checkout whose own directory has a space in it, which is not the user's doing at all."""
+    """abc splits its script on whitespace, so every path handed to it is quoted. This covers
+    the user's circuit path and the scratch intermediates of a checkout under a spaced directory."""
     import shutil
 
     from gpap.circuits.abc_backend import unroll_optimize_to_aig
@@ -181,8 +165,7 @@ def test_abc_paths_survive_a_space(tmp_path):
     shutil.copy(os.path.join(BENCH, "b01.bench"), src)
     out = str(d / "framed out.aig")
     unroll_optimize_to_aig(src, 2, out, opt="fast")      # spaced INPUT and spaced OUTPUT
-    # The OTHER abc-script site: the `--circuit-variants abc` route that writes a rival's
-    # primitive-gate .bench. Reverting the quoting there passed every other test.
+    # The other abc-script site (`--circuit-variants abc`); no other test covers its quoting.
     from gpap.circuits.abc_backend import simplify_bench_abc
     simplify_bench_abc(src, str(d / "simplified out.bench"))
     assert os.path.getsize(str(d / "simplified out.bench")) > 0
@@ -190,11 +173,9 @@ def test_abc_paths_survive_a_space(tmp_path):
 
 @pytest.mark.parametrize("ch", ['"', "'", "\n", "\r", "\t"])
 def test_abc_paths_it_cannot_carry_are_refused_by_name(tmp_path, ch):
-    """Quoting survives a space, a `;`, a glob, a backtick, `&` and UTF-8 — but abc rewrites tab,
-    newline and carriage return inside a quoted argument into a space, ends the quote at a `"`,
-    and strips a `'`, swallowing the rest of the script into the filename. Every one of them wrote
-    nothing and surfaced as "abc produced no framed AIG", the misleading message quoting was added
-    to remove, so they are refused up front with a message that names the character."""
+    """abc cannot carry a tab, newline, carriage return, `"` or `'` inside a quoted path, so such
+    paths are refused up front with a message naming the character, instead of failing later
+    as "abc produced no framed AIG"."""
     import shutil
 
     from gpap.circuits.abc_backend import _AbcError, unroll_optimize_to_aig

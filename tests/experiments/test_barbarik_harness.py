@@ -6,15 +6,8 @@ from tests.conftest import REPO_ROOT
 
 
 def test_every_default_portfolio_config_is_barbarik_certifiable():
-    """The uniformity certificate is per-CONFIG, so a portfolio member with no arm in the Barbarik
-    harness is an uncertified sampler the bandit can select.
-
-    The pipeline buckets delivered rows per config and returns only the winner's, so "the shipped
-    tool is Accepted" is exactly "every member of its portfolio is Accepted" — and that argument
-    silently breaks the moment someone adds a config here without adding it there. It had already
-    broken once: `s1` (STRUCTURED, B=1) has been in DEFAULT_PORTFOLIO while the harness only knew
-    b8/b1/soft/bsup, so the sk_/CMSGen-comparison portfolio was a third uncertified.
-    """
+    """Every portfolio config has an arm in the Barbarik harness. The pipeline delivers only the
+    winning config's rows, so the shipped tool is certified only if every member is."""
     import ast
     import pathlib
 
@@ -35,10 +28,9 @@ def test_every_default_portfolio_config_is_barbarik_certifiable():
 
 
 def test_barbarik_harness_silences_upstream_rm_noise_and_nothing_else(tmp_path, capfd, monkeypatch):
-    """barbarik unlinks its kernel CNF and then shells out `rm *.nnf <that file>`, so every round
-    of a certificate printed two `rm: cannot remove` warnings for a file it had already deleted.
-    The shim must (a) do that housekeeping quietly, including the already-gone case, and (b) leave
-    every other os.system call — the SPUR launch goes through it — exactly alone."""
+    """barbarik deletes its kernel CNF and then shells out `rm *.nnf <that file>`. The shim runs
+    that `rm` quietly, even when the file is already gone, and passes every other os.system call
+    (the SPUR launch among them) through unchanged."""
     import os
 
     from eval.uniformity.barbarik_gpap import _QuietOS
@@ -60,16 +52,9 @@ def test_barbarik_harness_silences_upstream_rm_noise_and_nothing_else(tmp_path, 
 
 
 def test_barbarik_fill_gives_up_on_dry_attempts_not_dry_calls(monkeypatch):
-    """The collector's stopping rule must not be charged to the sampler, and must not depend on
-    the DRAW.
-
-    `_FILL_GIVE_UP` counts *consecutive attempts that produced nothing*. Keying it off the last
-    CALL made the counter monotone in the `iid` branch — the only way to reach it there is a dry
-    `sample_bits(1)`, so a fill that was delivering rows was abandoned after 3 dry calls anywhere
-    in the 24-attempt budget and the order came back "GPAP produced 5/50" -> a no-verdict row.
-    That shrank coverage for exactly one arm: the i.i.d. one, whose independence premise
-    Barbarik's guarantee is stated under.
-    """
+    """`_FILL_GIVE_UP` counts consecutive attempts that produced nothing, not dry calls, so a
+    low-yield sampler fills its order in both the `batch` and `iid` draws. A fully dry one is
+    still abandoned at once."""
     import sys
     import types
 
@@ -80,13 +65,9 @@ def test_barbarik_fill_gives_up_on_dry_attempts_not_dry_calls(monkeypatch):
     cols = [1, 2, 3]
 
     class Stub:
-        """A LOW-YIELD sampler that sometimes returns nothing.
-
-        Deliberately harsher than the real `sample_bits`, whose zero-yield stop is now TOTAL-based
-        in the core (it abandons a fill only when NOTHING has been found). Giving up after 3
-        consecutive empty chunks is what the retired Python loop did; keeping that here makes the
-        collector face the worse of the two, which is the point — the rule under test is the
-        COLLECTOR's, and it must not depend on how generously the sampler behaves."""
+        """A low-yield sampler that sometimes returns nothing. It gives up after 3 consecutive
+        empty chunks, which is harsher than the real `sample_bits`, so the collector's rule is
+        tested against the worse case."""
         p_dry = 0.5
 
         def __init__(self):
@@ -131,12 +112,12 @@ def test_barbarik_fill_gives_up_on_dry_attempts_not_dry_calls(monkeypatch):
                 pass
         return ok / trials
 
-    for p_dry in (0.4, 0.6):                    # a LOW-YIELD kernel, not a dead one
+    for p_dry in (0.4, 0.6):                    # low yield, not dead
         assert fills("batch", p_dry) == 1.0, "the batch arm must fill an order it can fill"
         assert fills("iid", p_dry) == 1.0, (
             f"the iid arm gave up at p_dry={p_dry} while the batch arm filled — the collector's "
             f"stopping rule, not the sampler's yield")
-    # a genuinely dry instance must still be abandoned immediately, in both draws
+    # a fully dry instance is abandoned immediately, in both draws
     Stub.p_dry = 1.0
     for draw in ("batch", "iid"):
         with pytest.raises(RuntimeError, match="produced 0/50"):

@@ -1,16 +1,8 @@
-"""Circuit-sampling tests over the generated-CNF matrix (tests/conftest.py::circuit_cnfs).
+"""Circuit sampling over the generated CNFs (tests/conftest.py::circuit_cnfs).
 
-Axes:
-  soundness       — every emitted model satisfies the ORIGINAL clauses (pre-simplify).
-  determinism     — same seed => identical model set.
-  reference A/B   — kernel fixpoints == the pure-Python reference BCP (confluence).
-  reconstruction  — simplify / ELS on => models still verify on the ORIGINAL formula.
-  contract        — n_time delivered (or the run stops via a valve).
-  quality smoke   — distinct fraction ~1.0 on a non-tiny instance.
-
-ALL of these need CUDA + triton (the engine is packed-kernel-only); `slow` marks the deep
-c25 unroll. The off-GPU portable smoke is the host-side logic suite (formula/preprocess/
-circuits/simulate tests).
+Soundness against the original clauses, same-seed determinism, kernel fixpoints against the
+reference BCP, ELS reconstruction, n_time delivery, and the distinct fraction. `slow` marks the
+deep c25 unroll.
 """
 import pytest
 import torch
@@ -34,16 +26,11 @@ def _inst(circuit_cnfs, name):
 
 
 def _collecting_sampler(nv, clauses, support, *, k_cap, seed=5, **kw):
-    """A sampler whose COLLECTED chunk is actually bounded by `k_cap`.
+    """A sampler whose collected chunk is bounded by `k_cap`.
 
-    THE TRAP: `k_cap` bounds K, but the batch a fused chunk runs is `batch_size`, which sizes
-    itself from free VRAM — on these tiny circuit formulas it lands orders of magnitude higher
-    (b10-c5 measured K=1024 but a 242,423-row batch). Under `collect=True` every completed row is
-    reconstructed into python lists of ints (~36 B each), so a test asking for 1000 models peaked
-    at **28 GB** of host RAM and 341 s, enough to push a 48 GB box into swap.
-
-    `pin_batch` is the fix and exists precisely for this: it states a bound that holds, instead of
-    hoping the boost happens to be off.
+    `k_cap` bounds K, but a chunk runs `batch_size` rows, which is sized from free VRAM and is far
+    larger on these small formulas. With `collect=True` every row is rebuilt as Python ints, so
+    an unpinned batch can exhaust host RAM. `pin_batch` makes the bound hold.
     """
     smp = GPUSampler.from_clauses(nv, clauses, DEV, support=support, k_cap=k_cap, seed=seed, **kw)
     smp.pin_batch(smp.K)
@@ -54,7 +41,7 @@ def _collecting_sampler(nv, clauses, support, *, k_cap, seed=5, **kw):
 
 @pytest.mark.parametrize("name", SMOKE)
 def test_circuit_models_sound(circuit_cnfs, name):
-    """Every emitted model (simplify on) satisfies the ORIGINAL clauses."""
+    """Every emitted model (simplify on) satisfies the original clauses."""
     nv, clauses, support = _inst(circuit_cnfs, name)
     smp = _collecting_sampler(nv, clauses, support, k_cap=256, simplify=True)
     out = smp.sample(400, configs=[(True, 8, False)], max_chunks=3, collect=True,
@@ -67,7 +54,7 @@ def test_circuit_models_sound(circuit_cnfs, name):
 
 @pytest.mark.parametrize("name", GPU_MATRIX)
 def test_circuit_models_sound_matrix(circuit_cnfs, name):
-    """Broader matrix: models sound under the circuit portfolio (plain + soft)."""
+    """Models are sound under plain and soft configs on a broader matrix."""
     nv, clauses, support = _inst(circuit_cnfs, name)
     smp = _collecting_sampler(nv, clauses, support, k_cap=1024, simplify=True)
     out = smp.sample(1000, configs=[(True, 8, False), (True, 8, "soft")], max_chunks=4,
@@ -82,7 +69,7 @@ def test_circuit_models_sound_matrix(circuit_cnfs, name):
 
 @pytest.mark.parametrize("name", SMOKE)
 def test_circuit_determinism(circuit_cnfs, name):
-    """Same seed => identical model set (the kernel path is reproducible)."""
+    """The same seed gives the same model set."""
     nv, clauses, support = _inst(circuit_cnfs, name)
     runs = []
     for _ in range(2):
@@ -98,8 +85,10 @@ def test_circuit_determinism(circuit_cnfs, name):
 
 @pytest.mark.parametrize("name", ["b03-c1", "s386-c5", "b10-c5"])
 def test_circuit_kernel_matches_reference(circuit_cnfs, name):
-    """Kernel BCP fixpoints == the pure-Python reference on real circuit CNFs (confluence).
-    Decide fresh distinct vars per row, check conflict flags + non-conflicted assignments."""
+    """Kernel BCP fixpoints equal the pure-Python reference on circuit CNFs.
+
+    Each row decides up to 8 distinct free vars; conflict flags and non-conflicted assignments
+    must match."""
     import random
     nv, clauses, _ = _inst(circuit_cnfs, name)
     rng = random.Random(3)
@@ -126,7 +115,7 @@ def test_circuit_kernel_matches_reference(circuit_cnfs, name):
 
 @pytest.mark.parametrize("name", ["b03-c1", "s386-c1"])
 def test_circuit_reconstruction_els(circuit_cnfs, name):
-    """simplify + ELS on => reconstructed models still satisfy the ORIGINAL formula."""
+    """With ELS on, reconstructed models satisfy the original formula."""
     nv, clauses, support = _inst(circuit_cnfs, name)
     smp = _collecting_sampler(nv, clauses, support, k_cap=256, els=True)
     out = smp.sample(400, configs=[(True, 8, False)], max_chunks=3, collect=True,
@@ -138,10 +127,8 @@ def test_circuit_reconstruction_els(circuit_cnfs, name):
 # --------------------------------------------------------------------------- contract
 
 def test_circuit_contract_delivers_n_time(circuit_cnfs):
-    """A high-success shallow instance delivers the full n_time budget (not chunk-capped)."""
+    """A high-success shallow instance delivers the full n_time, without a valve firing."""
     from gpap.sampling.pipeline import sample_clauses, CIRCUIT_PORTFOLIO
-    # s386-c1 by name, not by a fallback: conftest's matrix has no b02, so the old
-    # `"b02-c1" if ... else` branch could only ever take the second arm.
     nv, clauses, support = _inst(circuit_cnfs, "s386-c1")
     info = sample_clauses(nv, clauses, support, DEV, n_time=5000, n_cov=0, verify_sound=True,
                           configs=CIRCUIT_PORTFOLIO, time_limit=30.0)
@@ -155,8 +142,7 @@ def test_circuit_distinct_fraction(circuit_cnfs):
     nv, clauses, support = _inst(circuit_cnfs, "b03-c10")
     smp = _collecting_sampler(nv, clauses, support, k_cap=1024, simplify=True)
     out = smp.sample(2000, configs=[(True, 8, False)], max_chunks=4, collect=True)
-    # assert the PRECONDITION rather than hiding behind it: `if n_models >= 200` alone means a
-    # regression that stops the sampler producing anything passes this test silently.
+    # Assert the precondition, so a sampler that produces nothing fails instead of skipping.
     assert out["n_models"] >= 200, "produced too few models to judge distinctness"
     assert out["n_distinct"] / out["n_models"] > 0.9
 
@@ -165,7 +151,7 @@ def test_circuit_distinct_fraction(circuit_cnfs):
 
 @slow
 def test_circuit_deep_cascade_c25(circuit_cnfs):
-    """The deep 25-cycle unroll: sound under the soft-lookahead config (the circuit-regime win)."""
+    """The deep 25-cycle unroll is sound under the soft-lookahead config."""
     nv, clauses, support = _inst(circuit_cnfs, "b03-c25")
     smp = _collecting_sampler(nv, clauses, support, k_cap=1024, simplify=True)
     out = smp.sample(1000, configs=[(True, 1, "soft"), (True, 8, False)], max_chunks=6,

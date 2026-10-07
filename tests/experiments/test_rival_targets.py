@@ -1,16 +1,7 @@
-"""The rivals' target tables are TRANSCRIBED into our harnesses — so re-derive them.
-
-`eval/rivals/rivals_recurrent.py::TARGETS` restates the branch table in the rival's own
-`run.py`, and a transcription is exactly the kind of thing that silently rots: their table is
-filename-keyed, their names strip dots (`s208.1` -> `s2081`), and a name we get wrong does not
-raise — it falls into their catch-all branch and pins five different outputs, or is skipped with
-a one-line message nobody reads. That already happened: `b14`/`b15` have a branch in their source
-and were absent here, so the harness skipped `b15` — an instance their own paper evaluates.
-
-So this parses THEIR source and checks ours against it (the verifier re-derives, per
-docs/findings/ RIVAL_FAIRNESS lessons). Self-skips when the checkout is absent, since
-`eval/rivals/rivals_setup.sh` is optional — but it must not skip silently on a MALFORMED
-checkout, so a present-but-unparseable run.py is a failure.
+"""Tests for the rival harnesses in `eval/rivals/`: the Recurrent target table re-derived from the
+rival's own `run.py`, the oversize guard, the start_point probe, the batch ladder and grants, the
+GPAP and CMSGen arms, and the cache keys. The transcription tests skip when the rival checkout
+is absent (`eval/rivals/rivals_setup.sh`) but fail on one they cannot parse.
 """
 import ast
 import os
@@ -21,18 +12,14 @@ import pytest
 from gpap import paths
 from tests.conftest import REPO_ROOT, SEQ_DIR
 
-# Through `paths.src_dir()`, not a hard-coded `<repo>/.gpap`: `rivals_setup.sh` installs into
-# `$GPAP_HOME/src`, so with that variable set this file pointed at a path that does not exist and
-# the test below skipped itself — passing while verifying nothing.
+# Through `paths.src_dir()`: `rivals_setup.sh` installs into `$GPAP_HOME/src`, so a hard-coded
+# `<repo>/.gpap` would make the tests below skip whenever `GPAP_HOME` is set.
 RIVAL_RUN_PY = str(paths.src_dir() / "Recurrent-CircuitSAT-Sampler" / "src" / "pytorch" / "run.py")
 
 
 def _their_branches(src):
     """[(names, target_idx, values)] for every `module_name in [...]` branch in their run.py.
-
-    Their values come from a `torch.ones/zeros(batch, k)` followed by optional
-    `target[:, SLICE] = V.` assignments, which is a small enough grammar to read exactly.
-    """
+    Values come from `torch.ones/zeros(batch, k)` plus optional `target[:, SLICE] = V.` lines."""
     out = []
     # each branch: the name list, then target_idx, then the ones/zeros, then any overrides
     pat = re.compile(
@@ -62,7 +49,7 @@ def _their_branches(src):
 
 
 def _their_catchall(src):
-    """Their final `else:` — a REAL target (idx [0,15,31,63,-1]) that unlisted names land on."""
+    """Their final `else:` branch: the target (idx [0,15,31,63,-1]) unlisted names fall into."""
     m = re.search(r"\n\s*else:\s*\n"
                   r"\s*self\.target_idx = \[([^\]]*)\]\s*\n"
                   r"\s*self\.target = torch\.(ones|zeros)\([^)]*\)\s*\n"
@@ -92,8 +79,7 @@ def _load_source():
         pytest.skip("Recurrent checkout absent (eval/rivals/rivals_setup.sh); nothing to verify")
     src = open(RIVAL_RUN_PY).read()
     branches = _their_branches(src)
-    # A present checkout that yields nothing means the parse broke, NOT that they removed their
-    # table — reporting that as "verified" is the vacuous-test trap.
+    # A present checkout that yields nothing means the parse broke, not that the table is gone.
     assert len(branches) >= 8, \
         f"parsed only {len(branches)} branches from {RIVAL_RUN_PY} — the grammar changed"
     return branches
@@ -126,8 +112,8 @@ def test_our_transcription_matches_their_source():
         via_catchall = want is None
         if via_catchall:
             want = catchall
-            # the catch-all indexes [0,15,31,63,-1], so it needs >= 64 outputs or their run
-            # dies with IndexError — an entry relying on it must be a wide-output circuit
+            # the catch-all indexes [0,15,31,63,-1], so an entry relying on it needs >= 64
+            # outputs or their run raises IndexError
             n_out = _n_outputs(ours_name)
             if n_out is not None and n_out < 64:
                 wrong.append(f"{ours_name}: relies on their catch-all but has only {n_out} "
@@ -141,11 +127,8 @@ def test_our_transcription_matches_their_source():
 
 
 def test_every_committed_circuit_their_table_covers_is_transcribed():
-    """A circuit we ship + a branch they define, but no entry here, is a SILENT SKIP.
-
-    That is how `b15` — in their paper's Table II — went unmeasured: the harness prints
-    'not in their target table, skipped' and moves on.
-    """
+    """A committed circuit with a branch in their table but no TARGETS entry would be skipped
+    by the harness with only a log line."""
     branches = _load_source()
     from eval.rivals.rivals_recurrent import TARGETS
 
@@ -164,16 +147,12 @@ def test_every_committed_circuit_their_table_covers_is_transcribed():
 
 
 def test_wide_miter_and_is_decomposed_within_the_packed_envelope():
-    """A miter over k outputs must not emit one k-input AND.
-
-    Tseitin turns that into a (k+1)-literal clause, and the packed 8|24 envelope caps clause
-    length at 255. `s35932` has 320 outputs, so `gpap_engine_create` refused the formula and the
-    instance was SKIPPED with no row in either Recurrent arm — while sitting in that rival's own
-    Table II. Both miter builders had the same line; `and_tree` is now the one home.
-    """
+    """A miter over k outputs is a tree of narrow ANDs, not one k-input AND: Tseitin makes that a
+    (k+1)-literal clause, and the packed 8|24 envelope caps clause length at 255, so a
+    wide-output circuit would be refused by the engine."""
     from eval.rivals.unroll_to_bench import _MITER_FANIN, and_tree
 
-    # narrow: untouched, so every already-measured instance is bit-identical
+    # narrow: unchanged, so existing instances encode bit-identically
     lines = []
     assert and_tree(lines, ["a", "b", "c"], "T") == ["a", "b", "c"]
     assert lines == [], "a narrow AND must emit no helper gates"
@@ -192,18 +171,12 @@ def test_wide_miter_and_is_decomposed_within_the_packed_envelope():
 
 
 def test_oversize_instance_is_refused_before_it_can_kill_the_sweep(tmp_path):
-    """An instance too large for the rival path must be REFUSED, not attempted.
-
-    The rival consumes .bench and unrolls it itself, so our arm has to Tseitin-encode the same
-    circuit — and b19 at T=25 is 9.6M vars that way (66,639 through abc:fast). Building it
-    exhausts host memory and the process is KILLED: no exception, no row, and every instance
-    alphabetically after it silently unmeasured. Four went missing from a 29-instance sweep
-    exactly this way, so the size is checked from the .bench BEFORE anything is built.
-    """
+    """An instance too large to Tseitin-encode is refused from the .bench size before anything is
+    built. Running out of host memory kills the process with no row, and every later instance in
+    the sweep goes unmeasured."""
     from eval.rivals.rival_common import MAX_UNROLLED_GATES, oversize_reason
 
-    # `avail_bytes` is pinned throughout: the guard's second term reads THIS machine's free RAM,
-    # and a test whose verdict depends on what else is running is not a test.
+    # `avail_bytes` is pinned so the verdict does not depend on this machine's free RAM.
     BIG_BOX = 256 << 30
 
     small = tmp_path / "small.bench"
@@ -216,18 +189,13 @@ def test_oversize_instance_is_refused_before_it_can_kill_the_sweep(tmp_path):
     big.write_text("INPUT(a)\nOUTPUT(z)\n" + "".join(f"g{i} = NOT(a)\n" for i in range(n)))
     why = oversize_reason(str(big), 25, avail_bytes=BIG_BOX)
     assert why and "unrolled gates" in why and f"{n:,}" in why
-    # ...and the SAME circuit at a shallow depth is fine: it is the unroll that is oversized
+    # ...and the same circuit at a shallow depth is fine: the unroll is what is oversized
     assert oversize_reason(str(big), 1, avail_bytes=BIG_BOX) is None
 
 
 def test_an_instance_too_big_for_THIS_box_is_refused_before_it_is_built(tmp_path):
-    """The absolute gate cap is a fixed number; the machines are not.
-
-    b18 at T=25 peaks at 10.6 GiB (measured) — fine on a 47 GB workstation, an OOM kill on a
-    13 GB Colab VM. An OOM kill is the failure mode with no exception to catch and no row to
-    show for it, which is exactly how four instances vanished from a 29-instance sweep. So the
-    guard also refuses what will not fit HERE, with the arithmetic in the reason.
-    """
+    """Besides the fixed gate cap, the guard refuses what will not fit in this machine's host
+    RAM and gives the memory arithmetic as the reason. b18's shape at T=25 needs about 10 GiB."""
     from eval.rivals.rival_common import oversize_reason, peak_host_gib
 
     # ~2.86M unrolled gates: b18's shape, well under MAX_UNROLLED_GATES
@@ -261,12 +229,9 @@ def test_the_memory_term_is_skipped_when_memory_cannot_be_read():
 
 # --------------------------------------------------------------------------- the start_point probe
 #
-# The probe decides whether a Recurrent cell is a comparison or an error row, and for one release
-# it decided that on OUR stopwatch: each probe was capped at 60 s against the measured run's
-# 300 s, and all three ways the search can fail were reported as the single string "no gradient
-# path at any start_point<=10" — a claim about the RIVAL. Measured (docs/findings/
-# RIVAL_FAIRNESS_FINDINGS.md §11): b14 at T=25 RUNS at start_point=1 in 743 s, where b17 really
-# does refuse in 5 s. These pin the contract without needing the checkout.
+# The probe decides whether a Recurrent cell is a comparison or an error row. Its three failure
+# modes are reported apart, and only one is a claim about the rival
+# (docs/findings/RIVAL_FAIRNESS_FINDINGS.md §11). These tests need no checkout.
 
 def _probe(monkeypatch, replies, **kw):
     """Drive probe_start_point against a stubbed rival. `replies[sp]` is its error string, or
@@ -286,11 +251,8 @@ def _probe(monkeypatch, replies, **kw):
 
 
 def test_the_whole_initialization_gets_one_budget_equal_to_the_run_timeout(monkeypatch):
-    """The start_point search is the rival's INITIALIZATION and gets ONE budget: the run's
-    timeout (300 s by default). Each probe runs with whatever is LEFT, so no probe can exceed
-    the budget and the sum of the probes cannot either. It used to be 4x the run timeout, so a
-    circuit whose model build takes ~1,100 s (b17) spent 4 x 1,200 s finding out it could not
-    start; the 300 s the user set is generous beside the 60 s the rival is measured under."""
+    """The start_point search is the rival's initialization and gets one budget, the run
+    timeout. Each probe runs with what is left, so neither one probe nor their sum exceeds it."""
     from eval.rivals import rivals_recurrent as rr
 
     assert rr.probe_budget(rr.DEFAULT_TIMEOUT) == rr.DEFAULT_TIMEOUT == 300.0
@@ -309,27 +271,26 @@ def test_a_settled_search_returns_the_start_point_and_no_reason(monkeypatch):
 
 
 def test_a_gradient_path_refusal_is_reported_as_one(monkeypatch):
-    """The only outcome that is a finding ABOUT THE RIVAL: it refused every depth we reached."""
+    """The only outcome that is a finding about the rival: it refused every depth reached."""
     sp, why, _seen = _probe(monkeypatch, {}, max_sp=4)          # no-grad everywhere
     assert sp is None
     assert why == "no gradient path at any start_point<=4"
 
 
 def test_a_timeout_is_reported_as_a_timeout_with_its_budget(monkeypatch):
-    """b14's real case. It must NOT read as 'no gradient path', and it must name the budget so a
-    reader can see whose number it is."""
+    """A probe timeout does not read as 'no gradient path', and it names the budget so a reader
+    can see whose number it is."""
     sp, why, seen = _probe(monkeypatch, {1: "timeout 300.0s"}, run_timeout=300.0)
     assert sp is None
     assert "gradient" not in why, f"a timeout must not be reported as a gradient-path refusal: {why}"
     assert "300s" in why and "budget" in why, why
-    # and the walk STOPS there: a larger start_point pays the same model build
+    # the walk stops there: a larger start_point pays the same model build
     assert [s for s, _t in seen] == [0, 1], f"the walk continued past a timeout: {seen}"
 
 
 def test_an_exhausted_budget_reads_as_did_not_initialize(monkeypatch):
-    """The third outcome: the probes we ran used the budget up before one completed. That is
-    neither a gradient-path refusal nor a single timeout — it is the rival failing to initialize
-    within the 300 s the campaign grants, and the row must say so with the budget's number."""
+    """The third outcome: the budget ran out before any probe completed. The row says the rival
+    did not initialize and names the budget."""
     sp, why, seen = _probe(monkeypatch, {}, budget=-1.0)       # budget already spent
     assert sp is None and seen == [], (sp, why, seen)
     assert why.startswith("did not initialize"), why
@@ -338,15 +299,10 @@ def test_an_exhausted_budget_reads_as_did_not_initialize(monkeypatch):
 
 
 def test_the_ladder_measures_the_largest_rung_that_completes():
-    """`run_at_batch` = ONE measured configuration per instance, and it is the LARGEST rung the
-    rival can actually finish on (2026-09-04). Rungs are rejected on FEASIBILITY — OOM, a driver
-    refusal, or not finishing inside the wall budget — never on throughput, so this is still one
-    measurement and not a best-of-N. Shared by every rival harness.
-
-    It used to start at our VRAM model's rung and step down only on a driver refusal, recording
-    a TIMEOUT as the rival's result. Both halves were wrong: the model was measured at
-    num_steps=10 and we run 1, so it under-granted DEMOTIC 1.5-3.9x on 4 of 11 ISCAS-85 cells,
-    and a batch the rival cannot finish with was never granted to it in the first place."""
+    """`run_at_batch` measures one configuration per instance: the largest rung the rival
+    completes, walked down from the top. Rungs are rejected on feasibility only (OOM, driver
+    refusal, wall budget), never on throughput, so it is not a best-of-N. Shared by every rival
+    harness (docs/findings/RIVAL_FAIRNESS_FINDINGS.md §2)."""
     from eval.rivals.rival_common import run_at_batch
 
     calls = []
@@ -380,10 +336,8 @@ def test_the_ladder_measures_the_largest_rung_that_completes():
 
 
 def test_each_rival_expands_paper_to_its_own_published_instances():
-    """`paper` expands to the rival's published set, defined ONCE in rival_common. (The tables
-    stopped scoring that subset beside the whole set on 2026-09-07 — the user's rule: the whole
-    set is the population, one number per row — so `paper_tables` no longer imports it; the
-    harnesses still expand the keyword.)"""
+    """`paper` expands to the rival's published set, defined once in rival_common. The tables no
+    longer read it; the harnesses still expand the keyword."""
     from eval.rivals.rival_common import PAPER_INSTANCES, expand_names
 
     assert len(PAPER_INSTANCES["demotic"]) == 11 and len(PAPER_INSTANCES["rcs"]) == 16
@@ -393,14 +347,8 @@ def test_each_rival_expands_paper_to_its_own_published_instances():
 
 
 def test_the_gpap_arm_cache_key_covers_the_python_sampling_layer(tmp_path, monkeypatch):
-    """A cached rival-arm result must MISS when the code that produced it changed.
-
-    The key fingerprints libgpap's bytes (`gpap_build_id`), which is the documented rule — but
-    the arm's answer is also decided by `gpap/sampling/`: the portfolio, the defaults, the
-    preprocessing, the coverage-run budget. A change there moves the number and leaves the build
-    id untouched, so a seeded campaign would replay stale arms as if they were current. That is
-    the same failure the key's own comment warns about one layer down.
-    """
+    """A cached GPAP-arm result misses when `gpap/sampling/` changes, not only when libgpap's
+    `gpap_build_id` does: the portfolio, defaults and preprocessing there also decide the number."""
     import shutil
 
     from eval.rivals import rival_common as rc
@@ -430,14 +378,9 @@ def test_the_gpap_arm_cache_key_covers_the_python_sampling_layer(tmp_path, monke
 
 
 def test_the_row_says_WHICH_sampler_produced_it():
-    """`--portfolio` selects GPAP's arm, so the row has to record which one ran.
-
-    The default is the shipped adaptive bandit (`circuit`) — every recorded campaign used it, and
-    changing it would move every published ratio. But it is an open asymmetry: the rivals and
-    CMSGen all run one fixed configuration while the bandit measures configs against each other
-    inside the timed wall and reports the winner (RIVAL_FAIRNESS_FINDINGS.md §10, §12). A caption
-    cannot carry that; the row can, via `portfolio` + `adaptive`.
-    """
+    """`--portfolio` selects GPAP's arm, so the row records which one ran. The default is the
+    adaptive bandit while the rivals and CMSGen run one fixed config; the row discloses this via
+    `portfolio` + `adaptive` (RIVAL_FAIRNESS_FINDINGS.md §10, §12)."""
     from gpap.sampling.pipeline import portfolio
     from eval.rivals.rivals_recurrent import GPAP_PORTFOLIO
 
@@ -447,8 +390,8 @@ def test_the_row_says_WHICH_sampler_produced_it():
 
 
 def test_both_rival_harnesses_share_the_pin():
-    """One definition. rivals_demotic imports the constant rather than restating it — two
-    harnesses drifting on the sampler they measure is the drift this repo keeps re-fixing."""
+    """rivals_demotic imports the portfolio constant from rivals_recurrent rather than restating
+    it."""
     import inspect
 
     from eval.rivals import rivals_demotic, rivals_recurrent
@@ -459,13 +402,9 @@ def test_both_rival_harnesses_share_the_pin():
 
 
 def test_the_portfolio_is_part_of_the_arm_cache_key():
-    """Two runs that differ only in `--portfolio` are different measurements. The GPAP-arm cache
-    keys on the task dict, so the portfolio has to be IN it — otherwise a `--portfolio b1` run
-    silently serves the `b8` result that is already on disk.
-
-    Gated on the harnesses' REAL task dicts (source-inspected, like the encoder test below).
-    The first version built its own dict with a `portfolio` key and hashed that — a test that
-    exercised nothing: deleting `portfolio` from the harness would have left it green."""
+    """Runs that differ only in `--portfolio` are different measurements, so the portfolio must
+    be in each harness's task dict (read from source); otherwise a `--portfolio b1` run would be
+    served the cached `b8` result."""
     import inspect
     import tempfile
 
@@ -487,11 +426,9 @@ def test_the_portfolio_is_part_of_the_arm_cache_key():
 
 
 def test_the_results_csv_cleanup_strips_the_dot_like_the_readback_does():
-    """Their `export_results` writes `sat_{dataset_str}_…` with the dot STRIPPED from the
-    instance name. The read-back glob learned that in the 2026-09-03 post-mortem; the clean-up
-    glob one function above it did not, so for `s208.1` / `s15850.1` no stale file was ever
-    removed and the read-back's `hits[0]` was an arbitrary pick among whatever rungs had run.
-    Both globs must strip the dot, and a multi-hit read-back must pick THIS call's rung."""
+    """Their `export_results` writes `sat_{dataset_str}_…` with the dot stripped from the instance
+    name (`s208.1` -> `s2081`). Both the clean-up and the read-back globs must strip it, and a
+    multi-hit read-back must pick this call's rung."""
     import inspect
 
     from eval.rivals import rivals_recurrent
@@ -527,8 +464,8 @@ def _stub_arm(monkeypatch, samples, sps=1000.0, n_models=5000, wall_total=10.0, 
 
     def fake_sample_file(path, device, **kw):
         seen["sample_kw"] = kw
-        # `sps_e2e_total` is the library's own e2e rate, which CARRIES the output projection;
-        # the arm recomputes its own with that phase removed (see the offline-dedup test).
+        # `sps_e2e_total` includes the output projection; the arm recomputes its e2e rate
+        # without it (see the offline-dedup test).
         return {"samples_per_s": sps, "sps_e2e_total": n_models / wall_total,
                 "success_rate": 0.5, "wall_total_s": wall_total,
                 "phases": {"sample": wall_total - proj_s, "output": proj_s},
@@ -541,10 +478,8 @@ def _stub_arm(monkeypatch, samples, sps=1000.0, n_models=5000, wall_total=10.0, 
 
 
 def test_the_gpap_arm_encodes_with_abc_fast_and_says_so(tmp_path, monkeypatch):
-    """The GPAP arm of every rival row is the abc:fast formula — the one Table 1 runs — and the
-    row records it. It used to be the native Tseitin with no encoder parameter at all, which made
-    Table 2 the only table whose GPAP number came from a 2-10x larger formula (b14: 413,451 vars
-    vs 41,938), unlabelled. RIVAL_FAIRNESS_FINDINGS.md §13."""
+    """The GPAP arm of every rival row encodes with abc:fast, the formula Table 1 runs, and the
+    row records it (RIVAL_FAIRNESS_FINDINGS.md §13)."""
     from eval.rivals import rivals_recurrent as rr
 
     seen = _stub_arm(monkeypatch, samples=[[0, 1], [1, 0], [0, 1]])
@@ -557,14 +492,10 @@ def test_the_gpap_arm_encodes_with_abc_fast_and_says_so(tmp_path, monkeypatch):
 
 def test_the_gpap_arm_runs_no_coverage_pass_and_measures_distinctness_on_its_own_rows(
         tmp_path, monkeypatch):
-    """`unique_per_s_est` = samples/s x the EXACT distinct fraction of everything the timed run
-    delivered (`out_cap=UNIQUE_ROWS`, now above any recorded delivery), with `n_cov=0`: the
-    coverage pass reconstructed rows x nv x 72 B of full models on the host and OOM-killed b14
-    (61 GB), and the user's rule is that the eval does not need it.
-
-    The cap was 1,000 until 2026-09-04, which made this an ESTIMATE from a window applied to runs
-    delivering up to a million models — while both rivals deduplicate their whole output exactly,
-    off their own clock. Same metric, same way, or it is not their metric."""
+    """`unique_per_s_est` is samples/s times the exact distinct fraction of every row the timed
+    run delivered (`out_cap=UNIQUE_ROWS`), as both rivals deduplicate their whole output. The
+    coverage pass is off (`n_cov=0`): it rebuilds full models on the host and can run out of
+    memory."""
     from eval.rivals import rivals_recurrent as rr
 
     seen = _stub_arm(monkeypatch, samples=[[0, 1], [1, 0], [0, 1], [0, 1]], sps=1000.0,
@@ -581,9 +512,9 @@ def test_the_gpap_arm_runs_no_coverage_pass_and_measures_distinctness_on_its_own
 
 
 def test_no_kept_row_is_not_measured_and_never_a_zero(tmp_path, monkeypatch):
-    """A run that kept nothing has no distinct fraction: None, with a status the table reader
-    (`paper_tables.unique_unmeasured`) recognizes — never 0.0, which every consumer buckets as
-    'GPAP produced nothing'."""
+    """A run that kept no rows has no distinct fraction: None, with a status
+    `paper_tables.unique_unmeasured` recognizes. Never 0.0, which reads as 'GPAP produced
+    nothing'."""
     import numpy as np
 
     from eval.artifact.paper_tables import unique_unmeasured
@@ -612,10 +543,9 @@ def test_the_encoder_is_part_of_both_harnesses_cache_key():
 
 
 def test_the_oversize_guard_is_a_tseitin_guard(tmp_path):
-    """Both terms of `oversize_reason` model the native Tseitin build; under abc:fast every seq
-    instance in the suite built on the 13 GB L4 VM (b18: 19,859 vars against 2.86M unrolled
-    gates), so a Tseitin-calibrated refusal there would omit instances the campaign already
-    ran. The guard must pass everything for the abc:fast encoder and keep refusing for Tseitin."""
+    """Both terms of `oversize_reason` model the native Tseitin build. Under abc:fast every seq
+    instance fits a 13 GB host, so the guard passes everything for abc:fast and keeps refusing
+    for Tseitin, the default."""
     from eval.rivals.rival_common import oversize_reason
 
     gates = 114_561                                  # b18's shape
@@ -630,10 +560,9 @@ def test_the_oversize_guard_is_a_tseitin_guard(tmp_path):
 # ---------------------------------------------------------------- the CMSGen arm on the rival rows
 
 def test_the_cmsgen_arm_is_the_bench_runner_timed_emission_free(monkeypatch, tmp_path):
-    """The third tool of every rival row is CMSGen on the row's own CNF, run by the SAME runner
-    `gpap bench` uses — `--nowrite` (no emission, like our collect=False run), the sampling
-    budget passed through so `--maxtime` makes the count exact — and recorded under the bench
-    driver's own `cms_*` keys, so every reader of a bench row reads a rival row unchanged."""
+    """CMSGen on a rival row's own CNF uses the `gpap bench` runner: `--nowrite` (no emission),
+    the sampling budget passed through so `--maxtime` makes the count exact, and the bench
+    driver's `cms_*` keys, so bench-row readers read a rival row unchanged."""
     import gpap.benchmark as gb
     from eval.artifact.paper_tables import cms_arm_ran
     from eval.rivals import rival_common as rc
@@ -660,8 +589,8 @@ def test_the_cmsgen_arm_is_the_bench_runner_timed_emission_free(monkeypatch, tmp
 
 
 def test_a_crashed_cmsgen_subprocess_is_recorded_as_an_error_not_a_zero(monkeypatch, tmp_path):
-    """A crashed baseline is `cms_error` beside a count of 0 — the ledger's own bucket, never
-    'CMSGen sampled nothing' (which would score as our win)."""
+    """A crashed CMSGen run is `cms_error` beside a count of 0, never 'CMSGen sampled nothing',
+    which would score as our win."""
     import gpap.benchmark as gb
     from eval.artifact.paper_tables import cms_arm_ran
     from eval.rivals import rival_common as rc
@@ -676,9 +605,9 @@ def test_a_crashed_cmsgen_subprocess_is_recorded_as_an_error_not_a_zero(monkeypa
 
 def test_run_gpap_samples_the_prebuilt_cnf_and_leaves_it_for_the_cmsgen_arm(tmp_path,
                                                                             monkeypatch):
-    """Both of our arms run ONE file: the harness builds the CNF once (`build_arm_cnf`), hands
-    it to `run_gpap(cnf=...)`, which samples exactly that path and must not delete it, and then
-    to `cmsgen_arm`. Without `cnf=` the arm builds and removes a temporary of its own."""
+    """Both of our arms run one file: the harness builds the CNF once (`build_arm_cnf`), and
+    `run_gpap(cnf=...)` samples that path and leaves it for `cmsgen_arm`. Without `cnf=` the arm
+    builds and removes its own temporary."""
     from eval.rivals import rivals_recurrent as rr
     from gpap.sampling import pipeline
 
@@ -704,10 +633,9 @@ def test_run_gpap_samples_the_prebuilt_cnf_and_leaves_it_for_the_cmsgen_arm(tmp_
 
 
 def test_both_harnesses_run_the_cmsgen_arm_on_the_cnf_the_gpap_arm_sampled():
-    """Structural gate on both harness mains: a `--cmsgen` flag, ONE `build_arm_cnf` into a
-    path, `run_gpap(... cnf=(<that path>, ...))` and `cmsgen_arm(<that path>, ...)` — so a
-    harness cannot drift into encoding twice (or pinning differently) for the two comparisons,
-    and the row carries the host CPU the CMSGen ratio needs."""
+    """Both harness mains have a `--cmsgen` flag, one `build_arm_cnf` into a path, and
+    `run_gpap(cnf=...)` and `cmsgen_arm` on that path, so the two comparisons share one encoding
+    and pin. The row also records the host CPU the CMSGen ratio needs."""
     import inspect
 
     from eval.rivals import rivals_demotic, rivals_recurrent
@@ -726,9 +654,8 @@ def test_both_harnesses_run_the_cmsgen_arm_on_the_cnf_the_gpap_arm_sampled():
 # ---------------------------------------------------------------- alignment + circuit-level checks
 
 def test_the_recurrent_miter_self_checks_and_catches_an_inverted_miter(tmp_path):
-    """The rare-mode miter's P[MITER=1] must equal the instance's own p_accept — the check the
-    DEMOTIC arm always ran and the Recurrent arm asserted by construction only. Sabotage: an
-    inverted miter (P ~ 1 - p) must be caught, or the check proves nothing."""
+    """The rare-mode miter's P[MITER=1] must equal the instance's p_accept. An inverted miter
+    (P ~ 1 - p) must fail the check, or the check proves nothing."""
     from eval.rivals import rivals_recurrent as rr
 
     src = os.path.join(SEQ_DIR, "b06.bench")
@@ -747,9 +674,8 @@ def test_the_recurrent_miter_self_checks_and_catches_an_inverted_miter(tmp_path)
 
 
 def test_both_harnesses_verify_constraint_alignment_per_row():
-    """Table 2's text says alignment is VERIFIED per row and the `misaligned` bucket exists for
-    it; for one release only the DEMOTIC harness ran the check, so the headline sequential rows
-    carried no evidence at all. Both mains must call it and write `pin_check_ok`."""
+    """Both harness mains run the constraint-alignment check and write `pin_check_ok`, which
+    Table 2's `misaligned` bucket reads."""
     import inspect
 
     from eval.rivals import rival_common, rivals_demotic, rivals_recurrent
@@ -763,8 +689,8 @@ def test_both_harnesses_verify_constraint_alignment_per_row():
 
 
 def _stub_arm_with_cols(monkeypatch, samples_by_label, sps=1000.0):
-    """Like `_stub_arm`, but the fake pipeline also returns the kept rows' column ids and the
-    wire map, exactly as `sample_file` does — so the arm's simulate check can run."""
+    """Like `_stub_arm`, but the fake pipeline also returns the kept rows' column ids and wire
+    map, as `sample_file` does, so the arm's simulate check can run."""
     import numpy as np
 
     from gpap.circuits import abc_backend, bench
@@ -792,10 +718,10 @@ def _stub_arm_with_cols(monkeypatch, samples_by_label, sps=1000.0):
 
 
 def test_the_arm_simulates_its_kept_rows_through_the_original_circuit(tmp_path, monkeypatch):
-    """Encoder-independent soundness ON THE CAMPAIGN PATH: the kept output rows are simulated
-    through the original circuit and must reproduce the pinned outputs. The tiny bench is
-    z = AND(DFF(a), b), so at T=3 the last-cycle output is a@1 & b@2: a row with those two bits
-    set passes, the all-zero row fails, and the verdict folds BAD over ok over off."""
+    """The arm simulates its kept output rows through the original circuit (encoder-independent
+    soundness). The tiny bench is z = AND(DFF(a), b), so at T=3 the last-cycle output is
+    a@1 & b@2: a row with both bits set passes, the all-zero row fails, and the verdict folds BAD
+    over ok over off."""
     from eval.rivals import rivals_recurrent as rr
 
     good = {"a@1": 1, "b@2": 1}
@@ -806,26 +732,16 @@ def test_the_arm_simulates_its_kept_rows_through_the_original_circuit(tmp_path, 
     _stub_arm_with_cols(monkeypatch, [good, good])
     g = rr.run_gpap(_tiny_bench(tmp_path), 3, 1, {"z": True}, [5], 100, "cpu", time_limit=1.0)
     assert g["sim_check"] == "ok" and g["sim_check_bad"] == 0 and g["sim_check_rows"] == 2
-    # no explicit target (never the harness's case) -> the check is OFF, never a silent pass
+    # no explicit target (never the harness's case): the check is off, not a silent pass
     _stub_arm(monkeypatch, samples=[[0, 1], [1, 0]])
     g = rr.run_gpap(_tiny_bench(tmp_path), 3, 1, None, [5], 100, "cpu", time_limit=1.0)
     assert g["sim_check"] == "off" and g["sim_check_rows"] == 0
 
 
 def test_repeats_size_the_space_but_no_longer_cap_our_own_rate(tmp_path, monkeypatch):
-    """THE CAP IS GONE, because what it corrected is gone (2026-09-04).
-
-    It existed because `unique_per_s_est` was a 1,000-row window's distinct fraction applied to a
-    whole run: where the window showed repeats, the implied |S| bounded what a run can deliver
-    (each solution at most once) and the figure was capped at |S|/wall. Now the arm deduplicates
-    every delivered row exactly, so the rate IS the measurement and there is nothing to correct.
-
-    The cap was also defeated by the median that followed it: on both 2026-09-03 cells where it
-    fired the capped seed was the slowest, so the median discarded it and the row published an
-    uncapped number under a `unique_capped: true` flag.
-
-    The space estimate stays — it feeds the `tiny` screen, and over the whole run it is a far
-    better estimator than it was over 1,000 rows."""
+    """The repeat rate still estimates the solution space (it feeds the `tiny` screen) but no
+    longer caps `unique_per_s_est`: the arm deduplicates every delivered row exactly, so the rate
+    is the measurement."""
     from eval.rivals import rivals_recurrent as rr
 
     rows = [[(i % 100) >> b & 1 for b in range(7)] for i in range(1000)]
@@ -855,16 +771,10 @@ def test_a_failed_demotic_miter_check_flags_the_row_instead_of_killing_the_stage
 
 
 def test_deduplication_is_offline_and_is_charged_to_no_rate(tmp_path, monkeypatch):
-    """THE unique/s figure must cost the sampler nothing, on either clock.
-
-    Two halves. The dedup itself runs after `sample_file` returns, so it is outside every clock
-    the sampler keeps — `distinct_s` records what it cost, because "off the clock" is a claim and
-    a claim needs evidence. The GATHER rides along inside the timed loop: `samples_per_s` already
-    subtracts it (`phases["output"]`), but `sps_e2e_total` CARRIES it, which was a rounding error
-    at 1,000 kept rows and is not at a million. Both rivals deduplicate their whole output off
-    their own timer, so ours comes off both of ours or the e2e column pays for an instrument the
-    rival is never charged for.
-    """
+    """The unique/s figure costs the sampler nothing on either clock, as both rivals deduplicate
+    off their own timer. The dedup runs after `sample_file` returns and is timed in
+    `distinct_s`. The row gather runs inside the timed loop: `samples_per_s` already excludes it
+    (`phases["output"]`), and the arm's e2e rate subtracts it too."""
     from eval.rivals import rivals_recurrent as rr
 
     rows = [[i & 1, (i >> 1) & 1] for i in range(400)]
@@ -875,24 +785,20 @@ def test_deduplication_is_offline_and_is_charged_to_no_rate(tmp_path, monkeypatc
 
     assert seed["out_project_s"] == 4.0, "the projection wall must be recorded, not assumed"
     assert seed["distinct_s"] >= 0.0, "the offline dedup must be timed"
-    # e2e is computed on the wall WITHOUT the gather: 400 / (10 - 4), not 400 / 10
+    # e2e is computed on the wall without the gather: 400 / (10 - 4), not 400 / 10
     assert seed["sps_e2e"] == pytest.approx(400 / 6.0)
     assert seed["sps_e2e_with_delivery"] == pytest.approx(400 / 10.0), \
         "the library's delivery-carrying rate must still be recorded for audit"
     assert g["sps_e2e"] == pytest.approx(400 / 6.0)
-    # and the steady-state rate is untouched by any of it
+    # the steady-state rate is unchanged
     assert g["sps"] == 1000.0
 
 
 def test_how_the_batch_grant_was_reached_reaches_the_row():
-    """Two ways the ladder can hand a rival less than the rule promises, both of which used to be
-    invisible outside `batch_sweep`, which nothing read.
-
-    `probe_truncated`: the walk spent its probe budget and fell back to the VRAM model's rung —
-    the estimator measured under-granting DEMOTIC 1.5-3.9x — so a cell whose oversized rungs fail
-    SLOWLY (timeouts) can settle for a smaller grant than an equally capable cell whose rungs fail
-    fast (OOM). `budget_bound`: every rung timed out, so the cell is bounded by OUR wall rather
-    than by the rival's capability, which is a different finding and a re-runnable one."""
+    """Two ways the ladder can grant a rival less than the rule promises are flagged on the row,
+    not only in `batch_sweep`: `probe_truncated` (the walk spent its probe budget and fell back to
+    the VRAM model's rung) and `budget_bound` (every rung timed out, so our wall bounds the cell
+    rather than the rival's capability)."""
     import eval.rivals.rival_common as rc
 
     rc._WARMED.add("probe-test")
@@ -908,14 +814,9 @@ def test_how_the_batch_grant_was_reached_reaches_the_row():
 
 
 def test_every_paper_set_instance_has_a_target_even_on_their_default_branch():
-    """A circuit their run.py handles through its catch-all `else` still needs an entry here, or
-    the table-mode loop drops it with `if name not in TARGETS: continue`.
-
-    That silent skip has now cost three instances: `b15` and `s208.1` in earlier sweeps, and it
-    was waiting for `s38584` — the circuit their Table II's 8th ISCAS-89 row actually names, added
-    to the paper set on 2026-09-04. The existing transcription test only checks circuits with a
-    NAMED branch in their source, so a catch-all instance passes it while never being measured.
-    This asserts the property that matters: everything we claim to score is scoreable."""
+    """Every instance in the rival's published set has a TARGETS entry, including those their
+    run.py handles through its catch-all `else`. Table mode skips a name not in TARGETS without
+    failing, and the transcription test only covers named branches."""
     from eval.rivals.rival_common import PAPER_INSTANCES
     from eval.rivals.rivals_recurrent import TARGETS
 
@@ -926,14 +827,9 @@ def test_every_paper_set_instance_has_a_target_even_on_their_default_branch():
 
 
 def test_the_rival_is_run_at_a_recorded_seed():
-    """The rivals take `--seed` (their own `flags.py`, default 0) and neither harness passed it,
-    so "the rival ran once" was true but the row could not say at WHICH initialization — and a
-    second run would have silently re-measured the same one.
-
-    One seed is the protocol (`rival_common.RIVAL_SEED`): the rival is measured in exactly one
-    configuration, at its own default, and the asymmetry against GPAP's median-of-three is stated
-    rather than hidden. What this asserts is that the choice is EXPLICIT — passed on the command
-    line and recorded — not inherited from a default that could move under us."""
+    """Both harnesses pass the rival `--seed` explicitly and record its source. The protocol is
+    one rival seed (`rival_common.RIVAL_SEED`, the rivals' own default 0), passed on the command
+    line rather than inherited from a default that could move."""
     import inspect
 
     from eval.rivals import rival_common, rivals_demotic, rivals_recurrent
@@ -946,13 +842,12 @@ def test_the_rival_is_run_at_a_recorded_seed():
         assert '"seed_source"' in src, f"{mod.__name__} does not record which seed it measured"
 
 
-# ---------------------------------------------------------------- the 2026-09-05 completion run
+# ---------------------------------------------------------------- init budget, retries, OOM cache
 
 def test_a_failed_initialization_probe_is_cached_at_its_budget_and_retried_at_a_larger_one(tmp_path, monkeypatch):
-    """The start_point probe is pin-independent, so the table stage re-paying a 1200 s failure
-    the rare stage just measured is 20 minutes for the same answer — cache it WITH the budget.
-    But a stuck instance may pass on a longer clock (that is what a budget means), so a larger
-    budget must re-ask, and a settled start_point must still be honoured as before."""
+    """The start_point probe is pin-independent, so a failure is cached with its budget and the
+    next stage does not re-pay it. A larger budget re-asks, since a stuck instance may pass on a
+    longer clock; a settled start_point is honoured at any budget."""
     import json
 
     from eval.rivals import rivals_recurrent as rr
@@ -991,11 +886,9 @@ def test_a_failed_initialization_probe_is_cached_at_its_budget_and_retried_at_a_
 
 
 def test_the_calibration_measures_the_papers_configuration_too():
-    """Three review rounds each found a knob the text cited and nobody ran: the tie-break
-    compared each script's `num_steps` against the argparse default only, so Recurrent's paper
-    (5 iterations, lr 50) and DEMOTIC's (10 iterations) were never in the candidate set. The
-    calibration now probes every value the tool's own artifacts give the knob — script, argparse,
-    PAPER — and the paper's paired setting; the campaign still RUNS the script configuration."""
+    """The steps/lr calibration probes every value the tool's own artifacts give a knob (script,
+    argparse, paper) and the paper's paired setting; the campaign still runs the script
+    configuration."""
     from eval.rivals.rival_common import RIVAL_PAPER_CONFIG, RIVAL_STEPS, resolve_lr, resolve_steps
     from eval.rivals.steps_calibration import candidates
 
@@ -1007,7 +900,7 @@ def test_the_calibration_measures_the_papers_configuration_too():
     assert pinned == 1 and vals == {1, 10}
     _p, _s, vals = candidates("recurrent", "lr")
     assert vals == {15.0, 50.0}
-    # the protocol runs the SHIPPED configuration, unchanged
+    # the protocol runs the shipped configuration
     assert resolve_steps("recurrent")[0] == RIVAL_STEPS["recurrent"][0] == 1
     assert resolve_lr("recurrent")[0] == 15.0 and resolve_steps("demotic")[0] == 1
 
@@ -1025,11 +918,9 @@ def test_the_init_budget_is_its_own_number_and_the_driver_passes_it():
 
 
 def test_retry_errors_re_runs_only_rows_not_measured_under_the_current_budget():
-    """`--retry-errors` used to drop EVERY error row at process start and re-probe it. With the
-    probe cache packed only at stage end and a ~1 h VM, each fresh VM re-paid the previous VM's
-    1,200 s failures and was reclaimed before reaching a new instance — the 2026-09-05 completion
-    run stalled on b17/b18/b19. A row whose reason names the CURRENT budget is a finished
-    measurement; only rows from another budget or an environmental failure are re-run."""
+    """`--retry-errors` keeps an error row whose reason names the current budget (a finished
+    measurement) and re-runs only rows from another budget or an environmental failure, so a
+    fresh VM does not re-pay every recorded init failure."""
     from eval.rivals.rivals_recurrent import settled_error
 
     cur = "did not initialize: a 1-step start_point probe (sp=2) did not complete within the 1200s initialization budget"
@@ -1045,10 +936,9 @@ def test_retry_errors_re_runs_only_rows_not_measured_under_the_current_budget():
 
 
 def test_a_known_oom_rung_is_not_walked_twice(tmp_path):
-    """A rung that OOM'd is deterministic for the circuit, depth and card, and on a 20M-node
-    circuit each doomed rung above the grant costs a full model build: the 2026-09-05 completion
-    run spent whole VM lifetimes re-walking seven of them after every reclaim and never reached
-    the run. The ceiling is cached; the next walk starts below it; the grant is unchanged."""
+    """An OOM rung is deterministic for the circuit, depth and card, and on a large circuit each
+    costs a full model build. The OOM ceiling is cached and the next walk starts below it; the
+    grant is unchanged."""
     from eval.rivals.rivals_recurrent import known_ladder, remember_oom_ceiling
 
     bench = tmp_path / "x.bench"; bench.write_text("INPUT(a)\nOUTPUT(y)\ny = DFF(a)\n")
@@ -1056,12 +946,12 @@ def test_a_known_oom_rung_is_not_walked_twice(tmp_path):
     ladder, prior = known_ladder(cache, str(bench), 25, (1_000, 3_000, 10_000, 30_000))
     assert ladder == (1_000, 3_000, 10_000, 30_000) and prior is None, "no ceiling known yet"
     sweep = [{"batch": 30_000, "error": "torch.OutOfMemoryError: CUDA out of memory"},
-             {"batch": 10_000, "error": "timeout 1200.0s"},          # a timeout is NOT a ceiling
+             {"batch": 10_000, "error": "timeout 1200.0s"},          # a timeout is not a ceiling
              {"batch": 3_000, "error": None, "unique_per_s": 5.0}]
     assert remember_oom_ceiling(cache, str(bench), 25, sweep) == 30_000
     ladder, prior = known_ladder(cache, str(bench), 25, (1_000, 3_000, 10_000, 30_000))
     assert ladder == (1_000, 3_000, 10_000) and prior == 30_000, "the OOM rung is skipped, the timeout rung is not"
-    # a later walk can only TIGHTEN the ceiling
+    # a later walk can only tighten the ceiling
     assert remember_oom_ceiling(cache, str(bench), 25, [{"batch": 10_000, "error": "OutOfMemoryError"}], prior=30_000) == 10_000
     assert known_ladder(cache, str(bench), 25, (1_000, 3_000, 10_000, 30_000))[0] == (1_000, 3_000)
     # a different depth is a different circuit
@@ -1071,10 +961,9 @@ def test_a_known_oom_rung_is_not_walked_twice(tmp_path):
 # --------------------------------------------------------------- protocol v1.0: the grant record
 
 def test_the_ladder_top_is_above_the_cards_reach_and_the_walk_starts_there():
-    """Six cells of the 2026-09-04 campaign completed the ladder's 3,000,000 top rung first try,
-    so the LADDER bound their grant rather than the card — a rejection reason the "feasibility
-    only" rule does not state (RIVAL_FAIRNESS_FINDINGS.md §16e). The top is 30,000,000 now; the
-    walk still starts at the top; and the rungs are the decade-and-triple ladder throughout."""
+    """The ladder top (at least 30,000,000) sits above what the card completes, so the card and
+    not the ladder bounds each grant (RIVAL_FAIRNESS_FINDINGS.md §16e). The walk starts at the
+    top, and the rungs are the decade-and-triple ladder."""
     from eval.rivals.rival_common import BATCH_LADDER, run_at_batch
 
     assert BATCH_LADDER[-1] >= 30_000_000
@@ -1088,10 +977,9 @@ def test_the_ladder_top_is_above_the_cards_reach_and_the_walk_starts_there():
 
 
 def test_a_recorded_grant_pins_the_walk_and_only_descends_when_this_card_cannot_finish():
-    """A grants file (eval/rivals/extract_grants.py) turns the ladder into `pinned_ladder`: the
-    recorded rung is measured FIRST and nothing above it is offered, so a reproduction pays no
-    walk. The rule is unchanged — on a card that cannot finish on that rung the walk descends
-    from it exactly as before — and the row says which of the two happened (`grant_source`)."""
+    """With a grants file (eval/rivals/extract_grants.py), `pinned_ladder` measures the recorded
+    rung first and offers nothing above it, so a reproduction pays no walk. On a card that cannot
+    finish that rung the walk descends as usual, and `grant_source` says which happened."""
     import eval.rivals.rival_common as rc
     from eval.rivals.rival_common import grant_source, pinned_ladder, run_at_batch
 
@@ -1115,9 +1003,8 @@ def test_a_recorded_grant_pins_the_walk_and_only_descends_when_this_card_cannot_
 
 
 def test_the_recurrent_harness_pins_both_the_rung_and_the_start_point_from_a_grant(tmp_path, monkeypatch):
-    """The two halves of Recurrent's search — the start_point probe and the ladder walk — are
-    the hours of a campaign and neither is a measurement. Given a grant, `run_recurrent_once`
-    runs ONCE at the recorded rung and stamps the row; given none, it walks as before."""
+    """Given a grant, `run_recurrent_once` skips the start_point probe and the ladder walk: it
+    runs once at the recorded rung and start_point and stamps the row. Without one, it walks."""
     import eval.rivals.rival_common as rc
     import eval.rivals.rivals_recurrent as rr
 
@@ -1141,11 +1028,10 @@ def test_the_recurrent_harness_pins_both_the_rung_and_the_start_point_from_a_gra
 
 
 def test_extract_grants_reads_the_grant_off_the_rows_and_never_pins_a_failure(tmp_path):
-    """The grants file is READ OFF the campaign rows (the rung in `batch`, the rungs tried in
-    `batch_sweep`, Recurrent's `start_point`), keyed the way the harnesses look it up — the
-    DEMOTIC native row runs a combinational circuit at T=1 whatever its file header says. A
-    rival failure is recorded with its reason and WITHOUT a batch, so `lookup_grant` returns
-    None for it and the harness re-measures rather than copies it."""
+    """The grants file is read off the campaign rows (`batch`, `batch_sweep`, Recurrent's
+    `start_point`), keyed the way the harnesses look it up; a DEMOTIC native row is a
+    combinational circuit at T=1 whatever its file header says. A rival failure is recorded
+    without a batch, so `lookup_grant` returns None and the harness re-measures it."""
     import json
 
     from eval.rivals.extract_grants import extract
@@ -1209,10 +1095,9 @@ def test_the_committed_grants_file_is_the_campaigns_and_every_pinned_rung_is_on_
 
 
 def test_a_rival_that_dies_with_nothing_on_either_stream_is_a_refusal_not_a_crash(tmp_path, monkeypatch):
-    """Session B of the T=50 appendix run (2026-09-06) lost its last nine cells to an IndexError:
-    the Recurrent subprocess exited non-zero with EMPTY stdout and stderr (a SIGKILL leaves no
-    traceback) and the error line took `[-1]` of an empty list. A rung that does not complete is
-    a refusal — the row must say how it died, and the ladder must step down past it."""
+    """A Recurrent subprocess that exits non-zero with empty stdout and stderr (a SIGKILL leaves
+    no traceback) is a refusal: the row says how it died and the ladder steps down past it,
+    rather than crashing on the empty output."""
     import subprocess
     from eval.rivals import rivals_recurrent as rr
     from eval.rivals.rival_common import run_at_batch
@@ -1242,11 +1127,9 @@ def test_a_rival_that_dies_with_nothing_on_either_stream_is_a_refusal_not_a_cras
 
 
 def test_an_interrupted_walk_resumes_below_the_rungs_it_already_saw_refused(tmp_path):
-    """s15850.1 at T=50 (2026-09-06): each rung pays minutes of model build before it fails, the
-    walk outlasts a Colab VM, and with the ceiling written only at the END of the walk every
-    reclaim restarted it from the top — two sessions burned an hour per cycle on one cell and
-    never landed it. Refusals are remembered as they are seen; a timeout only at its clock; the
-    search time is carried so the walk's probe budget is charged as one uninterrupted walk."""
+    """Each refused rung is cached as it is seen, so a walk interrupted by a VM reclaim resumes
+    below it instead of from the top. A timeout is a ceiling only at its own clock, and the search
+    time is carried so the probe budget is charged as one walk."""
     from eval.rivals.rival_common import run_at_batch
     from eval.rivals.rivals_recurrent import (known_ladder, known_spent, remember_oom_ceiling,
                                               remember_refusal)
@@ -1283,10 +1166,8 @@ def test_an_interrupted_walk_resumes_below_the_rungs_it_already_saw_refused(tmp_
 
 
 def test_the_recurrent_warmup_run_is_capped_far_below_the_measurement_timeout(tmp_path, monkeypatch):
-    """s15850.1 at T=50: even a discarded batch-256 warmup cost ~1,030 s (the rival's graph build
-    is O(circuit x T), not batch), re-paid on every VM reclaim. The warmup is now killed after
-    WARMUP_TIMEOUT_S while the measured rungs keep the full 1,200 s — proven by the timeouts each
-    call is handed."""
+    """The discarded warmup run is killed after WARMUP_TIMEOUT_S, since the rival's graph build
+    is O(circuit x T) whatever the batch; the measured rungs keep the full timeout."""
     from eval.rivals import rivals_recurrent as rr
 
     seen = []
@@ -1307,20 +1188,11 @@ def test_the_recurrent_warmup_run_is_capped_far_below_the_measurement_timeout(tm
 
 
 def test_a_recorded_failure_is_only_honoured_when_asked_for():
-    """The artifact's second shortcut, and the one that can only be unfair to the RIVAL.
-
-    28 of the campaign's cells are recorded as "the rival did not initialize inside its 1,200 s
-    budget", and re-deriving them costs that budget each — half the wall of a full reproduction,
-    for rows that say "no measurement". `eval/artifact/reproduce.sh` therefore pins them, and
-    this fixes what that is allowed to mean:
-
-      * a recorded failure is NEVER a grant — `lookup_grant` must keep returning None for it, or
-        a pinned batch would be invented out of an entry that has none;
-      * honouring it is opt-in at the harness (the frozen driver re-measures), because a failure
-        is "did not settle ON THAT CARD" and a faster card might settle;
-      * and the entry it produces must carry `not_remeasured`, which is what stops
-        `compare_campaign.py` counting the cell as agreement.
-    """
+    """`eval/artifact/reproduce.sh` can pin recorded rival failures instead of re-paying their
+    init budget. That shortcut can only be unfair to the rival, so: a recorded failure is never a
+    grant (`lookup_grant` returns None); honouring it is opt-in, since a faster card might settle;
+    and its entry carries `not_remeasured`, so `compare_campaign.py` does not count it as
+    agreement."""
     from eval.rivals.rival_common import (grant_key, lookup_grant,  # noqa: PLC0415
                                           lookup_recorded_failure)
 
@@ -1333,17 +1205,15 @@ def test_a_recorded_failure_is_only_honoured_when_asked_for():
     fail = lookup_recorded_failure(grants, "recurrent", "b17", "rare", 25)
     assert fail["not_remeasured"] and "NOT re-measured" in fail["grant_source"]
     assert fail["error"].startswith("did not initialize")
-    # a cell that HAS a grant is not a failure, and an unrecorded cell is neither
+    # a cell with a grant is not a failure, and an unrecorded cell is neither
     assert lookup_recorded_failure(grants, "recurrent", "b03", "rare", 25) is None
     assert lookup_recorded_failure(grants, "recurrent", "b99", "rare", 25) is None
     assert lookup_recorded_failure({}, "recurrent", "b17", "rare", 25) is None
 
 
 def test_a_pinned_failure_is_itself_a_rival_failure_row():
-    """AND WHAT THE TABLES THEN SEE. Both harnesses write the lookup's dict straight out
-    (`dict(pinned_fail)`), so the row's shape has exactly one definition and this classifies the
-    very object they write: a rival failure — never a zero, never a win — carrying the provenance
-    that says it was not measured here."""
+    """Both harnesses write the lookup's dict straight out (`dict(pinned_fail)`), so this
+    classifies that object: the tables see a rival failure, never a zero or a win."""
     from eval.artifact.paper_tables import rival_cells  # noqa: PLC0415
     from eval.rivals.rival_common import grant_key, lookup_recorded_failure  # noqa: PLC0415
 
@@ -1358,15 +1228,9 @@ def test_a_pinned_failure_is_itself_a_rival_failure_row():
 
 
 def test_honouring_a_recorded_failure_stays_opt_in_and_settings_bound():
-    """THE TWO PROPERTIES THE SHORTCUT'S FAIRNESS RESTS ON, neither of which any other test
-    touched: the flag is off unless asked for, and a pin is only honoured under the settings
-    that produced it.
-
-    The default is read out of the SOURCE because both harnesses build their parser inside
-    `main()`, which cannot be reached without running a campaign. That is precise about the one
-    regression that matters — `action="store_true"` becoming `default=True`, which would make
-    every reproduction stop measuring the rival while the whole suite stayed green.
-    """
+    """`--honour-recorded-failures` is off unless asked for, and a pin is honoured only under the
+    settings that produced it. The flag is read from source because both harnesses build their
+    parser inside `main()`."""
     from tests.conftest import REPO_ROOT  # noqa: PLC0415
 
     for mod in ("rivals_recurrent.py", "rivals_demotic.py"):
@@ -1382,9 +1246,8 @@ def test_honouring_a_recorded_failure_stays_opt_in_and_settings_bound():
             f"{mod}: the flag must be store_true, i.e. OFF unless the operator asks"
         assert "default" not in kw, f"{mod}: a default on this flag turns the shortcut on"
 
-    # ...and the pin is bound to the settings it was measured under. `settled_error` is the same
-    # predicate `--retry-errors` uses, so a raised --init-budget invalidates the recorded row
-    # rather than replaying it: the operator asking for more time must GET more time.
+    # The pin is bound to its settings: `settled_error` is the predicate `--retry-errors` uses,
+    # so a raised --init-budget re-measures the recorded row rather than replaying it.
     from eval.rivals.rivals_recurrent import settled_error  # noqa: PLC0415
 
     recorded = ("did not initialize: the start_point search reached sp=1 and exhausted its "

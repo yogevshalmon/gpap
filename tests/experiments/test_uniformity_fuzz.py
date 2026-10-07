@@ -1,18 +1,9 @@
-"""Uniformity regression gate, over generated instances whose solution set is known EXACTLY.
+"""Uniformity regression gate over generated instances whose solution set is known exactly.
 
-The full campaign lives in `eval/uniformity/fuzz_uniformity.py` (see docs/findings/UNIFORMITY_FINDINGS.md);
-this file gates the parts that must never regress silently:
-
-  * the generators' own oracle is self-consistent (a broken oracle would hide every other bug);
-  * the chi-square machinery does not manufacture skew from an exactly-uniform input;
-  * every emitted row is a real solution (SOUNDNESS — the one property that is not a trade-off);
-  * at B >= |support| the sampler is statistically indistinguishable from exactly uniform. That
-    is the structural claim: one decision round assigns the whole support a uniform random
-    polarity, and because GPAP DISCARDS conflicted trajectories instead of backtracking out of
-    them, keeping the survivors is exact rejection sampling over the projection.
-
-Deliberately NOT gated: that small-B configs are uniform. They are not, measurably so, and that is
-a documented property of this algorithm class (CMSGen included) rather than a defect.
+Checks that the oracle is self-consistent, the chi-square test neither invents nor misses skew,
+every emitted row is a solution, and B >= |support| is uniform (exact rejection sampling). Small-B
+configs are not uniform and are not gated. The full campaign is
+`eval/uniformity/fuzz_uniformity.py` (docs/findings/UNIFORMITY_FINDINGS.md).
 """
 import numpy as np
 import pytest
@@ -27,13 +18,12 @@ from eval.uniformity.fuzz_uniformity import (
 )
 from eval.uniformity.metrics import uniformity_stats
 
-# One fixed seed: a regression gate must fail for a code reason, never for a draw reason.
+# One fixed seed, so a failure comes from the code and not from the draw.
 FUZZ_SEED = 20260730
 N_INSTANCES = 6
 S_WINDOW = (8, 200)
 
-# A true uniform sampler trips this only ~1e-6 of the time per instance, so a failure here is a
-# real distributional change and not an unlucky campaign.
+# A uniform sampler trips this about 1e-6 of the time per instance.
 P_FLOOR = 1e-6
 
 
@@ -45,11 +35,8 @@ def instances():
 
 
 def test_degeneracy_flag_finds_subcube_solution_sets(instances):
-    """A solution set that is a full SUBCUBE (every support var pinned or free) is one on which
-    EVERY sampler is uniform by construction — the don't-care filler produces those bits, not the
-    config under test — so the campaign must be able to screen it out of a headline median. The
-    old `vacuous` flag only caught `accept.all()`, its all-free special case, which the generator
-    never produces inside the default |S| window."""
+    """A solution set that is a full subcube (every support var pinned or free) is uniform under
+    any sampler, so the campaign flags it to screen it out of a median."""
     from eval.uniformity.fuzz_uniformity import _degeneracy
 
     assert _degeneracy(np.array([[a, b, 1] for a in (0, 1) for b in (0, 1)],
@@ -60,16 +47,13 @@ def test_degeneracy_flag_finds_subcube_solution_sets(instances):
         meta = _degeneracy(inst.sols)
         assert inst.meta["subcube"] == meta["subcube"]
         assert inst.meta["free_dim"] == meta["free_dim"] <= len(inst.support)
-        # the flag must agree with the definition on real generated sets
+        # the flag agrees with the definition
         assert meta["subcube"] == (inst.S == (1 << meta["free_dim"]))
 
 
 def test_oracle_is_self_consistent(instances):
-    """Every enumerated solution must satisfy the formula, and the count must be reproducible.
-
-    For the circuit kind `gen_circuit` already proves encoding == truth table over all 2^k inputs
-    (it raises otherwise); this re-checks the `cnf` kind against its own clauses, so the oracle is
-    never taken on trust."""
+    """Every enumerated solution satisfies the formula and the count is reproducible. Only the
+    `cnf` kind is re-checked here; `gen_circuit` checks its own encoding against the truth table."""
     for inst in instances:
         assert inst.S >= S_WINDOW[0] and inst.S <= S_WINDOW[1]
         assert inst.sols.shape[1] == len(inst.support)
@@ -84,8 +68,7 @@ def test_oracle_is_self_consistent(instances):
 
 
 def test_brute_force_agrees_with_a_solver():
-    """The oracle is solver-free by design; cross-check it against pysat once so a silent bug in
-    the exhaustive evaluator cannot pass unnoticed."""
+    """The solver-free oracle matches pysat's model enumeration."""
     pysat = pytest.importorskip("pysat.solvers")
     clauses = [[1, 2, -3], [-1, 3], [2, 3], [-2, -3, 4], [-4, 1]]
     mine = {tuple(int(b) for b in r) for r in brute_force_models(4, clauses)}
@@ -100,8 +83,7 @@ def test_brute_force_agrees_with_a_solver():
 
 
 def test_statistics_do_not_manufacture_skew(instances):
-    """The negative control: an exactly-uniform input must not be flagged. If this fails, every
-    uniformity number this repo reports is suspect."""
+    """Negative control: an exactly uniform input is not flagged."""
     for inst in instances:
         n = 100 * inst.S
         counts, unsound, got, _ = sample_control(inst, n, seed=3, tv=0.0)
@@ -111,9 +93,8 @@ def test_statistics_do_not_manufacture_skew(instances):
 
 
 def test_positive_control_has_power(instances):
-    """...and the test must actually be able to see a real skew, or the negative control above is
-    passing for the wrong reason. TV=0.15 is well inside what the campaign measures on real
-    samplers, so it must be detected on every instance."""
+    """Positive control: a TV=0.15 skew is detected on every instance, so the negative control
+    is not passing for lack of power."""
     for inst in instances:
         n = 100 * inst.S
         counts, _, _, _ = sample_control(inst, n, seed=3, tv=0.15)
@@ -130,8 +111,7 @@ def test_all_assignments_shape():
 @pytest.mark.gpu
 @pytest.mark.parametrize("cfg", ["b1", "b8"])
 def test_every_emitted_row_is_a_solution(instances, cfg):
-    """SOUNDNESS. Unlike uniformity this is not a trade-off knob: a row that is not a solution is
-    a bug at any B, under any config."""
+    """Every emitted row is a solution, at any B and under any config."""
     for inst in instances:
         counts, unsound, got, _ = sample_gpap(inst, min(20 * inst.S, 4000), 1, CONFIGS[cfg])
         assert got > 0, f"{inst.name}: sampler emitted nothing at {cfg}"
@@ -141,19 +121,15 @@ def test_every_emitted_row_is_a_solution(instances, cfg):
 
 @pytest.mark.gpu
 def test_full_support_batch_is_exactly_uniform(instances):
-    """B >= |support| == one decision round over the whole support == exact rejection sampling.
-
-    This is the structural guarantee, so it is gated on EVERY generated instance rather than as an
-    aggregate: a single instance drifting off uniform here means the rejection-sampling argument
-    has stopped holding."""
+    """B >= |support| is one decision round over the whole support, and discarding conflicted
+    rows makes it exact rejection sampling. Gated per instance, not as an aggregate."""
     for inst in instances:
         n = min(100 * inst.S, 20_000)
         cfg = (True, len(inst.support), False)
         counts, unsound, got, _ = sample_gpap(inst, n, 1, cfg)
         assert unsound == 0 and got > 0
         u = uniformity_stats(counts, got, S=inst.S)
-        # Without enough draws chi2 reports p=None, and "no p" must not read as "uniform" —
-        # otherwise a sampler that produced almost nothing would pass this gate vacuously.
+        # With too few draws chi2 reports p=None; that must fail rather than pass vacuously.
         assert u["p"] is not None, \
             f"{inst.name}: only {got} samples for |S|={inst.S}; chi2 needs >= 5|S|"
         assert u["p"] > P_FLOOR, (
