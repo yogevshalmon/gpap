@@ -24,14 +24,8 @@ from gpap.circuits.aig2cnf import build_cnf_aig
 from gpap.circuits.aiger import read_aiger
 from gpap.circuits.bench import build_cnf, parse_bench
 from gpap.cli import _k_cap_arg
-from gpap.engine import BCPEngine, CnfFormula, LiteralProbe, core_available
+from gpap.engine import BCPEngine, CnfFormula, LiteralProbe
 
-AVAIL = torch.cuda.is_available() and core_available()
-needs_gpu = pytest.mark.skipif(not AVAIL, reason="requires CUDA + a built libgpap")
-# The DIMACS parser lives in the C++ core, so its tests need the LIBRARY but no GPU device —
-# except that loading libgpap needs libcuda, so on a driverless CI runner these skip too.
-needs_core = pytest.mark.skipif(not core_available(),
-                                reason="requires a built libgpap (the parser is in the core)")
 
 TINY_BENCH = """\
 INPUT(a)
@@ -94,7 +88,7 @@ def test_sample_clauses_support_is_validated_as_zero_based():
 
 # --------------------------------------------------------------------- engine (GPU)
 
-@needs_gpu
+@pytest.mark.gpu
 def test_device_path_apply_validates_row_count():
     """The CUDA-tensor fast path must reject a row mismatch exactly like the host path does:
     apply_dev hands the core a raw pointer it reads K rows from, so a short tensor is an
@@ -111,14 +105,14 @@ def test_device_path_apply_validates_row_count():
     eng.apply_and_propagate(torch.full((4, 1), -1, dtype=torch.int64, device=dev))
 
 
-@needs_gpu
+@pytest.mark.gpu
 def test_probe_size_validated_on_host():
     pr = LiteralProbe(6, [[1, 2], [-1, 3]], torch.device("cuda"))
     with pytest.raises(ValueError, match="probe size must be >= 1"):
         pr.probe(None, 0)
 
 
-@needs_gpu
+@pytest.mark.gpu
 def test_probe_tuples_ragged_input_is_a_clear_error():
     pr = LiteralProbe(6, [[1, 2], [-1, 3]], torch.device("cuda"))
     with pytest.raises(ValueError, match="rectangular"):
@@ -163,7 +157,7 @@ PARSER_ACCEPT = {
 }
 
 
-@needs_core
+@pytest.mark.gpu
 @pytest.mark.parametrize("text", PARSER_REJECT.values(), ids=list(PARSER_REJECT))
 def test_dimacs_rejects_corruption(tmp_path, text):
     from gpap.engine import read_dimacs
@@ -173,7 +167,7 @@ def test_dimacs_rejects_corruption(tmp_path, text):
         read_dimacs(str(p))
 
 
-@needs_core
+@pytest.mark.gpu
 @pytest.mark.parametrize("text", PARSER_ACCEPT.values(), ids=list(PARSER_ACCEPT))
 def test_dimacs_keeps_structural_leniency(tmp_path, text):
     from gpap.engine import read_dimacs
@@ -182,7 +176,7 @@ def test_dimacs_keeps_structural_leniency(tmp_path, text):
     read_dimacs(str(p))                          # must not raise
 
 
-@needs_gpu
+@pytest.mark.gpu
 def test_mine_entailed_seconds_none_is_unbounded():
     """`seconds=None` (what the CLI now maps `--seconds 0` to) must actually sweep — the CLI
     help promised "0 = unbounded" while the old passthrough made it a deadline of now."""

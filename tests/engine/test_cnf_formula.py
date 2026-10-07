@@ -92,7 +92,7 @@ class TestReferenceFormula:
         assert f.num_clauses == 1
 
 
-@pytest.mark.skipif(not _core.available(), reason="libgpap not built (see cpp/README.md)")
+@pytest.mark.gpu
 class TestCnfFormulaFacade:
     """The shipped CnfFormula is a facade over the core's builder — no CUDA needed to BUILD
     (formula construction is host-side C++), so these run wherever the library exists."""
@@ -117,7 +117,7 @@ class TestCnfFormulaFacade:
         assert f.init_lit_sum.tolist() == [3, 7, 4, 5]
 
 
-@pytest.mark.skipif(not _core.available(), reason="libgpap not built (see cpp/README.md)")
+@pytest.mark.gpu
 class TestReadDimacs:
     """`read_dimacs` is THE list-of-lists entry point (the core's parser + clause read-back) —
     it is what replaced the third-party parser, so its fidelity is what licenses that removal."""
@@ -209,7 +209,7 @@ class TestReadDimacs:
         assert (info.num_vars, info.num_clauses) == (0, 0)
 
 
-@pytest.mark.skipif(not _core.available(), reason="libgpap not built (see cpp/README.md)")
+@pytest.mark.gpu
 class TestOccTagAndSplitAgree:
     """The binary/long split is read TWO different ways, and they must never disagree.
 
@@ -282,13 +282,7 @@ def read_support(path):
     """The 0-based independent support the core parsed out of `c ind` / `cr`.
 
     `Formula.support` is a method on the facade; this goes at the ABI so the parser is what is
-    under test. Shared by both support-line test classes — there is one reader, not one per
-    class, and so the "needs the library" guard is one IMPERATIVE skip here rather than a
-    decorator per class. A `skipif` MARK on this function is what CI caught: pytest only honours
-    marks on collected items, so on a helper it silently guards nothing and every caller raised
-    GpapError on a tree with no libgpap."""
-    if not _core.available():
-        pytest.skip("libgpap not built (see cpp/README.md)")
+    under test. Shared by both support-line test classes."""
     f = _core.Formula.from_file(str(path))
     n = ctypes.c_int32(0)
     _core.load().gpap_formula_support(f._h, None, ctypes.byref(n))
@@ -300,6 +294,7 @@ def read_support(path):
     return out[:n.value].tolist()
 
 
+@pytest.mark.gpu
 class TestSupportLineIsBoundedByItsLine:
     """REGRESSION. The `c ind` scanner stopped at `line_end` by testing the CURSOR, but strtol
     skips leading whitespace including \\r and \\n — so any cursor left short of the newline
@@ -334,6 +329,7 @@ class TestSupportLineIsBoundedByItsLine:
         assert self._support(tmp_path, b"p cnf 5 2\r\ncr 2 3\r\n5 2 0\r\n-3 4 0\r\n") == [1, 2]
 
 
+@pytest.mark.gpu
 class TestSupportLineRanges:
     """`c ind` / `cr` values get the SAME range discipline as literals.
 

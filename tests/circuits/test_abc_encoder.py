@@ -16,25 +16,13 @@ from pysat.solvers import Solver
 from gpap.circuits.abc_backend import abc_available, build_cnf_abc
 from gpap.circuits.bench import build_cnf, parse_bench, simulate
 from tests.conftest import COMB_DIR, SEQ_DIR
+from tests.support import enumerate_projections
 
 pytestmark = pytest.mark.skipif(not abc_available(), reason="no `abc` binary (scripts/build_abc.sh)")
 
 BENCH = SEQ_DIR
 # Small enough that the projected solution set can be enumerated exhaustively.
 CASES = [("b01", 3), ("b01", 5), ("b02", 4), ("b06", 3), ("b09", 4), ("b03", 2)]
-
-
-def _enum_projections(nv, clauses, support, limit=200_000):
-    """All distinct assignments to `support` (1-based vars) that extend to a model."""
-    s = Solver(name="cadical195", bootstrap_with=CNF(from_clauses=clauses))
-    out = set()
-    while s.solve() and len(out) < limit:
-        m = set(s.get_model())
-        proj = tuple(1 if v in m else 0 for v in support)
-        out.add(proj)
-        s.add_clause([(-v if v in m else v) for v in support])   # block this projection
-    s.delete()
-    return out
 
 
 @pytest.mark.parametrize("opt", ["full", "fast"])
@@ -51,8 +39,8 @@ def test_abc_preserves_projected_solution_set(name, cycles, opt):
     assert tgt_t == tgt_a
     assert len(sup_t) == len(sup_a)
 
-    proj_t = _enum_projections(bt.nv, bt.clauses, sup_t)
-    proj_a = _enum_projections(ba.nv, ba.clauses, sup_a)
+    proj_t = enumerate_projections(bt.clauses, sup_t, limit=200_000)
+    proj_a = enumerate_projections(ba.clauses, sup_a, limit=200_000)
     assert proj_t, "native encoder produced an UNSAT/empty instance — bad test case"
     assert proj_a == proj_t, (f"{name} T={cycles}: ABC changed the projected solution set "
                               f"(native {len(proj_t)} vs abc {len(proj_a)} projections)")
@@ -73,12 +61,12 @@ def test_abc_pins_a_prefix_from_a_partial_target_like_the_native_encoder(name, c
     bt, sup_t, _t, _l = build_cnf(circ, cycles, 3, pin_outputs=k, target=partial)
     ba, sup_a, _t2, _l2 = build_cnf_abc(circ, path, cycles, 3, pin_outputs=k, opt="fast",
                                         target=partial)
-    proj_t = _enum_projections(bt.nv, bt.clauses, sup_t)
-    proj_a = _enum_projections(ba.nv, ba.clauses, sup_a)
+    proj_t = enumerate_projections(bt.clauses, sup_t, limit=200_000)
+    proj_a = enumerate_projections(ba.clauses, sup_a, limit=200_000)
     assert proj_t and proj_a == proj_t
     # And it genuinely pins fewer outputs than pinning all of them would.
     ball = build_cnf_abc(circ, path, cycles, 3, pin_outputs=None, opt="fast", target=full)[0]
-    assert len(_enum_projections(ball.nv, ball.clauses, sup_a)) <= len(proj_a)
+    assert len(enumerate_projections(ball.clauses, sup_a, limit=200_000)) <= len(proj_a)
 
 
 @pytest.mark.parametrize("name,cycles", [("b01", 4), ("b10", 3), ("b03", 3)])

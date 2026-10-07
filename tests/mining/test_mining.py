@@ -10,24 +10,15 @@ import random
 
 import numpy as np
 import pytest
-import torch
 
 import gpap.engine.probe
-from gpap.engine import core_available
 from gpap.engine.probe import LiteralProbe, ProbeBudget
 from gpap.mining import _derivable_mask, _Subsumption, mine_entailed
 from gpap.sampling.pipeline import sample_clauses
 from tests.reference.combinations import combinations
+from tests.support import DEV, random_cnf
 
-DEV = torch.device("cuda") if torch.cuda.is_available() else torch.device("cpu")
-AVAIL = torch.cuda.is_available() and core_available()
-pytestmark = pytest.mark.skipif(not AVAIL, reason="requires CUDA + a built libgpap")
-
-
-def _random_cnf(rng, nv, nc, kmax=3):
-    return [[rng.choice([-1, 1]) * v for v in rng.sample(range(1, nv + 1),
-                                                         rng.randint(2, min(kmax, nv)))]
-            for _ in range(nc)]
+pytestmark = pytest.mark.gpu
 
 
 def _brute_models(nv, clauses):
@@ -177,7 +168,7 @@ class TestLiteralProbe:
         """A sweep split across launches must give exactly the same answer. The chunk size is the
         core's business, so it is set explicitly here rather than monkeypatched."""
         rng = random.Random(3)
-        clauses = _random_cnf(rng, 12, 40)
+        clauses = random_cnf(rng, 12, 40, kmin=2, kmax=3)
         p = LiteralProbe(12, clauses, DEV)
         tuples = combinations(p.free_literals(), 2)
         one = p.probe_tuples(tuples)
@@ -246,7 +237,7 @@ class TestMining:
         mined = 0
         for _ in range(10):
             nv = rng.randint(6, 14)
-            clauses = _random_cnf(rng, nv, rng.randint(2 * nv, 5 * nv))
+            clauses = random_cnf(rng, nv, rng.randint(2 * nv, 5 * nv), kmin=2, kmax=3)
             with Minisat22(bootstrap_with=clauses) as s:
                 if not s.solve():
                     continue                                  # UNSAT input: mining may derive it
@@ -649,7 +640,7 @@ class TestDerivable:
         checked = 0
         for _ in range(30):
             nv = rng.randint(3, 6)
-            cls = _random_cnf(rng, nv, rng.randint(3, 9))
+            cls = random_cnf(rng, nv, rng.randint(3, 9), kmin=2, kmax=3)
             mods = _brute_models(nv, cls)
             if not mods:
                 continue

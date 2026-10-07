@@ -10,36 +10,13 @@ classification tests run anywhere."""
 import random
 
 import pytest
-import torch
-from pysat.formula import CNF
-from pysat.solvers import Solver
 
 from gpap.sampling.sampler import GPUSampler, simplify_cnf, simplify_cnf_els
 
-CUDA = torch.cuda.is_available()
-try:
-    from gpap.engine import core_available
-    KERNEL = CUDA and core_available()
-except Exception:  # noqa: BLE001
-    KERNEL = False
-needs_gpu = pytest.mark.skipif(not KERNEL, reason="engine is CUDA+triton-only")
-DEV = torch.device("cuda") if CUDA else torch.device("cpu")
+from tests.support import DEV, enumerate_projections
 
 
-def _enumerate_projections(clauses, support):
-    """Exact set of valid support projections (0-based support) via CaDiCaL + blocking."""
-    s = Solver(name="cadical195", bootstrap_with=CNF(from_clauses=clauses))
-    out = set()
-    while s.solve():
-        m = set(s.get_model())
-        proj = tuple((v + 1) if (v + 1) in m else -(v + 1) for v in support)
-        out.add(proj)
-        s.add_clause([-((v + 1) if (v + 1) in m else -(v + 1)) for v in support])
-    s.delete()
-    return out
-
-
-@needs_gpu
+@pytest.mark.gpu
 def test_sound_basic():
     # (x1∨x2)∧(¬x1∨x3)∧(¬x2∨¬x3) → exactly 2 models {-1,2,-3},{1,-2,3}
     clauses = [[1, 2], [-1, 3], [-2, -3]]
@@ -52,7 +29,7 @@ def test_sound_basic():
     assert out["n_models"] > 0
 
 
-@needs_gpu
+@pytest.mark.gpu
 def test_wide_decision_rounds_are_accepted_and_sound():
     """B is NOT capped, and must not be: the trail is sized by the VARIABLE count alone.
 
@@ -77,7 +54,7 @@ def test_wide_decision_rounds_are_accepted_and_sound():
         assert out["sound_check"] == "ok", f"B={B} left an unsound row"
 
 
-@needs_gpu
+@pytest.mark.gpu
 def test_config_portfolio_soft_lookahead():
     # The circuit portfolio uses 3-tuple configs (random_var, B, lookahead) including "soft"
     # risk-polarity. Every produced model must satisfy the formula, and the reported dominant/
@@ -95,19 +72,24 @@ def test_config_portfolio_soft_lookahead():
     assert out2["all_valid"] and len(out2["dominant_config"]) == 3
 
 
-@needs_gpu
+@pytest.mark.gpu
 def test_unsat():
     smp = GPUSampler.from_clauses(1, [[1], [-1]], DEV, k_cap=16, seed=1)
     out = smp.sample(10, max_chunks=5, collect=True, verify_clauses=[[1], [-1]])
     assert out["n_models"] == 0
 
 
-@needs_gpu
+@pytest.mark.gpu
 def test_unsat_via_simplify():
     smp = GPUSampler.from_clauses(1, [[1], [-1]], DEV, k_cap=16, seed=1, simplify=True)
     out = smp.sample(10, max_chunks=5, collect=True)
     assert out["n_models"] == 0
 
+
+
+def _projections(models, support):
+    """Full DIMACS models -> 0/1 projections over the 0-based `support`."""
+    return {tuple(1 if (v + 1) in set(m) else 0 for v in support) for m in models}
 
 def _controlled_formula(seed=3, S=6, nc=4, ng=10, add_forced=True, add_dontcare=True):
     """Small formula with a support of S vars, a few constraints, gate-defined non-support vars,
@@ -142,21 +124,19 @@ def test_simplify_cnf_classifies_forced_and_dontcare():
     assert all(1 <= abs(l) <= nv2 for c in cl2 for l in c)
 
 
-@needs_gpu
+@pytest.mark.gpu
 def test_simplify_preserves_projection_set():
     """The decisive legitimacy check: valid support projections are identical with/without
     simplification, and GPAP-simplified covers exactly that set (sound + complete)."""
     nv, clauses, sup = _controlled_formula(seed=7)
-    exact = _enumerate_projections(clauses, sup)
+    exact = enumerate_projections(clauses, [v + 1 for v in sup])
     assert len(exact) > 1
 
     # GPAP WITHOUT simplification
     smp_plain = GPUSampler.from_clauses(nv, clauses, DEV, k_cap=512, seed=2, support=sup)
     op = smp_plain.sample(60_000, decisions_per_round=1, max_chunks=120, collect=True,
                           verify_clauses=clauses, support=sup)
-    plain_projs = {tuple(l for l in m if abs(l) - 1 in set(sup)) for m in op["models"]}
-    plain_projs = {tuple((v + 1) if (v + 1) in set(m) else -(v + 1) for v in sup)
-                   for m in op["models"]}
+    plain_projs = _projections(op["models"], sup)
     assert op["all_valid"]
     assert plain_projs.issubset(exact)
 
@@ -166,8 +146,7 @@ def test_simplify_preserves_projection_set():
     osr = smp_simp.sample(60_000, decisions_per_round=1, max_chunks=120, collect=True,
                           verify_clauses=clauses)
     assert osr["all_valid"], "simplified+reconstructed model violates ORIGINAL clauses"
-    simp_projs = {tuple((v + 1) if (v + 1) in set(m) else -(v + 1) for v in sup)
-                  for m in osr["models"]}
+    simp_projs = _projections(osr["models"], sup)
     assert simp_projs.issubset(exact), "simplification produced an INVALID projection (unsound)"
     # completeness: with enough samples both cover the full exact set
     assert simp_projs == exact, f"simplified missed projections: {exact - simp_projs}"
@@ -200,24 +179,24 @@ def test_els_removes_variables():
     assert all(1 <= abs(l) <= nv_r for c in cl_r for l in c)
 
 
-@needs_gpu
+@pytest.mark.gpu
 def test_els_preserves_projection_set():
     """ELS-reduced sampling reconstructs models that (a) satisfy the ORIGINAL formula and (b) cover
     EXACTLY the valid support-projection set — the strongest soundness gate (an inconsistent
     reconstruction of equivalent vars would emit an invalid projection and fail the subset check)."""
     nv, clauses, sup = _equiv_formula(seed=8)
-    exact = _enumerate_projections(clauses, sup)
+    exact = enumerate_projections(clauses, [v + 1 for v in sup])
     assert len(exact) > 1
     smp = GPUSampler.from_clauses(nv, clauses, DEV, k_cap=512, seed=2, support=sup, els=True)
     out = smp.sample(80_000, decisions_per_round=1, max_chunks=160, collect=True,
                      verify_clauses=clauses)
     assert out["all_valid"], "ELS+reconstructed model violates ORIGINAL clauses (unsound)"
-    projs = {tuple((v + 1) if (v + 1) in set(m) else -(v + 1) for v in sup) for m in out["models"]}
+    projs = _projections(out["models"], sup)
     assert projs.issubset(exact), f"ELS produced an INVALID projection: {projs - exact}"
     assert projs == exact, f"ELS missed projections: {exact - projs}"
 
 
-@needs_gpu
+@pytest.mark.gpu
 def test_els_equivalent_vars_stay_equal():
     """The consistency requirement: s2≡s3 and s4≡s5 must be EQUAL in every reconstructed model."""
     nv, clauses, sup = _equiv_formula(seed=3)
@@ -230,7 +209,7 @@ def test_els_equivalent_vars_stay_equal():
         assert (4 in s) == (5 in s), "equivalent vars s4,s5 reconstructed unequal"
 
 
-@needs_gpu
+@pytest.mark.gpu
 def test_fully_determined_formula_m0():
     """A formula that simplification reduces to ZERO clauses (everything unit-forced or equivalence-
     collapsed) must still sample without crashing — the BCP engine handles M=0 (empty clause set)."""
@@ -248,7 +227,7 @@ def test_fully_determined_formula_m0():
         assert 1 in s and -2 in s and 3 in s and 4 in s
 
 
-@needs_gpu
+@pytest.mark.gpu
 def test_b_larger_than_num_vars():
     """decisions_per_round B can exceed the (post-simplify) variable count on tiny formulas —
     the in-kernel decision pick must exhaust the order instead of erroring."""
@@ -258,7 +237,7 @@ def test_b_larger_than_num_vars():
     assert out["n_models"] > 0 and out["all_valid"]
 
 
-@needs_gpu
+@pytest.mark.gpu
 def test_simplify_dontcare_both_polarities():
     """A don't-care support var must take BOTH polarities across samples (uniform), not be pinned."""
     nv, clauses, sup = _controlled_formula(seed=11)
@@ -302,7 +281,7 @@ def test_soft_is_not_in_any_default_portfolio():
     assert all(c[2] is Lookahead.NONE for c in (*CIRCUIT_PORTFOLIO, *DEFAULT_PORTFOLIO))
 
 
-@needs_gpu
+@pytest.mark.gpu
 def test_config_breakdown_keys_stay_legacy_formatted():
     """The results-JSON config keys must not gain the enum repr — rows recorded before the enums
     existed are compared against new ones."""
@@ -316,7 +295,7 @@ def test_config_breakdown_keys_stay_legacy_formatted():
         assert k.startswith("rv=True,") or k.startswith("rv=False,"), k
 
 
-@needs_gpu
+@pytest.mark.gpu
 def test_timed_run_never_gathers_a_model_to_the_host():
     """EMISSION SYMMETRY: the timed run must not pay to deliver its samples.
 

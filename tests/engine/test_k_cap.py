@@ -23,7 +23,6 @@ import os
 import pytest
 import torch
 
-from gpap.engine import _core
 from gpap.engine.calibrate import K_CAP, default_k_cap, resolve_k_cap
 from tests.conftest import REPO_ROOT
 
@@ -38,18 +37,11 @@ def test_the_cap_is_the_documented_constant():
     assert K_CAP == EXPECTED_CAP
 
 
-@pytest.mark.parametrize("device", ["cpu", "cuda"])
+@pytest.mark.parametrize("device", ["cpu", pytest.param("cuda", marks=pytest.mark.gpu)])
 def test_cap_is_device_independent(device):
     """THE property: same cap everywhere. A CPU device must answer without touching the driver,
     and a CUDA device must answer the same number — otherwise `auto` silently means a different
     experiment per machine."""
-    if device == "cuda":
-        if not torch.cuda.is_available():
-            pytest.skip("needs CUDA")
-        try:                       # a card and no built library: an unpacked artifact before `setup`
-            _core.load()
-        except _core.GpapError:
-            pytest.skip("needs a built libgpap")
     assert default_k_cap(torch.device(device)) == EXPECTED_CAP
 
 
@@ -77,11 +69,7 @@ def test_core_and_python_caps_agree():
     """ONE rule, two implementations (calibrate.py and cpp/src/calibrate.cpp). They are asserted
     equal here rather than assumed equal — a C++ consumer and a Python consumer sizing the same
     formula differently on the same card is exactly the bug this cap exists to prevent."""
-    if not torch.cuda.is_available():
-        pytest.skip("needs CUDA")
     from gpap.engine import _core
-    if not _core.available():
-        pytest.skip("needs a built libgpap")
     assert _core.default_k_cap(0) == default_k_cap(torch.device("cuda"))
 
 
@@ -90,8 +78,6 @@ def test_auto_is_stable_across_calls():
     """REGRESSION: the first cut keyed off free VRAM and drifted between calls, so two runs of
     the same sweep on the same box could use different K. Allocating in between must not move
     it."""
-    if not torch.cuda.is_available():
-        pytest.skip("needs CUDA")
     dev = torch.device("cuda")
     before = default_k_cap(dev)
     hog = torch.empty(int(3e8), dtype=torch.uint8, device=dev)   # ~300 MB of "something else"
@@ -112,8 +98,6 @@ def test_auto_is_stable_across_calls():
 
 @pytest.mark.gpu
 def test_vram_budget_cap_is_a_ceiling_not_a_floor(monkeypatch):
-    if not torch.cuda.is_available():
-        pytest.skip("needs CUDA")
     from gpap.engine import _core
     uncapped = _core.mem_available(0, 0.80)
     assert uncapped > 0
@@ -129,8 +113,6 @@ def test_vram_budget_cap_is_a_ceiling_not_a_floor(monkeypatch):
 def test_vram_budget_cap_ignores_meaningless_values(monkeypatch, value):
     """An unset, zero, negative or unparsable value must mean NO CAP, not a cap of zero: a
     budget of zero sizes K=1 and every run would silently crawl instead of failing."""
-    if not torch.cuda.is_available():
-        pytest.skip("needs CUDA")
     from gpap.engine import _core
     monkeypatch.delenv("GPAP_VRAM_BUDGET_MIB", raising=False)
     uncapped = _core.mem_available(0, 0.80)
@@ -196,8 +178,6 @@ def test_the_vram_cap_actually_moves_the_sampler_batch(monkeypatch):
     A formula tiny enough that the batch CAP would bind is useless for this — it would answer the
     same number either way — so the test caps the BUDGET low enough that the analytic bound is
     what binds, and asks for two different budgets."""
-    if not torch.cuda.is_available():
-        pytest.skip("needs CUDA")
     from gpap.engine.calibrate import compute_k_safe, row_bytes
     monkeypatch.delenv("GPAP_VRAM_BUDGET_MIB", raising=False)
     smp = _tiny_sampler(None)                    # k_cap None: the MEMORY bound is what answers
@@ -239,8 +219,6 @@ def _tiny_sampler(k_cap):
 
 @pytest.mark.gpu
 def test_batch_size_is_the_calibrated_k():
-    if not torch.cuda.is_available():
-        pytest.skip("needs CUDA")
     smp = _tiny_sampler(1024)
     assert smp.batch_size == smp.K == 1024, "the cap binds on a tiny formula"
 
@@ -248,8 +226,6 @@ def test_batch_size_is_the_calibrated_k():
 @pytest.mark.gpu
 @pytest.mark.parametrize("n", [1, 7, 512, 100_000])
 def test_pin_batch_is_exact_and_idempotent(n):
-    if not torch.cuda.is_available():
-        pytest.skip("needs CUDA")
     smp = _tiny_sampler(1024)
     assert smp.pin_batch(n) == n and smp.batch_size == n
     assert smp.pin_batch(n) == n, "pinning twice must not drift"
@@ -257,8 +233,6 @@ def test_pin_batch_is_exact_and_idempotent(n):
 
 @pytest.mark.gpu
 def test_pinned_batch_restores():
-    if not torch.cuda.is_available():
-        pytest.skip("needs CUDA")
     smp = _tiny_sampler(1024)
     before = (smp.K, smp.batch_size)
     with smp.pinned_batch(16):
@@ -270,8 +244,6 @@ def test_pinned_batch_restores():
 def test_row_bytes_matches_the_engine_allocation_list():
     """The model IS the allocation list, so state it here too: if ensure_state() gains a buffer
     and calibrate.cpp does not, this fails rather than silently over-committing the GPU."""
-    if not torch.cuda.is_available():
-        pytest.skip("needs CUDA")
     from gpap.engine.calibrate import row_bytes, trail_cap
     for M, N in [(2215, 1494), (14505, 5701), (201437, 77151)]:
         want = (4 * M                              # packed clause word
@@ -295,8 +267,6 @@ def test_trail_cap_is_the_variable_count_plus_one_wavefront():
     one WAVEFRONT of headroom: the vectorised append in the wave paths writes at
     `tail + prefix_sum` with no bound test, so a wavefront is the granularity in which a broken
     invariant would overshoot. Keep the slack in step with WAVE_W."""
-    if not torch.cuda.is_available():
-        pytest.skip("needs CUDA")
     from gpap.engine.calibrate import trail_cap
     wave_w = 32                                  # cpp/tools/build_kernels.py::WAVE_W
     assert trail_cap(1494) == 1494 + wave_w
@@ -312,8 +282,6 @@ def test_trail_cap_has_exactly_one_definition():
     per-row model stops describing the allocation — which is how the 1.57x-over model survived
     unnoticed. gpap_row_bytes' default trail term is that function, and it must equal what the
     engine reserves for a formula of the same size."""
-    if not torch.cuda.is_available():
-        pytest.skip("needs CUDA")
     import re
     src = open(os.path.join(REPO, "cpp", "src", "engine.cpp")).read()
     assert "gpap_trail_cap(" in src, "the engine must call the shared rule"
@@ -325,8 +293,6 @@ def test_trail_cap_has_exactly_one_definition():
 def test_pipeline_reports_the_resolved_cap():
     """The provenance contract: a row must say which ceiling produced its K, or a small K on a
     cross-GPU row is ambiguous between "small GPU" and "cap bound it"."""
-    if not torch.cuda.is_available():
-        pytest.skip("needs CUDA")
     from gpap.sampling.pipeline import sample_clauses
     dev = torch.device("cuda")
     clauses = [[1, 2], [-1, 3], [-2, -3], [2, 3, 4]]

@@ -14,14 +14,13 @@ import itertools
 import os
 
 import pytest
-from pysat.formula import CNF
-from pysat.solvers import Solver
 
 from gpap.circuits.abc_backend import abc_available, find_abc
 from gpap.circuits.aig2cnf import build_cnf_aig, convert_aig_one, simulate_aig
 from gpap.circuits.aiger import read_aiger
 
 from tests.conftest import SEQ_DIR as BENCH
+from tests.support import enumerate_projections
 
 # 2 inputs, 1 latch (reset 0), 1 output = ~latch; latch chases and(and(i0,i1), latch).
 AAG_SEQ = """aag 5 2 1 1 2
@@ -46,17 +45,6 @@ AAG_COMB = """aag 3 2 0 1 1
 6
 6 2 4
 """
-
-
-def _enum_projections(clauses, support):
-    s = Solver(name="cadical195", bootstrap_with=CNF(from_clauses=clauses))
-    out = set()
-    while s.solve():
-        m = set(s.get_model())
-        out.add(tuple(1 if v in m else 0 for v in support))
-        s.add_clause([(-v if v in m else v) for v in support])
-    s.delete()
-    return out
 
 
 def _brute_force(aig, T, target):
@@ -86,7 +74,7 @@ def test_native_aag_matches_brute_force(tmp_path, text, reset):
     assert aig.latches[0][2] == reset
     T = 3
     b, support, target, labels = build_cnf_aig(aig, T, seed=7)
-    got = _enum_projections(b.clauses, support)
+    got = enumerate_projections(b.clauses, support)
     want = _brute_force(aig, T, target)
     assert want, "pinned target unreachable — bad test circuit"
     assert got == want
@@ -97,7 +85,7 @@ def test_native_comb_clamps_to_one_cycle(tmp_path):
     aig = read_aiger(_write(tmp_path, "c.aag", AAG_COMB))
     b, support, target, labels = build_cnf_aig(aig, 25, seed=1)   # T forced to 1
     assert len(support) == 2 and labels == ["i0@0", "i1@0"]
-    got = _enum_projections(b.clauses, support)
+    got = enumerate_projections(b.clauses, support)
     want = {bits for bits in itertools.product((0, 1), repeat=2)
             if (bool(bits[0]) and bool(bits[1])) == target[0]}
     assert got == want
@@ -175,7 +163,7 @@ def test_native_aig_unroll_matches_brute_force_b06(tmp_path):
     aig = read_aiger(_bench_to_aig(tmp_path, "b06"))
     T = 3
     b, support, target, _lab = build_cnf_aig(aig, T, seed=4)
-    assert _enum_projections(b.clauses, support) == _brute_force(aig, T, target)
+    assert enumerate_projections(b.clauses, support) == _brute_force(aig, T, target)
 
 
 @needs_abc
@@ -187,7 +175,7 @@ def test_abc_route_on_aig_input_preserves_projections(tmp_path):
     bn, sn, tn, ln = build_cnf_aig(aig, T, seed)
     ba, sa, ta, la = build_cnf_abc_aig(aig, path, T, seed)
     assert (tn, ln) == (ta, la)                    # same simulated target, same label order
-    assert _enum_projections(bn.clauses, sn) == _enum_projections(ba.clauses, sa)
+    assert enumerate_projections(bn.clauses, sn) == enumerate_projections(ba.clauses, sa)
 
 
 @needs_abc
@@ -201,7 +189,7 @@ def test_abc_route_on_ascii_aag_input(tmp_path):
     bn, sn, tn, ln = build_cnf_aig(aig, T, seed)
     ba, sa, ta, la = build_cnf_abc_aig(aig, p, T, seed)
     assert (tn, ln) == (ta, la)
-    assert _enum_projections(bn.clauses, sn) == _enum_projections(ba.clauses, sa)
+    assert enumerate_projections(bn.clauses, sn) == enumerate_projections(ba.clauses, sa)
 
 
 @needs_abc

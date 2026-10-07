@@ -16,12 +16,10 @@ import numpy as np
 import pytest
 import torch
 
-from gpap.engine import _core, core_available
+from gpap.engine import _core
+from tests.support import DEV
 
-AVAIL = torch.cuda.is_available() and core_available()
-pytestmark = pytest.mark.skipif(not AVAIL, reason="requires CUDA + a built libgpap")
-
-DEV = torch.device("cuda") if torch.cuda.is_available() else torch.device("cpu")
+pytestmark = pytest.mark.gpu
 
 
 def _random_cnf(rng, nv):
@@ -60,7 +58,6 @@ def _to_dec_matrix(sets, nv):
     return d
 
 
-@pytest.mark.gpu
 @pytest.mark.parametrize("mode", ["scalar", "wave"])
 @pytest.mark.parametrize("shift", [16, 8])
 def test_state_identity_fuzz(mode, shift):

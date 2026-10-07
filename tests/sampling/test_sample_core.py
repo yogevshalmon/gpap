@@ -12,29 +12,13 @@ import random
 
 import numpy as np
 import pytest
-import torch
 
 from gpap.engine import _core
+from tests.support import random_cnf, rows_satisfy
 
-CUDA = torch.cuda.is_available()
-HAVE_CORE = _core.available()
-pytestmark = [
-    pytest.mark.gpu,
-    pytest.mark.skipif(not CUDA, reason="requires CUDA"),
-    pytest.mark.skipif(not HAVE_CORE, reason="libgpap not built (see cpp/README.md)"),
-]
+pytestmark = pytest.mark.gpu
 
 B8 = (True, 8, False)                     # the classic single config
-
-
-def _sat_cnf(rng, nv=24, nc=36, kmin=3, kmax=4):
-    """Random low-ratio CNF with clauses of >= 3 literals: almost surely satisfiable, decent
-    success rate, and never UNSAT-at-flush (no units) — see test_core._random_cnf on kmin."""
-    out = []
-    for _ in range(nc):
-        vs = rng.sample(range(1, nv + 1), rng.randint(kmin, kmax))
-        out.append([v if rng.random() < 0.5 else -v for v in vs])
-    return out
 
 
 def _sampler(clauses, nv, *, k_cap=256, **kw):
@@ -43,21 +27,11 @@ def _sampler(clauses, nv, *, k_cap=256, **kw):
     return _core.Sampler(e, k_cap=k_cap, **kw)
 
 
-def _rows_satisfy(bits, clauses):
-    """Every row (columns = all vars, bit j == var j+1 TRUE) must satisfy every clause."""
-    for r in range(bits.shape[0]):
-        row = bits[r]
-        for cl in clauses:
-            if not any((row[abs(l) - 1] == 1) == (l > 0) for l in cl):
-                return False
-    return True
-
-
 # ---------------------------------------------------------------- soundness
 
 def test_kept_rows_are_models():
     rng = random.Random(7)
-    clauses = _sat_cnf(rng)
+    clauses = random_cnf(rng, 24, 36, kmin=3)
     s = _sampler(clauses, 24, seed=3)
     st = s.run(500, [B8], keep_cap=-1)
     assert st.n_models > 0, "fixture produced nothing — the checks below would be vacuous"
@@ -65,7 +39,7 @@ def test_kept_rows_are_models():
     got = s.bits(0)
     assert got.shape == (s.config_stats(0).kept_rows, 24)
     assert got.shape[0] >= min(st.n_models, 500) > 0
-    assert _rows_satisfy(got, clauses)
+    assert rows_satisfy(got, clauses)
 
 
 def test_unsat_at_flush_is_a_proof_not_a_failure():
@@ -79,7 +53,7 @@ def test_unsat_at_flush_is_a_proof_not_a_failure():
 
 def test_same_seed_same_bits_and_reseed_restarts_the_stream():
     rng = random.Random(11)
-    clauses = _sat_cnf(rng)
+    clauses = random_cnf(rng, 24, 36, kmin=3)
     a = _sampler(clauses, 24, seed=9)
     b = _sampler(clauses, 24, seed=9)
     sa, sb = a.run(300, [B8], keep_cap=-1), b.run(300, [B8], keep_cap=-1)
@@ -104,7 +78,7 @@ def test_verify_and_delivery_do_not_touch_the_sampling_stream():
     the host-side version of this bug had (`--out` shifted every later chunk's permutation and
     the totals stayed plausible)."""
     rng = random.Random(13)
-    clauses = _sat_cnf(rng)
+    clauses = random_cnf(rng, 24, 36, kmin=3)
     base = _sampler(clauses, 24, seed=5)
     st0 = base.run(400, [B8], keep_cap=-1)
     assert st0.n_models > 0, "fixture produced nothing — the comparisons would be vacuous"
@@ -125,7 +99,7 @@ def test_verify_and_delivery_do_not_touch_the_sampling_stream():
 
 def test_verify_covers_every_model_and_bills_apart():
     rng = random.Random(17)
-    clauses = _sat_cnf(rng)
+    clauses = random_cnf(rng, 24, 36, kmin=3)
     s = _sampler(clauses, 24, seed=5)
     st = s.run(400, [B8], keep_cap=-1, verify=True)
     assert st.n_models > 0
@@ -138,7 +112,7 @@ def test_verify_covers_every_model_and_bills_apart():
 
 def test_keep_cap_bounds_the_bucket_not_the_count():
     rng = random.Random(19)
-    clauses = _sat_cnf(rng)
+    clauses = random_cnf(rng, 24, 36, kmin=3)
     s = _sampler(clauses, 24, seed=5)
     st = s.run(400, [B8], keep_cap=50)
     assert st.n_models > 50, "fixture too small to exercise the cap"
@@ -150,7 +124,7 @@ def test_keep_cap_bounds_the_bucket_not_the_count():
 
 def test_keep_cap_zero_never_gathers():
     rng = random.Random(23)
-    clauses = _sat_cnf(rng)
+    clauses = random_cnf(rng, 24, 36, kmin=3)
     s = _sampler(clauses, 24, seed=5)             # keep_cap=0: the timed-run spelling
     st = s.run(400, [B8])
     assert st.n_models > 0
@@ -161,7 +135,7 @@ def test_keep_cap_zero_never_gathers():
 
 def test_stop_valves_report_which_fired():
     rng = random.Random(29)
-    clauses = _sat_cnf(rng)
+    clauses = random_cnf(rng, 24, 36, kmin=3)
     st = _sampler(clauses, 24, seed=5).run(10**9, [B8], max_chunks=2)
     assert _core.SAMPLE_STOP[st.stop] == "chunks" and st.chunks == 2
     st = _sampler(clauses, 24, seed=5).run(10**9, [B8], time_limit_s=1e-9)
@@ -200,7 +174,7 @@ def test_retry_with_lookahead_flips_once_then_stops(soft0):
 
 def test_cold_start_measures_every_config_and_buckets_stay_per_config():
     rng = random.Random(31)
-    clauses = _sat_cnf(rng)
+    clauses = random_cnf(rng, 24, 36, kmin=3)
     s = _sampler(clauses, 24, seed=5)
     st = s.run(1, [(True, 8, False), (True, 1, False), (False, 1, False)], keep_cap=100)
     for i in range(3):
@@ -214,7 +188,7 @@ def test_cold_start_measures_every_config_and_buckets_stay_per_config():
 
 def test_min_measure_chunks_extends_past_the_target():
     rng = random.Random(37)
-    clauses = _sat_cnf(rng)
+    clauses = random_cnf(rng, 24, 36, kmin=3)
     s = _sampler(clauses, 24, seed=5)
     s.run(1, [(True, 8, False), (True, 1, False)], min_measure_chunks=3)
     assert max(s.config_stats(i).chunks for i in range(2)) >= 3, \
@@ -225,7 +199,7 @@ def test_min_measure_chunks_extends_past_the_target():
 
 def test_support_phase_and_columns():
     rng = random.Random(41)
-    clauses = _sat_cnf(rng)
+    clauses = random_cnf(rng, 24, 36, kmin=3)
     s = _sampler(clauses, 24, seed=5)
     s.set_support(list(range(8)))                 # phase 1 = vars 0..7
     st = s.run(300, [B8], keep_cap=-1)
@@ -263,7 +237,7 @@ def test_support_only_stops_after_phase_one():
         st = s.run(200, [B8], keep_cap=-1, support_only=so, max_chunks=4)
         assert st.n_models == st.attempts > 0, \
             f"support_only={so}: every trajectory should complete on a determined tail"
-        assert _rows_satisfy(s.bits(0), det)
+        assert rows_satisfy(s.bits(0), det)
     # NOT compared row for row, deliberately: the phase-2 shuffle draws from the same stream, so
     # the two settings reach different trajectory seeds and legitimately find different models.
     # (Checked: with a single-variable tail they DO come out bit-identical, which is how an
@@ -292,7 +266,7 @@ def test_zero_k_cap_means_the_library_cap_not_uncapped():
     batch nobody chose (83x wider on this formula), which is a different experiment.
     """
     rng = random.Random(67)
-    clauses = _sat_cnf(rng)
+    clauses = random_cnf(rng, 24, 36, kmin=3)
     f = _core.Formula.from_clauses(24, clauses)
     e = _core.Engine(f)
     zero = _core.Sampler(e, seed=1)                        # the {0} spelling
@@ -305,7 +279,7 @@ def test_zero_k_cap_means_the_library_cap_not_uncapped():
 
 def test_set_k_pins_the_batch():
     rng = random.Random(43)
-    clauses = _sat_cnf(rng)
+    clauses = random_cnf(rng, 24, 36, kmin=3)
     s = _sampler(clauses, 24, seed=5)
     auto = s.k
     s.set_k(64)
@@ -325,7 +299,7 @@ def test_a_guard_reports_its_own_failure_not_the_previous_one():
     was answered with an out-of-range variable in a formula that sampler had never seen.
     """
     rng = random.Random(53)
-    clauses = _sat_cnf(rng)
+    clauses = random_cnf(rng, 24, 36, kmin=3)
     stale = _sampler(clauses, 24, seed=5)
     with pytest.raises(Exception) as first:                 # noqa: PT011 -- seeds the thread-local
         stale.set_columns([0, 999])
@@ -355,7 +329,7 @@ def test_freeing_the_sampler_does_not_touch_a_dead_engine():
     Freeing the engine handle first is exactly what the collector can do, so this reproduces it
     without depending on gc ordering. Under a sanitizer build it is the whole test."""
     rng = random.Random(59)
-    clauses = _sat_cnf(rng)
+    clauses = random_cnf(rng, 24, 36, kmin=3)
     f = _core.Formula.from_clauses(24, clauses)
     e = _core.Engine(f)
     s = _core.Sampler(e, k_cap=256, seed=5)
@@ -378,7 +352,7 @@ def test_the_sampler_never_overrides_an_explicit_kernel_pin():
     over a caller's pin on every set_k, silently changing the kernel under a forced-kernel A/B.
     """
     rng = random.Random(61)
-    clauses = _sat_cnf(rng)                    # tiny M: the sampler resolves SCALAR at a big K
+    clauses = random_cnf(rng, 24, 36, kmin=3)                    # tiny M: the sampler resolves SCALAR at a big K
     f = _core.Formula.from_clauses(24, clauses)
     e = _core.Engine(f)
     assert e.auto_dispatch, "fixture: the engine must start on AUTO"

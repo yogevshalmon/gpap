@@ -13,15 +13,12 @@ import torch
 
 from gpap.engine.formula import CnfFormula
 from gpap.engine.bcp_engine import BCPEngine
-from gpap.engine import core_available
 from gpap.sampling.sampler import GPUSampler
 
 from tests.reference.bcp import ref_bcp, assigned_set
+from tests.support import DEV
 
-CUDA = torch.cuda.is_available()
-AVAIL = CUDA and core_available()
-pytestmark = pytest.mark.skipif(not AVAIL, reason="requires CUDA + a built libgpap")
-DEV = torch.device("cuda") if CUDA else torch.device("cpu")
+pytestmark = pytest.mark.gpu
 
 
 def _force_wide(smp, seed, k_cap):

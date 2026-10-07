@@ -8,46 +8,26 @@ writer round-trips are host-only.
 import os
 import numpy as np
 import pytest
-import torch
-from pysat.formula import CNF
-from pysat.solvers import Solver
 
 from gpap.sampling.sampler import GPUSampler
 from gpap.sampling.output import write_samples
 from tests.conftest import SEQ_DIR
 
-CUDA = torch.cuda.is_available()
-try:
-    from gpap.engine import core_available
-    KERNEL = CUDA and core_available()
-except Exception:  # noqa: BLE001
-    KERNEL = False
-needs_gpu = pytest.mark.skipif(not KERNEL, reason="engine is CUDA+triton-only")
-DEV = torch.device("cuda") if CUDA else torch.device("cpu")
-
-
-def _enum_projs(clauses, support):
-    s = Solver(name="cadical195", bootstrap_with=CNF(from_clauses=clauses))
-    out = set()
-    while s.solve():
-        m = set(s.get_model())
-        out.add(tuple((v + 1) if (v + 1) in m else -(v + 1) for v in support))
-        s.add_clause([-((v + 1) if (v + 1) in m else -(v + 1)) for v in support])
-    s.delete()
-    return out
+from tests.support import DEV, enumerate_projections
 
 
 def _bits_to_projs(M, cols, support):
+    """Sampled rows -> 0/1 projections over the 0-based `support`, like enumerate_projections."""
     ci = {v: i for i, v in enumerate(cols)}
-    return {tuple((v + 1) if row[ci[v + 1]] else -(v + 1) for v in support) for row in M}
+    return {tuple(int(row[ci[v + 1]]) for v in support) for row in M}
 
 
 # --------------------------------------------------------------------------- projection soundness
 
-@needs_gpu
+@pytest.mark.gpu
 def test_bits_plain_projection_matches_exact():
     clauses, sup = [[1, 2], [-1, 3], [-2, -3]], [0, 1, 2]
-    exact = _enum_projs(clauses, sup)
+    exact = enumerate_projections(clauses, [v + 1 for v in sup])
     smp = GPUSampler.from_clauses(3, clauses, DEV, k_cap=256, seed=1, support=sup)
     M, cols = smp.sample_bits(4000, config=(True, 1, False), max_chunks=60)
     got = _bits_to_projs(M, cols, sup)
@@ -55,7 +35,7 @@ def test_bits_plain_projection_matches_exact():
     assert got <= exact and got == exact                 # sound AND complete
 
 
-@needs_gpu
+@pytest.mark.gpu
 def test_bits_simplify_forced_and_dontcare():
     import random
     rng = random.Random(3)
@@ -66,7 +46,7 @@ def test_bits_simplify_forced_and_dontcare():
         vs = rng.sample(core, 3)
         clauses.append([v if rng.random() < 0.5 else -v for v in vs])
     sup0 = [v - 1 for v in sup]
-    exact = _enum_projs(clauses, sup0)
+    exact = enumerate_projections(clauses, [v + 1 for v in sup0])
     smp = GPUSampler.from_clauses(6, clauses, DEV, k_cap=512, seed=2, support=sup0,
                                   simplify=True)
     M, cols = smp.sample_bits(60_000, config=(True, 1, False), max_chunks=120)
@@ -77,7 +57,7 @@ def test_bits_simplify_forced_and_dontcare():
     assert set(np.unique(M[:, ci[6]]).tolist()) == {0, 1}  # don't-care var takes both polarities
 
 
-@needs_gpu
+@pytest.mark.gpu
 def test_bits_els_equivalent_columns_equal():
     import random
     rng = random.Random(5)
@@ -89,7 +69,7 @@ def test_bits_els_equivalent_columns_equal():
     g = var; var += 1
     clauses += [[-g, 1], [-1, g], [g, 6]]
     nv, sup0 = var - 1, list(range(S))
-    exact = _enum_projs(clauses, sup0)
+    exact = enumerate_projections(clauses, [v + 1 for v in sup0])
     smp = GPUSampler.from_clauses(nv, clauses, DEV, k_cap=512, seed=2, support=sup0,
                                   els=True)
     M, cols = smp.sample_bits(80_000, config=(True, 1, False), max_chunks=160)
@@ -99,7 +79,7 @@ def test_bits_els_equivalent_columns_equal():
     assert (M[:, ci[4]] == M[:, ci[5]]).all()
 
 
-@needs_gpu
+@pytest.mark.gpu
 def test_bits_respects_cap():
     clauses, sup = [[1, 2], [-1, 3], [-2, -3]], [0, 1, 2]
     smp = GPUSampler.from_clauses(3, clauses, DEV, k_cap=256, seed=1, support=sup)

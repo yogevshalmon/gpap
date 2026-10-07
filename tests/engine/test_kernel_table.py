@@ -87,9 +87,6 @@ def test_every_reachable_kernel_key_resolves():
     Trimming the matrix and normalizing the lookup key are two halves of one change; if only the
     first lands, a SOFT run with the decision scan on dies with GPAP_ERR_KERNEL at launch —
     after the sampler has already paid for a chunk."""
-    torch = pytest.importorskip("torch")
-    if not torch.cuda.is_available():
-        pytest.skip("needs CUDA")
     import numpy as np
 
     from gpap.engine import _core

@@ -17,8 +17,6 @@ def test_both_sides_of_a_head_to_head_get_the_same_budget(monkeypatch, cap_mib):
     calls `gpu_mem_available`, so there is one number and nothing to keep in step."""
     from eval.rivals.rival_common import rival_vram_budget
     from gpap.engine.calibrate import gpu_mem_available
-    if not torch.cuda.is_available():
-        pytest.skip("no CUDA device")
     if cap_mib is None:
         monkeypatch.delenv("GPAP_VRAM_BUDGET_MIB", raising=False)
     else:
