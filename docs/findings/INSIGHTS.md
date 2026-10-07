@@ -51,7 +51,7 @@ constant through the AST (a path literal has no whitespace; prose about one does
 separates them without a whitelist), every repo-root constant re-derived in all four spellings the
 tree uses, every internal import resolved (a driver had imported a module from its pre-reorg path
 for weeks inside an `except` that printed a one-line skip), and every shell ask guarded, because
-asking a module for a path let an empty answer reach `rm -rf`. Behaviour by tests/repo/test_paths.py.
+asking a module for a path let an empty answer reach `rm -rf`. Behaviour by tests/repo/test_paths.py and tests/eval/test_eval_paths.py.
 
 **A phase belongs where it happens, and a printed number must mean one thing (2026-09-12).**
 `gpap sample` read every line off the returned dict, so mining printed below the throughput it ran

@@ -133,15 +133,18 @@ def test_rare_target_cnf_is_sat_with_matching_projections(tmp_path):
     # CNF must be SAT and its full solution set must be that single assignment.
     p = tmp_path / "and3.bench"
     p.write_text("INPUT(a)\nINPUT(b)\nINPUT(c)\nOUTPUT(y)\ny = AND(a, b, c)\n")
+    from itertools import product
     from gpap.circuits.bench import convert_one, parse_support_labels
-    from eval.uniformity.metrics import enumerate_projections
     from pysat.formula import CNF
+    from pysat.solvers import Solver
     cnf_p = str(tmp_path / "and3.cnf")
     convert_one(str(p), cnf_p, 1, seed=5, target_mode="rare", quiet=True)
     cnf = CNF(from_file=cnf_p)
     sup = sorted(parse_support_labels(cnf_p))
-    projs, status = enumerate_projections(cnf.clauses, sup)
-    assert status == "complete" and projs == {(1, 1, 1)}
+    with Solver(name="cadical195", bootstrap_with=cnf.clauses) as s:
+        projs = {bits for bits in product((0, 1), repeat=len(sup))
+                 if s.solve(assumptions=[v if b else -v for v, b in zip(sup, bits)])}
+    assert projs == {(1, 1, 1)}
 
 
 def test_simulate_check_accepts_real_solutions_and_flags_corruption(bench_circ):

@@ -90,6 +90,9 @@ scripts/                   # build_core.sh, build_abc.sh, build_cmsgen.sh (+ cms
                            #   fetch_benchmarks.sh, perf_ab_trees.py
 docs/findings/             # INSIGHTS.md (settled-results index) + *_FINDINGS.md
 tests/                     # pytest; circuit CNFs generated from benchmarks/circuits/bench/ at test time
+  engine/ sampling/ mining/ circuits/ cli/ repo/   # the default run (pyproject `testpaths`)
+  eval/                    # the experiment layer's tests: `pytest tests/eval`, never by default
+  reference/               # the pure-Python oracles (bcp.py, formula.py, combinations.py)
 .gpap/                     # DISPOSABLE MACHINERY, one root for it: built/fetched tools, sources,
                            #   benchmark sets, and `tmp/` — ALL scratch, every layer. Gitignored,
                            #   not $HOME, not /tmp; `$GPAP_HOME` moves it. `gpap/paths.py` owns it
@@ -201,7 +204,8 @@ split per formula (16|16 for 2N ≤ 65535; 8|24 "wide" for 2N ≤ 0xFFFFFF with 
 ```bash
 scripts/build_core.sh                 # build libgpap; `gpap info` verifies
 pytest -m "not gpu and not slow"      # host-side smoke; engine tests need CUDA and self-skip
-pytest                                # full suite (slow = deep unrolls)
+pytest                                # default suite: engine, apps, repo (slow = deep unrolls)
+pytest tests/eval                     # the eval layer's tests (CI runs them as a separate step)
 
 gpap info
 gpap sample formula.cnf -n 50000 --out samples.out --stats run.json

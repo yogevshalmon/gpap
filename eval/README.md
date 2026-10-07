@@ -40,6 +40,11 @@ Nothing else names one of those directories: a shell script asks (`python3 -m ev
 rather than recomputing, which is what stopped four derivations of the record root from drifting
 apart. Gated by tests/repo/test_suite_hygiene.py.
 
+## Tests
+
+`pytest tests/eval` runs this layer's tests. They are not part of the default `pytest` run,
+which covers the library; CI runs them as a separate step.
+
 ## Reading a number before quoting it
 
 `eval_plots.py` writes a `summary.md` listing every skipped and errored instance — read it before

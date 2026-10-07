@@ -259,7 +259,7 @@ examples/         # runnable Python examples, one per application
 eval/             # the experiment layer (see Evaluation); nothing in gpap/ imports it
 scripts/          # build libgpap, optional third-party tools, fetch benchmarks
 docs/             # start at docs/README.md
-tests/            # pytest (CPU smoke + `gpu`/`slow` markers)
+tests/            # pytest, one directory per area (engine, sampling, mining, ...)
 benchmarks/       # small committed .bench, AIGER and CNF instances
 .gpap/            # built/fetched tools, benchmark sets and run scratch, gitignored
 ```
@@ -271,8 +271,9 @@ it is correct. The measurement that settled a design decision lives in
 ## Tests
 
 ```bash
+pytest                             # the engine, the applications and repo checks (GPU tests skip off-CUDA)
 pytest -m "not gpu and not slow"   # portable smoke suite, no GPU needed
-pytest                             # full suite (GPU tests skip off-CUDA; `slow` = deep unrolls)
+pytest tests/eval                  # the experiment layer's tests, not part of the default run
 ```
 
 ## Evaluation
