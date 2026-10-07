@@ -6,7 +6,7 @@
 > **Rule lives in:** `GPAP_VRAM_BUDGET_MIB`, clamped once inside `gpap_mem_available`
 > (`cpp/src/calibrate.cpp`); `eval/artifact/reproduce.sh --vram-cap`;
 > `eval/artifact/compare_campaign.py`; `eval/artifact/subset.json`.
-> **Gated by:** `tests/engine/test_k_cap.py`.
+> **Gated by:** `tests/engine/test_k_cap.py`, `tests/eval/test_rival_budget.py`.
 > **Record only:** §8, the review post-mortem on gates that could not fail.
 
 The evidence behind `ARTIFACT.md` and `eval/artifact/reproduce.sh` (protocol v1.0,
@@ -54,7 +54,7 @@ our budget or the rival's, never both: capping both at 17,280 handed the rival 6
 the campaign had granted it, and a rung that just fit could OOM and walk down, inflating our
 ratio in exactly the direction this section is about. It now calls `gpap_mem_available` itself,
 so the two sides are the same bytes of the same card by construction
-(`tests/engine/test_k_cap.py::test_both_sides_of_a_head_to_head_get_the_same_budget`).
+(`tests/eval/test_rival_budget.py::test_both_sides_of_a_head_to_head_get_the_same_budget`).
 
 Changing it costs nothing in the record: the modelled budget only ever picks a rung through
 `run_at_batch`'s truncation fallback — "`batch`, the rung our VRAM model predicts, decides
@@ -300,7 +300,7 @@ see what git sees where git works. And with a card visible and no built library 
 artifact before `setup` — `rival_vram_budget` took the CUDA branch, the core call raised, and the
 last-resort return handed the rival the whole fallback uncapped: the third route past the ceiling
 (§8 closed the CPU-only one), now capped and gated by
-`tests/engine/test_k_cap.py::test_rival_budget_is_capped_when_the_core_cannot_load`.
+`tests/eval/test_rival_budget.py::test_rival_budget_is_capped_when_the_core_cannot_load`.
 
 **The double-blind copy** is a transform over the packager's tarball,
 `$GPAP_RESULTS/artifact/anonymize.sh`, kept outside the repository because it spells the author's

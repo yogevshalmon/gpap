@@ -103,7 +103,7 @@ adjudicates the `unsat` screen. **Into a virtualenv**, whose `python` every step
 ```bash
 python -m venv .venv && . .venv/bin/activate
 pip install -r eval/artifact/requirements-artifact.txt && pip install -e .
-pytest -m "not gpu and not slow"      # optional: the shipped tree's own suite, ~10 s
+pytest tests -m "not gpu and not slow"  # optional: the shipped tree's own suite, ~10 s
 ```
 
 If you would rather not activate it, pass the interpreter explicitly:
