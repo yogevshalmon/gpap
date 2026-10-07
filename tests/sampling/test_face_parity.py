@@ -10,19 +10,12 @@ bandit selects on measured wall-clock throughput, so its chunk sequence is machi
 from pathlib import Path
 
 import pytest
-import torch
 
 from gpap.engine import _core
 
-from tests.engine.test_cpp_api import SAMPLE_BIN, _need, _parse_cnf, _run_sampler
+from tests.support import DEV, SAMPLE_BIN, need_binary, parse_dimacs, run_sample_example
 
-CUDA = torch.cuda.is_available()
-pytestmark = [
-    pytest.mark.gpu,
-    pytest.mark.skipif(not CUDA, reason="requires CUDA"),
-    pytest.mark.skipif(not _core.available(), reason="libgpap not built (see cpp/README.md)"),
-]
-DEV = torch.device("cuda") if CUDA else torch.device("cpu")
+pytestmark = pytest.mark.gpu
 
 
 def test_cpp_and_python_faces_draw_identical_models(circuit_cnfs, tmp_path):
@@ -36,12 +29,12 @@ def test_cpp_and_python_faces_draw_identical_models(circuit_cnfs, tmp_path):
     file is for. (Rows stay identical either way: a trajectory depends on the seed and its row
     index, so the narrower run's completions are a prefix of the wider one's.)"""
     from gpap.sampling.sampler import GPUSampler
-    _need(SAMPLE_BIN)
+    need_binary(SAMPLE_BIN)
     cnf = Path(circuit_cnfs["b03-c5"]["path"])
     want, seed, K = 2000, 11, 8192
 
     # C++ face: the example binary, single default config (random order, B=8), out file kept.
-    rows_cpp, stdout = _run_sampler(cnf, tmp_path / "cpp", n=want, seed=seed, k=K)
+    rows_cpp, stdout = run_sample_example(cnf, tmp_path / "cpp", n=want, seed=seed, k=K)
     assert rows_cpp, "the C++ face found nothing — the comparison would be vacuous"
 
     # Python face: same seed, same single config, same pinned batch; rows via the delivery path.
@@ -49,7 +42,7 @@ def test_cpp_and_python_faces_draw_identical_models(circuit_cnfs, tmp_path):
     smp.pin_batch(K)
     r = smp.sample(want, decisions_per_round=8, random_var=True, collect=False, out_cap=want)
 
-    nv, cls, sup = _parse_cnf(cnf)
+    nv, cls, sup = parse_dimacs(cnf)
     assert sup, "expected a `c ind` support on a circuit CNF"
     # NOT `== ... or r["out_cols"]`: python reads that as `(a == b) or a`, and a non-empty list
     # is truthy, so the comparison never ran and a column-ORDER divergence between the faces --

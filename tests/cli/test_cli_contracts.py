@@ -13,16 +13,6 @@ import torch
 from gpap.cli import main as cli_main
 from tests.conftest import REPO_ROOT
 
-CUDA = torch.cuda.is_available()
-try:
-    from gpap.engine import core_available
-    KERNEL = CUDA and core_available()
-except Exception:  # noqa: BLE001
-    KERNEL = False
-# Both marks: `skipif` so the file self-skips off-CUDA like every other engine test, AND the
-# repo-level `gpu` marker so `pytest -m "not gpu"` — the documented host-only lane — deselects
-# them rather than collecting and skipping.
-needs_gpu = pytest.mark.gpu(pytest.mark.skipif(not KERNEL, reason="engine is CUDA+triton-only"))
 
 
 def _cnf(tmp_path, text, name="f.cnf"):
@@ -88,7 +78,7 @@ def test_the_default_mining_path_never_caps_width_1():
             f"give it an explicit `1: 0`")
 
 
-@needs_gpu
+@pytest.mark.gpu
 def test_max_tuples_binds_at_width_1(tmp_path):
     """It was hardcoded to unbounded, while the plan line warned the ceiling was exceeded."""
     from gpap.mining import mine_entailed
@@ -103,7 +93,7 @@ def test_max_tuples_binds_at_width_1(tmp_path):
     assert full.exhausted[1] and full.probed[1] > 2  # 0 still means unbounded
 
 
-@needs_gpu
+@pytest.mark.gpu
 def test_width_1_totals_are_reconcilable_with_the_pool(tmp_path):
     """`candidates[1]` is a SUM over fixpoint rounds, so it can exceed one round's pool. That is
     only readable if the round count comes with it — it printed as a bare "of N candidates"."""
@@ -122,7 +112,7 @@ def test_width_1_totals_are_reconcilable_with_the_pool(tmp_path):
 
 # ------------------------------------------------------------------ delivery contracts
 
-@needs_gpu
+@pytest.mark.gpu
 def test_never_writes_more_samples_than_models_delivered(tmp_path, capsys):
     """The output pass used to re-sample from scratch, so a run capped at 2,990 models wrote the
     full 5,000 requested — and did it outside every reported wall."""
@@ -135,7 +125,7 @@ def test_never_writes_more_samples_than_models_delivered(tmp_path, capsys):
     assert len(rows) <= 300
 
 
-@needs_gpu
+@pytest.mark.gpu
 def test_delivery_delivers_what_it_collected(tmp_path):
     """The LOWER bound, which the upper-bound test above cannot see.
 
@@ -150,7 +140,7 @@ def test_delivery_delivers_what_it_collected(tmp_path):
     assert len(info["samples"]) == 1500, "asked for 1,500 deliverable rows and got fewer"
 
 
-@needs_gpu
+@pytest.mark.gpu
 def test_delivery_bound_holds_when_a_valve_other_than_the_clock_stops_the_run(tmp_path):
     """`--time-limit` is not the only way a run ends short (max_chunks, the zero-progress stop).
     Bounding the top-up by the REMAINING TIME alone left those cases free to sample the full
@@ -162,7 +152,7 @@ def test_delivery_bound_holds_when_a_valve_other_than_the_clock_stops_the_run(tm
     assert len(info["samples"]) <= info["n_models"]
 
 
-@needs_gpu
+@pytest.mark.gpu
 @pytest.mark.parametrize("extra", [{}, {"n_cov": 300}, {"verify_sound": True}],
                          ids=["off", "cov", "verify"])
 def test_phases_account_for_the_whole_reported_wall(tmp_path, extra):
@@ -185,7 +175,7 @@ def test_phases_account_for_the_whole_reported_wall(tmp_path, extra):
         assert info["phases_diag"]["verify_sound"] == pytest.approx(info["verify_sound_s"])
 
 
-@needs_gpu
+@pytest.mark.gpu
 def test_emitted_rows_come_from_one_config(tmp_path):
     """Collecting during the timed run must not turn the output into a MIXTURE of the bandit's
     arms — the rows are bucketed per config and only the winner's are returned."""
@@ -196,7 +186,7 @@ def test_emitted_rows_come_from_one_config(tmp_path):
     assert list(info["out_config"]) == [info["tuned_rv"], info["tuned_b"], info["tuned_la"]]
 
 
-@needs_gpu
+@pytest.mark.gpu
 def test_unsat_is_reported_as_a_proof_not_as_zero_models(tmp_path, capsys):
     """An UNSAT formula printed "0 models ... sound=True", indistinguishable from a satisfiable
     instance the sampler merely failed on. Both detectors were already in hand."""
@@ -237,7 +227,7 @@ def test_zero_models_on_a_satisfiable_formula_says_why(tmp_path, capsys, monkeyp
 
 # --------------------------------------------------------------- the order the run happened in
 
-@needs_gpu
+@pytest.mark.gpu
 def test_each_phase_is_printed_where_it_happened(tmp_path, capsys):
     """Mining runs BEFORE the timed run and the formula is built before either, but both lines
     were read off the returned dict and printed under the throughput — so the console said the
@@ -249,7 +239,7 @@ def test_each_phase_is_printed_where_it_happened(tmp_path, capsys):
     assert where["N=4 M=2"] < where["mined"] < where["models in"], out
 
 
-@needs_gpu
+@pytest.mark.gpu
 def test_a_formula_only_mining_refutes_is_reported_as_unsat(tmp_path, capsys):
     """The REAL path behind the test below. Every 3-literal clause over 3 variables: construction
     cannot refute it (no units, no equivalences), but mining fails every literal, so the rebuilt
@@ -340,7 +330,7 @@ class TestSoundVerdict:
         assert merge_sound_check(None, "") == SOUND_OFF
 
 
-@needs_gpu
+@pytest.mark.gpu
 def test_verify_requested_but_never_reached_reads_off(tmp_path):
     """`--verify-sound` on a run that COMPLETES NOTHING must report "off", not "ok".
 
@@ -400,7 +390,7 @@ def test_bench_forwards_every_flag_it_declares(tmp_path, monkeypatch):
         assert argv[argv.index(flag) + 1] == val, flag
 
 
-@needs_gpu
+@pytest.mark.gpu
 def test_out_cap_does_not_change_the_run(tmp_path):
     """Delivery must not perturb SAMPLING. The projection that fills `--out` draws random bits for
     don't-care columns; sharing the sampler's generator made `--out` shift every later chunk's
@@ -414,7 +404,7 @@ def test_out_cap_does_not_change_the_run(tmp_path):
     assert len({round(r["success_rate"], 12) for r in runs}) == 1
 
 
-@needs_gpu
+@pytest.mark.gpu
 def test_emitted_rows_are_sound(tmp_path):
     """The delivery path CHANGED — rows now come off the timed run's chunks, per config, and may
     be spliced with a top-up. test_output.py gates soundness on `sample_bits`, which is no longer
@@ -505,7 +495,7 @@ def test_no_face_turns_on_the_soft_polarity_by_itself():
         "the old field name is declared again — a silent flip for callers who only relink"
 
 
-@needs_gpu
+@pytest.mark.gpu
 def test_full_models_honours_the_same_row_ceiling_as_the_bit_path(tmp_path):
     """`gpap.sample(..., full_models=True)` returned a whole COVERAGE CHUNK regardless of what
     was asked for — `n=50, max_samples=10` came back with 2,048 models, while the bit path

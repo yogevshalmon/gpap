@@ -13,13 +13,6 @@ import pytest
 from gpap.circuits.simulate import (_run_aig, _run_bench, _topo_ands, _topo_gates, rare_target,
                                     sim_baseline, simulate_check)
 
-try:
-    import torch as _torch
-    from gpap.engine import core_available as _ka
-    _KERNEL = _torch.cuda.is_available() and _ka()
-except Exception:  # noqa: BLE001
-    _KERNEL = False
-needs_gpu = pytest.mark.skipif(not _KERNEL, reason="engine is CUDA+triton-only")
 
 # A small sequential circuit exercising every supported gate op + a DFF.
 BENCH = """\
@@ -169,7 +162,7 @@ def test_simulate_check_accepts_real_solutions_and_flags_corruption(bench_circ):
     assert simulate_check(path, T, seed=5, bits=bad, col_labels=labels) >= 1
 
 
-@needs_gpu
+@pytest.mark.gpu
 def test_simulate_check_through_pipeline_bits(tmp_path, bench_circ):
     # End-to-end: GPAP-emitted sample rows must drive the circuit to the pinned outputs.
     import torch

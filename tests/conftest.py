@@ -10,7 +10,6 @@ import os
 import pytest
 import torch
 
-CUDA = torch.cuda.is_available()
 #: Every path into the checkout is anchored HERE, never on the process's working directory.
 #: `pytest tests/` from anywhere but the repo root used to fail 32 tests with FileNotFoundError
 #: on hardcoded `benchmarks/...` strings — and one of them (the occ/split check over a real
@@ -21,6 +20,22 @@ BENCH_DIR = os.path.join(REPO_ROOT, "benchmarks", "circuits", "bench")
 SEQ_DIR = os.path.join(BENCH_DIR, "seq")
 COMB_DIR = os.path.join(BENCH_DIR, "comb")
 TEST_DATA_DIR = os.path.join(REPO_ROOT, "tests", "test_data")
+
+
+def _engine_available():
+    from gpap.engine import core_available
+    return torch.cuda.is_available() and core_available()
+
+
+def pytest_collection_modifyitems(config, items):
+    """`gpu` marks a test that needs the engine: a CUDA device and a built libgpap. Without
+    both, every such test is skipped here, so no test file checks for itself."""
+    if _engine_available():
+        return
+    skip = pytest.mark.skip(reason="needs CUDA and a built libgpap (scripts/build_core.sh)")
+    for item in items:
+        if item.get_closest_marker("gpu"):
+            item.add_marker(skip)
 
 
 # Sequential circuits × unroll depths (kept small for CI) + a deep-cascade c25 (slow), plus two

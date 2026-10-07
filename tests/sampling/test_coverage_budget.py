@@ -79,13 +79,11 @@ def test_the_cap_does_not_move_the_diagnostic_it_protects():
     """distinct_frac is what the coverage run exists to measure. On a formula big enough for the
     cap to bind, the space is astronomically larger than the sample, so a smaller sample must
     give the SAME fraction — otherwise the cap is buying memory with accuracy."""
-    torch = pytest.importorskip("torch")
-    if not torch.cuda.is_available():
-        pytest.skip("needs CUDA")
     import gpap.sampling.pipeline as P
     from gpap.circuits.bench import build_cnf, parse_bench
 
     from tests.conftest import SEQ_DIR
+    from tests.support import DEV
     src = os.path.join(SEQ_DIR, "b13.bench")
     b, sup, _tgt, _lab = build_cnf(parse_bench(src), 25, seed=5)
     nv, clauses = b.nv, [list(c) for c in b.clauses]
@@ -96,7 +94,7 @@ def test_the_cap_does_not_move_the_diagnostic_it_protects():
     try:
         for label, budget in (("capped", 1 << 31), ("uncapped", 64 * GIB)):
             P.COV_HOST_BUDGET = budget
-            out[label] = P.sample_clauses(nv, clauses, sup, torch.device("cuda"),
+            out[label] = P.sample_clauses(nv, clauses, sup, DEV,
                                           n_time=5_000, n_cov=1000, time_limit=15.0, seed=5)
     finally:
         P.COV_HOST_BUDGET = saved

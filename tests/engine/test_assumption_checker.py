@@ -5,11 +5,9 @@ import pytest
 import torch
 
 from gpap.engine.checker import AssumptionChecker
-from gpap.engine import core_available
 from tests.conftest import TEST_DATA_DIR
 
-AVAIL = torch.cuda.is_available() and core_available()
-pytestmark = pytest.mark.skipif(not AVAIL, reason="requires CUDA + a built libgpap")
+pytestmark = pytest.mark.gpu
 
 
 class TestAssumptionChecker:
@@ -194,7 +192,6 @@ class TestInputValidation:
             ck.check_assumptions([[1]] * n, assignments=True)
 
 
-@pytest.mark.gpu
 def test_matches_the_reference_bcp():
     """Oracle check: conflict flags and implied literals against the pure-Python reference BCP,
     over random CNFs and random assumption sets, across a chunk boundary."""

@@ -10,14 +10,12 @@ import torch
 
 from gpap.engine.formula import CnfFormula, ext_lit_to_lit_index
 from gpap.engine.bcp_engine import BCPEngine, make_assumption_tensor
-from gpap.engine import core_available
 
 from tests.conftest import TEST_DATA_DIR
 from tests.reference.bcp import ref_bcp, assigned_set
+from tests.support import DEV
 
-AVAIL = torch.cuda.is_available() and core_available()
-pytestmark = pytest.mark.skipif(not AVAIL, reason="requires CUDA + a built libgpap")
-DEV = torch.device("cuda") if torch.cuda.is_available() else torch.device("cpu")
+pytestmark = pytest.mark.gpu
 
 
 def _engine(clauses, num_vars, K):
@@ -203,7 +201,7 @@ class TestKernelDispatch:
 
     @staticmethod
     def _engine(mode=None, nv=6):
-        f = CnfFormula(torch.device("cuda"))
+        f = CnfFormula(DEV)
         f.init_formula(nv, [[1, 2], [-1, 3], [-2, -3], [4, 5], [-4, 6], [-5, -6]])
         return BCPEngine(f, mode=mode)
 
@@ -224,7 +222,7 @@ class TestKernelDispatch:
         A mid-size formula at a huge batch must come back "wave"."""
         from gpap.engine.calibrate import dispatch_mode, resident_warps
         monkeypatch.delenv("GPAP_KERNEL", raising=False)
-        dev = torch.device("cuda")
+        dev = DEV
         resident = resident_warps(dev)
         assert resident > 0
         huge = 262_144                                   # the batch cap: where the proxy died
@@ -237,7 +235,7 @@ class TestKernelDispatch:
         formula small enough for the batch term to bind."""
         from gpap.engine.calibrate import resident_warps
         monkeypatch.delenv("GPAP_KERNEL", raising=False)
-        big = resident_warps(torch.device("cuda")) + 1     # past what scalar can hold in flight
+        big = resident_warps(DEV) + 1     # past what scalar can hold in flight
         eng = self._engine()                                # M = 6
         eng.reset(64)
         assert eng.mode == "wave"
@@ -311,7 +309,7 @@ class TestKernelDispatch:
         monkeypatch.delenv("GPAP_KERNEL", raising=False)
         dec = make_assumption_tensor([[ext_lit_to_lit_index(1)],
                                       [ext_lit_to_lit_index(-1)],
-                                      [ext_lit_to_lit_index(4)]], torch.device("cuda"))
+                                      [ext_lit_to_lit_index(4)]], DEV)
         out = {}
         for mode in ("scalar", "wave"):
             eng = self._engine(mode=mode)
@@ -321,7 +319,6 @@ class TestKernelDispatch:
         assert out["scalar"] == out["wave"]
 
 
-@pytest.mark.gpu
 @pytest.mark.parametrize("mode", ["scalar", "wave"])
 @pytest.mark.parametrize("shift", [16, 8])
 def test_full_assignment_matches_reference_across_kernels_and_splits(mode, shift):

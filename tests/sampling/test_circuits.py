@@ -15,17 +15,13 @@ circuits/simulate tests).
 import pytest
 import torch
 
-from gpap.engine import BCPEngine, CnfFormula, core_available
+from gpap.engine import BCPEngine, CnfFormula
 from gpap.sampling.sampler import GPUSampler, _satisfies
 
 from tests.reference.bcp import ref_bcp, assigned_set
+from tests.support import DEV
 
-CUDA = torch.cuda.is_available()
-KERNEL = CUDA and core_available()
-pytestmark = pytest.mark.skipif(not KERNEL, reason="requires CUDA + a built libgpap")
-
-DEV = torch.device("cuda") if CUDA else torch.device("cpu")
-gpu = pytest.mark.gpu
+pytestmark = pytest.mark.gpu
 slow = pytest.mark.slow
 
 SMOKE = ["b03-c1", "s386-c1"]
@@ -69,7 +65,6 @@ def test_circuit_models_sound(circuit_cnfs, name):
     assert out["sound_check"] == "ok"
 
 
-@gpu
 @pytest.mark.parametrize("name", GPU_MATRIX)
 def test_circuit_models_sound_matrix(circuit_cnfs, name):
     """Broader matrix: models sound under the circuit portfolio (plain + soft)."""
@@ -101,7 +96,6 @@ def test_circuit_determinism(circuit_cnfs, name):
 
 # --------------------------------------------------------------------------- reference A/B
 
-@gpu
 @pytest.mark.parametrize("name", ["b03-c1", "s386-c5", "b10-c5"])
 def test_circuit_kernel_matches_reference(circuit_cnfs, name):
     """Kernel BCP fixpoints == the pure-Python reference on real circuit CNFs (confluence).
@@ -143,7 +137,6 @@ def test_circuit_reconstruction_els(circuit_cnfs, name):
 
 # --------------------------------------------------------------------------- contract
 
-@gpu
 def test_circuit_contract_delivers_n_time(circuit_cnfs):
     """A high-success shallow instance delivers the full n_time budget (not chunk-capped)."""
     from gpap.sampling.pipeline import sample_clauses, CIRCUIT_PORTFOLIO
@@ -157,7 +150,6 @@ def test_circuit_contract_delivers_n_time(circuit_cnfs):
 
 # --------------------------------------------------------------------------- quality smoke
 
-@gpu
 def test_circuit_distinct_fraction(circuit_cnfs):
     """A non-tiny instance emits (nearly) all-distinct support projections."""
     nv, clauses, support = _inst(circuit_cnfs, "b03-c10")
@@ -171,7 +163,6 @@ def test_circuit_distinct_fraction(circuit_cnfs):
 
 # --------------------------------------------------------------------------- deep cascade (slow)
 
-@gpu
 @slow
 def test_circuit_deep_cascade_c25(circuit_cnfs):
     """The deep 25-cycle unroll: sound under the soft-lookahead config (the circuit-regime win)."""

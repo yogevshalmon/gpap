@@ -14,25 +14,13 @@ import torch
 
 from gpap.engine.formula import CnfFormula
 from gpap.engine.bcp_engine import BCPEngine, make_assumption_tensor
-from gpap.engine import core_available
 from gpap.sampling.sampler import GPUSampler, _satisfies
 
 from tests.reference.bcp import ref_bcp, assigned_set
 from tests.conftest import SEQ_DIR
+from tests.support import DEV, random_cnf
 
-CUDA = torch.cuda.is_available()
-AVAIL = CUDA and core_available()
-pytestmark = pytest.mark.skipif(not AVAIL, reason="requires CUDA + a built libgpap")
-DEV = torch.device("cuda") if CUDA else torch.device("cpu")
-
-
-def _random_cnf(rng, nv, nc, kmax=4):
-    """Random CNF with distinct-variable clauses (may include units)."""
-    clauses = []
-    for _ in range(nc):
-        vs = rng.sample(range(1, nv + 1), rng.randint(1, min(kmax, nv)))
-        clauses.append([v if rng.random() < 0.5 else -v for v in vs])
-    return clauses
+pytestmark = pytest.mark.gpu
 
 
 def _free_decisions(rng, engine, K, B, contradict_rows=()):
@@ -61,7 +49,7 @@ def test_fixpoint_matches_reference_multistep():
     rng = random.Random(11)
     for _ in range(15):
         nv = rng.randint(4, 40)
-        clauses = _random_cnf(rng, nv, rng.randint(nv, 4 * nv))
+        clauses = random_cnf(rng, nv, rng.randint(nv, 4 * nv))
         K, B = 32, rng.choice([1, 2, 4])
         f = CnfFormula(DEV)
         f.init_formula(nv, clauses)

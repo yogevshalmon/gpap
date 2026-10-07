@@ -24,29 +24,9 @@ from gpap.engine._core import check
 
 from tests.reference.bcp import assigned_set, ref_bcp
 from tests.reference.formula import ReferenceFormula
+from tests.support import DEV, random_cnf
 
-CUDA = torch.cuda.is_available()
-HAVE_CORE = _core.available()
-pytestmark = [
-    pytest.mark.gpu,
-    pytest.mark.skipif(not CUDA, reason="requires CUDA"),
-    pytest.mark.skipif(not HAVE_CORE, reason="libgpap not built (see cpp/README.md)"),
-]
-DEV = torch.device("cuda") if CUDA else torch.device("cpu")
-
-
-def _random_cnf(rng, nv, nc, kmax=4, kmin=1):
-    """`kmin` is load-bearing, not decoration. At kmin=1 a formula of this size almost always
-    contains a contradictory pair of UNIT clauses, so it is UNSAT before a single decision is
-    made: every row is conflicted at construction and the trajectory kernel does nothing. Two
-    tests in the retired equivalence suite were passing that way — comparing zero models to zero
-    models. Propagation tests use kmin=2 (real implication chains, no trivial UNSAT); tests that
-    need SOLUTIONS to exist use kmin=3 at a low clause ratio."""
-    out = []
-    for _ in range(nc):
-        vs = rng.sample(range(1, nv + 1), rng.randint(min(kmin, nv), min(kmax, nv)))
-        out.append([v if rng.random() < 0.5 else -v for v in vs])
-    return out
+pytestmark = pytest.mark.gpu
 
 
 # ---------------------------------------------------------------- formula structures
@@ -54,7 +34,7 @@ def _random_cnf(rng, nv, nc, kmax=4, kmin=1):
 def test_formula_structures_match_the_reference_builder():
     rng = random.Random(7)
     for nv, nc in [(6, 10), (40, 120), (200, 900)]:
-        clauses = _random_cnf(rng, nv, nc)
+        clauses = random_cnf(rng, nv, nc)
         f = ReferenceFormula.from_clauses(nv, clauses)
         cf = _core.Formula.from_clauses(nv, clauses)
 
@@ -73,7 +53,7 @@ def test_formula_structures_match_the_reference_builder():
 
 def test_dimacs_parse_matches_the_reference_parser(tmp_path):
     rng = random.Random(11)
-    clauses = _random_cnf(rng, 30, 80)
+    clauses = random_cnf(rng, 30, 80)
     p = tmp_path / "f.cnf"
     with open(p, "w") as fh:
         fh.write("c a comment\np cnf 30 %d\n" % len(clauses))
@@ -113,7 +93,7 @@ def test_apply_matches_the_reference_bcp(mode):
     rng = random.Random(3)
     for trial in range(8):
         nv, nc = 25, 70
-        clauses = _random_cnf(rng, nv, nc, kmin=2)
+        clauses = random_cnf(rng, nv, nc, kmin=2)
         K, L = 16, 3
         dec = [[rng.randrange(2 * nv) for _ in range(L)] for _ in range(K)]
 
@@ -136,7 +116,7 @@ def test_scalar_and_wave_reach_the_same_fixpoint():
     differ only in propagation order. This is what licenses the runtime auto-dispatch."""
     rng = random.Random(19)
     nv, nc, K = 20, 55, 12
-    clauses = _random_cnf(rng, nv, nc, kmin=2)
+    clauses = random_cnf(rng, nv, nc, kmin=2)
     dec = np.array([[rng.randrange(2 * nv)] for _ in range(K)], dtype=np.int64)
     rows = np.arange(K, dtype=np.int32)
 
@@ -185,7 +165,7 @@ def test_check_sound_agrees_with_an_independent_recount(mode):
     it goes unit and forces a literal whose negation is already set."""
     rng = random.Random(11)
     nv, nc, K = 40, 90, 256
-    clauses = _random_cnf(rng, nv, nc, kmin=2)          # kmin=2 -> exercise the binary pair path
+    clauses = random_cnf(rng, nv, nc, kmin=2)          # kmin=2 -> exercise the binary pair path
     core = _core.Engine(_core.Formula.from_clauses(nv, clauses), mode=mode)
     core.reset(K)
     # Wide random assumptions: plenty of rows conflict, a few survive.
@@ -208,7 +188,7 @@ def test_trajectory_emits_only_real_models(mode, B):
     outside the engine. Also pins the on-device check (`check_sound`) against that verdict."""
     rng = random.Random(5)
     nv, nc, K, seed = 60, 150, 512, 1234567
-    clauses = _random_cnf(rng, nv, nc, kmin=3)
+    clauses = random_cnf(rng, nv, nc, kmin=3)
     core = _core.Engine(_core.Formula.from_clauses(nv, clauses), mode=mode)
 
     order = torch.randperm(nv, generator=torch.Generator(device=DEV).manual_seed(9),
@@ -236,7 +216,7 @@ def test_trajectory_counters_agree_with_the_assignment(mode):
     propagation rate is derived from, so they must not be free-floating."""
     rng = random.Random(23)
     nv, nc, K = 40, 110, 256
-    clauses = _random_cnf(rng, nv, nc, kmin=3)
+    clauses = random_cnf(rng, nv, nc, kmin=3)
     core = _core.Engine(_core.Formula.from_clauses(nv, clauses), mode=mode)
     order = torch.arange(nv, device=DEV, dtype=torch.int32).contiguous()
     core.reset(K)
@@ -353,7 +333,7 @@ def test_readout_never_writes_past_the_caller_buffer():
     selected must truncate — and truncate to the FIRST rows, not to arbitrary ones."""
     rng = random.Random(77)
     nv = 12
-    clauses = _random_cnf(rng, nv, 18, kmin=3)
+    clauses = random_cnf(rng, nv, 18, kmin=3)
     core = _core.Engine(_core.Formula.from_clauses(nv, clauses))
     core.reset(64)
     core.trajectory(np.arange(nv, dtype=np.int32), nv, 4, 2024)
@@ -374,7 +354,7 @@ def test_readout_never_writes_past_the_caller_buffer():
 
 def test_empty_decision_order_is_a_noop():
     rng = random.Random(41)
-    clauses = _random_cnf(rng, 8, 12)
+    clauses = random_cnf(rng, 8, 12)
     core = _core.Engine(_core.Formula.from_clauses(8, clauses))
     core.reset(4)
     before = core.flags()[0].copy()
@@ -395,7 +375,7 @@ def test_wide_split_is_selected_and_sound():
     """8|24 'wide' split: 2N > 65535 forces the second envelope, and it must still be sound."""
     rng = random.Random(31)
     nv = 40000
-    clauses = _random_cnf(rng, nv, 60000, kmax=4, kmin=3)
+    clauses = random_cnf(rng, nv, 60000, kmax=4, kmin=3)
     core = _core.Engine(_core.Formula.from_clauses(nv, clauses))
     assert core.shift == 8
     order = torch.randperm(nv, generator=torch.Generator(device=DEV).manual_seed(2),
