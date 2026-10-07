@@ -249,8 +249,9 @@ ENGINE to 1 MiB while the rival ran with the whole card, and `1_000` split the o
 two-sides-capped-apart failure the cap exists to prevent, reached from the opposite direction. A
 huge value overflowed the MiB→bytes shift into a small positive cap that bound while `gpap info`
 called it inert. Both sides now share one narrow grammar (blanks, an optional `+`, digits) and
-answer *no cap* outside it, pinned by `tests/engine/test_k_cap.py::test_the_cap_grammar_is_one_grammar`,
-which asserts against the CORE and not only against the Python mirror.
+answer *no cap* outside it, pinned by `tests/engine/test_k_cap.py::test_the_cap_grammar_is_one_grammar` and
+`::test_the_core_reads_the_cap_grammar_the_same_way`, the second of which asserts against the
+CORE and not only against the Python mirror.
 
 **Two budgets under one cap.** The rival's budget was a second implementation — the same 0.80
 of the same card, minus the driver reserve we take and it did not — so `--vram-cap l4` capped

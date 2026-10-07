@@ -75,7 +75,7 @@ def test_the_budget_is_overridable_for_a_box_that_has_the_ram():
 
 
 @pytest.mark.gpu
-def test_the_cap_does_not_move_the_diagnostic_it_protects():
+def test_the_cap_does_not_move_the_diagnostic_it_protects(monkeypatch):
     """distinct_frac is what the coverage run exists to measure. On a formula big enough for the
     cap to bind, the space is astronomically larger than the sample, so a smaller sample must
     give the SAME fraction — otherwise the cap is buying memory with accuracy."""
@@ -90,14 +90,11 @@ def test_the_cap_does_not_move_the_diagnostic_it_protects():
     assert cov_batch(nv) < 2048, \
         f"b13 has nv={nv:,}; the cap must BIND here or this test proves nothing"
 
-    saved, out = P.COV_HOST_BUDGET, {}
-    try:
-        for label, budget in (("capped", 1 << 31), ("uncapped", 64 * GIB)):
-            P.COV_HOST_BUDGET = budget
-            out[label] = P.sample_clauses(nv, clauses, sup, DEV,
-                                          n_time=5_000, n_cov=1000, time_limit=15.0, seed=5)
-    finally:
-        P.COV_HOST_BUDGET = saved
+    out = {}
+    for label, budget in (("capped", 1 << 31), ("uncapped", 64 * GIB)):
+        monkeypatch.setattr(P, "COV_HOST_BUDGET", budget)
+        out[label] = P.sample_clauses(nv, clauses, sup, DEV,
+                                      n_time=5_000, n_cov=1000, time_limit=15.0, seed=5)
 
     assert out["capped"]["n_collected"] < out["uncapped"]["n_collected"], \
         "the capped run must actually have collected fewer rows — else nothing was exercised"
