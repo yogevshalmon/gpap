@@ -1,6 +1,6 @@
 """Correctness tests for the packed Triton BCP kernels through the engine + sampler.
 
-The semantic oracle is the pure-Python reference BCP (reference_bcp.py — BCP fixpoints are
+The semantic oracle is the pure-Python reference BCP (tests/reference/bcp.py — BCP fixpoints are
 confluent, so agreement is exact), plus external CPU verification of every sampled model
 (_satisfies / PySAT in the miner test). Reproducibility: the chunk loop draws its order
 and trajectory seed from the CORE sampler's own RNG (cpp/src/sample.cpp), so at a fixed batch

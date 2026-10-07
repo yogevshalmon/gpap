@@ -1,4 +1,4 @@
-"""Host-side tests for the evaluation harness (no CUDA needed).
+"""Host-side tests for `gpap bench` (gpap/benchmark.py; no CUDA needed).
 
 Covers the parts of a long unattended sweep that must not be wrong: the packed-envelope
 pre-check that decides whether an instance CAN run at all, the encoder-spec parsing that drives

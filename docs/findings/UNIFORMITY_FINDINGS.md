@@ -9,7 +9,8 @@
 > on `sound_check` in `cpp/include/gpap/gpap.h` and `.hpp`, and `eval/uniformity/` — which makes
 > the claims the library does not: `metrics.py` (statistics), `fuzz_uniformity.py` (exact
 > oracle), `barbarik_gpap.py` + `barbarik_screen.py` + `barbarik_table.py` (the certificate).
-> **Gated by:** `tests/experiments/test_uniformity_fuzz.py`, `tests/sampling/test_sampler.py`.
+> **Gated by:** `tests/experiments/test_uniformity_fuzz.py`, `tests/experiments/test_barbarik_harness.py`,
+> `tests/sampling/test_sampler.py`.
 > **SECTION NUMBERS ARE AN API** — cited from `gpap/`, `cpp/`, `eval/`, the tests and the
 > generated paper prose. Append; never renumber.
 

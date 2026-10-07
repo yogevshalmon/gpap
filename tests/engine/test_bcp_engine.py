@@ -1,5 +1,5 @@
 """Unit tests for the packed kernel engine (BCPEngine): fixpoint semantics, the flush cache,
-counters and edge cases. Semantic ground truth = the pure-Python reference (reference_bcp.py);
+counters and edge cases. Semantic ground truth = the pure-Python reference (tests/reference/bcp.py);
 scenario-level expectations are spelled out per test. CUDA-only (the engine has no CPU path).
 """
 import os
