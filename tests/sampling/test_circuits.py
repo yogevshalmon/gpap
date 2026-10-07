@@ -18,7 +18,7 @@ import torch
 from gpap.engine import BCPEngine, CnfFormula, core_available
 from gpap.sampling.sampler import GPUSampler, _satisfies
 
-from tests.reference_bcp import ref_bcp, assigned_set
+from tests.reference.bcp import ref_bcp, assigned_set
 
 CUDA = torch.cuda.is_available()
 KERNEL = CUDA and core_available()

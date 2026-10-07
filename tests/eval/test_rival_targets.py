@@ -15,14 +15,11 @@ checkout, so a present-but-unparseable run.py is a failure.
 import ast
 import os
 import re
-import sys
 
 import pytest
 
-sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-
-from gpap import paths  # noqa: E402  (after the sys.path insert above)
-from tests.conftest import REPO_ROOT, SEQ_DIR  # noqa: E402
+from gpap import paths
+from tests.conftest import REPO_ROOT, SEQ_DIR
 
 # Through `paths.src_dir()`, not a hard-coded `<repo>/.gpap`: `rivals_setup.sh` installs into
 # `$GPAP_HOME/src`, so with that variable set this file pointed at a path that does not exist and

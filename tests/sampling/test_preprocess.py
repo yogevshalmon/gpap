@@ -2,7 +2,7 @@
 unit_closure (formula-level unit propagation) and equivalent_literal_substitution (ELS).
 
 The full end-to-end ELS soundness gates (projection-set equality vs CaDiCaL enumeration,
-class-consistent reconstruction) live in tests/test_sampler.py (test_els_*); these are the
+class-consistent reconstruction) live in tests/sampling/test_sampler.py (test_els_*); these are the
 unit-level checks on the primitives themselves. Binary-implication edges are built exactly
 the way simplify_cnf_els builds them: (l1 ∨ l2) ⇒ ¬l1→l2 and ¬l2→l1.
 """

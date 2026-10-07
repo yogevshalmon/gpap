@@ -2,9 +2,9 @@
 
 Two oracles keep this honest, and NEITHER is a second GPU engine:
 
-  * the formula build is checked against `tests/reference_formula.py` — a pure-numpy
+  * the formula build is checked against `tests/reference/formula.py` — a pure-numpy
     re-derivation of the structures, which runs on any host;
-  * propagation is checked against `tests/reference_bcp.py` — a pure-Python BCP.
+  * propagation is checked against `tests/reference/bcp.py` — a pure-Python BCP.
 
 Anything the core emits is additionally verifiable from the outside: a model must satisfy every
 clause, and these tests check that directly rather than trusting either implementation.
@@ -22,8 +22,8 @@ import torch
 from gpap.engine import _core
 from gpap.engine._core import check
 
-from tests.reference_bcp import assigned_set, ref_bcp
-from tests.reference_formula import ReferenceFormula
+from tests.reference.bcp import assigned_set, ref_bcp
+from tests.reference.formula import ReferenceFormula
 
 CUDA = torch.cuda.is_available()
 HAVE_CORE = _core.available()
@@ -418,9 +418,9 @@ def test_wide_split_is_selected_and_sound():
 # later GPU test in the process rather than failing alone.
 #
 # The guarantee that actually matters is that the PACKAGED faces validate before any launch, and
-# that is gated twice, safely: tests/test_assumption_checker.py (test_out_of_range_literal_raises
+# that is gated twice, safely: tests/engine/test_assumption_checker.py (test_out_of_range_literal_raises
 # over five bad literals, plus test_bad_literal_cannot_corrupt_another_row) and
-# tests/test_mining.py::test_rejects_out_of_range_literals. The raw ABI's precondition is stated
+# tests/mining/test_mining.py::test_rejects_out_of_range_literals. The raw ABI's precondition is stated
 # in gpap.h.
 
 
@@ -514,7 +514,7 @@ def test_a_row_never_writes_outside_itself(mode, shift):
     change. The detector is known to fire: aiming an out-of-range literal index at a canary's
     bitmap words trips exactly that canary (see
     test_an_out_of_range_apply_literal_corrupts_a_DIFFERENT_row, which is the same mechanism)."""
-    from tests.reference_bcp import lit_idx
+    from tests.reference.bcp import lit_idx
 
     nv = 300
     rng = random.Random(31337)
@@ -561,7 +561,7 @@ def test_probe_returns_exactly_the_conflicting_tuples(mode):
     of them", which is exactly the claim under test."""
     import itertools
 
-    from tests.reference_bcp import lit_idx, ref_bcp
+    from tests.reference.bcp import lit_idx, ref_bcp
 
     rng = random.Random(4242)
     compared = conflicts_seen = 0
@@ -634,7 +634,7 @@ def test_the_warp_wide_decision_scan_picks_identically(B):
     """`bcp.py` claims the warp-wide decision scan makes "bit-identical picks" — the same first B
     still-free variables in `order`, the same per-(chunk, row, var) polarity hash — and that claim
     is the whole reason VSCAN is ON by default in the wave kernel. It was checked only for
-    LAUNCHABILITY (tests/test_kernel_table.py runs every vscan value and asserts the cubin
+    LAUNCHABILITY (tests/engine/test_kernel_table.py runs every vscan value and asserts the cubin
     exists); nothing compared results.
 
     Compare the model SETS, not the counts: identical counts from different picks would pass."""

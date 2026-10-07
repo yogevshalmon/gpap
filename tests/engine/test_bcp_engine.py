@@ -12,9 +12,9 @@ from gpap.engine.formula import CnfFormula, ext_lit_to_lit_index
 from gpap.engine.bcp_engine import BCPEngine, make_assumption_tensor
 from gpap.engine import core_available
 
-from tests.reference_bcp import ref_bcp, assigned_set
+from tests.conftest import TEST_DATA_DIR
+from tests.reference.bcp import ref_bcp, assigned_set
 
-TEST_DATA_DIR = os.path.join(os.path.dirname(__file__), "test_data")
 AVAIL = torch.cuda.is_available() and core_available()
 pytestmark = pytest.mark.skipif(not AVAIL, reason="requires CUDA + a built libgpap")
 DEV = torch.device("cuda") if torch.cuda.is_available() else torch.device("cpu")
@@ -338,7 +338,7 @@ def test_full_assignment_matches_reference_across_kernels_and_splits(mode, shift
     import random
 
     from gpap.engine import _core
-    from tests.reference_bcp import lit_idx, ref_bcp
+    from tests.reference.bcp import lit_idx, ref_bcp
 
     rng = random.Random(2026)
     compared = 0

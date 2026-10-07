@@ -8,7 +8,9 @@ import re
 
 import pytest
 
-REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+from tests.conftest import REPO_ROOT
+
+REPO = REPO_ROOT
 GENERATED = os.path.join(REPO, "cpp", "src", "generated", "gpap_kernels.c")
 
 

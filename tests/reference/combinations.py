@@ -2,7 +2,7 @@
 
 The sweep itself runs in cpp/src/probe.cpp; this exists ONLY so tests can pin that the core
 produces the same candidates in the same order as an independent, obvious implementation — the
-same role tests/reference_bcp.py plays for the kernels. It materializes C(P,k) tuples, which is
+same role tests/reference/bcp.py plays for the kernels. It materializes C(P,k) tuples, which is
 exactly why it is not in the shipping API: at k=3 over an unrolled circuit's free literals that is
 ~1e11 tuples.
 """

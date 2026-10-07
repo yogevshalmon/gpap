@@ -26,7 +26,9 @@ import re
 
 import pytest
 
-REPO = pathlib.Path(__file__).resolve().parents[1]
+from tests.conftest import REPO_ROOT
+
+REPO = pathlib.Path(REPO_ROOT)
 FINDINGS = REPO / "docs" / "findings"
 
 #: Trees whose files may cite a doc. `docs/` itself is included: a findings file citing a dead
@@ -154,7 +156,7 @@ def test_every_findings_file_opens_with_its_status_block(path):
 
 #: The shapes of a path that names one machine, mirrored from eval/artifact/check_leaks.sh: that
 #: script gates the SHIPPED tree, this test the checkout, and bash and Python cannot share one
-#: definition — so each names the other. tests/test_artifact_gate.py proves the script refuses each.
+#: definition — so each names the other. tests/eval/test_artifact_gate.py proves the script refuses each.
 _LEAK_SHAPES = (r"/home/[a-z][\w.-]*/", r"/Users/[A-Za-z][\w.-]*/",
                 r"-home-[a-z][\w.-]*-", r"/claude-[0-9]+/")
 
@@ -241,7 +243,7 @@ def test_the_python_package_version_is_the_same_number_in_all_three_places():
     cite = re.search(r"^version: (\S+)", cite_f.read_text(), re.M)
     assert pkg and proj and cite, "a version declaration went missing entirely"
     # Labels derived from the anchored paths, not written out: a literal like "gpap/__init__.py"
-    # both drifts and trips tests/test_suite_hygiene.py's working-directory detector.
+    # both drifts and trips tests/repo/test_suite_hygiene.py's working-directory detector.
     found = {str(init.relative_to(REPO)): pkg, str(proj_f.relative_to(REPO)): proj.group(1),
              str(cite_f.relative_to(REPO)): cite.group(1)}
     assert len(set(found.values())) == 1, f"the package version disagrees with itself: {found}"

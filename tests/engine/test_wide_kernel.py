@@ -16,7 +16,7 @@ from gpap.engine.bcp_engine import BCPEngine
 from gpap.engine import core_available
 from gpap.sampling.sampler import GPUSampler
 
-from tests.reference_bcp import ref_bcp, assigned_set
+from tests.reference.bcp import ref_bcp, assigned_set
 
 CUDA = torch.cuda.is_available()
 AVAIL = CUDA and core_available()

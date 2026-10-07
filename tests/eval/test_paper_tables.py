@@ -15,11 +15,10 @@ from pathlib import Path
 
 import pytest
 
-_REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-sys.path.insert(0, _REPO_ROOT)
-from eval.artifact.paper_tables import (cms_family, encoders_in, prop_rates,  # noqa: E402
+from eval.artifact.paper_tables import (cms_family, encoders_in, prop_rates,
                                         rival_family, tiny_space, vacuous_pin,
                                         zero_search)
+from tests.conftest import REPO_ROOT as _REPO_ROOT
 
 
 def row(name, enc="tseitin", *, models=1000, cms=1000, sps=1e6, cms_sps=1e4,
@@ -679,7 +678,7 @@ def test_a_crashed_cmsgen_is_not_a_zero_win(tmp_path):
 
 def _verify(*argv):
     import subprocess
-    root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    root = _REPO_ROOT
     return subprocess.run(
         [sys.executable, os.path.join(root, "eval", "artifact", "verify_artifact.py"),
          *[str(a) for a in argv]], capture_output=True, text=True)
@@ -967,7 +966,7 @@ SCREENS = ["zero_search", "select_cells", "cms_family", "prop_rates", "rival_fam
 
 
 def _eval_modules():
-    root = Path(__file__).resolve().parents[1] / "eval"
+    root = Path(_REPO_ROOT) / "eval"
     return sorted(p for p in root.rglob("*.py"))
 
 
@@ -975,7 +974,7 @@ def test_each_screening_rule_is_defined_exactly_once_across_eval():
     """A second definition anywhere under eval/ is the drift itself, whatever it is called."""
     import ast
 
-    home = Path(__file__).resolve().parents[1] / "eval" / "artifact" / "paper_tables.py"
+    home = Path(_REPO_ROOT) / "eval" / "artifact" / "paper_tables.py"
     found = {name: [] for name in SCREENS}
     for path in _eval_modules():
         for node in ast.parse(path.read_text()).body:
@@ -996,7 +995,7 @@ def test_the_other_generators_import_the_paper_rules_rather_than_restating_them(
     """
     import ast
 
-    root = Path(__file__).resolve().parents[1]
+    root = Path(_REPO_ROOT)
     tree = ast.parse((root / "eval/artifact" / mod).read_text())
     imported = {alias.name for node in ast.walk(tree)
                 if isinstance(node, ast.ImportFrom) and (node.module or "").endswith("paper_tables")
@@ -1131,7 +1130,7 @@ def test_the_generator_survives_a_stage_whose_every_cell_is_degenerate(tmp_path)
     riv.mkdir()
     (riv / "rivals_recurrent_rare.json").write_text(json.dumps([rrow("b13", dec=0, impl=0)]))
     (riv / "rivals_demotic_native.json").write_text(json.dumps({"rows": [rrow("c432")]}))
-    root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    root = _REPO_ROOT
     r = subprocess.run([sys.executable, os.path.join(root, "eval", "artifact", "paper_tables.py"),
                         "--rivals", str(riv), "--out-md", str(tmp_path / "R.md"),
                         "--out-tex", str(tmp_path / "T.tex")], capture_output=True, text=True)

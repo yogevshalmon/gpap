@@ -11,6 +11,7 @@ import pytest
 import torch
 
 from gpap.cli import main as cli_main
+from tests.conftest import REPO_ROOT
 
 CUDA = torch.cuda.is_available()
 try:
@@ -455,7 +456,7 @@ def test_the_two_faces_agree_on_the_decision_batch_default():
     def default(fn, name):
         return inspect.signature(fn).parameters[name].default
 
-    hpp = (Path(__file__).resolve().parents[1] / "cpp/include/gpap/gpap.hpp").read_text()
+    hpp = (Path(REPO_ROOT) / "cpp/include/gpap/gpap.hpp").read_text()
     m = re.search(r"std::int32_t\s+batch\s*=\s*(\d+)\s*;", hpp)
     assert m, "SampleOptions::batch default not found — did the field move?"
 
@@ -489,7 +490,7 @@ def test_no_face_turns_on_the_soft_polarity_by_itself():
 
     from gpap.engine import _core
 
-    hpp = (Path(__file__).resolve().parents[1] / "cpp/include/gpap/gpap.hpp").read_text()
+    hpp = (Path(REPO_ROOT) / "cpp/include/gpap/gpap.hpp").read_text()
     m = re.search(r"bool\s+retry_with_lookahead\s*=\s*(true|false)\s*;", hpp)
     assert m, "SampleOptions::retry_with_lookahead not found — did the field move or revert?"
     assert m.group(1) == "false", \

@@ -15,9 +15,10 @@ from pathlib import Path
 
 import pytest
 
-from tests.reference_bcp import lit_idx, ref_bcp
+from tests.conftest import REPO_ROOT
+from tests.reference.bcp import lit_idx, ref_bcp
 
-REPO = Path(__file__).resolve().parent.parent
+REPO = Path(REPO_ROOT)
 
 
 def _bin(name: str) -> Path:

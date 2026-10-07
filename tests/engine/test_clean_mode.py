@@ -67,7 +67,7 @@ def test_state_identity_fuzz(mode, shift):
     """After every CLEAN launch: packed == the broadcast baseline BIT-EXACT on every row
     (conflicted rows included), flags/counters == a plain-apply twin, conflict flags == the
     pure-Python reference BCP. Both kernels, both packed splits."""
-    from tests.reference_bcp import lit_idx, ref_bcp
+    from tests.reference.bcp import lit_idx, ref_bcp
 
     rng = np.random.default_rng(11)
     lite_seen = 0
@@ -166,7 +166,7 @@ def test_pure_binary_formula_is_stateless(mode):
     """A formula of ONLY <=2-literal clauses has num_long == 0: no packed words, no broadcast,
     nothing for CLEAN to restore — yet propagation, flags, counters, the sat_rows synthesis and
     reset-lite must all behave exactly as on any other formula."""
-    from tests.reference_bcp import lit_idx, ref_bcp
+    from tests.reference.bcp import lit_idx, ref_bcp
 
     nv = 40
     clauses = [[-(v), v + 1] for v in range(1, nv)] + [[1, 2]]   # binary chain + one extra edge

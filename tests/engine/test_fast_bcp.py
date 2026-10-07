@@ -4,7 +4,7 @@ The semantic oracle is the pure-Python reference BCP (reference_bcp.py — BCP f
 confluent, so agreement is exact), plus external CPU verification of every sampled model
 (_satisfies / PySAT in the miner test). Reproducibility: the chunk loop draws its order
 and trajectory seed from the CORE sampler's own RNG (cpp/src/sample.cpp), so at a fixed batch
-same-seed runs are bit-identical — see tests/test_sample_core.py for that contract itself.
+same-seed runs are bit-identical — see tests/sampling/test_sample_core.py for that contract itself.
 """
 import os
 import random
@@ -17,7 +17,7 @@ from gpap.engine.bcp_engine import BCPEngine, make_assumption_tensor
 from gpap.engine import core_available
 from gpap.sampling.sampler import GPUSampler, _satisfies
 
-from tests.reference_bcp import ref_bcp, assigned_set
+from tests.reference.bcp import ref_bcp, assigned_set
 from tests.conftest import SEQ_DIR
 
 CUDA = torch.cuda.is_available()
