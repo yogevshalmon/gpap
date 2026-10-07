@@ -39,7 +39,7 @@ be pure draw luck.
 the core sampler (`gpap_sampler_*` — one deterministic stream shared by the C++ and Python
 faces). Same-seed model counts are comparable within an era, never across it; the gate below
 applies unchanged inside the new era, and it gains a cross-face variant
-(tests/test_face_parity.py: same seed + single config ⇒ identical rows on both faces).
+(tests/sampling/test_face_parity.py: same seed + single config ⇒ identical rows on both faces).
 
 **A pure refactor is gated on identical model counts**, not on rates:
 

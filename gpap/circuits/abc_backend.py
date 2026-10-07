@@ -5,7 +5,7 @@ and `fraig` SAT-sweeping shrink the unrolled circuit well below a gate-by-gate T
 (docs/findings/INSIGHTS.md).
 
 Soundness: `strash`/`dc2`/`fraig`/`&fraig`/`scorr` are function-preserving and `zero` +
-`frames -F T -i` reproduces our reset-state-0 unroll exactly, gated by tests/test_abc_encoder.py,
+`frames -F T -i` reproduces our reset-state-0 unroll exactly, gated by tests/circuits/test_abc_encoder.py,
 which enumerates the projected solution set under both encoders and asserts SET EQUALITY. `zero`
 is MANDATORY: without it ABC turns the T=0 register state into FREE primary inputs.
 

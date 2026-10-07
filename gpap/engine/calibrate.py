@@ -64,7 +64,7 @@ _CAP_MAX_MIB = ((1 << 63) - 1) >> 20
 
 
 def vram_budget_cap_mib() -> int:
-    """The ceiling in MiB, or 0 for "no cap". Gated against the C reader by tests/test_k_cap.py:
+    """The ceiling in MiB, or 0 for "no cap". Gated against the C reader by tests/engine/test_k_cap.py:
     a divergence here caps one side of a comparison and not the other."""
     import os
     m = _CAP_GRAMMAR.match(os.environ.get("GPAP_VRAM_BUDGET_MIB") or "")

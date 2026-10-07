@@ -21,7 +21,7 @@
 #
 # WHAT IS NOT, and why that is not an oversight: numpy and matplotlib touch no verdict. The table
 # generators and the gate are pure JSON readers that import neither (gated by
-# tests/test_paper_tables.py::test_the_table_generators_import_without_torch_or_numpy);
+# tests/eval/test_paper_tables.py::test_the_table_generators_import_without_torch_or_numpy);
 # matplotlib only draws the two figures, which no claim rests on. Floors, so a reviewer on an
 # older Python still resolves.
 #

@@ -46,12 +46,12 @@ the explanation got copied to each one and three copies were wrong. Now `.gpap/`
 machinery including ALL scratch (`gpap/paths.py`), `.experiments/` is a run's output and
 `$GPAP_RESULTS` the record (`eval/paths.py`), nothing else names them, and shell ASKS
 (`python3 -m gpap.paths home`) rather than reimplementing the rule in a second language — which is
-what the divergences all were. Gated by tests/test_suite_hygiene.py — every string
+what the divergences all were. Gated by tests/repo/test_suite_hygiene.py — every string
 constant through the AST (a path literal has no whitespace; prose about one does, which is what
 separates them without a whitelist), every repo-root constant re-derived in all four spellings the
 tree uses, every internal import resolved (a driver had imported a module from its pre-reorg path
 for weeks inside an `except` that printed a one-line skip), and every shell ask guarded, because
-asking a module for a path let an empty answer reach `rm -rf`. Behaviour by tests/test_paths.py.
+asking a module for a path let an empty answer reach `rm -rf`. Behaviour by tests/repo/test_paths.py.
 
 **A phase belongs where it happens, and a printed number must mean one thing (2026-09-12).**
 `gpap sample` read every line off the returned dict, so mining printed below the throughput it ran
@@ -65,7 +65,7 @@ space in it wrote nothing. [CLI_DELIVERY_FINDINGS.md](CLI_DELIVERY_FINDINGS.md).
 
 **The sampling chunk loop moved into the core (2026-09-01).** `cpp/src/sample.cpp`
 (`gpap_sampler_*`) owns chunks, bandit, valves, buckets and accounting; both faces marshal over it.
-Gated by tests/test_sample_core.py and tests/test_face_parity.py; pre-port seed streams re-baselined
+Gated by tests/sampling/test_sample_core.py and tests/sampling/test_face_parity.py; pre-port seed streams re-baselined
 ([BENCHMARKING.md](../BENCHMARKING.md) §3).
 
 **`{0}` on an options struct must equal every default; `GPAP_MODE_AUTO` is 0 (2026-08-31).** `mode`
@@ -81,7 +81,7 @@ the pipeline, not only per config — a pinned config has no per-config wall.
 **6 of 33 AOT cubins were byte-identical duplicates (2026-08-31).** `VSCAN` is read only under `if
 WAVE and VSCAN and not SOFT`; trimmed in `build_kernels.vscan_is_read` and `engine.cpp::traj_key`.
 Byte-identity is no gate (line info moves 24 of 33) — compare SHF_EXECINSTR sections. Gated by
-tests/test_kernel_table.py.
+tests/engine/test_kernel_table.py.
 
 **Key a cache on `gpap_build_id()`, never `gpap_version()` (2026-08-31).** The version literal
 stayed "0.1.0" while the engine got 1.8× faster under it; the build id is an FNV-1a of the loaded
@@ -162,7 +162,7 @@ absolute numbers; A/B ratios within one state stay valid.
 [BENCHMARKING.md §1b](../BENCHMARKING.md).
 
 **The PyTorch execution path was deleted; the engine is packed-kernel-only (2026-07-13).** CUDA and
-triton are required, the A/B oracle is `tests/reference_bcp.py`, out-of-envelope formulas are
+triton are required, the A/B oracle is `tests/reference/bcp.py`, out-of-envelope formulas are
 rejected, and `orac`/full-lookahead are gone. Validated by 11 model-set hashes reproduced
 bit-identically at pinned K, seed 5.
 
@@ -377,7 +377,7 @@ card's budget, and `compare_campaign.py` counts every walked-down grant.
 absolute path to ship had no `/home/` in it: an agent's scratch directory with the home path
 flattened into its NAME, inside three Barbarik error rows, and the packager's inline `/home/` check
 passed it. The shapes now live in one script, `eval/artifact/check_leaks.sh`, proven to refuse
-each on its own (tests/test_artifact_gate.py); literal names come from a denylist outside the
+each on its own (tests/eval/test_artifact_gate.py); literal names come from a denylist outside the
 repository, because the script ships in the tarball it checks; and the double-blind copy is a
 transform over the packager's tarball, `$GPAP_RESULTS/artifact/anonymize.sh`, that must still pass
 the gate and the host suite. Running `pytest` inside the packaged tree for the first time found

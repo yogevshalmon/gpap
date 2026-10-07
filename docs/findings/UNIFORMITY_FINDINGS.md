@@ -9,7 +9,7 @@
 > on `sound_check` in `cpp/include/gpap/gpap.h` and `.hpp`, and `eval/uniformity/` — which makes
 > the claims the library does not: `metrics.py` (statistics), `fuzz_uniformity.py` (exact
 > oracle), `barbarik_gpap.py` + `barbarik_screen.py` + `barbarik_table.py` (the certificate).
-> **Gated by:** `tests/test_uniformity_fuzz.py`, `tests/test_sampler.py`.
+> **Gated by:** `tests/eval/test_uniformity_fuzz.py`, `tests/sampling/test_sampler.py`.
 > **SECTION NUMBERS ARE AN API** — cited from `gpap/`, `cpp/`, `eval/`, the tests and the
 > generated paper prose. Append; never renumber.
 
@@ -162,7 +162,7 @@ The bandit selects on models/second with no uniformity term, so wherever `soft` 
 silently emitted a distribution the standard tester rejects. Done 2026-07-30: `soft` removed from
 `CIRCUIT_PORTFOLIO`, opt-in via `--allow-soft` on `gpap sample`/`gpap bench` (with a warning) or
 `pipeline.SOFT_CONFIG` / `portfolio(name, allow_soft=True)`; gated by
-`tests/test_sampler.py::test_soft_is_not_in_any_default_portfolio`. Configs are `SamplingConfig`
+`tests/sampling/test_sampler.py::test_soft_is_not_in_any_default_portfolio`. Configs are `SamplingConfig`
 NamedTuples over `VarOrder`/`Lookahead` enums that carry their justification, tuple-compatible
 (`test_portfolio_configs_are_tuple_compatible`).
 
@@ -453,7 +453,7 @@ The 2026-08-28 rows are in `.experiments/barbarik_20260828/`: 92 generated insta
 the cost screen, 66 pass the control. `--sampler spur` (must Accept) and `--config soft` (must
 Reject) are the two controls; a table without both is not evidence. `--draw iid` re-runs any
 GPAP arm with one chunk per sample, the independence premise barbarik's guarantee is stated
-under. `tests/test_uniformity_fuzz.py` gates the invariants (oracle self-consistency, both
+under. `tests/eval/test_uniformity_fuzz.py` gates the invariants (oracle self-consistency, both
 controls, soundness at every B, `B >= |support|` indistinguishable from uniform on every generated
 instance) in under 1 s; it deliberately does not gate small-B uniformity, a documented property of
 the algorithm class rather than a defect.

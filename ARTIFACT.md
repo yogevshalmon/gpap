@@ -27,7 +27,7 @@ eval/artifact/reproduce.sh tables --out /tmp/tier1
 
 The table generators and the gate are pure JSON readers — **no GPU, no CUDA wheels, not even
 numpy** (gated by
-`tests/test_paper_tables.py::test_the_table_generators_import_without_torch_or_numpy`), so they
+`tests/eval/test_paper_tables.py::test_the_table_generators_import_without_torch_or_numpy`), so they
 run under a stock `python3` in the TACAS evaluation VM. Their output is byte-identical to the
 paper's tables apart from a date and commit line in each header. Only the two figures need
 anything extra (`matplotlib`); without it that step says so and the rest still completes.

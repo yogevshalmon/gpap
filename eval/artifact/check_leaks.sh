@@ -18,7 +18,7 @@
 # it checks. They come from a denylist kept OUTSIDE the repository: one fixed string per line,
 # matched case-insensitively; blank lines, `#` comments and carriage returns are stripped, because
 # to `grep -F -f` an empty line is a pattern that matches EVERY line and a trailing CR is part of
-# the pattern — the two ways this gate can fail open. Gated by tests/test_artifact_gate.py.
+# the pattern — the two ways this gate can fail open. Gated by tests/eval/test_artifact_gate.py.
 set -uo pipefail
 
 usage() { echo "usage: check_leaks.sh DIR [--denylist FILE]" >&2; exit 2; }
@@ -35,7 +35,7 @@ done
 [ -z "$DENY" ] || [ -f "$DENY" ] || { echo "no such denylist: $DENY" >&2; exit 2; }
 
 # THE SHAPES: a path form that names a machine without saying so. Text files only (`-I`): an
-# image's bytes are not a path. Mirrored by tests/test_docs_hygiene.py over the checkout.
+# image's bytes are not a path. Mirrored by tests/repo/test_docs_hygiene.py over the checkout.
 SHAPES=(
     '/home/[a-z][A-Za-z0-9_.-]*/'          # a Linux home directory
     '/Users/[A-Za-z][A-Za-z0-9_.-]*/'      # a macOS home directory

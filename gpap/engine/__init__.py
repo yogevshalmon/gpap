@@ -28,7 +28,7 @@ active rows are models.
 
 Everything else on BCPEngine is an accessor; do not reach into the private `_core` handle.
 Correctness: BCP fixpoints are confluent, the kernels are validated against a pure-Python
-reference BCP (tests/reference_bcp.py), and every emitted model is externally verifiable.
+reference BCP (tests/reference/bcp.py), and every emitted model is externally verifiable.
 """
 from gpap.engine.formula import (
     CnfFormula,

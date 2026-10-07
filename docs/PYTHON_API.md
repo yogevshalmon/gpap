@@ -67,7 +67,7 @@ tests and off-hot-path consumers.
 BCP fixpoints are confluent, so kernel and chunking choices change speed but never answers on
 surviving rows (a conflicted row's non-`conflict` fields are snapshots — see
 `AssumptionChecker.check_assumptions`). The kernels are A/B'd against a pure-Python reference
-BCP (`tests/reference_bcp.py`), the formula builder against `tests/reference_formula.py`, and
+BCP (`tests/reference/bcp.py`), the formula builder against `tests/reference/formula.py`, and
 every emitted model is externally verifiable.
 
 ## Runnable starting points

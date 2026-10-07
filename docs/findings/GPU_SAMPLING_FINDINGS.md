@@ -13,7 +13,7 @@
 
 Code: [`gpap/sampling/sampler.py`](../../gpap/sampling/sampler.py), harness
 [`gpap/benchmark.py`](../../gpap/benchmark.py), tests
-[`tests/test_sampler.py`](../../tests/test_sampler.py).
+[`tests/sampling/test_sampler.py`](../../tests/sampling/test_sampler.py).
 
 ## The algorithm: GPAP = GPU-parallel CMSGen
 
@@ -40,7 +40,7 @@ Ours is not elimination:
 - **Unit propagation** (`simplify_cnf`) only pins variables already forced in every model, so it is
   strictly model-preserving. The exact set of valid support projections is identical with and
   without it, and reconstructed models satisfy the original clauses
-  (`tests/test_sampler.py::test_simplify_preserves_projection_set`). Don't-care support variables —
+  (`tests/sampling/test_sampler.py::test_simplify_preserves_projection_set`). Don't-care support variables —
   those in no remaining clause — are sampled uniformly, which preserves the projection
   distribution.
 - **ELS** (`simplify_cnf_els`) collapses binary-implication SCCs, removing variables. It is

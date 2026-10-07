@@ -210,7 +210,7 @@ circuit, which checks soundness independently of the CNF encoding.
 `--encoder abc` unrolls and logic-optimizes the circuit with
 [berkeley-abc](https://github.com/berkeley-abc/abc), then Tseitin-encodes the resulting AIG. This
 gives a smaller CNF with the same projected solution space (asserted by
-`tests/test_abc_encoder.py`). `scripts/build_abc.sh` builds a pinned upstream commit, and
+`tests/circuits/test_abc_encoder.py`). `scripts/build_abc.sh` builds a pinned upstream commit, and
 `--abc-opt full|fast|auto` picks the optimization effort. The default encoder stays `tseitin`, so
 a result never depends on whether ABC is installed.
 

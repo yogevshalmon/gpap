@@ -12,5 +12,5 @@
 #
 # Adding a line here is also a promise to reword whatever names the file: it vanishes from every
 # tarball while staying in the checkout, so a reference to it dangles for everyone who unpacks one
-# and looks fine here. tests/test_docs_hygiene.py enforces that.
+# and looks fine here. tests/repo/test_docs_hygiene.py enforces that.
 CLAUDE.md export-ignore

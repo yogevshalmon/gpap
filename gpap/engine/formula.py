@@ -12,7 +12,7 @@ it exactly, since every removal is exact mod 2^F and a single index is < 2^F. Th
 makes the warp-parallel kernel possible — ONE atomic_add applies count-=1 and sum-=neg together
 (the count never borrows, the sum wraps off the top), and its RETURN VALUE alone yields
 conflict/unit detection plus the forced literal. The independent re-derivation these structures
-are checked against is `tests/reference_formula.py`.
+are checked against is `tests/reference/formula.py`.
 """
 import torch
 

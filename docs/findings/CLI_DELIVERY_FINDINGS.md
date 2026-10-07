@@ -6,8 +6,8 @@
 > are illustrations of a defect, not throughput claims; every rule here is machine-independent.
 > **Rule lives in:** `gpap/sampling/sampler.py`, `pipeline.py`, `output.py`, `gpap/cli.py`,
 > `gpap/verdict.py`; restated in `docs/BENCHMARKING.md`.
-> **Gated by:** `tests/test_cli_contracts.py`, `tests/test_benchmark_harness.py`
-> (`TestTableAlignment`), `tests/test_abc_encoder.py`.
+> **Gated by:** `tests/cli/test_cli_contracts.py`, `tests/cli/test_benchmark_harness.py`
+> (`TestTableAlignment`), `tests/circuits/test_abc_encoder.py`.
 
 Nothing here implicated the engine; the defects were in the print/plumbing layer, where nothing
 crashes and every number looks plausible. This file keeps the rules that came out of it.
@@ -121,7 +121,7 @@ Three rules came out of the same pass, each a case of one printed number meaning
   and 175 of 4,797 recorded rows are under 0.01% success. `PCT_WIDTH` is now a stated contract, the
   column is sized from it, and the small end keeps its magnitude (`4e-07%`, not `<0.01%`).
   The recorded range that sizes it: rates reach **3.9e-8** (kernel_ab) and **3.6e-7** (sin.aig),
-  so `tests/test_benchmark_harness.py` gates at 3.6e-9 — below both, i.e. at the small end of what
+  so `tests/cli/test_benchmark_harness.py` gates at 3.6e-9 — below both, i.e. at the small end of what
   `fmt_pct` can be ASKED to render rather than at the smallest yet seen.
 
 Also here: the scratch CNF a circuit is unrolled to, and the ABC encoder's intermediate AIGs, move
@@ -134,4 +134,4 @@ glob, `$`, `&`, a backtick, a leading dash and UTF-8, but NOT a tab, newline or 
 (abc rewrites each to a space INSIDE the quotes), a `"` (it ends the quoting) or a `'` (it is
 stripped, and the rest of the script is swallowed into the filename). Those five are refused up
 front with a message naming the character. Both abc-script sites are gated by
-`tests/test_abc_encoder.py`.
+`tests/circuits/test_abc_encoder.py`.

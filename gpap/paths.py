@@ -111,7 +111,7 @@ def tmp_dir() -> Path:
     Falls back to the system temp directory when there is no checkout and no `$GPAP_HOME` (an
     installed wheel, where `./.gpap` would mean a directory in wherever the user happens to
     stand) and whenever the root is not writable — see `_writable` for why creation is not the
-    test. Gated by tests/test_paths.py.
+    test. Gated by tests/repo/test_paths.py.
 
     Nothing here is MEANT to survive a run, but a kill leaves files behind, so they do collect —
     inside the checkout rather than somewhere the OS reclaims. `rm -rf .gpap/tmp` is safe against

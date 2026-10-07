@@ -138,7 +138,7 @@ def k_scaling(path: str, device: torch.device, *, b: int, chunks: int, k_cap: in
     for k in ks:
         if k > auto_K:
             continue
-        # pin_batch, not `smp.K = k`: only the pin bounds the batch actually run (tests/test_k_cap.py).
+        # pin_batch, not `smp.K = k`: only the pin bounds the batch actually run (tests/engine/test_k_cap.py).
         smp.pin_batch(k)
         # Reseed per point so every K samples the same trajectory distribution.
         smp.reseed(seed)                    # all streams: core sampling, delivery, host fills

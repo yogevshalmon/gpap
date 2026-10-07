@@ -34,7 +34,7 @@ why it is correct. The measurement that settled it (date, GPU, per-instance tabl
   is a bitmap (bit l of int32 words; l and ~l share a word, so one `atomic_or` answers
   duplicate and contradiction). Accessors materialize copies off the hot path.
 - Correctness story: BCP fixpoints are confluent, so kernels are A/B'd against a pure-Python
-  reference (`tests/reference_bcp.py`), and every emitted model is externally verifiable.
+  reference (`tests/reference/bcp.py`), and every emitted model is externally verifiable.
 
 ## Layout
 
@@ -59,7 +59,7 @@ gpap/
   mining.py                # entailed-clause mining: the STRATEGY over the core's probe primitive
   engine/                  # the Python face of the core (app-agnostic)
     _core.py               # ctypes binding (private)
-    formula.py             # CnfFormula over the core's builder (reference: tests/reference_formula.py)
+    formula.py             # CnfFormula over the core's builder (reference: tests/reference/formula.py)
     bcp_engine.py          # BCPEngine: marshalling + accessors
     calibrate.py           # K sizing, VRAM model, gpu_mem_available
     checker.py             # AssumptionChecker (marshalling; the loop is cpp/src/check.cpp)
@@ -117,7 +117,7 @@ tests/                     # pytest; circuit CNFs generated from benchmarks/circ
      words from the baseline inside the launch; `reset()` goes lite when rows are provably clean.
      Probe sweeps and flags-only `check_sets` ride it; anything that reads post-apply state
      (assignments, sat readout, `recache_flush`, selections) must use plain `apply`. `GPAP_CLEAN=0`
-     is exact legacy. Gated by tests/test_clean_mode.py; docs/findings/CLEAN_MODE_FINDINGS.md.
+     is exact legacy. Gated by tests/engine/test_clean_mode.py; docs/findings/CLEAN_MODE_FINDINGS.md.
    - **Redundancy is filtered on the host, at three levels** (`mine_entailed(drop=)`, `gpap mine
      --drop`): `none` / `subsumed` (default) / `derivable`. The default is deliberately not the
      strongest: a derivable clause still shortens propagation and the sampler is propagation-bound.
@@ -130,12 +130,12 @@ tests/                     # pytest; circuit CNFs generated from benchmarks/circ
    core** (`gpap_sampler_*`, `cpp/src/sample.cpp`): chunks, the config bandit, the stop valves,
    per-config kept-row buckets, delivery/verify accounting, and the core's own RNG. Both faces
    are marshalling; at one seed, one config and one batch they draw identical models
-   (tests/test_face_parity.py, tests/test_sample_core.py).
+   (tests/sampling/test_face_parity.py, tests/sampling/test_sample_core.py).
    - **K is not part of the seed**: it is the analytic bound over live free VRAM, so a narrower
      run's models are a prefix of a wider one's. Pin the batch before comparing counts
      (`pin_batch` / `gpap_sampler_set_k` / `--k`).
    - The faces agree on defaults, not only on the loop: decision batch 8 everywhere (gated by
-     tests/test_cli_contracts.py, which reads the C++ default out of the header). The C++
+     tests/cli/test_cli_contracts.py, which reads the C++ default out of the header). The C++
      `retry_with_lookahead` is OFF by default; turning it on runs the Barbarik-rejected soft
      polarity, the same choice `--allow-soft` gates in Python.
    - Rows recorded before the RNG moved into the core replay under torch seeds and are not
@@ -171,7 +171,7 @@ split per formula (16|16 for 2N ≤ 65535; 8|24 "wide" for 2N ≤ 0xFFFFFF with 
 - **The cap is one constant on every GPU**: `kBatchCap = 262,144` (`cpp/src/calibrate.cpp`,
   `engine.calibrate.K_CAP`, `--k-cap auto`). It is a saturation limit, not a safety one, and it is
   hygiene, not a throughput lever: success is machine-independent and the work rate tracks SM
-  count (docs/findings/CROSS_GPU_FINDINGS.md). Device-independence is gated by tests/test_k_cap.py.
+  count (docs/findings/CROSS_GPU_FINDINGS.md). Device-independence is gated by tests/engine/test_k_cap.py.
   Two cross-GPU traps: a free bandit picks differently per machine (always pin the config), and
   a `--n-time` that finishes in one chunk measures first-chunk overhead.
 - **`gpap_trail_cap(N)` in `cpp/src/calibrate.cpp` is the one definition** of the trail term:
@@ -179,7 +179,7 @@ split per formula (16|16 for 2N ≤ 65535; 8|24 "wide" for 2N ≤ 0xFFFFFF with 
   because the wave paths append a whole wavefront with no bound test. Keep the slack in step
   with `WAVE_W`. There is no ceiling on B; `B ≥ |support|` is the exactly-uniform configuration.
 - **Read `smp.batch_size`; set it with `smp.pin_batch(n)` / `with smp.pinned_batch(n):`.**
-  `batch_size == K`, stamped into every row as `engine.batch`. Gated by tests/test_k_cap.py.
+  `batch_size == K`, stamped into every row as `engine.batch`. Gated by tests/engine/test_k_cap.py.
 - Any retune of `compute_k_safe` is a K change: re-validate under the nvidia-smi kill-switch and
   re-check dispatch, since the batch feeds the dispatch rule's small-batch term.
 - Wave and scalar agree exactly on models and decisions; the implication counter differs on
@@ -272,7 +272,7 @@ scripts/build_abc.sh                                         # optional: pinned 
   the original circuit: encoder-independent end-to-end soundness.
 - **Encoder** (`--encoder tseitin|abc|auto`, default `tseitin` so results never shift with
   ABC's presence): `abc` = strash + `zero` + `frames -F T -i` + dc2/fraig, then Tseitin of the
-  AIG (2-/3-literal clauses). Same projected solution space (gated by tests/test_abc_encoder.py);
+  AIG (2-/3-literal clauses). Same projected solution space (gated by tests/circuits/test_abc_encoder.py);
   `zero` is mandatory (without it the T=0 register state becomes free PIs; reset-1 AIGs are
   refused on the abc route). AIGER, not `write_cnf`, is the route because it keeps the PI→var
   map. `--abc-opt full|fast|auto`: post-unroll fraig is the whole encode cost and the whole
@@ -357,7 +357,7 @@ skipped/errored instance; read it before quoting a geomean.
   where the useful default is "on" the field is named for the opt-out (`same_var`). A rename is a
   compile error for out-of-tree callers; a flipped meaning under the same name is not.
 - **A cubin the kernel cannot tell apart is not shipped**: `build_kernels.vscan_is_read` and
-  `engine.cpp::traj_key` are one rule; gated by tests/test_kernel_table.py. Cubin byte-identity
+  `engine.cpp::traj_key` are one rule; gated by tests/engine/test_kernel_table.py. Cubin byte-identity
   is not a no-change gate (line info is embedded); compare the executable sections.
 - **Key a results cache on `gpap_build_id()`, never `gpap_version()`.**
 - Runtime per-batch memory probes are unreliable; this box spills to host RAM rather than
@@ -372,7 +372,7 @@ skipped/errored instance; read it before quoting a geomean.
 - **The zero ledger is symmetric and must add up.** CMSGen-zero → `ratio=inf`, GPAP-zero →
   `ratio=0.0`, both-zero → `ratio=None` (the last two are falsy; never branch on `ratio` alone).
   Invariants: `inst = n + CMSGen=0 + GPAP=0 + excluded` (Table 1) and `cells = n + rival=0 +
-  GPAP=0 + failed + excluded` (Table 2), pinned by tests/test_paper_tables.py. Every reason a
+  GPAP=0 + failed + excluded` (Table 2), pinned by tests/eval/test_paper_tables.py. Every reason a
   cell carries no ratio is the one `excluded` column, itemised by name (`excl_names`); there is
   no thin-denominator floor (a tool that scored anything is scored; cells under
   `THIN_DENOMINATOR = 30` events are named in the caveats); no `paper set` column. Table 1 and

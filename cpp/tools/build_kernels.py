@@ -67,7 +67,7 @@ def vscan_is_read(wave: int, soft: int) -> bool:
     a SOFT trajectory compiles to the same kernel under either VSCAN value: a cubin the kernel
     cannot tell apart is not shipped. `traj_key` in cpp/src/engine.cpp applies the same rule, so
     the engine asks for the key that exists. The rule lives in two languages and must agree;
-    gated by tests/test_kernel_table.py, which hashes the generated table and launches every
+    gated by tests/engine/test_kernel_table.py, which hashes the generated table and launches every
     reachable key.
     """
     return bool(wave and not soft)
