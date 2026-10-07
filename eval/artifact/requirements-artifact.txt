@@ -33,4 +33,4 @@ triton==3.6.0 ; platform_system == "Linux"
 python-sat==1.9.dev15
 numpy>=1.24
 matplotlib>=3.7                 # the two figures only; `tables` says so and continues without it
-pytest>=7.4                     # the shipped tree's own test suite: `pytest -m "not gpu"`
+pytest>=7.4                     # the shipped tree's own test suite: `pytest tests -m "not gpu"`

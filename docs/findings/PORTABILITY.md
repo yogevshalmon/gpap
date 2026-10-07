@@ -60,7 +60,7 @@ Remaining work: `build_kernels.py` parses `arch` as an int (`sm_89`) where AMD's
 (`gfx942`) and hard-codes `threads = 32 * num_warps` (must be `warp_size * num_warps`; CDNA 64,
 RDNA 32); a `gpu_api.h` shim over the 18 calls (HIP is close to 1:1); and re-tuning, not
 rewriting: the wave/scalar crossover (`M >= 2048`), `W` and `compute_k_safe`'s constants were
-all measured on NVIDIA. The no-change gate (`tests/engine/test_core.py` against `reference_bcp.py`)
+all measured on NVIDIA. The no-change gate (`tests/engine/test_core.py` against `tests/reference/bcp.py`)
 transfers unchanged and is what proves correctness on the new device. Estimate 1–2 weeks. Main
 risk: whether Triton's AMD backend lowers the atomic-with-return pattern as efficiently on CDNA —
 a benchmark, not a rewrite.

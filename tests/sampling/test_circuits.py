@@ -10,7 +10,7 @@ Axes:
 
 ALL of these need CUDA + triton (the engine is packed-kernel-only); `slow` marks the deep
 c25 unroll. The off-GPU portable smoke is the host-side logic suite (formula/preprocess/
-circuits/simulate/metrics tests).
+circuits/simulate tests).
 """
 import pytest
 import torch

@@ -57,7 +57,7 @@ class TestCombinations:
     """The REFERENCE enumerator (tests/reference/combinations.py), not shipping code.
 
     It is here to pin the core's candidate order against an independent implementation — the same
-    role reference_bcp.py plays for the kernels. It used to live in `gpap.engine.probe` as a public
+    role tests/reference/bcp.py plays for the kernels. It used to live in `gpap.engine.probe` as a public
     helper "for callers that filter candidates before probing"; that caller was measured at 65s to
     drop 0 of 122M and deleted, leaving a second enumerator in the shipping face with nothing to
     do but drift. Literals are DIMACS here, as everywhere else."""
