@@ -7,6 +7,7 @@ gate on the core being present, since the shipped CnfFormula has no other builde
 """
 import ctypes
 import os
+import random
 
 import numpy as np
 import pytest
@@ -15,6 +16,7 @@ from gpap.engine import _core
 from gpap.engine.formula import CnfFormula, ext_lit_to_lit_index, lit_index_negation
 from tests.reference.formula import ReferenceFormula
 from tests.conftest import REPO_ROOT, TEST_DATA_DIR
+from tests.support import random_cnf
 
 SIMPLE = [[-1, 2], [1, -2, 3], [-1, -2], [-3]]     # (~1|2), (1|~2|3), (~1|~2), (~3)
 
@@ -371,3 +373,41 @@ class TestSupportLineRanges:
         for line in ("c ind 4294967297 2 -9223372036854775808 3 0", "c ind 0 0", "c ind x y 0"):
             for v in self._support(tmp_path, line):
                 assert 0 <= v < 5, (line, v)
+
+
+# ---------------------------------------------------------------- the core's builder vs the reference
+
+@pytest.mark.gpu
+def test_formula_structures_match_the_reference_builder():
+    rng = random.Random(7)
+    for nv, nc in [(6, 10), (40, 120), (200, 900)]:
+        clauses = random_cnf(rng, nv, nc)
+        f = ReferenceFormula.from_clauses(nv, clauses)
+        cf = _core.Formula.from_clauses(nv, clauses)
+
+        assert cf.info.num_vars == f.num_vars
+        assert cf.info.num_clauses == f.num_clauses
+        assert cf.info.num_bin == f.num_bin
+        assert cf.info.num_long == f.num_long
+        off, mid, cls_ = cf.occ()
+        np.testing.assert_array_equal(off, f.occ_offsets)
+        np.testing.assert_array_equal(mid, f.occ_mid)
+        np.testing.assert_array_equal(cls_, f.occ_clauses)
+        sizes, lsum = cf.clause_arrays()
+        np.testing.assert_array_equal(sizes, f.clause_sizes)
+        np.testing.assert_array_equal(lsum, f.init_lit_sum)
+
+
+@pytest.mark.gpu
+def test_dimacs_parse_matches_the_reference_parser(tmp_path):
+    rng = random.Random(11)
+    clauses = random_cnf(rng, 30, 80)
+    p = tmp_path / "f.cnf"
+    with open(p, "w") as fh:
+        fh.write("c a comment\np cnf 30 %d\n" % len(clauses))
+        for c in clauses:                       # two clauses per line: the token stream matters
+            fh.write(" ".join(map(str, c)) + " 0 ")
+    f = ReferenceFormula.from_file(str(p))
+    cf = _core.Formula.from_file(str(p))
+    assert (cf.info.num_vars, cf.info.num_clauses) == (f.num_vars, f.num_clauses)
+    np.testing.assert_array_equal(cf.clause_arrays()[0], f.clause_sizes)

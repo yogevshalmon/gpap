@@ -1,4 +1,5 @@
 import os
+import random
 
 import numpy as np
 import pytest
@@ -6,6 +7,7 @@ import torch
 
 from gpap.engine.checker import AssumptionChecker
 from tests.conftest import TEST_DATA_DIR
+from tests.support import random_assumptions, random_cnf
 
 pytestmark = pytest.mark.gpu
 
@@ -71,12 +73,6 @@ class TestChunking:
     def _formula(checker):
         checker.formula.init_formula(6, [[1, 2], [-1, 3], [-2, -3], [4, 5], [-4, 6], [-5, -6]])
 
-    def _random_sets(self, n, nv=6, seed=0):
-        rng = np.random.default_rng(seed)
-        return [[int(v) * (1 if rng.random() < 0.5 else -1)
-                 for v in rng.choice(nv, size=int(rng.integers(0, 4)), replace=False) + 1]
-                for _ in range(n)]
-
     def test_chunked_matches_single_chunk_exactly(self, monkeypatch):
         """THE contract: how many launches it took must not be observable. Same sets, one chunk
         vs many, compared element for element and IN INPUT ORDER.
@@ -91,7 +87,7 @@ class TestChunking:
         and batch 97, and 0/1,718 surviving rows differ in anything."""
         ck = AssumptionChecker()
         self._formula(ck)
-        sets = self._random_sets(5000)
+        sets = random_assumptions(random.Random(0), 6, 5000, wmax=3)
         one = ck.check_assumptions(sets, assignments=True, sat_count=True)
         assert ck.chunk_size(len(sets), 3) >= len(sets), "precondition: this fits in one chunk"
         monkeypatch.setattr(ck, "chunk_size", lambda n, max_lits=1: 97)   # 52 chunks, uneven
@@ -197,17 +193,13 @@ def test_matches_the_reference_bcp():
     over random CNFs and random assumption sets, across a chunk boundary."""
     from tests.reference.bcp import lit_idx, ref_bcp
 
-    rng = np.random.default_rng(7)
+    rng = random.Random(7)
     for trial in range(5):
-        nv = int(rng.integers(6, 14))
-        clauses = [[int(v) * (1 if rng.random() < 0.5 else -1)
-                    for v in rng.choice(nv, size=int(rng.integers(2, 4)), replace=False) + 1]
-                   for _ in range(int(rng.integers(4, 20)))]
+        nv = rng.randint(6, 13)
+        clauses = random_cnf(rng, nv, rng.randint(4, 19), kmin=2, kmax=3)
         ck = AssumptionChecker()
         ck.formula.init_formula(nv, clauses)
-        sets = [[int(v) * (1 if rng.random() < 0.5 else -1)
-                 for v in rng.choice(nv, size=int(rng.integers(1, 4)), replace=False) + 1]
-                for _ in range(300)]
+        sets = random_assumptions(rng, nv, 300, wmin=1, wmax=3)
         ck.chunk_size = lambda n, max_lits=1: 41          # force several chunks
         r = ck.check_assumptions(sets, assignments=True)
         got_conflict = r["conflict"].cpu().numpy()

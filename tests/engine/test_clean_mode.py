@@ -12,50 +12,27 @@ deep-row guard that streams a row instead), duplicate literals, empty sets, K sh
 which is exactly where a wrong restore could hide.
 """
 
+import random
+
 import numpy as np
 import pytest
 import torch
 
 from gpap.engine import _core
-from tests.support import DEV
+from tests.support import DEV, decision_matrix, random_assumptions, random_cnf
 
 pytestmark = pytest.mark.gpu
 
 
-def _random_cnf(rng, nv):
-    """Random clauses INCLUDING units, so the flush assigns literals and seed-vs-baseline
-    contradictions are reachable."""
-    n_cl = int(rng.integers(4, 24))
-    out = []
-    for _ in range(n_cl):
-        w = int(rng.integers(1, 5))
-        vs = rng.choice(nv, size=min(w, nv), replace=False) + 1
-        out.append([int(v) * (1 if rng.random() < 0.5 else -1) for v in vs])
-    return out
-
-
-def _random_sets(rng, nv, n):
-    """Widths 0..4, with deliberate duplicates and l/~l pairs mixed in."""
-    sets = []
-    for _ in range(n):
-        w = int(rng.integers(0, 5))
-        s = [int(v) * (1 if rng.random() < 0.5 else -1)
-             for v in rng.choice(nv, size=min(w, nv), replace=False) + 1]
+def _awkward_sets(rng, nv, n):
+    """Assumption sets of width 0..4 with duplicate literals and l/~l pairs mixed in."""
+    sets = random_assumptions(rng, nv, n, wmax=4)
+    for s in sets:
         if s and rng.random() < 0.25:
             s.append(s[0])                       # duplicate literal
         if s and rng.random() < 0.25:
             s.append(-s[0])                      # l / ~l pair -> in-seed contradiction
-        sets.append(s)
     return sets
-
-
-def _to_dec_matrix(sets, nv):
-    L = max(1, max((len(s) for s in sets), default=1))
-    d = np.full((len(sets), L), -1, dtype=np.int64)
-    for i, s in enumerate(sets):
-        for j, lit in enumerate(s):
-            d[i, j] = 2 * (abs(lit) - 1) + (0 if lit > 0 else 1)
-    return d
 
 
 @pytest.mark.parametrize("mode", ["scalar", "wave"])
@@ -66,11 +43,11 @@ def test_state_identity_fuzz(mode, shift):
     pure-Python reference BCP. Both kernels, both packed splits."""
     from tests.reference.bcp import lit_idx, ref_bcp
 
-    rng = np.random.default_rng(11)
+    rng = random.Random(11)
     lite_seen = 0
     for trial in range(8):
-        nv = int(rng.integers(6, 14))
-        clauses = _random_cnf(rng, nv)
+        nv = rng.randint(6, 13)
+        clauses = random_cnf(rng, nv, rng.randint(4, 23))   # units included
         f = _core.Formula.from_clauses(nv, clauses)
         if f.info.has_empty_clause:
             continue
@@ -78,13 +55,13 @@ def test_state_identity_fuzz(mode, shift):
         twin = _core.Engine(f, mode=mode, force_shift=shift)
         if eng.flush_conflict:
             continue
-        K = int(rng.integers(3, 40))
+        K = rng.randint(3, 39)
         eng.reset(K)
         baseline = eng.packed_rows(np.arange(K))
 
         for round_ in range(4):
-            sets = _random_sets(rng, nv, K)
-            d = _to_dec_matrix(sets, nv)
+            sets = _awkward_sets(rng, nv, K)
+            d = decision_matrix(sets)
             eng.reset(K)
             eng.apply_clean(d)
             twin.reset(K)
