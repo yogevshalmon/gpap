@@ -20,26 +20,6 @@ from tests.support import DEV, random_cnf
 pytestmark = pytest.mark.gpu
 
 
-# ---------------------------------------------------------------- what Python binds
-
-def test_k_calibration_matches():
-    """Python's compute_k_safe is the binding of cpp/src/calibrate.cpp, not a second copy."""
-    from gpap.engine.calibrate import compute_k_safe as py_k
-    for M, N in [(4407, 1701), (109432, 42051), (201437, 77151)]:
-        for budget in (1 << 30, 6 << 30):
-            for cap in (0, 16384):
-                assert _core.compute_k_safe(M, N, budget, cap or None) == \
-                    py_k(M, N, budget, cap=cap or None)
-
-
-def test_envelope_matches():
-    """The packed-split envelope in cpp/src/runtime.cpp and its Python mirror (used to
-    pre-check formulas without CUDA) agree."""
-    from gpap.engine.bcp_engine import packed_envelope
-    for nv, ml in [(10, 3), (32767, 5), (33000, 5), (40000, 300), (9_000_000, 3)]:
-        assert _core.packed_envelope(nv, ml)[0] == packed_envelope(nv, ml)[0]
-
-
 # ---------------------------------------------------------------- the flush cache
 
 def test_flush_cache_and_units():

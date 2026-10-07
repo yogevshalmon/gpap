@@ -1,8 +1,8 @@
 """Literal indexing, the reference formula build, the core's DIMACS parser and builder, and the
 CnfFormula facade.
 
-The reference tests (tests/reference/formula.py) run without libgpap; the rest need the core and
-compare it against the reference.
+The reference tests (tests/reference/formula.py) run without libgpap; the rest need the library
+(not a GPU) and compare it against the reference.
 """
 import ctypes
 import os
@@ -101,7 +101,7 @@ def test_empty_clause_is_dropped_and_flagged():
 # CnfFormula is a facade over the core's builder. Construction is host-side C++, so these build
 # on a CPU device.
 
-@pytest.mark.gpu
+@pytest.mark.core
 def test_init_formula_adopts_the_core_build():
     import torch
     f = CnfFormula(torch.device("cpu"))
@@ -114,7 +114,7 @@ def test_init_formula_adopts_the_core_build():
     assert f.init_lit_sum.tolist() == [3, 7, 4, 5]
 
 
-@pytest.mark.gpu
+@pytest.mark.core
 def test_parse_cnf_file():
     import torch
     f = CnfFormula(torch.device("cpu"))
@@ -127,7 +127,7 @@ def test_parse_cnf_file():
 # ---------------------------------------------------------------- read dimacs
 # `read_dimacs` returns clauses as lists of literals, via the core's parser and clause read-back.
 
-@pytest.mark.gpu
+@pytest.mark.core
 def test_matches_the_reference_parser_as_clause_sets(tmp_path):
     from gpap.engine import read_dimacs
     p = tmp_path / "f.cnf"
@@ -141,13 +141,13 @@ def test_matches_the_reference_parser_as_clause_sets(tmp_path):
     assert sup is None
 
 
-@pytest.mark.gpu
+@pytest.mark.core
 def test_duplicate_literals_survive_the_round_trip():
     f = _core.Formula.from_clauses(2, [[1, 1, -2], [2]])
     assert [sorted(c) for c in f.clauses()] == [[-2, 1, 1], [2]]
 
 
-@pytest.mark.gpu
+@pytest.mark.core
 def test_empty_clause_is_reappended(tmp_path):
     from gpap.engine import read_dimacs
     p = tmp_path / "unsat.cnf"
@@ -156,7 +156,7 @@ def test_empty_clause_is_reappended(tmp_path):
     assert [] in clauses and len(clauses) == 2
 
 
-@pytest.mark.gpu
+@pytest.mark.core
 def test_header_n_wins_over_max_var_used(tmp_path):
     """A header declaring more variables than the clauses use is honoured, so support
     variables that appear in no clause keep their slots."""
@@ -167,7 +167,7 @@ def test_header_n_wins_over_max_var_used(tmp_path):
     assert nv == 20 and len(clauses) == 2
 
 
-@pytest.mark.gpu
+@pytest.mark.core
 def test_support_lines_c_ind_and_cr(tmp_path):
     """Both support-line conventions; the core's parse agrees with the Python scanner
     `parse_independent_support`."""
@@ -180,7 +180,7 @@ def test_support_lines_c_ind_and_cr(tmp_path):
     assert parse_independent_support(str(p)) == sup
 
 
-@pytest.mark.gpu
+@pytest.mark.core
 def test_a_directory_is_an_error_not_a_process_abort(tmp_path):
     """On Linux fopen succeeds on a directory and ftell reports LONG_MAX. The core must return
     a gpap_status, not throw through the C boundary and abort the process."""
@@ -189,7 +189,7 @@ def test_a_directory_is_an_error_not_a_process_abort(tmp_path):
     assert e.value.status == 4                                  # GPAP_ERR_IO
 
 
-@pytest.mark.gpu
+@pytest.mark.core
 def test_a_non_seekable_stream_parses_its_actual_bytes(tmp_path):
     """A FIFO (like /dev/stdin or <(...)) has no ftell size. Its bytes must be parsed, not
     replaced by the empty formula."""
@@ -206,7 +206,7 @@ def test_a_non_seekable_stream_parses_its_actual_bytes(tmp_path):
     assert (info.num_vars, info.num_clauses) == (ref.num_vars, ref.num_clauses) == (3, 3)
 
 
-@pytest.mark.gpu
+@pytest.mark.core
 def test_a_file_ftell_sizes_as_empty_is_still_read(tmp_path):
     """procfs files report size 0 but have content. This one is not a CNF, so it must be
     rejected, not read as the empty formula."""
@@ -215,7 +215,7 @@ def test_a_file_ftell_sizes_as_empty_is_still_read(tmp_path):
     assert e.value.status == 4                                  # read, then refused as non-DIMACS
 
 
-@pytest.mark.gpu
+@pytest.mark.core
 def test_an_empty_file_is_still_the_empty_formula(tmp_path):
     """A truly empty file is the empty formula, not an error."""
     p = tmp_path / "empty.cnf"
@@ -257,13 +257,13 @@ _DEGENERATE = [
 ]
 
 
-@pytest.mark.gpu
+@pytest.mark.core
 def test_on_mixed_and_degenerate_formulas():
     for nv, clauses in _DEGENERATE:
         _check(_core.Formula.from_clauses(nv, clauses))
 
 
-@pytest.mark.gpu
+@pytest.mark.core
 def test_every_read_back_accessor_survives_an_empty_vector():
     """Call every read-back accessor on the shapes that empty its vectors. The null-source
     memcpy is only visible under a sanitizer, so this test is meant to run under one."""
@@ -278,7 +278,7 @@ def test_every_read_back_accessor_survives_an_empty_vector():
         assert [sorted(c) for c in back] == [sorted(c) for c in clauses if c]
 
 
-@pytest.mark.gpu
+@pytest.mark.core
 def test_on_a_real_benchmark():
     import pathlib
     cnf = sorted((pathlib.Path(REPO_ROOT) / "benchmarks" / "sampling").glob("*.cnf"))
@@ -314,7 +314,7 @@ def _support_of_bytes(tmp_path, raw):
     return read_support(p)
 
 
-@pytest.mark.gpu
+@pytest.mark.core
 @pytest.mark.parametrize(
     "name,raw",
     [
@@ -329,7 +329,7 @@ def test_line_endings_do_not_leak_the_next_clause(tmp_path, name, raw):
     assert _support_of_bytes(tmp_path, raw) == [1, 2], name
 
 
-@pytest.mark.gpu
+@pytest.mark.core
 def test_a_cr_line_is_bounded_too(tmp_path):
     # the `cr <v...>` variant takes the same path and has no terminating 0 at all
     assert _support_of_bytes(tmp_path, b"p cnf 5 2\r\ncr 2 3\r\n5 2 0\r\n-3 4 0\r\n") == [1, 2]
@@ -347,7 +347,7 @@ def _support_of_line(tmp_path, line):
     return read_support(p)
 
 
-@pytest.mark.gpu
+@pytest.mark.core
 @pytest.mark.parametrize("line", [
     "c ind 4294967297 0",              # would wrap through int32 to variable 1
     "c ind 9223372036854775808 0",     # past int64
@@ -359,7 +359,7 @@ def test_unrepresentable_values_are_dropped(tmp_path, line):
     assert _support_of_line(tmp_path, line) == []
 
 
-@pytest.mark.gpu
+@pytest.mark.core
 def test_valid_values_survive_either_polarity_and_either_keyword(tmp_path):
     assert _support_of_line(tmp_path, "c ind 2 3 0") == [1, 2]
     assert _support_of_line(tmp_path, "c ind -2 -3 0") == [1, 2]     # sign is ignored
@@ -367,7 +367,7 @@ def test_valid_values_survive_either_polarity_and_either_keyword(tmp_path):
     assert _support_of_line(tmp_path, "c ind 2 99 3 0") == [1, 2]    # junk dropped, rest kept
 
 
-@pytest.mark.gpu
+@pytest.mark.core
 def test_every_returned_index_is_a_valid_variable(tmp_path):
     for line in ("c ind 4294967297 2 -9223372036854775808 3 0", "c ind 0 0", "c ind x y 0"):
         for v in _support_of_line(tmp_path, line):
@@ -376,7 +376,7 @@ def test_every_returned_index_is_a_valid_variable(tmp_path):
 
 # ------------------------------------------------- the core's builder vs the reference
 
-@pytest.mark.gpu
+@pytest.mark.core
 def test_formula_structures_match_the_reference_builder():
     rng = random.Random(7)
     for nv, nc in [(6, 10), (40, 120), (200, 900)]:
@@ -397,7 +397,7 @@ def test_formula_structures_match_the_reference_builder():
         np.testing.assert_array_equal(lsum, f.init_lit_sum)
 
 
-@pytest.mark.gpu
+@pytest.mark.core
 def test_dimacs_parse_matches_the_reference_parser(tmp_path):
     rng = random.Random(11)
     clauses = random_cnf(rng, 30, 80)
@@ -410,3 +410,12 @@ def test_dimacs_parse_matches_the_reference_parser(tmp_path):
     cf = _core.Formula.from_file(str(p))
     assert (cf.info.num_vars, cf.info.num_clauses) == (f.num_vars, f.num_clauses)
     np.testing.assert_array_equal(cf.clause_arrays()[0], f.clause_sizes)
+
+
+@pytest.mark.core
+def test_envelope_matches():
+    """The packed-split envelope in cpp/src/runtime.cpp and its Python mirror (used to
+    pre-check formulas without CUDA) agree."""
+    from gpap.engine.bcp_engine import packed_envelope
+    for nv, ml in [(10, 3), (32767, 5), (33000, 5), (40000, 300), (9_000_000, 3)]:
+        assert _core.packed_envelope(nv, ml)[0] == packed_envelope(nv, ml)[0]
