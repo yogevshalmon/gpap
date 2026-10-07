@@ -7,7 +7,7 @@
 > **Rule lives in:** `gpap/sampling/sampler.py`, `pipeline.py`, `output.py`, `gpap/cli.py`,
 > `gpap/verdict.py`; restated in `docs/BENCHMARKING.md`.
 > **Gated by:** `tests/cli/test_cli_contracts.py`, `tests/cli/test_benchmark_harness.py`
-> (`TestTableAlignment`), `tests/circuits/test_abc_encoder.py`.
+> (the table-alignment tests), `tests/circuits/test_abc_encoder.py`.
 
 Nothing here implicated the engine; the defects were in the print/plumbing layer, where nothing
 crashes and every number looks plausible. This file keeps the rules that came out of it.

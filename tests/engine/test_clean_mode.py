@@ -240,130 +240,137 @@ def test_gpap_clean_env_disables(monkeypatch):
     assert eng.reset_stats()[1] == 0
 
 
-class TestCleanModeGuards:
-    """The state a CLEAN launch leaves behind is asymmetric — packed is the BASELINE, abits are
-    the FIXPOINT — so the calls whose answer would silently come from the wrong half REFUSE.
-    Found by code review: each of these used to return a plausible wrong number."""
+# ---------------------------------------------------------------- clean mode guards
+# The state a CLEAN launch leaves behind is asymmetric — packed is the BASELINE, abits are
+# the FIXPOINT — so the calls whose answer would silently come from the wrong half REFUSE.
+# Found by code review: each of these used to return a plausible wrong number.
 
-    @staticmethod
-    def _engine_after_clean():
-        f = _core.Formula.from_clauses(8, [[-1, 2], [-2, 3], [3, 4], [-3, -5], [1, 6]])
-        e = _core.Engine(f)
-        e.reset(4)
-        e.apply_clean(np.array([[0]] * 4, dtype=np.int64))    # x1 TRUE -> propagates
-        return e
-
-    def test_recache_flush_refuses_after_clean(self):
-        """THE dangerous one: caching (baseline packed, fixpoint abits) would bake a
-        self-contradictory flush cache — abits claiming literals TRUE whose clause decrements
-        packed never recorded — and every later launch would propagate from it, undetectably."""
-        e = self._engine_after_clean()
-        with pytest.raises(Exception, match="apply_clean|recache"):
-            e.recache_flush()
-
-    def test_packed_derived_readouts_refuse_after_clean(self):
-        """sat_rows / check_sound answer FROM the packed words, which are the baseline here."""
-        e = self._engine_after_clean()
-        with pytest.raises(Exception, match="apply_clean|baseline"):
-            e.sat_rows([0, 1])
-
-    def test_raw_packed_readout_stays_open(self):
-        """gpap_packed_rows is the documented raw/debug readout and is how the identity gate
-        PROVES the restore happened — guarding it would break the gate."""
-        e = self._engine_after_clean()
-        assert e.packed_rows([0, 1]).shape[0] == 2
-
-    def test_plain_apply_leaves_everything_usable(self):
-        """Positive control: the guards key off the CLEAN launch, not off clean mode existing."""
-        f = _core.Formula.from_clauses(8, [[-1, 2], [-2, 3], [3, 4], [-3, -5], [1, 6]])
-        e = _core.Engine(f)
-        e.reset(4)
-        e.apply(np.array([[0]] * 4, dtype=np.int64))
-        assert e.sat_rows([0]).shape == (1, e.num_clauses)
-        e.recache_flush()                                     # must NOT raise
-        assert e.reset_stats()[1] == 0
-
-    def test_reset_clears_the_divergence(self):
-        """reset() re-broadcasts abits, so the pair is consistent again and recache is legal."""
-        e = self._engine_after_clean()
-        e.reset(4)
-        e.recache_flush()                                     # must NOT raise
-        assert e.sat_rows([0]).shape[0] == 1
-
-    @pytest.mark.parametrize("rows", [1, 3, 8])
-    def test_apply_validates_row_count(self, rows):
-        """MEMORY SAFETY, not politeness: the C side stages K*L int64s, so a short array is read
-        past its end and the garbage becomes literal indices — and an index past 2N makes the
-        kernel write into a LATER row. Both entry points check."""
-        f = _core.Formula.from_clauses(6, [[1, 2], [-1, 3]])
-        e = _core.Engine(f)
-        e.reset(4)
-        d = np.zeros((rows, 1), dtype=np.int64)      # parametrized 1/3/8, never the sized 4
-        for fn in (e.apply, e.apply_clean):
-            with pytest.raises(ValueError, match="rows but the engine is sized"):
-                fn(d)
+def _engine_after_clean():
+    f = _core.Formula.from_clauses(8, [[-1, 2], [-2, 3], [3, 4], [-3, -5], [1, 6]])
+    e = _core.Engine(f)
+    e.reset(4)
+    e.apply_clean(np.array([[0]] * 4, dtype=np.int64))    # x1 TRUE -> propagates
+    return e
 
 
-class TestConsumers:
-    """The two call sites that opted in, exercised end to end."""
+def test_recache_flush_refuses_after_clean():
+    """THE dangerous one: caching (baseline packed, fixpoint abits) would bake a
+    self-contradictory flush cache — abits claiming literals TRUE whose clause decrements
+    packed never recorded — and every later launch would propagate from it, undetectably."""
+    e = _engine_after_clean()
+    with pytest.raises(Exception, match="apply_clean|recache"):
+        e.recache_flush()
 
-    def test_probe_sweep_identical_and_lite(self, monkeypatch):
-        """The core probe sweep: identical conflict tuples with CLEAN on vs off, and the ON
-        engine's resets actually went lite after chunk 1 (forced multi-chunk via batch)."""
-        nv = 8
-        clauses = [[1, 2, 3], [-1, -2], [-2, -3], [-1, -3], [4, 5], [-5, 6], [-4, -6, 7]]
-        f = _core.Formula.from_clauses(nv, clauses)
 
-        eng_on = _core.Engine(f)
-        with eng_on.probe_combinations(None, 2, batch=13) as sweep:   # many small chunks
-            on = sweep.conflicts().tolist()
-        full_on, lite_on = eng_on.reset_stats()
+def test_packed_derived_readouts_refuse_after_clean():
+    """sat_rows / check_sound answer FROM the packed words, which are the baseline here."""
+    e = _engine_after_clean()
+    with pytest.raises(Exception, match="apply_clean|baseline"):
+        e.sat_rows([0, 1])
 
-        monkeypatch.setenv("GPAP_CLEAN", "0")
-        eng_off = _core.Engine(f)
-        with eng_off.probe_combinations(None, 2, batch=13) as sweep:
-            off = sweep.conflicts().tolist()
-        assert on == off, "conflict tuples must not depend on the reset mechanism"
-        assert len(on) > 0, "precondition: this pool must yield real conflicts"
-        assert eng_off.reset_stats()[1] == 0
-        assert lite_on > 0, "multi-chunk sweep with CLEAN on must reset lite"
 
-    def test_checker_flags_only_goes_lite(self, monkeypatch):
-        """AssumptionChecker flags-only calls ride the clean kernel (lite resets, same answers);
-        assignments=True keeps the plain kernel and readable state. (A single carried-over lite
-        at a flags-only -> arrays boundary would be legitimate — the previous clean launch really
-        did leave baseline state — so the arrays half uses a FRESH checker for a crisp zero.)"""
-        from gpap.engine.checker import AssumptionChecker
+def test_raw_packed_readout_stays_open():
+    """gpap_packed_rows is the documented raw/debug readout and is how the identity gate
+    PROVES the restore happened — guarding it would break the gate."""
+    e = _engine_after_clean()
+    assert e.packed_rows([0, 1]).shape[0] == 2
 
-        CLAUSES = [[1, 2], [-1, 3], [-2, -3], [4, 5], [-4, 6]]
-        sets = [[1], [2, 4], [-3], [], [1, -1], [5]] * 40
-        ck = AssumptionChecker.from_clauses(6, CLAUSES)
-        one = ck.check_assumptions(sets)
-        monkeypatch.setattr(ck, "chunk_size", lambda n, max_lits=1: 17)
-        before = ck.engine._core.reset_stats()[1]
-        many = ck.check_assumptions(sets)
-        gained = ck.engine._core.reset_stats()[1] - before
-        assert torch.equal(one["conflict"], many["conflict"])
-        # Tied to the CHUNK COUNT, not just > 0: the boundary reset alone (the previous call's
-        # last clean apply makes this call's FIRST reset lite) satisfies a bare > 0, so that
-        # form would stay green even if chunking stopped happening entirely.
-        n_chunks = -(-len(sets) // 17)
-        assert gained >= n_chunks - 1, (
-            f"expected ~{n_chunks} lite resets across {n_chunks} chunks, got {gained}")
 
-        ck2 = AssumptionChecker.from_clauses(6, CLAUSES)
-        monkeypatch.setattr(ck2, "chunk_size", lambda n, max_lits=1: 17)
-        r = ck2.check_assumptions(sets, assignments=True)
-        assert ck2.engine._core.reset_stats()[1] == 0, \
-            "state-reading calls must keep the plain kernel (no lite resets)"
-        assert int(r["assignment"].sum()) > 0, "assignments must be the fixpoint, not baseline"
+def test_plain_apply_leaves_everything_usable():
+    """Positive control: the guards key off the CLEAN launch, not off clean mode existing."""
+    f = _core.Formula.from_clauses(8, [[-1, 2], [-2, 3], [3, 4], [-3, -5], [1, 6]])
+    e = _core.Engine(f)
+    e.reset(4)
+    e.apply(np.array([[0]] * 4, dtype=np.int64))
+    assert e.sat_rows([0]).shape == (1, e.num_clauses)
+    e.recache_flush()                                     # must NOT raise
+    assert e.reset_stats()[1] == 0
 
-    def test_mining_identical_under_env(self, monkeypatch):
-        """gpap.mining end to end: identical clause sets with CLEAN on vs off."""
-        from gpap.mining import mine_entailed
 
-        clauses = [[-1, 2], [-2, 3], [-1, -3, 4], [-4, 5], [1, 2, 3], [-5, -1, 3]]
-        on = mine_entailed(6, clauses, DEV, widths=(1, 2), drop="none")
-        monkeypatch.setenv("GPAP_CLEAN", "0")
-        off = mine_entailed(6, clauses, DEV, widths=(1, 2), drop="none")
-        assert sorted(map(tuple, on.clauses)) == sorted(map(tuple, off.clauses))
+def test_reset_clears_the_divergence():
+    """reset() re-broadcasts abits, so the pair is consistent again and recache is legal."""
+    e = _engine_after_clean()
+    e.reset(4)
+    e.recache_flush()                                     # must NOT raise
+    assert e.sat_rows([0]).shape[0] == 1
+
+
+@pytest.mark.parametrize("rows", [1, 3, 8])
+def test_apply_validates_row_count(rows):
+    """MEMORY SAFETY, not politeness: the C side stages K*L int64s, so a short array is read
+    past its end and the garbage becomes literal indices — and an index past 2N makes the
+    kernel write into a LATER row. Both entry points check."""
+    f = _core.Formula.from_clauses(6, [[1, 2], [-1, 3]])
+    e = _core.Engine(f)
+    e.reset(4)
+    d = np.zeros((rows, 1), dtype=np.int64)      # parametrized 1/3/8, never the sized 4
+    for fn in (e.apply, e.apply_clean):
+        with pytest.raises(ValueError, match="rows but the engine is sized"):
+            fn(d)
+
+
+# ---------------------------------------------------------------- consumers
+# The two call sites that opted in, exercised end to end.
+
+def test_probe_sweep_identical_and_lite(monkeypatch):
+    """The core probe sweep: identical conflict tuples with CLEAN on vs off, and the ON
+    engine's resets actually went lite after chunk 1 (forced multi-chunk via batch)."""
+    nv = 8
+    clauses = [[1, 2, 3], [-1, -2], [-2, -3], [-1, -3], [4, 5], [-5, 6], [-4, -6, 7]]
+    f = _core.Formula.from_clauses(nv, clauses)
+
+    eng_on = _core.Engine(f)
+    with eng_on.probe_combinations(None, 2, batch=13) as sweep:   # many small chunks
+        on = sweep.conflicts().tolist()
+    full_on, lite_on = eng_on.reset_stats()
+
+    monkeypatch.setenv("GPAP_CLEAN", "0")
+    eng_off = _core.Engine(f)
+    with eng_off.probe_combinations(None, 2, batch=13) as sweep:
+        off = sweep.conflicts().tolist()
+    assert on == off, "conflict tuples must not depend on the reset mechanism"
+    assert len(on) > 0, "precondition: this pool must yield real conflicts"
+    assert eng_off.reset_stats()[1] == 0
+    assert lite_on > 0, "multi-chunk sweep with CLEAN on must reset lite"
+
+
+def test_checker_flags_only_goes_lite(monkeypatch):
+    """AssumptionChecker flags-only calls ride the clean kernel (lite resets, same answers);
+    assignments=True keeps the plain kernel and readable state. (A single carried-over lite
+    at a flags-only -> arrays boundary would be legitimate — the previous clean launch really
+    did leave baseline state — so the arrays half uses a FRESH checker for a crisp zero.)"""
+    from gpap.engine.checker import AssumptionChecker
+
+    CLAUSES = [[1, 2], [-1, 3], [-2, -3], [4, 5], [-4, 6]]
+    sets = [[1], [2, 4], [-3], [], [1, -1], [5]] * 40
+    ck = AssumptionChecker.from_clauses(6, CLAUSES)
+    one = ck.check_assumptions(sets)
+    monkeypatch.setattr(ck, "chunk_size", lambda n, max_lits=1: 17)
+    before = ck.engine._core.reset_stats()[1]
+    many = ck.check_assumptions(sets)
+    gained = ck.engine._core.reset_stats()[1] - before
+    assert torch.equal(one["conflict"], many["conflict"])
+    # Tied to the CHUNK COUNT, not just > 0: the boundary reset alone (the previous call's
+    # last clean apply makes this call's FIRST reset lite) satisfies a bare > 0, so that
+    # form would stay green even if chunking stopped happening entirely.
+    n_chunks = -(-len(sets) // 17)
+    assert gained >= n_chunks - 1, (
+        f"expected ~{n_chunks} lite resets across {n_chunks} chunks, got {gained}")
+
+    ck2 = AssumptionChecker.from_clauses(6, CLAUSES)
+    monkeypatch.setattr(ck2, "chunk_size", lambda n, max_lits=1: 17)
+    r = ck2.check_assumptions(sets, assignments=True)
+    assert ck2.engine._core.reset_stats()[1] == 0, \
+        "state-reading calls must keep the plain kernel (no lite resets)"
+    assert int(r["assignment"].sum()) > 0, "assignments must be the fixpoint, not baseline"
+
+
+def test_mining_identical_under_env(monkeypatch):
+    """gpap.mining end to end: identical clause sets with CLEAN on vs off."""
+    from gpap.mining import mine_entailed
+
+    clauses = [[-1, 2], [-2, 3], [-1, -3, 4], [-4, 5], [1, 2, 3], [-5, -1, 3]]
+    on = mine_entailed(6, clauses, DEV, widths=(1, 2), drop="none")
+    monkeypatch.setenv("GPAP_CLEAN", "0")
+    off = mine_entailed(6, clauses, DEV, widths=(1, 2), drop="none")
+    assert sorted(map(tuple, on.clauses)) == sorted(map(tuple, off.clauses))

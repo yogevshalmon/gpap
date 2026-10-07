@@ -300,160 +300,163 @@ def test_bench_driver_skips_an_oversized_instance_and_still_writes_json(tmp_path
     assert "max-clauses" in row["skipped"] and row["M"] == 999999
 
 
-class TestCliHelpRenders:
-    """Every --help screen must actually render.
+# ---------------------------------------------------------------- cli help renders
+# Every --help screen must actually render.
+#
+# argparse runs `%`-expansion over help strings, so a literal `%` in prose (a percentage —
+# exactly what this repo's help text is full of) raises at FORMAT time, not at parse time. The
+# result is a subcommand whose --help crashes with a TypeError while every real invocation of it
+# works, so nothing else in the suite can see it. `gpap mine --help` shipped broken this way.
 
-    argparse runs `%`-expansion over help strings, so a literal `%` in prose (a percentage —
-    exactly what this repo's help text is full of) raises at FORMAT time, not at parse time. The
-    result is a subcommand whose --help crashes with a TypeError while every real invocation of it
-    works, so nothing else in the suite can see it. `gpap mine --help` shipped broken this way.
-    """
+@pytest.mark.parametrize("sub", ["sample", "mine", "bench", "circuit2cnf", "info"])
+def test_subcommand_help_renders(sub):
+    from gpap.cli import main
 
-    @pytest.mark.parametrize("sub", ["sample", "mine", "bench", "circuit2cnf", "info"])
-    def test_subcommand_help_renders(self, sub):
-        from gpap.cli import main
-
-        with pytest.raises(SystemExit) as e:
-            main([sub, "--help"])
-        assert e.value.code == 0
-
-    def test_top_level_help_renders(self):
-        from gpap.cli import main
-
-        with pytest.raises(SystemExit) as e:
-            main(["--help"])
-        assert e.value.code == 0
+    with pytest.raises(SystemExit) as e:
+        main([sub, "--help"])
+    assert e.value.code == 0
 
 
-class TestQualityPassMetrics:
-    """The quality pass's two metrics, now that they live in the suite driver rather than the
-    library: distinct-projection COUNTING and 2-wise COVERAGE. Neither is a uniformity test —
-    that claim is `eval/uniformity/`'s (barbarik + the exact-oracle fuzz)."""
+def test_top_level_help_renders():
+    from gpap.cli import main
 
-    def test_two_wise_vectorized_matches_bruteforce(self):
-        import itertools
-        import random
-
-        from gpap.benchmark import two_wise_coverage
-
-        rng = random.Random(9)
-        support = [2, 5, 7, 9]                          # 1-based vars, non-contiguous
-        models = [[v if rng.random() < 0.5 else -v for v in support] for _ in range(40)]
-        got = two_wise_coverage(models, support)
-        # brute-force reference: a pair is covered iff all 4 joint polarities appear
-        covered = total = 0
-        for a, b in itertools.combinations(range(len(support)), 2):
-            total += 1
-            seen = {(support[a] in set(m), support[b] in set(m)) for m in models}
-            covered += len(seen) == 4
-        assert got == pytest.approx(100.0 * covered / total)
-        assert two_wise_coverage([], support) == 0.0
-        assert two_wise_coverage(models, [3]) == 0.0    # S < 2
-
-    def test_distinct_projections_counts_the_projection_not_the_model(self):
-        """Two models that agree on the SUPPORT are one distinct sample — that is the whole
-        point of the metric, and the reason it is computed over the support rather than the
-        full assignment."""
-        from gpap.benchmark import distinct_projections
-
-        sup = [1, 2]
-        models = [[1, 2, 3], [1, 2, -3], [1, -2, 3]]     # first two share the projection (1, 2)
-        assert distinct_projections(models, sup) == (2, 3)
-        assert distinct_projections([], sup) == (0, 0)
+    with pytest.raises(SystemExit) as e:
+        main(["--help"])
+    assert e.value.code == 0
 
 
-class TestTableAlignment:
-    """The bench table's two layout invariants, over every combination of optional columns.
+# ---------------------------------------------------------------- quality pass metrics
+# The quality pass's two metrics, now that they live in the suite driver rather than the
+# library: distinct-projection COUNTING and 2-wise COVERAGE. Neither is a uniformity test —
+# that claim is `eval/uniformity/`'s (barbarik + the exact-oracle fuzz).
 
-    Three width bugs have shipped in this file, in TWO distinct classes, and each class needs
-    its own check:
+def test_two_wise_vectorized_matches_bruteforce():
+    import itertools
+    import random
 
-      SAME TOTAL WIDTH  the three sim-baseline branches must agree on their field widths. One of
-                        them kept the pre-widening `rej/s` width, shifting `amp`/`krn`/`snd` and
-                        every CMSGen column 4 characters left on exactly the rows where the
-                        instance was not a circuit.
-      NO GLUED CELLS    a value that exactly FILLS its right-aligned field leaves no separating
-                        space and runs into its left neighbour (`5.0e-01143,498,947` for `p_acc`
-                        + a 9-digit accepted/s; `0.1s12,234,239` for `t_enc` + an 8-digit unique
-                        rate). Total width is unchanged, so the first check cannot see it — but
-                        two glued cells are ONE whitespace token instead of two, and neither the
-                        header labels nor the row's own cells contain spaces, so comparing token
-                        counts against the header detects it without restating a single width.
-    """
+    from gpap.benchmark import two_wise_coverage
 
-    class _Args:                                   # only the flags the formatters read
-        def __init__(self, **kw):
-            self.seeds = self.twise = self.sim_baseline = self.cmsgen = None
-            self.__dict__.update(kw)
+    rng = random.Random(9)
+    support = [2, 5, 7, 9]                          # 1-based vars, non-contiguous
+    models = [[v if rng.random() < 0.5 else -v for v in support] for _ in range(40)]
+    got = two_wise_coverage(models, support)
+    # brute-force reference: a pair is covered iff all 4 joint polarities appear
+    covered = total = 0
+    for a, b in itertools.combinations(range(len(support)), 2):
+        total += 1
+        seen = {(support[a] in set(m), support[b] in set(m)) for m in models}
+        covered += len(seen) == 4
+    assert got == pytest.approx(100.0 * covered / total)
+    assert two_wise_coverage([], support) == 0.0
+    assert two_wise_coverage(models, [3]) == 0.0    # S < 2
 
-    # At the wide end of the range campaigns ACTUALLY produce — a mid-range row would pass
-    # while the suite's own output did not, and a max-out-every-field row would demand widths
-    # for numbers we never print. `unique_sps_est` and `accepted_per_s` are the two values
-    # observed gluing (b03-c4: `0.1s12,234,239`; a 9-digit accepted/s under `p_acc`); the rest
-    # are the documented maxima from `_format_header` (rates 6e7 samples/s, M 1e6 on a b14-c25
-    # tseitin unroll, sols 1e7, the documented ceiling, plus the `<` chunk-capped marker).
-    ROW = {
-        "name": "registerlesSwap-c50", "enc_key": "abc:fast", "nv": 999_999, "M": 1_000_000,
-        "support": 65536, "gpap_sps": 62_345_678.0, "gpap_sps_e2e": 51_234_567.0,
-        "decisions_per_s": 6.7e7, "implications_per_s": 2.4e9, "succ": 1.0,
-        "n_models": 10_000_000, "chunk_capped": True, "wall_timed_s": 123.4,
-        "wall_total_s": 234.5, "sps_spread_frac": 0.42, "encode_s": 123.4,
-        "unique_sps_est": 12_234_239.0, "twise_gpap": 100.0, "mined": {"n_units": 1},
-        "engine": {"mode": "wave", "shift": 16}, "sound_check": "ok",
-        "cms_sps": 1_234_567.0, "cms_decisions_per_s": 5.4e6,
-        "cms_implications_per_s": 5.4e6, "ratio": 1234.56, "ratio_e2e": 999.99,
-        "twise_cms": 100.0,
-    }
 
-    @pytest.mark.parametrize("multi_enc", [False, True])
-    @pytest.mark.parametrize("has_circuits", [False, True])
-    @pytest.mark.parametrize("quality", [False, True])
-    @pytest.mark.parametrize("flags", [
-        {}, {"seeds": [1, 2]}, {"twise": True}, {"sim_baseline": True},
-        {"cmsgen": "/bin/true"}, {"twise": True, "cmsgen": "/bin/true"},
-        {"seeds": [1, 2], "twise": True, "sim_baseline": True, "cmsgen": "/bin/true"},
-    ])
-    def test_row_width_matches_header_width(self, multi_enc, has_circuits, quality, flags):
-        from gpap.benchmark import _format_header, _format_row
+def test_distinct_projections_counts_the_projection_not_the_model():
+    """Two models that agree on the SUPPORT are one distinct sample — that is the whole
+    point of the metric, and the reason it is computed over the support rather than the
+    full assignment."""
+    from gpap.benchmark import distinct_projections
 
-        args = self._Args(**flags)
-        hdr = _format_header(args, multi_enc, has_circuits, quality)
-        # Three sim_baseline shapes, because they are three separate format branches and only
-        # one of them was ever exercised by a manual eyeball.
-        # succ is varied with them: `succ%` renders through `fmt_pct`, whose small end is the
-        # widest string it produces ("4e-07%" fills the field exactly), and a row pinned at 100%
-        # never exercises the width the column is sized for. 3.6e-9 is below every recorded rate,
-        # so the gate holds at the small end of what `fmt_pct` can be ASKED to render rather than
-        # at the smallest yet seen (docs/findings/CLI_DELIVERY_FINDINGS.md §7 has the range).
-        for sim, succ in product((None,
-                                  {"hits": 7, "p_accept": 4.9e-4, "accepted_per_s": 162_912_098.0},
-                                  {"hits": 0, "p_accept_lt": 1e-9}),
-                                 (1.0, 1e-4, 3.6e-9)):
-            row = dict(self.ROW, sim_baseline=sim, amplification=2047.0, succ=succ)
-            line = _format_row(row, args, multi_enc, has_circuits, quality)
-            why = f"(sim={None if sim is None else sim['hits']}, succ={succ})\n{hdr}\n{line}"
-            assert len(line) == len(hdr), \
-                f"row is {len(line) - len(hdr):+d} chars off the header {why}"
-            assert len(line.split()) == len(hdr.split()), \
-                f"{len(hdr.split()) - len(line.split())} cell(s) ran together {why}"
+    sup = [1, 2]
+    models = [[1, 2, 3], [1, 2, -3], [1, -2, 3]]     # first two share the projection (1, 2)
+    assert distinct_projections(models, sup) == (2, 3)
+    assert distinct_projections([], sup) == (0, 0)
 
-    def test_both_invariants_actually_fire(self):
-        """A gate nobody has seen fail is a gate that might be checking nothing. Each check is
-        shown rejecting the shape it exists for — one row too long, one row with a glued cell
-        that is exactly the right length."""
-        from gpap.benchmark import _format_header, _format_row
 
-        args = self._Args(sim_baseline=True)
-        hdr = _format_header(args, False, False, False)
-        # (a) overflow past the field: 15 digits + commas is well past `rej/s`.
-        over = dict(self.ROW, amplification=2047.0,
-                    sim_baseline={"hits": 1, "p_accept": 0.5, "accepted_per_s": 1e14})
-        assert len(_format_row(over, args, False, False, False)) > len(hdr)
-        # (b) EXACTLY filling the field: same total width, one token short. This is the shape
-        #     the length check cannot see, and it is what shipped twice.
-        glued = dict(self.ROW, amplification=2047.0,
-                     sim_baseline={"hits": 1, "p_accept": 0.5,
-                                   "accepted_per_s": 162_912_098.0 * 1000})  # 15 chars w/ commas
-        line = _format_row(glued, args, False, False, False)
-        assert len(line) == len(hdr), "precondition: this row is the RIGHT length"
-        assert len(line.split()) < len(hdr.split()), "...but two of its cells ran together"
+# ---------------------------------------------------------------- table alignment
+# The bench table's two layout invariants, over every combination of optional columns.
+#
+# Three width bugs have shipped in this file, in TWO distinct classes, and each class needs
+# its own check:
+#
+#   SAME TOTAL WIDTH  the three sim-baseline branches must agree on their field widths. One of
+#                     them kept the pre-widening `rej/s` width, shifting `amp`/`krn`/`snd` and
+#                     every CMSGen column 4 characters left on exactly the rows where the
+#                     instance was not a circuit.
+#   NO GLUED CELLS    a value that exactly FILLS its right-aligned field leaves no separating
+#                     space and runs into its left neighbour (`5.0e-01143,498,947` for `p_acc`
+#                     + a 9-digit accepted/s; `0.1s12,234,239` for `t_enc` + an 8-digit unique
+#                     rate). Total width is unchanged, so the first check cannot see it — but
+#                     two glued cells are ONE whitespace token instead of two, and neither the
+#                     header labels nor the row's own cells contain spaces, so comparing token
+#                     counts against the header detects it without restating a single width.
+
+class _TableArgs:                                   # only the flags the formatters read
+    def __init__(self, **kw):
+        self.seeds = self.twise = self.sim_baseline = self.cmsgen = None
+        self.__dict__.update(kw)
+
+
+# At the wide end of the range campaigns ACTUALLY produce — a mid-range row would pass
+# while the suite's own output did not, and a max-out-every-field row would demand widths
+# for numbers we never print. `unique_sps_est` and `accepted_per_s` are the two values
+# observed gluing (b03-c4: `0.1s12,234,239`; a 9-digit accepted/s under `p_acc`); the rest
+# are the documented maxima from `_format_header` (rates 6e7 samples/s, M 1e6 on a b14-c25
+# tseitin unroll, sols 1e7, the documented ceiling, plus the `<` chunk-capped marker).
+_TABLE_ROW = {
+    "name": "registerlesSwap-c50", "enc_key": "abc:fast", "nv": 999_999, "M": 1_000_000,
+    "support": 65536, "gpap_sps": 62_345_678.0, "gpap_sps_e2e": 51_234_567.0,
+    "decisions_per_s": 6.7e7, "implications_per_s": 2.4e9, "succ": 1.0,
+    "n_models": 10_000_000, "chunk_capped": True, "wall_timed_s": 123.4,
+    "wall_total_s": 234.5, "sps_spread_frac": 0.42, "encode_s": 123.4,
+    "unique_sps_est": 12_234_239.0, "twise_gpap": 100.0, "mined": {"n_units": 1},
+    "engine": {"mode": "wave", "shift": 16}, "sound_check": "ok",
+    "cms_sps": 1_234_567.0, "cms_decisions_per_s": 5.4e6,
+    "cms_implications_per_s": 5.4e6, "ratio": 1234.56, "ratio_e2e": 999.99,
+    "twise_cms": 100.0,
+}
+
+
+@pytest.mark.parametrize("multi_enc", [False, True])
+@pytest.mark.parametrize("has_circuits", [False, True])
+@pytest.mark.parametrize("quality", [False, True])
+@pytest.mark.parametrize("flags", [
+    {}, {"seeds": [1, 2]}, {"twise": True}, {"sim_baseline": True},
+    {"cmsgen": "/bin/true"}, {"twise": True, "cmsgen": "/bin/true"},
+    {"seeds": [1, 2], "twise": True, "sim_baseline": True, "cmsgen": "/bin/true"},
+])
+def test_row_width_matches_header_width(multi_enc, has_circuits, quality, flags):
+    from gpap.benchmark import _format_header, _format_row
+
+    args = _TableArgs(**flags)
+    hdr = _format_header(args, multi_enc, has_circuits, quality)
+    # Three sim_baseline shapes, because they are three separate format branches and only
+    # one of them was ever exercised by a manual eyeball.
+    # succ is varied with them: `succ%` renders through `fmt_pct`, whose small end is the
+    # widest string it produces ("4e-07%" fills the field exactly), and a row pinned at 100%
+    # never exercises the width the column is sized for. 3.6e-9 is below every recorded rate,
+    # so the gate holds at the small end of what `fmt_pct` can be ASKED to render rather than
+    # at the smallest yet seen (docs/findings/CLI_DELIVERY_FINDINGS.md §7 has the range).
+    for sim, succ in product((None,
+                              {"hits": 7, "p_accept": 4.9e-4, "accepted_per_s": 162_912_098.0},
+                              {"hits": 0, "p_accept_lt": 1e-9}),
+                             (1.0, 1e-4, 3.6e-9)):
+        row = dict(_TABLE_ROW, sim_baseline=sim, amplification=2047.0, succ=succ)
+        line = _format_row(row, args, multi_enc, has_circuits, quality)
+        why = f"(sim={None if sim is None else sim['hits']}, succ={succ})\n{hdr}\n{line}"
+        assert len(line) == len(hdr), \
+            f"row is {len(line) - len(hdr):+d} chars off the header {why}"
+        assert len(line.split()) == len(hdr.split()), \
+            f"{len(hdr.split()) - len(line.split())} cell(s) ran together {why}"
+
+
+def test_both_invariants_actually_fire():
+    """A gate nobody has seen fail is a gate that might be checking nothing. Each check is
+    shown rejecting the shape it exists for — one row too long, one row with a glued cell
+    that is exactly the right length."""
+    from gpap.benchmark import _format_header, _format_row
+
+    args = _TableArgs(sim_baseline=True)
+    hdr = _format_header(args, False, False, False)
+    # (a) overflow past the field: 15 digits + commas is well past `rej/s`.
+    over = dict(_TABLE_ROW, amplification=2047.0,
+                sim_baseline={"hits": 1, "p_accept": 0.5, "accepted_per_s": 1e14})
+    assert len(_format_row(over, args, False, False, False)) > len(hdr)
+    # (b) EXACTLY filling the field: same total width, one token short. This is the shape
+    #     the length check cannot see, and it is what shipped twice.
+    glued = dict(_TABLE_ROW, amplification=2047.0,
+                 sim_baseline={"hits": 1, "p_accept": 0.5,
+                               "accepted_per_s": 162_912_098.0 * 1000})  # 15 chars w/ commas
+    line = _format_row(glued, args, False, False, False)
+    assert len(line) == len(hdr), "precondition: this row is the RIGHT length"
+    assert len(line.split()) < len(hdr.split()), "...but two of its cells ran together"

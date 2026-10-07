@@ -14,7 +14,6 @@ from gpap.cli import main as cli_main
 from tests.conftest import REPO_ROOT
 
 
-
 def _cnf(tmp_path, text, name="f.cnf"):
     p = tmp_path / name
     p.write_text(text)
@@ -282,52 +281,54 @@ def test_unsat_proved_after_construction_is_still_printed(tmp_path, capsys, monk
 
 # ------------------------------------------------------------- the soundness tri-state
 
-class TestSoundVerdict:
-    """`pipeline.sound_verdict` / `merge_sound_check` — THE reader and THE fold.
+# ---------------------------------------------------------------- sound verdict
+# `pipeline.sound_verdict` / `merge_sound_check` — THE reader and THE fold.
+#
+# Every consumer branches on the string: the bench table, the CLI, the Colab driver, the rival
+# harnesses and paper_tables all import these two. They replaced six open-coded comparisons, of
+# which only two handled the legacy key — so a resumed campaign reported a fully verified sweep
+# as "not run", and a legacy FAILURE as a non-verdict. Neither function had a test.
 
-    Every consumer branches on the string: the bench table, the CLI, the Colab driver, the rival
-    harnesses and paper_tables all import these two. They replaced six open-coded comparisons, of
-    which only two handled the legacy key — so a resumed campaign reported a fully verified sweep
-    as "not run", and a legacy FAILURE as a non-verdict. Neither function had a test.
-    """
+def test_the_three_states_are_read_back_verbatim():
+    from gpap.sampling.pipeline import SOUND_BAD, SOUND_OFF, SOUND_OK, sound_verdict
+    for state in (SOUND_OK, SOUND_BAD, SOUND_OFF):
+        assert sound_verdict({"sound_check": state}) == state
 
-    def test_the_three_states_are_read_back_verbatim(self):
-        from gpap.sampling.pipeline import SOUND_BAD, SOUND_OFF, SOUND_OK, sound_verdict
-        for state in (SOUND_OK, SOUND_BAD, SOUND_OFF):
-            assert sound_verdict({"sound_check": state}) == state
 
-    def test_a_row_with_no_verdict_at_all_reads_off_not_ok(self):
-        """"not run" is not "passed". This is the conflation the tri-state exists to prevent, so
-        an unrecognised value has to land on `off` rather than being taken at face value."""
-        from gpap.sampling.pipeline import SOUND_OFF, sound_verdict
-        assert sound_verdict({}) == SOUND_OFF
-        assert sound_verdict({"sound_check": "yes"}) == SOUND_OFF     # junk is not a verdict
-        assert sound_verdict({"sound_check": None}) == SOUND_OFF
+def test_a_row_with_no_verdict_at_all_reads_off_not_ok():
+    """"not run" is not "passed". This is the conflation the tri-state exists to prevent, so
+    an unrecognised value has to land on `off` rather than being taken at face value."""
+    from gpap.sampling.pipeline import SOUND_OFF, sound_verdict
+    assert sound_verdict({}) == SOUND_OFF
+    assert sound_verdict({"sound_check": "yes"}) == SOUND_OFF     # junk is not a verdict
+    assert sound_verdict({"sound_check": None}) == SOUND_OFF
 
-    def test_the_legacy_bool_is_a_verdict_in_both_directions(self):
-        """Rows recorded before 2026-08-30 carry `gpu_sound: bool` and checked unconditionally,
-        so the bool IS the verdict there — including when it is False, which is the half that was
-        being read as "no verdict"."""
-        from gpap.sampling.pipeline import SOUND_BAD, SOUND_OK, sound_verdict
-        assert sound_verdict({"gpu_sound": True}) == SOUND_OK
-        assert sound_verdict({"gpu_sound": False}) == SOUND_BAD
-        # a row carrying both keys is a NEW row; the new key wins
-        assert sound_verdict({"sound_check": SOUND_OK, "gpu_sound": False}) == SOUND_OK
 
-    def test_unsound_dominates_the_merge(self):
-        """The timed and coverage runs are folded into one published verdict. Preferring either
-        run's "ok" printed it beside the other's non-zero `unsound_rows`."""
-        from gpap.sampling.pipeline import SOUND_BAD, SOUND_OFF, SOUND_OK, merge_sound_check
-        assert merge_sound_check(SOUND_OK, SOUND_BAD) == SOUND_BAD
-        assert merge_sound_check(SOUND_BAD, SOUND_OK) == SOUND_BAD    # order must not matter
-        assert merge_sound_check(SOUND_OFF, SOUND_BAD) == SOUND_BAD
-        # ...and evidence beats absence, in both orders
-        assert merge_sound_check(SOUND_OK, SOUND_OFF) == SOUND_OK
-        assert merge_sound_check(SOUND_OFF, SOUND_OK) == SOUND_OK
-        # nothing ran, or nothing was passed at all
-        assert merge_sound_check(SOUND_OFF, SOUND_OFF) == SOUND_OFF
-        assert merge_sound_check() == SOUND_OFF
-        assert merge_sound_check(None, "") == SOUND_OFF
+def test_the_legacy_bool_is_a_verdict_in_both_directions():
+    """Rows recorded before 2026-08-30 carry `gpu_sound: bool` and checked unconditionally,
+    so the bool IS the verdict there — including when it is False, which is the half that was
+    being read as "no verdict"."""
+    from gpap.sampling.pipeline import SOUND_BAD, SOUND_OK, sound_verdict
+    assert sound_verdict({"gpu_sound": True}) == SOUND_OK
+    assert sound_verdict({"gpu_sound": False}) == SOUND_BAD
+    # a row carrying both keys is a NEW row; the new key wins
+    assert sound_verdict({"sound_check": SOUND_OK, "gpu_sound": False}) == SOUND_OK
+
+
+def test_unsound_dominates_the_merge():
+    """The timed and coverage runs are folded into one published verdict. Preferring either
+    run's "ok" printed it beside the other's non-zero `unsound_rows`."""
+    from gpap.sampling.pipeline import SOUND_BAD, SOUND_OFF, SOUND_OK, merge_sound_check
+    assert merge_sound_check(SOUND_OK, SOUND_BAD) == SOUND_BAD
+    assert merge_sound_check(SOUND_BAD, SOUND_OK) == SOUND_BAD    # order must not matter
+    assert merge_sound_check(SOUND_OFF, SOUND_BAD) == SOUND_BAD
+    # ...and evidence beats absence, in both orders
+    assert merge_sound_check(SOUND_OK, SOUND_OFF) == SOUND_OK
+    assert merge_sound_check(SOUND_OFF, SOUND_OK) == SOUND_OK
+    # nothing ran, or nothing was passed at all
+    assert merge_sound_check(SOUND_OFF, SOUND_OFF) == SOUND_OFF
+    assert merge_sound_check() == SOUND_OFF
+    assert merge_sound_check(None, "") == SOUND_OFF
 
 
 @pytest.mark.gpu
