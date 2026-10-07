@@ -96,7 +96,7 @@ Data: `$GPAP_RESULTS/clean_mode_l4_20260821/`.
 
 `tests/engine/test_clean_mode.py`: state-identity fuzz against a plain-apply twin and the reference BCP
 across both kernels × both splits, the deep-row stream arm, K shrink/grow, every invalidation,
-probe/checker/mining A/B under the env, and `TestCleanModeGuards` with a positive control per
+probe/checker/mining A/B under the env, and the clean-mode guard tests with a positive control per
 guard. Verified to fail against a broken tail (walk `tail-1`).
 
 ## Considered, not adopted
