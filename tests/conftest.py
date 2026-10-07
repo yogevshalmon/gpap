@@ -1,4 +1,4 @@
-"""Shared test fixtures and the `gpu` skip rule.
+"""Shared test fixtures and the `gpu` / `core` skip rule.
 
 Circuit CNFs are generated at test time from the bundled `.bench` sources
 (benchmarks/circuits/bench/), never from a user-local benchmark tree.
@@ -17,20 +17,21 @@ COMB_DIR = os.path.join(BENCH_DIR, "comb")
 TEST_DATA_DIR = os.path.join(REPO_ROOT, "tests", "test_data")
 
 
-def _engine_available():
-    from gpap.engine import core_available
-    return torch.cuda.is_available() and core_available()
-
-
 def pytest_collection_modifyitems(config, items):
-    """`gpu` marks a test that needs the engine: a CUDA device and a built libgpap. Without
-    both, every such test is skipped here, so no test file checks for itself."""
-    if _engine_available():
-        return
-    skip = pytest.mark.skip(reason="needs CUDA and a built libgpap (scripts/build_core.sh)")
+    """`gpu` marks a test that needs the engine: a CUDA device and a built libgpap. `core` marks
+    one that needs only the library (the parser, the formula build, the sizing arithmetic), which
+    loads wherever the NVIDIA driver does, with or without a visible GPU. A test whose need is
+    missing is skipped here, so no test file checks for itself."""
+    from gpap.engine import core_available
+    have_core = core_available()
+    have_gpu = have_core and torch.cuda.is_available()
+    skip_gpu = pytest.mark.skip(reason="needs CUDA and a built libgpap (scripts/build_core.sh)")
+    skip_core = pytest.mark.skip(reason="needs a built libgpap (scripts/build_core.sh)")
     for item in items:
-        if item.get_closest_marker("gpu"):
-            item.add_marker(skip)
+        if item.get_closest_marker("gpu") and not have_gpu:
+            item.add_marker(skip_gpu)
+        elif item.get_closest_marker("core") and not have_core:
+            item.add_marker(skip_core)
 
 
 # Small sequential circuits at a few unroll depths, one deeper unroll (b03 at 25 cycles), and two

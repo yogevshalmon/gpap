@@ -51,7 +51,7 @@ def test_gpusampler_defaults_to_auto():
     assert inspect.signature(GPUSampler.__init__).parameters["k_cap"].default == "auto"
 
 
-@pytest.mark.gpu
+@pytest.mark.core
 def test_core_and_python_caps_agree():
     """calibrate.py and cpp/src/calibrate.cpp give the same cap, so C++ and Python callers size
     a formula the same way."""
@@ -208,7 +208,7 @@ def test_pinned_batch_restores():
     assert (smp.K, smp.batch_size) == before
 
 
-@pytest.mark.gpu
+@pytest.mark.core
 def test_row_bytes_matches_the_engine_allocation_list():
     """The per-row model is the allocation list, restated here so that a buffer added to
     ensure_state() but not to calibrate.cpp fails the test."""
@@ -221,7 +221,19 @@ def test_row_bytes_matches_the_engine_allocation_list():
         assert row_bytes(M, N) == want, (M, N)
 
 
-@pytest.mark.gpu
+@pytest.mark.core
+def test_k_calibration_matches():
+    """Python's compute_k_safe is the binding of cpp/src/calibrate.cpp, not a second copy."""
+    from gpap.engine import _core
+    from gpap.engine.calibrate import compute_k_safe as py_k
+    for M, N in [(4407, 1701), (109432, 42051), (201437, 77151)]:
+        for budget in (1 << 30, 6 << 30):
+            for cap in (0, 16384):
+                assert _core.compute_k_safe(M, N, budget, cap or None) == \
+                    py_k(M, N, budget, cap=cap or None)
+
+
+@pytest.mark.core
 def test_trail_cap_is_the_variable_count_plus_one_wavefront():
     """The trail is num_vars entries (a variable is pushed at most once) plus one wavefront,
     because the wave paths append a whole wavefront with no bound test. It depends on nothing
@@ -236,7 +248,6 @@ def test_trail_cap_is_the_variable_count_plus_one_wavefront():
         "no decision-batch or assumption-width parameter may come back"
 
 
-@pytest.mark.gpu
 def test_trail_cap_has_exactly_one_definition():
     """The engine's allocator and gpap_row_bytes use the same trail function, so the sizing
     model describes the real allocation."""

@@ -139,7 +139,7 @@ PARSER_ACCEPT = {
 }
 
 
-@pytest.mark.gpu
+@pytest.mark.core
 @pytest.mark.parametrize("text", PARSER_REJECT.values(), ids=list(PARSER_REJECT))
 def test_dimacs_rejects_corruption(tmp_path, text):
     from gpap.engine import read_dimacs
@@ -149,7 +149,7 @@ def test_dimacs_rejects_corruption(tmp_path, text):
         read_dimacs(str(p))
 
 
-@pytest.mark.gpu
+@pytest.mark.core
 @pytest.mark.parametrize("text", PARSER_ACCEPT.values(), ids=list(PARSER_ACCEPT))
 def test_dimacs_keeps_structural_leniency(tmp_path, text):
     from gpap.engine import read_dimacs
