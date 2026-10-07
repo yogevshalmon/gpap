@@ -33,6 +33,12 @@ EXPECTED_CAP = 262_144
 REPO = REPO_ROOT
 
 
+@pytest.fixture(autouse=True)
+def _no_vram_cap(monkeypatch):
+    """A `GPAP_VRAM_BUDGET_MIB` in the caller's shell would cap every budget in this file."""
+    monkeypatch.delenv("GPAP_VRAM_BUDGET_MIB", raising=False)
+
+
 def test_the_cap_is_the_documented_constant():
     assert K_CAP == EXPECTED_CAP
 
@@ -114,7 +120,6 @@ def test_vram_budget_cap_ignores_meaningless_values(monkeypatch, value):
     """An unset, zero, negative or unparsable value must mean NO CAP, not a cap of zero: a
     budget of zero sizes K=1 and every run would silently crawl instead of failing."""
     from gpap.engine import _core
-    monkeypatch.delenv("GPAP_VRAM_BUDGET_MIB", raising=False)
     uncapped = _core.mem_available(0, 0.80)
     monkeypatch.setenv("GPAP_VRAM_BUDGET_MIB", value)
     assert _core.mem_available(0, 0.80) == uncapped
@@ -124,7 +129,6 @@ def test_vram_budget_cap_reporter_matches_the_env(monkeypatch):
     """`vram_budget_cap` only REPORTS; the clamp is the core's. Same parse, though, or a row's
     provenance would disagree with the budget that sized it."""
     from gpap.engine.calibrate import vram_budget_cap
-    monkeypatch.delenv("GPAP_VRAM_BUDGET_MIB", raising=False)
     assert vram_budget_cap() == 0
     monkeypatch.setenv("GPAP_VRAM_BUDGET_MIB", "18120")
     assert vram_budget_cap() == 18120 << 20
@@ -147,19 +151,19 @@ def test_the_cap_grammar_is_one_grammar(monkeypatch, value, want_mib):
     """THE FAILURE THIS FORBIDS: C and Python disagreeing about a string. The engine clamps in
     C++ (`env_budget_cap`) and the rival harness plus `gpap info` read the same variable in
     Python, so a value one accepts and the other rejects caps ONE SIDE of a head-to-head — the
-    inflation the cap exists to prevent, arrived at from the opposite direction.
-
-    Asserted against the CORE, not only against the Python mirror: the reporter agreeing with
-    itself is what the test above proves, and it is not the same claim."""
-    from gpap.engine import _core
+    inflation the cap exists to prevent, arrived at from the opposite direction. This is the
+    Python reader; the core is held to the same table below."""
     from gpap.engine.calibrate import vram_budget_cap_mib
     monkeypatch.setenv("GPAP_VRAM_BUDGET_MIB", value)
     assert vram_budget_cap_mib() == want_mib
-    if not _core.available() or not torch.cuda.is_available():
-        return
-    # The core exposes the clamp only through its effect, so compare the budget it reports with
-    # the whole of free memory: a cap below that must bind at exactly the cap.
-    monkeypatch.delenv("GPAP_VRAM_BUDGET_MIB", raising=False)
+
+
+@pytest.mark.gpu
+@pytest.mark.parametrize(("value", "want_mib"), CAP_GRAMMAR_CASES)
+def test_the_core_reads_the_cap_grammar_the_same_way(monkeypatch, value, want_mib):
+    """The core exposes the clamp only through its effect, so compare the budget it reports with
+    the whole of free memory: a cap below that must bind at exactly the cap."""
+    from gpap.engine import _core
     uncapped = _core.mem_available(0, 1.0)
     monkeypatch.setenv("GPAP_VRAM_BUDGET_MIB", value)
     got = _core.mem_available(0, 1.0)
@@ -179,7 +183,6 @@ def test_the_vram_cap_actually_moves_the_sampler_batch(monkeypatch):
     same number either way — so the test caps the BUDGET low enough that the analytic bound is
     what binds, and asks for two different budgets."""
     from gpap.engine.calibrate import compute_k_safe, row_bytes
-    monkeypatch.delenv("GPAP_VRAM_BUDGET_MIB", raising=False)
     smp = _tiny_sampler(None)                    # k_cap None: the MEMORY bound is what answers
     wide, N, num_long = smp.K, smp.engine.num_vars, smp.engine.num_long
     # a budget admitting an eighth of what the uncapped card does
@@ -195,7 +198,6 @@ def test_the_cpu_placeholder_budget_is_capped_too(monkeypatch):
     """Our side's own no-CUDA branch. It is a placeholder — the engine has no CPU path — but an
     uncapped one makes the two sides diverge on exactly the machines that cannot notice."""
     from gpap.engine.calibrate import gpu_mem_available
-    monkeypatch.delenv("GPAP_VRAM_BUDGET_MIB", raising=False)
     uncapped = gpu_mem_available(torch.device("cpu"))
     monkeypatch.setenv("GPAP_VRAM_BUDGET_MIB", "1024")
     assert gpu_mem_available(torch.device("cpu")) == 1024 << 20 < uncapped
