@@ -146,7 +146,6 @@ def test_a_thin_denominator_is_scored_and_disclosed_not_screened(tmp_path):
     assert p["n"] == v["n_gm"] == 3
 
 
-
 def test_a_cell_whose_sign_is_inside_gpap_seed_band_is_a_tie_not_a_win(tmp_path):
     """A cell whose ratio at our slowest and fastest seed straddles 1.0 is a tie, not a win;
     a clear loss stays a loss."""
@@ -555,8 +554,6 @@ def test_summary_md_counts_zeros_the_papers_way(tmp_path):
     got = dict(zip(cols, cells))
     assert got["wins"] == "2/4", got            # win + CMSGen-zero, over finite + both zeros
     assert got["CMSGen=0"] == "1" and got["GPAP=0"] == "1", got
-
-
 
 
 def test_a_gpap_only_sweep_is_not_a_string_of_cmsgen_zero_wins(tmp_path):

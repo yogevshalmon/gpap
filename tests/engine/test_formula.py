@@ -303,7 +303,7 @@ def read_support(path):
     return out[:n.value].tolist()
 
 
-# ---------------------------------------------------------------- support line is bounded by its line
+# ------------------------------------------------- support line is bounded by its line
 # strtol skips leading whitespace, including \r and \n. A `c ind` scan that stops short of the
 # newline (a \r on a CRLF file, a trailing space) must not read the next line's first literal
 # into the support. The bundled benchmarks are all LF, so only these tests reach it.
@@ -374,7 +374,7 @@ def test_every_returned_index_is_a_valid_variable(tmp_path):
             assert 0 <= v < 5, (line, v)
 
 
-# ---------------------------------------------------------------- the core's builder vs the reference
+# ------------------------------------------------- the core's builder vs the reference
 
 @pytest.mark.gpu
 def test_formula_structures_match_the_reference_builder():
