@@ -47,9 +47,10 @@ gpap = ["lib/libgpap.so*"]
 
 [tool.pytest.ini_options]
 # The default run: the engine, the applications on it, and the repo itself. The paper's
-# experiment layer is tested apart: `pytest tests/eval`.
+# experiment layer is tested apart: `pytest tests/experiments`.
 testpaths = ["tests/engine", "tests/sampling", "tests/mining", "tests/circuits", "tests/cli",
              "tests/repo"]
+pythonpath = ["."]   # `eval` and `tests` import from the repo root in any import mode
 markers = [
     "gpu: requires CUDA + a built libgpap (skipped without either)",
     "slow: slow deep-unroll case (c25)",

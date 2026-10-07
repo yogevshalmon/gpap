@@ -6,7 +6,7 @@
 > **Rule lives in:** `GPAP_VRAM_BUDGET_MIB`, clamped once inside `gpap_mem_available`
 > (`cpp/src/calibrate.cpp`); `eval/artifact/reproduce.sh --vram-cap`;
 > `eval/artifact/compare_campaign.py`; `eval/artifact/subset.json`.
-> **Gated by:** `tests/engine/test_k_cap.py`, `tests/eval/test_rival_budget.py`.
+> **Gated by:** `tests/engine/test_k_cap.py`, `tests/experiments/test_rival_budget.py`.
 > **Record only:** §8, the review post-mortem on gates that could not fail.
 
 The evidence behind `ARTIFACT.md` and `eval/artifact/reproduce.sh` (protocol v1.0,
@@ -54,7 +54,7 @@ our budget or the rival's, never both: capping both at 17,280 handed the rival 6
 the campaign had granted it, and a rung that just fit could OOM and walk down, inflating our
 ratio in exactly the direction this section is about. It now calls `gpap_mem_available` itself,
 so the two sides are the same bytes of the same card by construction
-(`tests/eval/test_rival_budget.py::test_both_sides_of_a_head_to_head_get_the_same_budget`).
+(`tests/experiments/test_rival_budget.py::test_both_sides_of_a_head_to_head_get_the_same_budget`).
 
 Changing it costs nothing in the record: the modelled budget only ever picks a rung through
 `run_at_batch`'s truncation fallback — "`batch`, the rung our VRAM model predicts, decides
@@ -210,7 +210,7 @@ flatter us is counted and named.
 in the TACAS evaluation VM would have meant an 800 MB install for a pure JSON reader. The
 reader moved to `gpap/verdict.py`, a stdlib-only leaf that `pipeline` re-exports (one
 definition, every existing import site unchanged). Gated by
-`tests/eval/test_paper_tables.py::test_the_table_generators_import_without_torch_or_numpy`, which
+`tests/experiments/test_paper_tables.py::test_the_table_generators_import_without_torch_or_numpy`, which
 asserts it in a subprocess with those modules blocked — this interpreter has them installed and
 would import them happily, so an in-process check would prove nothing.
 
@@ -284,7 +284,7 @@ knows one shape of a leak is a gate for that shape.
 **What changed.** The shapes live in one script, `eval/artifact/check_leaks.sh` — a Linux home, a
 macOS home, a home flattened into one directory name, an agent scratch root — run by the packager
 over the STAGED bytes and mirrored by `tests/repo/test_docs_hygiene.py` over the checkout.
-`tests/eval/test_artifact_gate.py` proves the script refuses each shape on its own and a denylisted
+`tests/experiments/test_artifact_gate.py` proves the script refuses each shape on its own and a denylisted
 literal case-insensitively, and that a blank or comment line in the denylist matches nothing (to
 `grep -F -f` an empty line is a pattern that matches every line, and the failure mode of that is an
 operator setting the override for good). Literal names cannot be in the script, which ships inside
@@ -300,7 +300,7 @@ see what git sees where git works. And with a card visible and no built library 
 artifact before `setup` — `rival_vram_budget` took the CUDA branch, the core call raised, and the
 last-resort return handed the rival the whole fallback uncapped: the third route past the ceiling
 (§8 closed the CPU-only one), now capped and gated by
-`tests/eval/test_rival_budget.py::test_rival_budget_is_capped_when_the_core_cannot_load`.
+`tests/experiments/test_rival_budget.py::test_rival_budget_is_capped_when_the_core_cannot_load`.
 
 **The double-blind copy** is a transform over the packager's tarball,
 `$GPAP_RESULTS/artifact/anonymize.sh`, kept outside the repository because it spells the author's

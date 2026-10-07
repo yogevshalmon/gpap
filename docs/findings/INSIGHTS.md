@@ -51,7 +51,7 @@ constant through the AST (a path literal has no whitespace; prose about one does
 separates them without a whitelist), every repo-root constant re-derived in all four spellings the
 tree uses, every internal import resolved (a driver had imported a module from its pre-reorg path
 for weeks inside an `except` that printed a one-line skip), and every shell ask guarded, because
-asking a module for a path let an empty answer reach `rm -rf`. Behaviour by tests/repo/test_paths.py and tests/eval/test_eval_paths.py.
+asking a module for a path let an empty answer reach `rm -rf`. Behaviour by tests/repo/test_paths.py and tests/experiments/test_eval_paths.py.
 
 **A phase belongs where it happens, and a printed number must mean one thing (2026-09-12).**
 `gpap sample` read every line off the returned dict, so mining printed below the throughput it ran
@@ -377,7 +377,7 @@ card's budget, and `compare_campaign.py` counts every walked-down grant.
 absolute path to ship had no `/home/` in it: an agent's scratch directory with the home path
 flattened into its NAME, inside three Barbarik error rows, and the packager's inline `/home/` check
 passed it. The shapes now live in one script, `eval/artifact/check_leaks.sh`, proven to refuse
-each on its own (tests/eval/test_artifact_gate.py); literal names come from a denylist outside the
+each on its own (tests/experiments/test_artifact_gate.py); literal names come from a denylist outside the
 repository, because the script ships in the tarball it checks; and the double-blind copy is a
 transform over the packager's tarball, `$GPAP_RESULTS/artifact/anonymize.sh`, that must still pass
 the gate and the host suite. Running `pytest` inside the packaged tree for the first time found

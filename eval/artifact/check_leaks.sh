@@ -18,7 +18,7 @@
 # it checks. They come from a denylist kept OUTSIDE the repository: one fixed string per line,
 # matched case-insensitively; blank lines, `#` comments and carriage returns are stripped, because
 # to `grep -F -f` an empty line is a pattern that matches EVERY line and a trailing CR is part of
-# the pattern — the two ways this gate can fail open. Gated by tests/eval/test_artifact_gate.py.
+# the pattern — the two ways this gate can fail open. Gated by tests/experiments/test_artifact_gate.py.
 set -uo pipefail
 
 usage() { echo "usage: check_leaks.sh DIR [--denylist FILE]" >&2; exit 2; }

@@ -2,7 +2,7 @@
 
 A wrong answer here moves every path in the repo at once. `tmp_dir()`'s fallback (an unusable
 root) and its refusal of a planted symlink are exercised directly, since a healthy box never takes
-either branch. `eval/paths.py` is tested in tests/eval/test_eval_paths.py."""
+either branch. `eval/paths.py` is tested in tests/experiments/test_eval_paths.py."""
 import os
 
 

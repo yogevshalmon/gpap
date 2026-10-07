@@ -53,7 +53,7 @@ REPO_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))
 if REPO_ROOT not in sys.path:        # guarded: unconditional, it prepended a duplicate entry on
     sys.path.insert(0, REPO_ROOT)    # every import, which is a side effect on the whole session
 # Error text lands in a row that ships; a message that prints the argument it was handed put an
-# operator's scratch directory into three rows of the published campaign (tests/eval/test_artifact_gate.py).
+# operator's scratch directory into three rows of the published campaign (tests/experiments/test_artifact_gate.py).
 from eval.paths import display_path  # noqa: E402 — after sys.path
 
 # (random_var, B, lookahead), as gpap.sampling.pipeline defines a config. Every config a default

@@ -60,7 +60,7 @@ def test_wide_decision_rounds_are_accepted_and_sound():
     variable can contribute at most one entry however many literals one round decides — the cap
     is N + slack for ANY B. That is not a curiosity: `B >= |support|` decides the whole support
     in one round, which is exactly the configuration behind the "exactly uniform by rejection
-    sampling" property (barbarik's `bsup` arm, tests/eval/test_uniformity_fuzz.py). A ceiling on B
+    sampling" property (barbarik's `bsup` arm, tests/experiments/test_uniformity_fuzz.py). A ceiling on B
     would silently remove it.
 
     Gated with B past the old 64-wide trail floor AND past the variable count itself."""
