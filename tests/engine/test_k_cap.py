@@ -25,12 +25,13 @@ import torch
 
 from gpap.engine import _core
 from gpap.engine.calibrate import K_CAP, default_k_cap, resolve_k_cap
+from tests.conftest import REPO_ROOT
 
 # Spelled out rather than imported so that editing K_CAP cannot silently make this test agree
 # with itself. Moving it re-scales every future run's batch: change it deliberately, and expect
 # recorded sweeps to stop being comparable.
 EXPECTED_CAP = 262_144
-REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+REPO = REPO_ROOT
 
 
 def test_the_cap_is_the_documented_constant():
@@ -271,7 +272,7 @@ def test_the_cpu_placeholder_budget_is_capped_too(monkeypatch):
 # ---------------------------------------------------------------- the batch-size API
 # `batch_size` is the one number that says what a chunk runs, and `pin_batch` the one way to
 # bound it. These gate that contract, because getting it wrong is not a wrong number — it is
-# 28 GB of host RAM (see tests/test_circuits.py::_collecting_sampler).
+# 28 GB of host RAM (see tests/sampling/test_circuits.py::_collecting_sampler).
 #
 # There used to be TWO models here (K plus a K_fused "boost"), and the boost existed only to
 # recover headroom a 1.57x-over per-row model was wasting. The model is now the engine's exact

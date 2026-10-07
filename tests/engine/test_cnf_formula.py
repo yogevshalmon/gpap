@@ -1,7 +1,7 @@
 """Literal indexing, the reference formula build, and the shipped CnfFormula facade.
 
-The reference build (tests/reference_formula.py) runs on any host, so this file keeps DIMACS
-parsing and structure construction covered on machines with no libgpap; tests/test_core.py is
+The reference build (tests/reference/formula.py) runs on any host, so this file keeps DIMACS
+parsing and structure construction covered on machines with no libgpap; tests/engine/test_core.py is
 where the core is compared against the reference entry for entry. The facade tests at the bottom
 gate on the core being present, since the shipped CnfFormula has no other builder.
 """
@@ -13,10 +13,9 @@ import pytest
 
 from gpap.engine import _core
 from gpap.engine.formula import CnfFormula, ext_lit_to_lit_index, lit_index_negation
-from tests.reference_formula import ReferenceFormula
-from tests.conftest import REPO_ROOT
+from tests.reference.formula import ReferenceFormula
+from tests.conftest import REPO_ROOT, TEST_DATA_DIR
 
-TEST_DATA_DIR = os.path.join(os.path.dirname(__file__), "test_data")
 SIMPLE = [[-1, 2], [1, -2, 3], [-1, -2], [-3]]     # (~1|2), (1|~2|3), (~1|~2), (~3)
 
 
@@ -59,7 +58,7 @@ class TestReferenceOccurrenceLists:
         assert f.occ(4).tolist() == []
         # RAW storage carries the binary tag (the sign bit) so a kernel can classify an entry
         # from the value it already loaded; occ_bin() above is the masked view.
-        from tests.reference_formula import BIN_TAG
+        from tests.reference.formula import BIN_TAG
         assert f.occ(0).tolist() == [2 | BIN_TAG, 3 | BIN_TAG]
         assert all(x < 0 for x in f.occ(0).tolist())      # binaries tagged
         assert all(x >= 0 for x in f.occ_long(1).tolist())  # long clause ids are not

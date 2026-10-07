@@ -20,6 +20,7 @@ REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 BENCH_DIR = os.path.join(REPO_ROOT, "benchmarks", "circuits", "bench")
 SEQ_DIR = os.path.join(BENCH_DIR, "seq")
 COMB_DIR = os.path.join(BENCH_DIR, "comb")
+TEST_DATA_DIR = os.path.join(REPO_ROOT, "tests", "test_data")
 
 
 # Sequential circuits × unroll depths (kept small for CI) + a deep-cascade c25 (slow), plus two

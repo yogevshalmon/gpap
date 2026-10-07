@@ -3,7 +3,7 @@
 `cpp/src/formula.cpp` is THE builder the library ships (one implementation, shared by the Python
 and C++ faces). This module is its independent re-derivation, kept where reference
 implementations live in this repo (`reference_bcp.py` is the same idea for propagation):
-`tests/test_core.py` builds every structure both ways and compares entry for entry, and the
+`tests/engine/test_core.py` builds every structure both ways and compares entry for entry, and the
 host-only suite uses it to cover DIMACS parsing on machines with no libgpap at all.
 
 It is deliberately torch-free and device-free: the structures under test are plain arrays, and

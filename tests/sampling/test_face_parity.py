@@ -14,7 +14,7 @@ import torch
 
 from gpap.engine import _core
 
-from tests.test_cpp_api import SAMPLE_BIN, _need, _parse_cnf, _run_sampler
+from tests.engine.test_cpp_api import SAMPLE_BIN, _need, _parse_cnf, _run_sampler
 
 CUDA = torch.cuda.is_available()
 pytestmark = [

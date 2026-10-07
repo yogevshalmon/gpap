@@ -17,7 +17,7 @@ from gpap.engine import core_available
 from gpap.engine.probe import LiteralProbe, ProbeBudget
 from gpap.mining import _derivable_mask, _Subsumption, mine_entailed
 from gpap.sampling.pipeline import sample_clauses
-from tests.reference_combinations import combinations
+from tests.reference.combinations import combinations
 
 DEV = torch.device("cuda") if torch.cuda.is_available() else torch.device("cpu")
 AVAIL = torch.cuda.is_available() and core_available()
@@ -54,7 +54,7 @@ def _entailed_binaries(nv, mods):
 # ------------------------------------------------------------------ the enumerator
 
 class TestCombinations:
-    """The REFERENCE enumerator (tests/reference_combinations.py), not shipping code.
+    """The REFERENCE enumerator (tests/reference/combinations.py), not shipping code.
 
     It is here to pin the core's candidate order against an independent implementation — the same
     role reference_bcp.py plays for the kernels. It used to live in `gpap.engine.probe` as a public
@@ -643,7 +643,7 @@ class TestDerivable:
         false must already conflict or force it. The candidates are every ENTAILED binary clause,
         computed by brute force over the truth table — so the fuzz feeds the filter exactly the
         population it is meant to thin, without asking the engine what is entailed."""
-        from tests.reference_bcp import lit_idx, ref_bcp
+        from tests.reference.bcp import lit_idx, ref_bcp
 
         rng = random.Random(7)
         checked = 0

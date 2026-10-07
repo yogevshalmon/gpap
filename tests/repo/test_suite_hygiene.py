@@ -25,10 +25,11 @@ import subprocess
 
 import pytest
 
-#: The checkout.
-REPO = pathlib.Path(__file__).resolve().parents[1]
+from tests.conftest import REPO_ROOT
 
-TESTS = pathlib.Path(__file__).resolve().parent
+#: The checkout.
+REPO = pathlib.Path(REPO_ROOT)
+TESTS = REPO / "tests"
 #: The directories a test may want to reach into. `tests/conftest.py` exports REPO_ROOT /
 #: BENCH_DIR / SEQ_DIR / COMB_DIR; a bare relative string used as a WHOLE path is the bug.
 CHECKOUT_DIRS = ("benchmarks/", "eval/", "scripts/", "cpp/", "gpap/", "build/", "docs/")
@@ -74,10 +75,10 @@ def test_no_test_reaches_into_the_checkout_by_a_relative_path():
     turns itself off when it cannot find its input is the worst version of this: green, and gone.
     """
     offenders = []
-    for path in sorted(TESTS.glob("*.py")):
+    for path in sorted(TESTS.rglob("*.py")):
         if path.name == pathlib.Path(__file__).name:
             continue                                   # CHECKOUT_DIRS itself
-        offenders += [f"{path.name}:{n}: {v!r}" for n, v in _unanchored_path_strings(path)]
+        offenders += [f"{path.relative_to(TESTS)}:{n}: {v!r}" for n, v in _unanchored_path_strings(path)]
     assert not offenders, (
         "these paths depend on the working directory — anchor them on tests.conftest's "
         "REPO_ROOT / BENCH_DIR / SEQ_DIR / COMB_DIR instead:\n  " + "\n  ".join(offenders))
@@ -115,7 +116,7 @@ def test_every_test_can_actually_fail():
     named in NO_ASSERT_BY_DESIGN above.
     """
     toothless = []
-    for path in sorted(TESTS.glob("test_*.py")):
+    for path in sorted(TESTS.rglob("test_*.py")):
         for node in ast.walk(ast.parse(path.read_text())):
             if not isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
                 continue
@@ -138,7 +139,7 @@ def test_no_skip_mark_sits_on_a_helper_where_pytest_cannot_see_it():
     is inert decoration, so the guard it looks like silently is not one — which is how a helper
     that needs libgpap came to raise GpapError on every caller on a tree with no library."""
     offenders = []
-    for path in sorted(TESTS.glob("*.py")):
+    for path in sorted(TESTS.rglob("*.py")):
         for node in ast.walk(ast.parse(path.read_text())):
             if not isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
                 continue
@@ -164,7 +165,7 @@ def test_the_anchored_paths_exist(name):
 #: Every way this tree spells "the checkout, counted from this file". The depth is written by
 #: hand, so moving a file changes the answer without changing the line — and a spelling missing
 #: from here is a declaration nothing checks, which is how two of them sat wrong. Each
-#: alternative is required to match below, so losing one reddens instead of passing quietly.
+#: alternative is checked against a sample below, so losing one reddens instead of passing quietly.
 _ROOT_DECL = re.compile(
     r"^\s*(?P<name>[A-Z_]*(?:ROOT|REPO)[A-Z_]*)\s*=\s*(?:str\()?"
     r"(?:(?:pathlib\.)?Path\(__file__\)\.resolve\(\)"
@@ -225,32 +226,35 @@ def test_every_repo_root_constant_is_the_repo_root():
     pointing its `--sampling-dir` and `--circuit-dir` at paths with no files in them. Counted
     here rather than trusted, for every tracked Python file.
 
-    Each ALTERNATIVE of the pattern is required to match something, because the failure mode of a
-    scan is silence: when this was one loose `>= 15`, corrupting either branch of the regex lost
-    eight declarations and still passed."""
-    seen, wrong = {"n": 0, "chain": 0, "ups": 0, "dirnames": 0}, []
+    Each ALTERNATIVE of the pattern must match its sample, because the failure mode of a scan is
+    silence: corrupting one branch of the regex would drop its declarations and still pass."""
+    for kind, sample in (
+            ("n", "REPO = Path(__file__).resolve().parents[1]"),
+            ("chain", "REPO = Path(__file__).resolve().parent.parent"),
+            ("ups", 'ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))'),
+            ("dirnames", "ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))")):
+        m = _ROOT_DECL.match(sample)
+        assert m and m.group(kind) is not None, f"the {kind} spelling no longer matches: {sample}"
+    wrong = []
     for rel in _tracked(".py"):
         f = REPO / rel
         text = f.read_text(errors="ignore")
         for m in _ROOT_DECL.finditer(text):
             if m.group("n") is not None:
-                up, kind = int(m.group("n")), "n"
+                up = int(m.group("n"))
             elif m.group("chain") is not None:
                 # `.parent` is parents[0], so a chain of k is parents[k-1].
-                up, kind = m.group("chain").count(".parent") - 1, "chain"
+                up = m.group("chain").count(".parent") - 1
             elif m.group("ups") is not None:
-                up, kind = m.group("ups").count(".."), "ups"
+                up = m.group("ups").count("..")
             else:
-                up, kind = m.group("dirnames").count("dirname(") - 1, "dirnames"
-            seen[kind] += 1
+                up = m.group("dirnames").count("dirname(") - 1
             parents = f.resolve().parents
             got = parents[up] if up < len(parents) else None
             if got != REPO:
                 wrong.append(f"{rel}:{text.count(chr(10), 0, m.start()) + 1}: "
                              f"{m.group('name')} -> {got}")
     assert not wrong, "repo-root constant does not resolve to the repo root:\n  " + "\n  ".join(wrong)
-    empty = [k for k, v in seen.items() if not v]
-    assert not empty, f"these spellings matched nothing — the pattern rotted: {empty} (counts {seen})"
 
 
 #: The directories GPAP manages, and the ONE module allowed to name each. `gpap/paths.py` owns the
@@ -305,7 +309,7 @@ def test_only_the_paths_modules_name_a_managed_directory():
     Scanned: tracked `.py` and `.sh`. A workflow YAML is not — `.github/workflows/ci.yml`
     links against a `/tmp/libcuda.so` stub it generates, which is right for an ephemeral
     runner with no checkout to outlive, and is deliberately none of these roots."""
-    exempt = set(_MANAGED.values()) | {"tests/test_suite_hygiene.py", "tests/test_paths.py"}
+    exempt = set(_MANAGED.values()) | {"tests/repo/test_suite_hygiene.py", "tests/repo/test_paths.py"}
     bad = []
     for rel in _tracked(".py"):
         if rel in exempt:
@@ -412,3 +416,4 @@ def test_the_no_git_fallback_sees_what_git_sees():
     suffixes = (".py", ".sh", ".ipynb")
     by_git = {f for f in out.stdout.split() if f.endswith(suffixes)}
     assert _walk(*suffixes) == by_git
+

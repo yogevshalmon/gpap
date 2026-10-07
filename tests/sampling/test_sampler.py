@@ -60,7 +60,7 @@ def test_wide_decision_rounds_are_accepted_and_sound():
     variable can contribute at most one entry however many literals one round decides — the cap
     is N + slack for ANY B. That is not a curiosity: `B >= |support|` decides the whole support
     in one round, which is exactly the configuration behind the "exactly uniform by rejection
-    sampling" property (barbarik's `bsup` arm, tests/test_uniformity_fuzz.py). A ceiling on B
+    sampling" property (barbarik's `bsup` arm, tests/eval/test_uniformity_fuzz.py). A ceiling on B
     would silently remove it.
 
     Gated with B past the old 64-wide trail floor AND past the variable count itself."""
@@ -317,7 +317,7 @@ def test_every_default_portfolio_config_is_barbarik_certifiable():
 
     from gpap.sampling.pipeline import CIRCUIT_PORTFOLIO, DEFAULT_PORTFOLIO
 
-    src = pathlib.Path(__file__).resolve().parents[1] / "eval/uniformity/barbarik_gpap.py"
+    src = pathlib.Path(__file__).resolve().parents[2] / "eval/uniformity/barbarik_gpap.py"
     tree = ast.parse(src.read_text())
     configs = next(ast.literal_eval(node.value)
                    for node in ast.walk(tree)

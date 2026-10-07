@@ -11,7 +11,7 @@ What is pinned here is the machinery those claims rest on:
                    samples report the birthday floor.
   enumerate_projections — the exact-mode input: complete vs capped, and it must say which.
 
-The campaign that uses them end to end is tests/test_uniformity_fuzz.py (and, at full size,
+The campaign that uses them end to end is tests/eval/test_uniformity_fuzz.py (and, at full size,
 eval/uniformity/fuzz_uniformity.py).
 """
 import numpy as np

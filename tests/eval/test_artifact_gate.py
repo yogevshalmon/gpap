@@ -17,11 +17,13 @@ import subprocess
 
 import pytest
 
-REPO = pathlib.Path(__file__).resolve().parents[1]
+from tests.conftest import REPO_ROOT
+
+REPO = pathlib.Path(REPO_ROOT)
 GATE = REPO / "eval" / "artifact" / "check_leaks.sh"
 
 # Built by concatenation so that this file carries none of the shapes it injects: the hygiene
-# test over tracked files (tests/test_docs_hygiene.py) would otherwise refuse this file itself.
+# test over tracked files (tests/repo/test_docs_hygiene.py) would otherwise refuse this file itself.
 SHAPES = {
     "a linux home": "/home/" + "alice/proj/x.cnf",
     "a macos home": "/Users/" + "alice/proj/x.cnf",
