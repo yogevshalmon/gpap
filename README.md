@@ -9,9 +9,9 @@
 
 **GPU-Parallel (partial) Assignment Propagation**
 
-Boolean constraint propagation across **hundreds of thousands of independent partial assignments in
-one kernel launch** — and the sampler built on it, where **every emitted sample is a real
-solution**. No gradient, no rounding, no repair pass.
+Boolean constraint propagation on the GPU: hand it a CNF formula and **thousands of independent
+partial assignments**, and it propagates every one of them to its own fixpoint **in one kernel
+launch**. A foundation for SAT on the GPU, and a library to build on.
 
 [![CI](https://github.com/yogevshalmon/gpap/actions/workflows/ci.yml/badge.svg)](https://github.com/yogevshalmon/gpap/actions/workflows/ci.yml)
 [![license MIT](https://img.shields.io/badge/license-MIT-8E5EFA?labelColor=2C125A)](LICENSE)
@@ -20,17 +20,7 @@ solution**. No gradient, no rounding, no repair pass.
 [![runtime: libcuda only](https://img.shields.io/badge/runtime-libcuda%20only-E4C470?labelColor=2C125A)](#install)
 
 [**Docs**](docs/) · [**Engine internals**](docs/ENGINE.md) · [**Python API**](docs/PYTHON_API.md) ·
-[**C++ API**](cpp/README.md) · [**Benchmarking**](docs/BENCHMARKING.md) · [**Artifact**](ARTIFACT.md)
-
-<picture>
-  <source srcset="docs/assets/demo/gpap_demo.gif">
-  <img src="https://raw.githubusercontent.com/yogevshalmon/gpap/v0.1.0/docs/assets/demo/gpap_demo.gif" width="812"
-       alt="Terminal recording: gpap sample runs on b10.bench unrolled 25 cycles, encodes it to 7,851 variables and 19,682 clauses, mines 86 units that pay their way, and writes 50,000 input stimuli in under seven seconds at about 20,000 samples per second">
-</picture>
-
-<sub>Pinning <code>b10</code> to a rare reachable state, 25 cycles deep, and writing 50,000 input
-stimuli that reach it. One run on a laptop GPU, not a benchmark — how throughput is measured is in
-<a href="docs/BENCHMARKING.md">the benchmarking notes</a>.</sub>
+[**C++ API**](cpp/README.md) · [**Examples**](examples/)
 
 </div>
 
@@ -38,47 +28,74 @@ stimuli that reach it. One run on a laptop GPU, not a benchmark — how throughp
 
 ## What it is
 
-Two things that share one engine, and one compiled library — [`libgpap`](cpp/) — behind both:
+**An engine.** GPAP takes one formula and K partial assignments and propagates each assignment
+to its own BCP fixpoint, all in a single launch. For each one it reports whether it conflicted
+and, if not, what it implied. The engine also has a second entry point that makes decisions
+itself: pick free variables, give them polarities, propagate, and repeat. That runs a whole
+randomized decide-and-propagate trajectory per row, again in one launch.
 
-- **The engine** ([`gpap.engine`](gpap/engine/), [`cpp/`](cpp/)) propagates K independent
-  assumption sets to fixpoint in parallel, with **no clause scanning at all**
-  ([below](#the-core-idea-propagate-everything-at-once)). A second, fused kernel runs a whole
-  randomized decide-and-propagate trajectory per row in one launch.
-- **The sampler** ([`gpap.sampling`](gpap/sampling/)) is GPU-parallel CMSGen: K randomized BCP
-  completions per chunk. It samples the primary-input support of unrolled sequential and
-  combinational circuits — the setting of the recent GPU-sampling papers (DEMOTIC, Recurrent
-  CircuitSAT) — as well as plain projected CNF.
+Both entry points live in one compiled library, [`libgpap`](cpp/), with a Python face and a C++
+face over the same core. The engine is application-agnostic. Anything that needs "propagate a
+large number of assumption sets" can call it, and everything else in this repository does.
+
+**Applications built on it today:**
+
+- **[Solution sampling](#solution-sampling)** (`gpap sample`) draws random solutions of a CNF or a
+  circuit. Every sample is a real solution.
+- **[Entailed-clause mining](#entailed-clause-mining)** (`gpap mine`) proves clauses the formula
+  already implies, so that later propagation becomes stronger.
+- **[Batched assumption checking](#batched-assumption-checking)** (`AssumptionChecker`,
+  `LiteralProbe`) answers "which of these sets conflict, and what do they force?" for any number
+  of sets.
+
+More applications are planned for future work — stay tuned!
+
+**Design at a glance:**
 
 |  |  |
 |---|---|
-| **Every sample is a solution** | A row is a randomized propagation to a total assignment, so validity is structural rather than checked afterwards. Turn on `--verify-sound` to re-check every emitted row on the GPU anyway, and `--sim-check` to replay each one through the *original circuit*, independently of the encoder. |
-| **No clause scanning** | Negated occurrence lists, one packed 32-bit word per long clause, and the sum trick — the whole per-literal update is a single `atomic_add` whose return value *is* the unit/conflict detection. |
-| **It sizes itself** | No batch size appears in any example below. The batch is an analytic bound over the card's free VRAM; the kernel choice, the trail bound and the packed layout are all derived from the formula. |
-| **One library, two faces** | Python (ctypes) and C++ (`#include <gpap/gpap.hpp>`) are both thin marshalling layers over the same core. At one seed, one config and one batch they draw *identical* models — and a test asserts it. |
-| **Runs on a driver alone** | Kernels are Triton, compiled ahead of time into the library. At run time `libgpap.so` links `libcuda.so.1` and nothing else: no CUDA toolkit, no nvcc, no Triton, not even torch for the C++ face. |
-| **Measured honestly** | Setup is inside the end-to-end rate, rivals are timed the way they time themselves, and nothing is quietly dropped from a mean. [`docs/BENCHMARKING.md`](docs/BENCHMARKING.md) |
+| **No clause scanning** | Negated occurrence lists, one packed 32-bit word per long clause, and the sum trick. The whole per-literal clause update is a single `atomic_add`, and its return value detects units and conflicts. |
+| **K private jobs, one shared formula** | Each row owns its assignment, trail and clause words, and rows never communicate. A row that conflicts just stops: there is no conflict analysis to serialize. |
+| **It sizes itself** | The batch is an analytic bound over the card's free VRAM. The kernel choice, trail bound and packed layout are all derived from the formula. |
+| **One library, two faces** | Python (ctypes) and C++ (`#include <gpap/gpap.hpp>`) are thin marshalling layers over the same C ABI. At one seed, config and batch they draw identical models. |
+| **Runs on a driver alone** | The kernels are Triton, compiled ahead of time into the library. At run time `libgpap.so` links `libcuda.so.1` and nothing else: no CUDA toolkit, no nvcc, no Triton, and no torch for the C++ face. |
+| **Checked against a reference** | A BCP fixpoint is unique, so on every row that does not conflict both kernels must match a pure-Python reference propagator exactly. The test suite enforces this. |
 
-## How fast
+## How it works
 
-Measured on the published benchmark sets of the GPU samplers — ISCAS-85, ISCAS-89 and ITC'99
-circuits, unrolled and pinned:
+<div align="center">
+<picture>
+  <source media="(prefers-color-scheme: dark)"  srcset="docs/assets/animation/gpap_propagate_dark.gif">
+  <source media="(prefers-color-scheme: light)" srcset="docs/assets/animation/gpap_propagate_light.gif">
+  <img src="https://raw.githubusercontent.com/yogevshalmon/gpap/v0.1.0/docs/assets/animation/gpap_propagate_light.gif" width="675"
+       alt="Animation of the engine's core idea, in three acts. Throughout, the assignment sits on the left as a green vine with a node per variable: a gold leaf marks a variable decided at random, a green leaf one forced by propagation, a bare node one never touched. The vine runs level over its own nodes, steps down once the assignment ends, and carries on at that lower level to the bunch, which hangs from it by its own stem — so the two are one plant rather than two objects near each other, with the plant's one leaf sitting on the vine just before it. On the right is the formula, a bunch of grapes in which every row is a clause and every berry a literal. In the first act a real propagation trace runs, and the vine moves with it: a decision lights a berry gold and grows a gold leaf in the same frame, the literals that decision falsifies shrink and darken wherever they occur, and a clause left with one survivor forces it — a white flash and a green leaf — which falsifies more. It halts at a fixpoint with four clauses satisfied, one still open with two live literals, and most of the formula never touched. In the second act each clause row collapses onto a single cell, because under one assignment a clause's whole state is one packed word; the five stack into an even column, and that column unfolds into a row beside the vine. In the third act rows multiply downwards until the die holds five, each a vine with its own decisions and its own row of clause states, now plugged into the die's pins, all propagating in the same launch and each stopping at its own fixpoint while the row just watched holds the one it already reached, so no vine fills and no row ever lights up completely.">
+</picture>
+</div>
 
-| GPAP's sampling rate | |
-|---|---|
-| vs **CMSGen** — the CPU sampler GPAP parallelizes, on the identical CNF | **~70× – 1,600×** |
-| vs **DEMOTIC** and **Recurrent-CircuitSAT** — GPU gradient samplers, on their own instances | **2× – 170×** |
+**Bytes per clause decide everything.** The formula is built once and every row reads it. What
+propagation changes belongs to each row alone, so the per-row footprint decides how many
+assignments fit on the card at once. That is why each clause's per-row bookkeeping is a counter
+and a key, updated **in place**. Two watched literals per clause would be smaller still, but each
+update *moves* which literals are watched. That kind of irregular pointer work is exactly what a
+GPU does worst.
 
-> [!NOTE]
-> Geometric means per benchmark set, on an NVIDIA L4 with an Intel Xeon at 2.20 GHz — CMSGen is
-> single-core, so the CPU is as much a part of these ratios as the GPU is. The spread is real, not
-> a rounding choice: it depends on the instance and on how rare the pinned target is. Charging
-> setup to both sides brings the CMSGen figures down by roughly 2–4×.
->
-> The **engine** is the flat part: propagation holds ~2 × 10⁹ implications per second across every
-> set, depth and target — around 550× a CMSGen core, with under 1.6× between the fastest and
-> slowest row. So the spread above is work per emitted sample, not propagation speed. How every
-> tool is timed, and what is excluded from a mean and why, is in
-> [`docs/BENCHMARKING.md`](docs/BENCHMARKING.md).
+Three choices mean a clause is never scanned:
+
+1. **Negated occurrence lists** (CSR). `occ[l]` holds the clauses where `~l` appears. Setting `l`
+   TRUE falsifies `~l` in exactly those clauses and in no others. Binary clauses exist only here,
+   as implication edges with no per-row state. Unit clauses are applied once, at construction.
+2. **One packed word per clause of length ≥ 3**, batched over every row. The low bits count the
+   non-falsified literals (`0` means conflict, `1` means unit). The high bits hold the sum of
+   those literals' indices.
+3. **The sum trick.** At count 1, the sum *is* the index of the surviving literal, so no scan or
+   gather is needed. Each clause update is one `atomic_add`, and its return value detects units
+   and conflicts without races.
+
+Literal indexing is `+v → 2(v-1)` and `-v → 2(v-1)+1`, with negation `l ^ 1`. The assignment is a
+bitmap in which `l` and `~l` share a word, so one `atomic_or` answers both "already set?" and
+"contradiction?". Two propagate kernels, scalar and warp-wide, are chosen per formula. The
+details are in [`docs/ENGINE.md`](docs/ENGINE.md), and the kernels are in
+[`cpp/kernels/bcp.py`](cpp/kernels/bcp.py).
 
 ## Install
 
@@ -89,128 +106,63 @@ pip install -e ".[dev]"      # + pytest, ruff, python-sat
 gpap info                    # device, kernels, encoder, power-limit warning
 ```
 
-`scripts/build_core.sh` compiles the Triton kernels ahead of time and builds the library; it needs
-cmake, a C++17 compiler, the NVIDIA driver and, at build time only, triton. The cubins target one
-GPU architecture, so rebuild on a different card generation — the loader says so by name.
+`scripts/build_core.sh` compiles the Triton kernels ahead of time and builds the library. It
+needs cmake, a C++17 compiler and the NVIDIA driver, plus triton at build time only. The compiled
+kernels target one GPU architecture, so rebuild when you move to a different card generation. If
+you forget, the loader names the mismatch.
 
 > [!IMPORTANT]
-> A CUDA GPU is required. There is no CPU path, and this is a design decision rather than a gap:
-> the whole point is the batch.
+> A CUDA GPU is required. There is no CPU path. This is a design decision, not a gap: the whole
+> point is the batch.
 
-## Quickstart — Python
+## Quickstart: Python
 
 ```python
-import gpap
+# The engine: propagate many assumption sets at once (DIMACS literals)
+from gpap.engine import AssumptionChecker
+r = AssumptionChecker("formula.cnf").check_assumptions([[1, -2, 3], [-1, 2, -3], [4]])
+r["conflict"]                 # (n,) bool: did propagation refute the set?
+r["num_propagated"]           # (n,) how many literals each set implied
 
-# A DIMACS CNF (support read from `c ind` header lines if present)
-samples, info = gpap.sample("formula.cnf", n=50_000, seed=5)
+# Sampling: solutions of a CNF, projected on its support (`c ind` lines if present)
+import gpap
+samples, info = gpap.sample("formula.cnf", n=50_000)
 samples.shape                 # (50000, S) uint8, one column per support variable
 info["cols"]                  # the DIMACS variable each column stands for
-print(info["samples_per_s"], info["success_rate"], info["sound_check"])
 
-# A sequential circuit: unroll T cycles, pin outputs to a reachable pattern, sample the inputs
+# ...or of a sequential circuit: unroll T cycles, pin the outputs, sample the inputs
 samples, info = gpap.sample_circuit("b10.bench", cycles=25, n=50_000)
 info["wire_map"]              # column -> "input@cycle"
-
-# In-memory clauses
-samples, info = gpap.sample_clauses(3, [[1, 2], [-1, 3], [-2, -3]], n=1_000, support=[0, 1, 2])
-
-# The engine as a primitive: batched assumption checking
-from gpap.engine import AssumptionChecker
-r = AssumptionChecker("formula.cnf").check_assumptions([[1, -2, 3], [-1, 2, -3]])
-print(r["conflict"])          # (n,) bool
 ```
 
-Nothing above names a batch size: every entry point sizes itself to the GPU and the formula.
-`samples` is a `(rows, S)` uint8 matrix of support projections, projected on the GPU and collected
-off the timing path; a run cut short by its time limit returns what it produced. `info` carries
-throughput (`samples_per_s` steady state, `sps_e2e_total` including setup), `success_rate`,
-per-phase timings, mining stats and the soundness verdict.
-[`docs/PYTHON_API.md`](docs/PYTHON_API.md) maps the API tiers.
+Pass any number of assumption sets. They are split into GPU-sized launches internally and returned
+in input order. [`docs/PYTHON_API.md`](docs/PYTHON_API.md) maps the API tiers, and
+[`examples/`](examples/) has runnable scripts for each application.
 
-## Quickstart — CLI
+## Quickstart: CLI
 
 ```bash
 gpap sample formula.cnf -n 50000 --out samples.out --stats run.json
 gpap sample b10.bench --cycles 25 -n 50000 --out stim.out   # unroll, sample, write input stimuli
 gpap sample design.aig --cycles 25 -n 50000                 # AIGER input (.aig/.aag)
-gpap sample b10.bench --cycles 25 --encoder abc             # smaller CNF via berkeley-abc
 gpap mine formula.cnf --width 1 2 --pool all --seconds 10 --out stronger.cnf
 gpap circuit2cnf benches/ cnf_out/ --cycles 25 --pin-outputs 1
-gpap bench 'benches/*.bench' --encoders tseitin abc:fast --cycles 25 --target rare --resume
 ```
 
-<details>
-<summary><b>Circuit inputs, targets and the rejection baseline</b></summary>
+## Quickstart: C++
 
-<br>
-
-`.bench` (ISCAS-85/89, ITC'99) and AIGER `.aig`/`.aag` are parsed natively. Sequential circuits are
-unrolled `--cycles` times from the reset state, the last-cycle outputs are pinned to a simulated
-reachable pattern, and the primary inputs across cycles become the sampling support (`wire@cycle`
-columns).
-
-`--target rare` pins the rarest output pattern seen in a large simulation batch instead of a random
-one, which is biased toward easy patterns. `--sim-baseline` measures the CNF-free rival — random
-inputs plus bit-parallel simulation — and reports its acceptance rate beside GPAP's; `--sim-check`
-simulates every emitted sample through the original circuit as an encoder-independent soundness
-check.
-
-</details>
-
-<details>
-<summary><b>The ABC encoder</b></summary>
-
-<br>
-
-`--encoder abc` unrolls and logic-optimizes the circuit with
-[berkeley-abc](https://github.com/berkeley-abc/abc) and Tseitins the resulting AIG. The projected
-solution space is identical to the native encoder's (asserted by `tests/test_abc_encoder.py`); only
-internal variables change, and the clause count drops by 2–8× on the benches here.
-`scripts/build_abc.sh` builds a pinned upstream commit into `.gpap/bin`; `--abc-opt full|fast|auto`
-picks the effort. The default stays `tseitin` so results never change with ABC's presence.
-
-</details>
-
-<details>
-<summary><b>Writing solutions, and comparing against CMSGen</b></summary>
-
-<br>
-
-`--out FILE` writes support projections, one bit per support variable
-(`--out-format bits|npy|dimacs`), collected by the timed run itself; `--stats FILE` writes the run's
-info JSON. `--max-samples` (default 100k) is a ceiling.
-
-Build CMSGen with `scripts/build_cmsgen.sh` (pinned upstream plus `scripts/cmsgen_gpap_eval.patch`,
-which adds `--nowrite` and `--statsevery`). GPAP's timed run emits nothing, so `gpap bench` times
-CMSGen the same way and reports its emission cost apart —
-[`docs/BENCHMARKING.md`](docs/BENCHMARKING.md).
-
-The full experimental sweep, the rival harnesses and the figures live in
-[`docs/EVAL_RUNBOOK.md`](docs/EVAL_RUNBOOK.md):
-
-```bash
-eval/rivals/rivals_setup.sh     # abc + patched cmsgen + DEMOTIC / Recurrent-CircuitSAT / HTS
-eval/run_full_eval.sh campaign  # the paper run; resumable
-```
-
-</details>
-
-## Quickstart — C++
-
-The same library: a C ABI (`gpap/gpap.h`) plus a header-only C++ layer (`gpap/gpap.hpp`).
+The same library, as a C ABI (`gpap/gpap.h`) plus a header-only C++ layer (`gpap/gpap.hpp`).
 
 ```cpp
 #include <gpap/gpap.hpp>
 
-gpap::Sampler sampler("formula.cnf");
-gpap::Solutions sols = sampler.sample(100000);     // 100k satisfying assignments
-bool v = sols(i, j);                               // of variable sols.variables()[j]
+gpap::AssumptionChecker checker("formula.cnf");            // the engine
+gpap::CheckResults r = checker.check({{1, -2, 3}, {-1, 2, -3}});
+bool refuted = r.conflict(0);
+gpap::Value x3 = r.value(1, 3);                            // True / False / Free after BCP
 
-gpap::Engine engine(formula);                      // or own the loop yourself
-engine.reset(65536);
-engine.trajectory(order, n_support, /*B=*/8, seed);
-int models = engine.select_complete(engine.pair_mask());
+gpap::Sampler sampler("formula.cnf");                      // an application
+gpap::Solutions sols = sampler.sample(100000);             // 100k satisfying assignments
 ```
 
 ```cmake
@@ -218,90 +170,103 @@ find_package(gpap REQUIRED)
 target_link_libraries(my_solver PRIVATE gpap::gpap)
 ```
 
-Examples for both faces in [`cpp/examples/`](cpp/examples/) and [`examples/`](examples/); details in
-[`cpp/README.md`](cpp/README.md).
+`gpap::Engine` exposes both entry points directly, for building a loop of your own. Examples are
+in [`cpp/examples/`](cpp/examples/), and the full API is in [`cpp/README.md`](cpp/README.md).
 
-## The core idea: propagate everything at once
+## Applications
+
+### Solution sampling
+
+Each row of a launch runs one randomized decide-and-propagate trajectory. A trajectory either
+reaches a full assignment, which is a model by construction, or conflicts and is discarded.
+Validity is structural, not checked afterwards, so there is no gradient, no rounding and no repair
+pass. If you want the check anyway, `--verify-sound` re-checks every emitted row on the GPU. The
+sampler handles plain projected CNF and the primary-input support of unrolled sequential and
+combinational circuits.
 
 <div align="center">
-
 <picture>
-  <source media="(prefers-color-scheme: dark)"  srcset="docs/assets/animation/gpap_propagate_dark.gif">
-  <source media="(prefers-color-scheme: light)" srcset="docs/assets/animation/gpap_propagate_light.gif">
-  <img src="https://raw.githubusercontent.com/yogevshalmon/gpap/v0.1.0/docs/assets/animation/gpap_propagate_light.gif" width="675"
-       alt="Animation of the engine's core idea, in three acts. Throughout, the assignment sits on the left as a green vine with a node per variable: a gold leaf marks a variable decided at random, a green leaf one forced by propagation, a bare node one never touched. The vine runs level over its own nodes, steps down once the assignment ends, and carries on at that lower level to the bunch, which hangs from it by its own stem — so the two are one plant rather than two objects near each other, with the plant's one leaf sitting on the vine just before it. On the right is the formula, a bunch of grapes in which every row is a clause and every berry a literal. In the first act a real propagation trace runs, and the vine moves with it: a decision lights a berry gold and grows a gold leaf in the same frame, the literals that decision falsifies shrink and darken wherever they occur, and a clause left with one survivor forces it — a white flash and a green leaf — which falsifies more. It halts at a fixpoint with four clauses satisfied, one still open with two live literals, and most of the formula never touched. In the second act each clause row collapses onto a single cell, because under one assignment a clause's whole state is one packed word; the five stack into an even column, and that column unfolds into a row beside the vine. In the third act rows multiply downwards until the die holds five, each a vine with its own decisions and its own row of clause states, now plugged into the die's pins, all propagating in the same launch and each stopping at its own fixpoint while the row just watched holds the one it already reached, so no vine fills and no row ever lights up completely.">
+  <source srcset="docs/assets/demo/gpap_demo.gif">
+  <img src="https://raw.githubusercontent.com/yogevshalmon/gpap/v0.1.0/docs/assets/demo/gpap_demo.gif" width="812"
+       alt="Terminal recording: gpap sample runs on b10.bench unrolled 25 cycles, encodes it to 7,851 variables and 19,682 clauses, mines 86 units that pay their way, and writes 50,000 input stimuli in under seven seconds at about 20,000 samples per second">
 </picture>
-
 </div>
 
-**One primitive.** Hand GPAP a CNF formula and K partial assignments, and it propagates every one
-of them to its own BCP fixpoint in a single launch — reporting, per assignment, whether it
-conflicted and otherwise what it implied. On request it decides too: pick a free variable, fix a
-polarity, propagate from there. Everything else in this repository is built on that one call.
+The library makes no uniformity claim. Testing one needs the whole solution set or conditional
+sampling, so it lives in the evaluation layer ([below](#evaluation)).
 
-**One shared formula, K private jobs.** The formula is built once and read by all of them. What
-propagation mutates belongs to each job alone: an assignment, a trail, and the per-clause
-bookkeeping that says when a clause has gone unit or empty. Jobs never communicate, and one that
-derives a conflict simply stops — there is no conflict analysis and no backtracking to serialize.
-That leaves **bytes per clause** as the whole game, because they decide how many assignments fit on
-the card at once, and it is why that bookkeeping is a counter and a key updated **in place**. Two
-watched literals per clause is smaller still, but an update *relocates* which literals are watched,
-and irregular pointer work is exactly what a GPU is worst at.
+<details>
+<summary><b>Circuits: inputs, unrolling and targets</b></summary>
 
-**And the engine's rate barely moves.** It propagates at essentially the same rate whatever the
-formula, the depth or the target. So the spread in the sampling figures above is not the
-propagator: it is how much propagation an instance spends per emitted sample, which is a property
-of the task rather than of the engine.
+<br>
 
-None of it is affordable unless a clause is never scanned:
+`.bench` (ISCAS-85/89, ITC'99) and AIGER `.aig`/`.aag` are parsed natively. Sequential circuits are
+unrolled `--cycles` times from the reset state. The last-cycle outputs are pinned to a reachable
+pattern found by simulation, and the primary inputs across all cycles become the sampling support
+(`wire@cycle` columns). `--target rare` pins the rarest output pattern seen in a large simulation
+batch instead of a random one. `--sim-check` replays every emitted sample through the original
+circuit, which checks soundness independently of the CNF encoding.
 
-1. **Negated occurrence lists** (CSR): `occ[l]` is the set of clauses where `~l` appears, so setting
-   `l` TRUE falsifies `~l` in exactly those clauses — and in no others. Binary clauses live only
-   here, as implication edges with zero per-row state; unit clauses live in a bitmap.
-2. **One packed word per clause of length ≥ 3**, batched over every row: the low bits count the
-   non-falsified literals (`0` = conflict, `1` = unit), the high bits hold the sum of their indices.
-3. **The sum trick**: at count 1, the surviving literal's index *is* the sum. No scan, no gather.
-   The whole clause update is one `atomic_add` whose return value gives race-free unit and conflict
-   detection.
+`--encoder abc` unrolls and logic-optimizes the circuit with
+[berkeley-abc](https://github.com/berkeley-abc/abc), then Tseitin-encodes the resulting AIG. This
+gives a smaller CNF with the same projected solution space (asserted by
+`tests/test_abc_encoder.py`). `scripts/build_abc.sh` builds a pinned upstream commit, and
+`--abc-opt full|fast|auto` picks the optimization effort. The default encoder stays `tseitin`, so
+a result never depends on whether ABC is installed.
 
-Literal indexing is `+v → 2(v-1)`, `-v → 2(v-1)+1`, negation `l ^ 1`; the assignment is a bitmap in
-which `l` and `~l` share a word, so a single `atomic_or` answers both "already set?" and
-"contradiction?".
-[`cpp/kernels/bcp.py`](cpp/kernels/bcp.py) · [`docs/ENGINE.md`](docs/ENGINE.md)
+</details>
 
-## Uniformity
+<details>
+<summary><b>Output</b></summary>
 
-A uniformity number is a claim about a distribution, so `gpap sample` does not make one on the way
-past: an honest test needs either the whole solution set or conditional sampling, and neither is
-something a sampler can do while sampling.
+<br>
 
-Tested the way CMSGen was, under [Barbarik](https://github.com/meelgroup/barbarik), GPAP is never
-rejected — the same verdict CMSGen obtains. Read that as it is meant: the guarantee is asymmetric,
-so Reject is unconditional and Accept only ever means "not caught", and a run is evidence only with
-both controls in place — an exactly uniform reference must Accept, and a deliberately skewed config
-must Reject.
+`--out FILE` writes support projections, one bit per support variable
+(`--out-format bits|npy|dimacs`). The rows are collected during the timed run itself. `--stats
+FILE` writes the run's info JSON, with rates, phase timings, mining stats and the soundness
+verdict. `--max-samples` (default 100k) caps the number of rows written.
+
+</details>
+
+### Entailed-clause mining
+
+Assume a set of literals and propagate. If BCP hits a conflict, the formula entails the negation
+of that set, which is a clause. `gpap mine` sweeps every k-subset of a literal pool under a work
+budget and writes the clauses it proves. Width 1 gives the BCP-visible backbone. Every clause
+found is entailed, so adding them leaves the solution set exactly unchanged and makes later
+propagation stronger. The sampler runs mining as a preprocessing step and keeps the mined clauses
+only if they pay for themselves. See [`examples/mine_clauses.py`](examples/mine_clauses.py).
+
+### Batched assumption checking
+
+This is the engine's first entry point, exposed directly. `AssumptionChecker` takes any number of
+assumption sets and returns, for each one, whether it conflicts, how many literals it implied
+and, on request, its full assignment. `LiteralProbe` checks every k-subset of a literal pool
+within a budget; mining is built on it. See
+[`examples/check_assumptions.py`](examples/check_assumptions.py).
 
 ## Layout
 
 ```
 cpp/              # the engine core: libgpap, C ABI + C++ wrapper, shared by both faces
 gpap/
-  engine/         # the Python face of the core (ctypes)
-  sampling/       # the sampler, the e2e pipeline, preprocessing, output
-  circuits/       # .bench / AIGER parse, unroll, Tseitin, pin -> projected-sampling CNF
-  mining.py       # entailed-clause mining over the core's probe primitive
+  engine/         # the Python face of the core (ctypes): checker, probe, engine
+  sampling/       # application: the sampler, its pipeline, preprocessing, output
+  circuits/       # .bench / AIGER parse, unroll, Tseitin, pin -> projected CNF
+  mining.py       # application: entailed-clause mining over the probe primitive
   cli.py          # `gpap` subcommands
-eval/             # the experiment layer: campaign driver and rival harnesses
+examples/         # runnable Python examples, one per application
+eval/             # the experiment layer (see Evaluation); nothing in gpap/ imports it
 scripts/          # build libgpap, optional third-party tools, fetch benchmarks
-docs/             # start at docs/README.md; docs/findings/ is the evidence behind every rule
-tests/            # pytest (CPU smoke + `gpu`/`slow` markers); circuit CNFs generated on demand
-benchmarks/       # small committed .bench sources (CNFs are generated, never committed)
+docs/             # start at docs/README.md
+tests/            # pytest (CPU smoke + `gpu`/`slow` markers)
+benchmarks/       # small committed .bench, AIGER and CNF instances
 .gpap/            # built/fetched tools, benchmark sets and run scratch, gitignored
 ```
 
-**Code carries the rule; `docs/` carries the evidence.** A comment says what the code does and why
-it is correct; the measurement that settled it — date, GPU, per-instance table — lives in
-[`docs/findings/`](docs/findings/), never in a source file.
+Code carries the rule and `docs/` carries the evidence. A comment says what the code does and why
+it is correct. The measurement that settled a design decision lives in
+[`docs/findings/`](docs/findings/), not in a source file.
 
 ## Tests
 
@@ -309,6 +274,17 @@ it is correct; the measurement that settled it — date, GPU, per-instance table
 pytest -m "not gpu and not slow"   # portable smoke suite, no GPU needed
 pytest                             # full suite (GPU tests skip off-CUDA; `slow` = deep unrolls)
 ```
+
+## Evaluation
+
+The experiments for the paper live outside the library:
+
+- [`eval/`](eval/): campaign drivers, rival harnesses and uniformity tests. Nothing in `gpap/`
+  imports it.
+- [`ARTIFACT.md`](ARTIFACT.md): reproducing the paper's tables and figures.
+- [`docs/BENCHMARKING.md`](docs/BENCHMARKING.md): the measurement protocol.
+- `gpap bench`: benchmark a glob of instances, optionally against CMSGen
+  (`scripts/build_cmsgen.sh`).
 
 ## Citation and license
 
