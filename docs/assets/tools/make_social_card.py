@@ -46,11 +46,10 @@ d.text((x + 6, 298), "GPU-Parallel (partial) Assignment Propagation",
 d.rectangle([x + 6, 348, x + 6 + 260, 353], fill=GOLD)
 
 body = ImageFont.truetype(MONO, 23)
-# The batch cap is 262,144 per launch, so "millions" is not ours to claim; and CircuitSAT is
-# the rivals' banner, not a name for us. Both match the README.
-d.text((x + 6, 386), "Batched BCP over hundreds of thousands", font=body, fill=LAV_HI)
-d.text((x + 6, 416), "of partial assignments, in one launch.", font=body, fill=LAV_HI)
-d.text((x + 6, 458), "Every sample is a real solution.", font=body, fill=LEAF)
+# The card says what the README's headline says: the engine, not one application of it.
+d.text((x + 6, 386), "Boolean constraint propagation over", font=body, fill=LAV_HI)
+d.text((x + 6, 416), "thousands of partial assignments at once.", font=body, fill=LAV_HI)
+d.text((x + 6, 458), "A foundation for SAT on the GPU.", font=body, fill=LEAF)
 
 d.text((x + 6, 516), "github.com/yogevshalmon/gpap",
        font=ImageFont.truetype(MONO, 20), fill=(0x8A, 0x7C, 0xAD))
