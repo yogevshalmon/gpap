@@ -24,7 +24,7 @@ METHOD (do not "simplify" this — the numbers are meaningless without it):
     tautology) are measured but excluded from the headline geomean, by the screens that live once
     in `eval/artifact/paper_tables.py`.
 
-  PYTHONPATH=. .venv/bin/python eval/profile_soft_portfolio.py \
+  PYTHONPATH=. .venv/bin/python eval/profiling/profile_soft_portfolio.py \
       --glob 'benchmarks/circuits/bench/seq/*.bench' --encoder abc --abc-opt fast --cycles 25
 """
 import argparse
@@ -37,10 +37,9 @@ import time
 
 import numpy as np
 
-from gpap import paths
-
-REPO_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
+REPO_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))
 sys.path.insert(0, REPO_ROOT)
+from gpap import paths                                        # noqa: E402
 
 # Constant-output-cone instances: any sampler gets ~100% success, so their ratio is ~1.00 by
 # construction and including them would dilute the headline toward "no effect".

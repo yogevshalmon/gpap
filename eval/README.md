@@ -5,14 +5,15 @@ so it may depend on third-party tools and result files outside the repo.
 
 - `run_full_eval.sh` — staged and resumable, one stage per family (`seq`, `comb`, `sk`, `epfl`,
   `hwmcc`, `rivals`, `plots`, `all`); a failing cell becomes an error row, not a stop.
-- `eval_plots.py` — staged JSON into figures and `summary.md`.
-- `recheck_compare.py` — re-runs recorded cells, diffing them; non-zero exit only on a
-  *deterministic* disagreement.
-
-- `profile_soft_portfolio.py` — paired safe-vs-soft sweep, one process.
-- `artifact/` — the paper and artifact build: `paper_tables.py` (the single generator),
-  `slide_tables.py` (imports it, so the deck cannot drift), `verify_artifact.py` (the gate),
-  `make_artifact.sh`.
+- `eval_plots.py` — staged JSON into figures and `summary.md`, an inventory of what ran.
+- `artifact/` — the paper and artifact build, and nothing else: every file here is one the
+  artifact drivers run. `reproduce.sh` (the entry point), `paper_tables.py` (the single
+  generator), `check_paper_numbers.py` and `verify_artifact.py` (the gates),
+  `compare_campaign.py`, `estimate_wall.py`, `make_artifact.sh`. `slide_tables.py` sits here
+  too, importing the generator so the deck cannot drift.
+- `profiling/` — the GPAP-vs-GPAP sweeps that measure a choice rather than a rival, with their
+  own table generators: `kernel_ab.py` (WAVE vs SCALAR) and `profile_soft_portfolio.py` (what
+  one portfolio costs another). Nothing in the artifact runs them.
 - `rivals/` — harnesses for the GPU-sampler rivals, `rival_common.py` (the
   same-circuit-on-both-sides rule) and `rivals_setup.sh`.
 - `uniformity/` — `barbarik_gpap.py` (conditional-sampling certification) and `fuzz_uniformity.py`

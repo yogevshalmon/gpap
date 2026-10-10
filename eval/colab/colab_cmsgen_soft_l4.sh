@@ -4,11 +4,11 @@
 # `soft` is Barbarik-rejected on nearly every circuit instance, so it is out of the default
 # portfolio and opt-in: every published number already runs without it. This sweep states the
 # price — how much throughput, and how many instances, the uniformity guarantee costs in the
-# head-to-head we publish. (`eval/profile_soft_portfolio.py` answers the narrower GPAP-vs-GPAP
+# head-to-head we publish. (`eval/profiling/profile_soft_portfolio.py` answers the narrower GPAP-vs-GPAP
 # version.) Same protocol, budgets, encoders, targets, instances and code path, one bit changed.
 # Pair the two output directories per (stage, instance, encoder) with:
 #
-#     eval/artifact/soft_price_tables.py --safe <no-soft dir> --soft <this dir>
+#     eval/profiling/soft_price_tables.py --safe <no-soft dir> --soft <this dir>
 #
 # Rare-first, like the safe arm: a rented VM dies within the hour, so the stages most likely to
 # reach publication run first.

@@ -120,4 +120,4 @@ avoids costs one `shfl.sync`, not a shared-memory reduction; re-measure before r
 
 L4 campaign re-run on the new engine (the 20260827 campaign is the pre-binary baseline);
 stage-0 binary-fraction sweep on ABC/sk_/EPFL/HWMCC post-ELS; forced-kernel M-ladder re-check
-(`eval/kernel_ab.py`).
+(`eval/profiling/kernel_ab.py`).

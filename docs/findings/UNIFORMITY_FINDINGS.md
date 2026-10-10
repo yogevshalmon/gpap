@@ -179,7 +179,7 @@ capability losses: b11 11,269 models @ 386/s → 0, b12 50,434 @ 10,997/s → 78
 a circuit-regime trade-off from an `sk_` instance: the earlier "~1.3x" came from 27.sk_3_32 alone.
 
 Open decision, parked (user, 2026-07-30: "that's a big loss, please document it and keep it for
-now, we will need to think about it later"). Re-measure with `eval/profile_soft_portfolio.py`
+now, we will need to think about it later"). Re-measure with `eval/profiling/profile_soft_portfolio.py`
 before revisiting. Sketched, not implemented: a bandit that falls back to `soft` only when every
 uniformity-safe config yields ~nothing (the b11/b12 signature), with the fallback reported. Also
 open: a uniformity term in the bandit objective (needs an enumerable space, so not general).
@@ -397,7 +397,7 @@ better on 51%, because GPAP is more often exactly right and more often badly wro
 `--portfolio b8`: 0.0402 against a 0.0399 floor, 2.8× better than CMSGen, better on 84%,
 unflagged 4× as often (64/80 vs 16/80).
 
-The price of pinning B=8 is ~10%. `eval/profile_soft_portfolio.py --arm-a circuit --arm-b b8`
+The price of pinning B=8 is ~10%. `eval/profiling/profile_soft_portfolio.py --arm-a circuit --arm-b b8`
 (each circuit encoded once, both arms in the same process, arm order alternated, best of reps —
 this box's SM clock swings 615-1710 MHz, so nothing else resolves 10%), 19 seq circuits,
 `abc:fast`, T=25, `--target rare`, 15 non-vacuous / 14 comparable: geomean 0.910 (1.10× slower),
@@ -455,7 +455,7 @@ PYTHONPATH=. .venv/bin/python eval/uniformity/fuzz_uniformity.py --kinds circuit
     --n-mult 100 --sup-min 12 --circuit-inputs 14 20 --s-min 128 --s-max 2000 \
     --configs b16 --pipelines circuit b8 --cmsgen .gpap/bin/cmsgen --controls 0.0 0.05
 # and its price: both portfolios in ONE process, arm order alternated
-PYTHONPATH=. .venv/bin/python eval/profile_soft_portfolio.py --glob 'benchmarks/circuits/bench/seq/*.bench' \
+PYTHONPATH=. .venv/bin/python eval/profiling/profile_soft_portfolio.py --glob 'benchmarks/circuits/bench/seq/*.bench' \
     --encoder abc --abc-opt fast --cycles 25 --target rare --arm-a circuit --arm-b b8
 ```
 
