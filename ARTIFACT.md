@@ -22,8 +22,11 @@ The artifact carries the campaign's per-instance rows. `reproduce.sh tables` reg
 Tables 1, 2, 3 and 4b, both figures, the publishability gate and the emission audit from them:
 
 ```bash
-eval/artifact/reproduce.sh tables --out /tmp/tier1
+eval/artifact/reproduce.sh tables          # writes under .experiments/artifact/
 ```
+
+`--out DIR` puts them elsewhere. The default stays inside the repository's own disposable
+root, so nothing lands in `/tmp`, where the next reboot is free to take it.
 
 The table generators and the gate are pure JSON readers — **no GPU, no CUDA wheels, not even
 numpy** (gated by
