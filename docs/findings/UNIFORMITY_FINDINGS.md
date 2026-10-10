@@ -432,20 +432,20 @@ PYTHONPATH=. .venv/bin/python eval/uniformity/fuzz_uniformity.py --count 12 --se
     --configs b1 b2 b4 b8 b16 b32 b64 b256 --controls 0.0
 # the certificate (§4b), circuit-only: generate, SCREEN, then every arm including both controls
 PYTHONPATH=. .venv/bin/python eval/uniformity/barbarik_gpap.py --explain
-mkdir -p /tmp/circ
+mkdir -p .gpap/tmp/circ
 for c in b01 b03 b04 b06 b08 b09 b10 b11 b13 s386 s832 s1196; do for T in 5 10 25; do for tg in rare random; do
-  gpap circuit2cnf benchmarks/circuits/bench/seq/$c.bench /tmp/circ/$c-c$T-$tg.cnf --cycles $T --target $tg --seed 1
+  gpap circuit2cnf benchmarks/circuits/bench/seq/$c.bench .gpap/tmp/circ/$c-c$T-$tg.cnf --cycles $T --target $tg --seed 1
 done; done; done
 for c in c432 c499 c880 c1355 c1908 c2670 c3540 c5315 c6288 c7552; do for tg in rare random; do
-  gpap circuit2cnf benchmarks/circuits/bench/comb/$c.bench /tmp/circ/$c-c1-$tg.cnf --cycles 1 --target $tg --seed 1
+  gpap circuit2cnf benchmarks/circuits/bench/comb/$c.bench .gpap/tmp/circ/$c-c1-$tg.cnf --cycles 1 --target $tg --seed 1
 done; done
-PYTHONPATH=. .venv/bin/python eval/uniformity/barbarik_screen.py /tmp/circ/*.cnf --out /tmp/eligible.txt
+PYTHONPATH=. .venv/bin/python eval/uniformity/barbarik_screen.py .gpap/tmp/circ/*.cnf --out .gpap/tmp/eligible.txt
 for arm in "--sampler spur" "--sampler cmsgen" "--sampler gpap --config b8" \
            "--sampler gpap --config b1" "--sampler gpap --config s1" \
            "--sampler gpap --config soft"; do
-  PYTHONPATH=. .venv/bin/python eval/uniformity/barbarik_gpap.py $(cat /tmp/eligible.txt) \
+  PYTHONPATH=. .venv/bin/python eval/uniformity/barbarik_gpap.py $(cat .gpap/tmp/eligible.txt) \
       $arm --out .experiments/barbarik/circ.jsonl                       # CMSGen-paper setting
-  PYTHONPATH=. .venv/bin/python eval/uniformity/barbarik_gpap.py $(head -6 /tmp/eligible.txt) \
+  PYTHONPATH=. .venv/bin/python eval/uniformity/barbarik_gpap.py $(head -6 .gpap/tmp/eligible.txt) \
       $arm --epsilon 0.1 --eta 0.9 --delta 0.05 --out .experiments/barbarik/circ_strict.jsonl
 done
 PYTHONPATH=. .venv/bin/python eval/uniformity/barbarik_table.py .experiments/barbarik/circ.jsonl

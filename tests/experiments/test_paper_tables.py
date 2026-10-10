@@ -1519,3 +1519,29 @@ def test_a_narrower_end_to_end_cell_set_is_disclosed_not_assumed(tmp_path):
     assert "the end-to-end column stands on FEWER cells" in text, \
         "a narrower e2e cell set must be stated in the generated numbers, not left to the reader"
     assert "1 of 2" in text
+
+
+def test_every_table_generator_still_imports():
+    """Every module under eval/artifact/ imports.
+
+    `soft_price_tables.py` imported `tex_escape` from `paper_tables`, and removing that helper
+    with the LaTeX renderer broke it silently: nothing in the suite imported the supplementary
+    generators, so a repo-wide check for USERS of a symbol was the only thing standing between a
+    dead-code sweep and a broken script. This is that check, as a test rather than a habit.
+
+    Discovered by running it, not by reading: the dead-code scan had looked inside
+    `paper_tables.py` and found no remaining use, which is true and not the question."""
+    import importlib
+    import pkgutil
+
+    pkg = importlib.import_module("eval.artifact")
+    broken = []
+    for mod in pkgutil.iter_modules(pkg.__path__):
+        if mod.name.startswith("_"):
+            continue
+        try:
+            importlib.import_module(f"eval.artifact.{mod.name}")
+        except Exception as e:                           # noqa: BLE001 — report, never hide
+            broken.append(f"{mod.name}: {type(e).__name__}: {e}")
+    assert not broken, "modules under eval/artifact/ that no longer import:\n  " + \
+        "\n  ".join(broken)
