@@ -1387,3 +1387,132 @@ def test_the_table_generators_import_without_torch_or_numpy():
                          cwd=_REPO_ROOT, timeout=120)
     assert out.returncode == 0 and out.stdout.strip() == "ok", \
         f"a table generator pulls in a GPU dependency:\n{out.stderr[-2000:]}"
+
+
+# ------------------------------- the paper's absolute rate columns and the numbers its text quotes
+
+def test_the_rate_columns_quotient_is_the_ratio_column(tmp_path):
+    """The paper prints each side's ABSOLUTE rate where the generator prints their ratio, so the
+    two must be one claim: a geomean of quotients is the quotient of the geomeans. If this ever
+    parts, a table and the text beside it describe different cell sets and the identity that
+    makes the speedup readable off the rates is gone."""
+    import json as _json
+
+    from eval.artifact.paper_tables import rival_cms_family, rival_family
+
+    rows = [rrow("s386", sps=1e6, cms_sps=1e4), rrow("b12", sps=4e6, cms_sps=1e4)]
+    (tmp_path / "rivals_recurrent_rare.json").write_text(_json.dumps(rows))
+    v = rival_cms_family(str(tmp_path), "recurrent_rare", "rcs")
+    assert v["gm_gpap_sps"] == pytest.approx(2e6) and v["gm_cms_sps"] == pytest.approx(1e4)
+    assert v["gm_gpap_sps"] / v["gm_cms_sps"] == pytest.approx(v["gm"])
+    # and on the other clock, over its own cells
+    assert v["gm_gpap_e2e"] / v["gm_cms_e2e"] == pytest.approx(v["gm_e2e"])
+    assert v["n_rate"] == v["n_gm"] == 2
+
+    # Table 2 carries the same identity on the rivals' own metric
+    riv = [{"name": "b11", "variant": "raw", "rcs": {"unique_per_s": 100.0, "num_inputs": 40},
+            "gpap": {"unique_per_s_est": 1e4, "n_models": 10, "sps": 1e4, "support": 40}},
+           {"name": "b12", "variant": "raw", "rcs": {"unique_per_s": 400.0, "num_inputs": 40},
+            "gpap": {"unique_per_s_est": 1e4, "n_models": 10, "sps": 1e4, "support": 40}}]
+    (tmp_path / "rivals_q.json").write_text(_json.dumps({"rows": riv}))
+    w = rival_family(str(tmp_path), "q", "rcs")
+    assert w["gm_rival"] == pytest.approx(200.0) and w["gm_gpap"] == pytest.approx(1e4)
+    assert w["gm_gpap"] / w["gm_rival"] == pytest.approx(w["gm"])
+
+
+def test_a_rate_column_stands_on_exactly_the_ratios_own_cells(tmp_path):
+    """A rate geomean may not quietly widen the cell set the ratio beside it was computed over.
+    A CMSGen-zero cell has a GPAP rate and no ratio: folding it into the GPAP column alone would
+    raise our printed rate while leaving the ratio where it was, which is the one direction that
+    flatters us and the hardest to see in a finished table."""
+    import json as _json
+
+    from eval.artifact.paper_tables import rival_cms_family
+
+    rows = [rrow("a", sps=1e6, cms_sps=1e4),
+            # `impl` scales with the rate or `zero_search` reads the cell as a free support
+            # and screens it BEFORE the zero ledger — which is what this fixture first did.
+            rrow("b", sps=1e9, cms=0, impl=1e12, dec=1e11),
+            rrow("c", models=0, cms_sps=1e4)]            # we are silent: our loss, no ratio
+    (tmp_path / "rivals_recurrent_rare.json").write_text(_json.dumps(rows))
+    v = rival_cms_family(str(tmp_path), "recurrent_rare", "rcs")
+    assert (v["inf"], v["gpap0"], v["n_gm"]) == (1, 1, 1)
+    assert v["n_rate"] == 1, "the rate stands on the one cell with a ratio"
+    assert v["gm_gpap_sps"] == pytest.approx(1e6), "the 1e9 CMSGen-zero cell must not enter it"
+    assert v["gm_gpap_sps"] / v["gm_cms_sps"] == pytest.approx(v["gm"])
+
+
+def test_the_delivery_count_reads_the_request_off_the_row(tmp_path):
+    """"GPAP filled the request on 90 instances, CMSGen on 42" is not a rate and is in no
+    geomean, so it needs its own count — over the cells either tool scored on, with the request
+    taken from the row rather than assumed. A row that records no request is counted apart: "we
+    do not know" and "it fell short" are different claims about a tool."""
+    import json as _json
+
+    from eval.artifact.paper_tables import filled_request, rival_cms_family
+
+    rows = [rrow("a", models=50_000, cms=50_000, cms_n_requested=50_000),   # both filled
+            rrow("b", models=60_000, cms=10, cms_n_requested=50_000),       # overshoot still fills
+            rrow("c", models=7, cms=0, cms_n_requested=50_000),             # CMSGen-zero cell
+            rrow("d", models=40_000, cms=50_000)]                           # no request recorded
+    (tmp_path / "rivals_recurrent_rare.json").write_text(_json.dumps(rows))
+    v = rival_cms_family(str(tmp_path), "recurrent_rare", "rcs")
+    assert v["n_req"] == 50_000
+    assert v["full_gpap"] == 2 and v["full_cms"] == 1
+    assert v["full_unknown"] == 1, "the request-less row is named, not scored either way"
+    # the counts share ONE denominator: the cells either tool scored on
+    assert v["n"] == 4
+    # and the primitive is explicit about not knowing
+    assert filled_request({"cms_n_samples": 1, "gpap": {"n_models": 1}}) is None
+
+
+def test_a_published_number_is_checked_at_its_own_precision():
+    """`check_paper_numbers.py` compares what the PDF prints against what the generator derived.
+    A printed rate claims only its significant figures, so it is compared at those; a printed
+    COUNT has no precision to round to and must match exactly. Without the asymmetry the check
+    would either reject every rate or accept a wrong `n`."""
+    from eval.artifact.check_paper_numbers import agrees, sig_digits
+
+    assert (sig_digits("2.31e6"), sig_digits("1.10e5"), sig_digits("0.94"),
+            sig_digits("12899")) == (3, 3, 2, 5)
+    assert agrees("2.31e6", 2_305_714.0)[0], "anything rounding to 2.31e6 at 3 s.f. agrees"
+    assert not agrees("2.30e6", 2_305_714.0)[0], "the third figure is a claim and is checked"
+    assert agrees("1.59", 1.58869)[0] and not agrees("1.60", 1.58869)[0]
+    assert agrees(16, 16)[0] and not agrees(16, 17)[0], "a count is exact"
+    assert not agrees("2.31e6", None)[0], "a number the generator does not produce is a failure"
+
+
+def test_a_narrower_end_to_end_cell_set_is_disclosed_not_assumed(tmp_path):
+    """A row prints ONE `n` and TWO rate columns. They cover the same cells only while every
+    scored row carries both clocks: a row with no `sps_e2e` narrows the end-to-end geomean while
+    `n` goes on claiming the wider set, and a reader dividing the printed e2e rate by the printed
+    `n`-cell CMSGen rate would get a ratio over cells that were never compared. The published
+    campaign has no such row — which is exactly why the path needs a test rather than a reading."""
+    import os
+    import subprocess
+    import sys
+
+    from eval.artifact.paper_tables import rival_cms_family
+    from tests.conftest import REPO_ROOT
+
+    rows = [rrow("s386", sps=1e6, cms_sps=1e4),
+            # scored on the steady-state clock, and carrying NO end-to-end rate on either route
+            dict(rrow("b12", sps=2e6, cms_sps=1e4),
+                 gpap=dict(rrow("b12", sps=2e6)["gpap"], seeds=[{"sps": 2e6}]))]
+    (tmp_path / "rivals_recurrent_rare.json").write_text(json.dumps(rows))
+    v = rival_cms_family(str(tmp_path), "recurrent_rare", "rcs")
+    assert v["n_gm"] == v["n_rate"] == 2, "both cells have a steady-state ratio"
+    assert v["n_rate_e2e"] == 1, "only one carries an end-to-end rate"
+    assert v["gm_gpap_e2e"] / v["gm_cms_e2e"] == pytest.approx(v["gm_e2e"]), \
+        "the e2e rates must still quotient to the e2e ratio, over their own narrower set"
+
+    md = tmp_path / "R.md"
+    r = subprocess.run([sys.executable,
+                        os.path.join(REPO_ROOT, "eval", "artifact", "paper_tables.py"),
+                        "--rivals", str(tmp_path), "--out-md", str(md)],
+                       capture_output=True, text=True, cwd=REPO_ROOT, timeout=120)
+    assert r.returncode == 0, r.stderr
+    text = md.read_text()
+    assert "the end-to-end column stands on FEWER cells" in text, \
+        "a narrower e2e cell set must be stated in the generated numbers, not left to the reader"
+    assert "1 of 2" in text

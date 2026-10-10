@@ -225,6 +225,47 @@ def load(path):
     return json.load(open(path)) if os.path.isfile(path) else None
 
 
+def rate_gm_pair(pairs):
+    """Each side's own absolute rate geomean over ONE cell set, and how many cells that is.
+
+    Why a table may print two rates where the text quotes one speedup: a geomean of quotients
+    IS the quotient of the geomeans, so `ours / theirs` here reproduces the ratio column
+    exactly. That identity is the whole reason these rates are generated rather than typed off
+    a ratio -- the paper prints absolute rates, the text quotes the speedups, and neither can
+    drift from the other or from the cells both stand on. Pinned by
+    tests/experiments/test_paper_tables.py::test_the_rate_columns_quotient_is_the_ratio_column.
+
+    A pair is used only where BOTH sides are positive, which is the `ok` bucket's own condition,
+    so a rate column cannot stand on cells the ratio column does not."""
+    use = [(a, b) for a, b in pairs if a and b and a > 0 and b > 0]
+    return {"ours": gm([a for a, _ in use]), "theirs": gm([b for _, b in use]), "n": len(use)}
+
+
+def filled_request(r, gpap_models=None):
+    """`(gpap_filled, cms_filled)` for one cell: did each tool deliver the samples it was asked
+    for? `None` where the row records no request.
+
+    THE REQUEST IS READ OFF THE ROW (`cms_n_requested`), never assumed. Both tools are handed the
+    same one by the protocol, and a campaign that changes it must move this count with it rather
+    than leave the text quoting a number from the last one. "Filled" is `>=`: `--n-time` overshoots
+    to the end of a chunk, so a run that delivered more than it was asked still filled the request.
+    A row with no request is counted apart and never as a shortfall -- "we do not know" and "it
+    fell short" are different claims about a tool."""
+    req = r.get("cms_n_requested")
+    if not req:
+        return None
+    g = (r.get("gpap") or {}).get("n_models") if gpap_models is None else gpap_models
+    return ((g or 0) >= req, (r.get("cms_n_samples") or 0) >= req)
+
+
+def sig3(x):
+    """Three significant figures, scientific at or above 1,000 -- the paper's own rate format,
+    so a generated number and a printed one are compared as the same string."""
+    if x is None:
+        return "—"
+    return f"{x:.3g}" if x < 1000 else f"{x:.2e}"
+
+
 # ------------------------------------------------------------------ GPAP vs CMSGen
 
 def _enc(r):
@@ -324,12 +365,20 @@ def cms_family(d, stem, encoder):
             both_zero.append(k)
     n_inf, n_g0, n_b0 = len(cms_zero), len(gpap_zero), len(both_zero)
     gm_vals = [r["ratio"] for r in finite.values()]
+    # The cells either tool scored on -- ONE denominator for both delivery counts.
+    scored_cells = list(finite.values()) + [cells[k] for k in cms_zero + gpap_zero]
+    filled = [filled_request(r, r.get("n_models")) for r in scored_cells]
 
     def _all(pred):
         """geomean over cells that pass `pred`, used only for the size-of-the-error caveats."""
         return gm([r["ratio"] for k, r in cells.items()
                    if pred(k) and r.get("ratio") and math.isfinite(r["ratio"])
                    and scored(r, "n_models") and scored(r, "cms_n_samples")])
+
+    # Absolute rates, the same four fields the rival-stage reader returns, so ONE renderer
+    # prints both kinds of row. A bench row names its own rate `gpap_sps`, not `sps`.
+    _ss = rate_gm_pair((r.get("gpap_sps"), r.get("cms_sps")) for r in finite.values())
+    _ee = rate_gm_pair((r.get("gpap_sps_e2e"), r.get("cms_sps_e2e")) for r in finite.values())
 
     return {
         "encoder": encoder, "cells": len(rows), "inst": len(cells),
@@ -341,6 +390,15 @@ def cms_family(d, stem, encoder):
         "gm_e2e": gm([r.get("ratio_e2e") for r in finite.values()]),
         "pre_frac": (statistics.median([_pre_frac(r) for r in finite.values()
                                         if _pre_frac(r) is not None] or [0.0])),
+        # absolute rates, the same four fields the rival-stage reader returns, so ONE renderer
+        # prints both kinds of row (a bench row names its own rate `gpap_sps`)
+        "gm_gpap_sps": _ss["ours"], "gm_cms_sps": _ss["theirs"], "n_rate": _ss["n"],
+        "gm_gpap_e2e": _ee["ours"], "gm_cms_e2e": _ee["theirs"], "n_rate_e2e": _ee["n"],
+        "n_req": next((r.get("cms_n_requested") for r in scored_cells
+                       if r.get("cms_n_requested")), None),
+        "full_gpap": sum(1 for f in filled if f and f[0]),
+        "full_cms": sum(1 for f in filled if f and f[1]),
+        "full_unknown": sum(1 for f in filled if f is None),
         "free": len(free), "free_names": sorted(free),
         "vac": len(vac), "vac_names": sorted(vac),
         # How many instances actually ENTER the geomean — where CMSGen scores zero on most of a
@@ -557,7 +615,10 @@ def rival_family(d, stem, key):
     # than a tool scoring zero or the rival failing. cells = n + rival=0 + GPAP=0 + failed + excl.
     excl_buckets = ("vacuous", "unsat", "tiny", "free", "misaligned", "nomeas", "both0",
                     "gpap_error")
+    # absolute unique/s per side over the `ok` cells; their quotient is `gm` (`rate_gm_pair`)
+    uq = rate_gm_pair((ours, rate) for _n, _v, b, ours, rate in cells if b == "ok")
     return {"cells": len(cells), "gm": gm(ratios), "n": len(ratios) + zero + gzero,
+            "gm_gpap": uq["ours"], "gm_rival": uq["theirs"], "n_rate": uq["n"],
             # a straddling cell is a TIE: neither a win nor a loss (`ties` says how many)
             "wins": sum(1 for x, _, _, st in okc if x >= 1 and not st) + zero,
             "ties": ties, "errors": n.get("error", 0),
@@ -737,14 +798,34 @@ def rival_cms_family(d, stem, key):
     finite = {(name, v): g / c for name, v, bucket, g, c in cells if bucket == "ok"}
     measured = {k: r for k, r in seen.items() if _gpap_measured(r) is not None}
     n_inf, n_g0, n_b0 = n.get("cms0", 0), n.get("gpap0", 0), n.get("both0", 0)
-    e2e, pre = [], []
+    # THE PAPER'S RATE COLUMNS: each side's own geomean over the `ok` cells, on both clocks.
+    # `gm_gpap_sps / gm_cms_sps` is `gm` and `gm_gpap_e2e / gm_cms_e2e` is `gm_e2e` (see
+    # `rate_gm_pair`), so a table may print the rates and the text the speedups.
+    ss_gm = rate_gm_pair((g, c) for _n, _v, b, g, c in cells if b == "ok")
+    e2e, pre, e2e_pairs = [], [], []
     for k in finite:
         g, r = seen[k]["gpap"], seen[k]
         ge = _gpap_e2e(g)
         if ge and r.get("cms_sps_e2e"):
             e2e.append(ge / r["cms_sps_e2e"])
+            e2e_pairs.append((ge, r["cms_sps_e2e"]))
         if ge and g.get("sps"):
             pre.append(max(0.0, 1.0 - ge / g["sps"]))     # (wall_total - timed) / wall_total
+    e2e_gm = rate_gm_pair(e2e_pairs)
+    # Did each tool FILL the request, on the cells either of them scored on? A rate says how
+    # fast a tool sampled; this says whether it finished the job at all, which is the other half
+    # of a delivered-samples claim and is in no geomean (a tool that delivered 1 sample and a
+    # tool that delivered all 50,000 both have a rate).
+    full_g = full_c = full_unk = 0
+    for name, v, bucket, _g, _c in cells:
+        if bucket not in ("ok", "cms0", "gpap0"):
+            continue
+        filled = filled_request(seen[(name, v)])
+        if filled is None:
+            full_unk += 1
+        else:
+            full_g += filled[0]
+            full_c += filled[1]
 
     def _all(pred):
         """geomean over measured cells that pass `pred` — the size-of-the-error caveats only."""
@@ -763,6 +844,13 @@ def rival_cms_family(d, stem, key):
         "gm": gm(list(finite.values())), "gm_all": _all(lambda k: True),
         "gm_withfree": _all(lambda k: k not in vac),
         "gm_e2e": gm(e2e), "pre_frac": statistics.median(pre) if pre else 0.0,
+        # absolute rates, each over the cells of the ratio beside it
+        "gm_gpap_sps": ss_gm["ours"], "gm_cms_sps": ss_gm["theirs"], "n_rate": ss_gm["n"],
+        "gm_gpap_e2e": e2e_gm["ours"], "gm_cms_e2e": e2e_gm["theirs"],
+        "n_rate_e2e": e2e_gm["n"],
+        "n_req": next((r.get("cms_n_requested") for r in measured.values()
+                       if r.get("cms_n_requested")), None),
+        "full_gpap": full_g, "full_cms": full_c, "full_unknown": full_unk,
         "free": n.get("free", 0), "free_names": sorted(names.get("free", [])),
         "vac": len(vac), "vac_names": sorted(vac),
         "unsat": n.get("unsat", 0),
@@ -872,6 +960,14 @@ def uniformity(paths):
 
 
 # ------------------------------------------------------------------ barbarik
+
+#: What a CM_test Accept costs, per certified setting: (rounds, samples in all, samples drawn
+#: from the SAMPLER UNDER TEST). The two totals differ by the one reference draw per round, and
+#: BOTH are printed, because "1,872 samples" and "1,836 samples" are one run counted two ways
+#: and the gap between them has been read as a discrepancy. The paper quotes the second.
+BARBARIK_COST = {(0.3, 1.8, 0.1): (36, 1_872, 1_836),       # 36 x (1 + 1 + 50)
+                 (0.1, 0.9, 0.05): (477, 70_596, None)}     # breakdown not re-derived here
+
 
 def barbarik(paths):
     """The standard certificate, per sampler under test.
@@ -1153,11 +1249,21 @@ def build(args):
          "steady-state column only for the large-n regime, saying which. (Circuit ENCODING is "
          "in neither: it is reported per instance as `t_enc` and belongs to the encoder, not "
          "the sampler.)", "",
+         "**The absolute rate columns are what the paper prints.** Each is that side's own "
+         "geometric mean over the very cells the ratio beside it stands on, so `GPAP s/s` / "
+         "`CMSGen s/s` IS `GPAP/CMSGen` and `GPAP e2e` / `CMSGen e2e` is `e2e` — a geomean of "
+         "quotients is the quotient of the geomeans. A table may therefore print rates where "
+         "the text quotes speedups without the two being separate claims. `filled` counts the "
+         "cells where each tool delivered the whole sample request (read off the row, "
+         "`cms_n_requested`), over the same instances `wins` is counted over: a rate says how "
+         "fast a tool sampled, this says whether it finished the job.", "",
          "| instance set | depth | pins |" + (" enc |" if show_enc else "")
-         + " inst | n | GPAP/CMSGen | e2e | pre% | wins | CMSGen=0 | GPAP=0 | excluded |"
+         + " inst | n | CMSGen s/s | GPAP s/s | GPAP e2e | GPAP/CMSGen | e2e | pre% "
+           "| wins | filled G/C | CMSGen=0 | GPAP=0 | excluded |"
          + (" ref GPU |" if ref else ""),
          "|---|---|---|" + ("---|" if show_enc else "")
-         + "---:|---:|---:|---:|---:|---:|---:|---:|---:|" + ("---:|" if ref else "")]
+         + "---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|"
+         + ("---:|" if ref else "")]
     for (stem, enc), label, depth, tgt in t1:
         v = cms[(stem, enc)]
         exp = expected.get(stem.split("-")[0], v["inst"])
@@ -1171,9 +1277,13 @@ def build(args):
         if v["gm"] and v["n_gm"] < 3:
             gms += f" ⚠n={v['n_gm']}"
         e2e = f"{v['gm_e2e']:,.1f}x" if v.get("gm_e2e") else "—"
+        unk = f" ⚠{v['full_unknown']} no request" if v.get("full_unknown") else ""
         M.append(f"| {label}{mark} | {depth} | {tgt} |" + (f" {enc or '—'} |" if show_enc else "")
-                 + f" {v['inst']} | {v['n_gm']} | {gms} | {e2e} "
-                 f"| {100 * v.get('pre_frac', 0):.0f}% | {v['wins']}/{v['n']} | {v['inf']} "
+                 + f" {v['inst']} | {v['n_gm']} | {sig3(v.get('gm_cms_sps'))} "
+                 f"| {sig3(v.get('gm_gpap_sps'))} | {sig3(v.get('gm_gpap_e2e'))} "
+                 f"| {gms} | {e2e} "
+                 f"| {100 * v.get('pre_frac', 0):.0f}% | {v['wins']}/{v['n']} "
+                 f"| {v.get('full_gpap', 0)}/{v.get('full_cms', 0)}{unk} | {v['inf']} "
                  f"| {v['gpap0']} | {v.get('excl', 0)} |{refs}")
     # THE EXCLUDED COLUMN, ITEMISED: prose under the table, from the lists the count sums over.
     excl_lines = []
@@ -1223,13 +1333,17 @@ def build(args):
     pa_rare = _pa_range([_rival_rows(args.rivals, st) or {}
                          for st, _k, _r, pr in RIVALS if "rare" in st])
     M += ["", "## Table 2 — GPAP vs the GPU gradient samplers", "",
-          "| rival | task | cells | n | GPAP/rival | wins | ties | rival=0 | GPAP=0 "
-          "| rival failed | excluded |",
-          "|---|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|"]
+          "The two rate columns are each side's own geomean over the `n` cells, so "
+          "`GPAP uniq/s` / `rival uniq/s` IS `GPAP/rival` — the same identity as Table 1's.",
+          "",
+          "| rival | task | cells | n | rival uniq/s | GPAP uniq/s | GPAP/rival | wins | ties "
+          "| rival=0 | GPAP=0 | rival failed | excluded |",
+          "|---|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|"]
     for stem, _, rival, proto in RIVALS:
         v = riv.get(stem)
         if not v:
-            M.append(f"| {rival} | {proto} | — | — | not run | — | — | — | — | — | — |")
+            M.append(f"| {rival} | {proto} | — | — | — | — | not run "
+                     f"| — | — | — | — | — | — |")
             continue
         gs = f"{v['gm']:,.1f}x" if v["gm"] else "—"
         # `n` in Table 1 is the geomean's instance count and EXCLUDES the zero buckets; here
@@ -1237,7 +1351,8 @@ def build(args):
         n_gm_ok = v["n"] - v["zero"] - v["gpap0"]
         if v["gm"] and n_gm_ok < 3:
             gs += f" ⚠n={n_gm_ok}"
-        M.append(f"| {rival} | {proto} | {v['cells']} | {n_gm_ok} | {gs} | "
+        M.append(f"| {rival} | {proto} | {v['cells']} | {n_gm_ok} "
+                 f"| {sig3(v.get('gm_rival'))} | {sig3(v.get('gm_gpap'))} | {gs} | "
                  f"{v['wins']}/{v['n']} | {v.get('ties', 0)} | {v['zero']} | {v['gpap0']} "
                  f"| {v['errors']} | {v.get('excl', 0)} |")
     excl_lines = []
@@ -1412,8 +1527,11 @@ def build(args):
         p = barb["params"]
         n_el = len(barb["eligible"])
         setting = {(0.3, 1.8, 0.1): "the parameters CMSGen's own authors certify at (FMCAD'21 "
-                                    "Table I): 36 rounds x (1 + 1 + 50) = **1,872 samples** for "
-                                    "an Accept, per-round accept band **[0.05, 0.95]**",
+                                    "Table I): 36 rounds x (1 + 1 + 50) = **1,872 samples** drawn "
+                                    "in all for an Accept, **1,836** of them from the sampler "
+                                    "under test (the one reference draw per round is the "
+                                    "difference, and the paper quotes the 1,836), per-round "
+                                    "accept band **[0.05, 0.95]**",
                    (0.1, 0.9, 0.05): "barbarik's own default: 477 rounds, **70,596 samples** for "
                                      "an Accept, per-round bands about +-0.21"
                    }.get((p["epsilon"], p["eta"], p["delta"]), "a non-standard setting")
@@ -1938,6 +2056,145 @@ def build(args):
              "against GPAP's 3-seed median: read them as orders of magnitude, not constants.")
     M += ["", "## Caveats that MUST appear in the text", ""] + [f"* {c}" for c in C]
 
+    # ============================================================ what the paper's TEXT quotes
+    # Every number the paper states outside a table cell, derived here rather than by hand off a
+    # printed table. A hand-derived number cannot be re-checked after a campaign moves a row --
+    # which is exactly how a paper ends up quoting a speedup no surviving data supports.
+    t1_rows = [(cms[k], label, depth, tgt) for k, label, depth, tgt in t1]
+    # THE PROTOCOL'S OWN ROWS, by where they came from — not by which fields they happen to
+    # carry. Selecting on `n_req` instead made every bullet below vanish on a stage that records
+    # no request, and formatted the empty set as a number.
+    prot = [cms[k] for k, *_ in t1 if str(k[0]).startswith("rivals:")]
+    reqs = sorted({v["n_req"] for v in prot if v.get("n_req")})
+    pre = [v["pre_frac"] for v in prot if v.get("pre_frac")]
+    impl = [prop[k] for k, *_ in t1 if prop.get(k)]
+    irate = [p["gpap"] for p in impl if p.get("gpap")]
+    N = {
+        "sample_request": reqs[0] if len(reqs) == 1 else (reqs or None),
+        "scored_instances": sum(v["n"] for v in prot),
+        "filled_request_gpap": sum(v.get("full_gpap", 0) for v in prot),
+        "filled_request_cms": sum(v.get("full_cms", 0) for v in prot),
+        "filled_request_unknown": sum(v.get("full_unknown", 0) for v in prot),
+        "ratio_ss_min": min((v["gm"] for v in prot if v.get("gm")), default=None),
+        "ratio_ss_max": max((v["gm"] for v in prot if v.get("gm")), default=None),
+        "ratio_e2e_min": min((v["gm_e2e"] for v in prot if v.get("gm_e2e")), default=None),
+        "ratio_e2e_max": max((v["gm_e2e"] for v in prot if v.get("gm_e2e")), default=None),
+        "pre_frac_min": min(pre, default=None), "pre_frac_max": max(pre, default=None),
+        # Table 3 across its rows: the rate ratio barely moves, which is the section's argument
+        "impl_ratio_gm": gm([p["ratio"] for p in impl]),
+        "impl_rate_min": min(irate, default=None), "impl_rate_max": max(irate, default=None),
+        "impl_rate_spread": (max(irate) / min(irate)) if irate else None,
+    }
+    bullets = []
+    if isinstance(N["sample_request"], int):
+        bullets.append(f"sample request **{N['sample_request']:,}** per instance, on both tools")
+    elif N["sample_request"]:
+        bullets.append("the rows DISAGREE on the sample request: "
+                       + ", ".join(f"{q:,}" for q in N["sample_request"])
+                       + " — the delivery counts below pool two protocols")
+    if N["scored_instances"]:
+        bullets.append(
+            f"of the **{N['scored_instances']}** instances where either sampler emits, GPAP "
+            f"filled the whole request on **{N['filled_request_gpap']}**, CMSGen on "
+            f"**{N['filled_request_cms']}**"
+            + (f" ({N['filled_request_unknown']} of them record no request, so they are in "
+               f"neither count)" if N["filled_request_unknown"] else ""))
+    if N["ratio_ss_min"] and N["ratio_e2e_min"]:
+        bullets.append(
+            f"speedup over CMSGen: **{N['ratio_ss_min']:,.1f}x–{N['ratio_ss_max']:,.0f}x** steady "
+            f"state, **{N['ratio_e2e_min']:,.1f}x–{N['ratio_e2e_max']:,.0f}x** end to end")
+    # A row prints ONE `n` and TWO rate columns. They are the same cell set only while every
+    # scored row carries both clocks; a row missing `sps_e2e` silently narrows the end-to-end
+    # column while `n` goes on claiming the wider set. Say so rather than let the reader assume.
+    split = [(label, tgt, v["n_gm"], v["n_rate_e2e"]) for v, label, _d, tgt in t1_rows
+             if v.get("n_rate_e2e") is not None and v["n_rate_e2e"] != v["n_gm"]]
+    if split:
+        bullets.append("⚠ the end-to-end column stands on FEWER cells than the row's `n`: "
+                       + "; ".join(f"{lb} ({tg}) {e2e} of {n}" for lb, tg, n, e2e in split)
+                       + " — those rows carry no `sps_e2e` on every scored cell, so the two "
+                         "rate columns are not over one set and `n` describes the wider one")
+    if N["pre_frac_min"]:
+        bullets.append(f"preparation is a median **{100 * N['pre_frac_min']:.0f}–"
+                       f"{100 * N['pre_frac_max']:.0f}%** of GPAP's end-to-end wall across "
+                       f"the rows")
+    if N["impl_rate_min"] and N["impl_ratio_gm"]:
+        bullets.append(
+            f"GPAP's propagation rate spans **{N['impl_rate_min']:.3g}–{N['impl_rate_max']:.3g}** "
+            f"impl/s, so the slowest row is within **{N['impl_rate_spread']:.2f}x** of the "
+            f"fastest, and the rate ratio's geomean over the rows is "
+            f"**{N['impl_ratio_gm']:,.0f}x** CMSGen's")
+    if bullets:
+        M += ["", "## Numbers the paper's text quotes", "",
+              "Derived here, not by hand off the tables above, so a campaign that moves a row "
+              "moves these with it. `eval/artifact/check_paper_numbers.py` compares them "
+              "against what the submitted PDF prints.", ""] + [f"* {b}" for b in bullets]
+
+    if getattr(args, "out_json", None):
+        _bp = (barb or {}).get("params") or {}
+        _bcost = BARBARIK_COST.get((_bp.get("epsilon"), _bp.get("eta"), _bp.get("delta")),
+                                   (None, None, None))
+        # THE CONTRACT with the paper: one machine-readable file holding every published number,
+        # so checking the PDF is a diff and not a re-reading. Shapes may differ between the
+        # generated table and the typeset one (the paper fits its own columns); the NUMBERS may
+        # not.
+        doc = {
+            "generated": time.strftime("%Y-%m-%d %H:%M"), "commit": commit,
+            "engine": cores, "gpu": prov.get("gpu"), "cpu": prov.get("cpu"),
+            "cms_patched": prov.get("patched"),
+            "table1": [{"set": label, "target": tgt, "depth": depth, "n": v["n_gm"],
+                        "cms_sps": v.get("gm_cms_sps"), "gpap_sps": v.get("gm_gpap_sps"),
+                        "gpap_sps_e2e": v.get("gm_gpap_e2e"),
+                        "cms_sps_e2e": v.get("gm_cms_e2e"),
+                        "ratio_ss": v.get("gm"), "ratio_e2e": v.get("gm_e2e"),
+                        # how many cells each printed rate stands on: equal to `n` while every
+                        # scored row carries both clocks, and the thing to check when it is not
+                        "n_rate": v.get("n_rate"), "n_rate_e2e": v.get("n_rate_e2e"),
+                        "pre_frac": v.get("pre_frac"),
+                        "wins": v["wins"], "win_denom": v["n"], "cms_zero": v["inf"],
+                        "gpap_zero": v["gpap0"], "excluded": v.get("excl", 0),
+                        "filled_gpap": v.get("full_gpap"), "filled_cms": v.get("full_cms")}
+                       for v, label, depth, tgt in t1_rows],
+            "table2": [{"rival": rival, "task": proto, "n": riv[stem]["n"] - riv[stem]["zero"]
+                        - riv[stem]["gpap0"],
+                        "rival_unique_per_s": riv[stem].get("gm_rival"),
+                        "gpap_unique_per_s": riv[stem].get("gm_gpap"),
+                        "ratio": riv[stem].get("gm"), "n_rate": riv[stem].get("n_rate"),
+                        "wins": riv[stem]["wins"],
+                        "win_denom": riv[stem]["n"], "ties": riv[stem].get("ties", 0),
+                        "rival_zero": riv[stem]["zero"], "failed": riv[stem]["errors"],
+                        "excluded": riv[stem].get("excl", 0),
+                        "small_grant_gm": riv[stem].get("gm_small"),
+                        "small_grant_n": len(riv[stem].get("small_grant") or []),
+                        "rest_gm": riv[stem].get("gm_rest"),
+                        "rest_n": riv[stem].get("n_rest")}
+                       for stem, _k, rival, proto in RIVALS if riv.get(stem)],
+            "table3": [{"set": label, "target": tgt, "depth": depth, "n": prop[k]["n"],
+                        "cms_impl_per_s": prop[k]["cms"], "gpap_impl_per_s": prop[k]["gpap"],
+                        "cms_impl_per_sample": prop[k]["cper"],
+                        "gpap_impl_per_sample": prop[k]["gper"],
+                        "work_ratio": prop[k]["work"], "impl_ratio": prop[k]["ratio"]}
+                       for k, label, depth, tgt in t1 if prop.get(k)],
+            "text": N,
+            # The paper's uniformity claim is PROSE, not a table, so these are the numbers it
+            # quotes there: the eligible set after the control's own screen, and each arm's
+            # verdicts. `pipe:circuit` is the shipped default; `gpap:b8` is the pinned config.
+            "uniformity": ({
+                "params": barb["params"],
+                "rounds": _bcost[0], "samples_total": _bcost[1],
+                "samples_under_test": _bcost[2],
+                "eligible": len(barb["eligible"]),
+                "control_rejected": len(barb["control_rejected"]),
+                "arms": {k: {"accept": v["accept"], "reject": v["reject"],
+                             "no_verdict": v["error"], "n": v["n"]}
+                         for k, v in barb["summary"].items()},
+            } if barb else None),
+        }
+        os.makedirs(os.path.dirname(args.out_json) or ".", exist_ok=True)
+        with open(args.out_json, "w") as fh:   # noqa: SIM115
+            json.dump(doc, fh, indent=2, sort_keys=False)
+            fh.write("\n")
+        print(f"wrote {args.out_json}")
+
     if args.out_md:
         os.makedirs(os.path.dirname(args.out_md) or ".", exist_ok=True)
         open(args.out_md, "w").write("\n".join(M) + "\n")
@@ -1969,6 +2226,9 @@ def main():
     ap.add_argument("--soft", default=None)
     ap.add_argument("--out-tex", default=None)
     ap.add_argument("--out-md", default=None)
+    ap.add_argument("--out-json", default=None,
+                    help="every published number, machine-readable: the contract "
+                         "check_paper_numbers.py holds the paper to")
     args = ap.parse_args()
     if not (args.cmsgen or args.rivals):
         ap.error("nothing to read: pass --rivals (the campaign) and/or --cmsgen (supplementary)")
