@@ -225,13 +225,26 @@ step_tables() {
     # completion and print a publishable verdict about nothing.
     [ -n "$(ls "$data"/rivals_*.json 2>/dev/null)" ] || {
         fail "no rivals_*.json in $data — the tables need the campaign's rows"; return 1; }
+    # THE ROWS MUST BE THE ROWS. Without this, a row edited by hand regenerates a table and the
+    # publishability gate still says "Publishable" — about rows that are no longer the published
+    # ones. It lived only in `$GPAP_RESULTS/paper/regenerate.sh`, outside any repository, so a
+    # reviewer regenerating from the shipped rows never got the check at all. Absent manifest is
+    # not a failure: a fresh campaign's own rows have none until one is written.
+    if [ -f "$data/MANIFEST.sha256" ]; then
+        ( cd "$data" && sha256sum --quiet -c MANIFEST.sha256 ) \
+            || { fail "$data does not match its MANIFEST.sha256 — these are not the frozen rows,
+       so every table below would describe something else. Restore them, or regenerate
+       the manifest deliberately if you meant to change a row."; return 1; }
+        say "the rows match $data/MANIFEST.sha256"
+    else
+        say "no MANIFEST.sha256 in $data — nothing pins these rows (fine for your own campaign)"
+    fi
     mkdir -p "$out"
     say "tables 1/2/3 (+4b where the Barbarik rows are present) -> $out"
     local bar=("$data"/barbarik/circ_abc_*.jsonl)
     local barargs=(); [ -e "${bar[0]}" ] && barargs=(--barbarik "${bar[@]}")
     $PY eval/artifact/paper_tables.py --rivals "$data" ${barargs[@]+"${barargs[@]}"} \
-        --out-md "$out/RESULTS.md" --out-tex "$out/tables.tex" \
-        --out-json "$out/paper_numbers.json" | tail -3 \
+        --out-md "$out/RESULTS.md" --out-json "$out/paper_numbers.json" | tail -3 \
         || fail "the table generator failed over $data"
     # Does the PAPER still say what these rows say? The paper's tables are typeset by hand, so
     # nothing else compares them: without this step a campaign can move a number under a
@@ -258,8 +271,8 @@ step_tables() {
     $PY eval/eval_plots.py "$data" --out-dir "$out/plots" 2>&1 | tail -4 \
         || echo "(figures skipped — eval_plots.py needs matplotlib; the tables above do not)"
     echo
-    echo "wrote $out/{RESULTS.md,tables.tex,paper_numbers.json,VERIFICATION.txt,"
-    echo "              emission_audit.txt,PAPER_NUMBERS.txt,plots/}"
+    echo "wrote $out/{RESULTS.md,paper_numbers.json,VERIFICATION.txt,emission_audit.txt,"
+    echo "              PAPER_NUMBERS.txt,plots/}"
 }
 
 # ---------------------------------------------------------------------------- GPU tiers
