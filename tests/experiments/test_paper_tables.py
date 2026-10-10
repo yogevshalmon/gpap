@@ -171,8 +171,10 @@ def test_a_cell_whose_sign_is_inside_gpap_seed_band_is_a_tie_not_a_win(tmp_path)
 
 
 def test_the_circuit_variant_sentence_is_read_off_the_rows(tmp_path):
-    """The methods sentence on circuit variants is read off the rows: one variant on every row
-    names it and says the raw-netlist axis was not run; two variants say the tie-break applied."""
+    """The sentence naming which circuit file each side got is read off the rows, never fixed:
+    one variant everywhere names it, two variants say the tie-break applied. (WHY the asymmetry
+    is left uncorrected is standing policy and lives in docs/papers/tacas-27/README.md; which
+    variant actually ran is per-campaign data and belongs in the output.)"""
     import json as _json
     import types
 
@@ -183,13 +185,13 @@ def test_the_circuit_variant_sentence_is_read_off_the_rows(tmp_path):
         out = tmp_path / "r.md"
         args = types.SimpleNamespace(cmsgen=None, cmsgen_ref=None, rivals=str(tmp_path),
                                      uniformity=[], barbarik=[], recheck=None, soft=None,
-                                     out_md=str(out), out_tex=None)
+                                     out_md=str(out), out_json=None)
         paper_tables.build(args)
         return out.read_text()
 
     one = render([dict(rrow("c432"), variant="abc")])
     assert "whichever suits it" not in one
-    assert "`variant: abc` on every row" in one and "raw-netlist axis was not run" in one
+    assert "`variant: abc` on every row" in one
     two = render([dict(rrow("c432"), variant="abc"), dict(rrow("c432"), variant="raw")])
     assert "whichever suits it" in two
 
@@ -209,30 +211,11 @@ def test_a_rival_failure_is_described_as_a_budget_statement(tmp_path):
     out = tmp_path / "r.md"
     args = types.SimpleNamespace(cmsgen=None, cmsgen_ref=None, rivals=str(tmp_path),
                                  uniformity=[], barbarik=[], recheck=None, soft=None,
-                                 out_md=str(out), out_tex=None)
+                                 out_md=str(out), out_json=None)
     paper_tables.build(args)
     md = out.read_text()
     assert "cannot process" not in md
     assert "statement about OUR budget" in md and "re-runnable at a longer one" in md
-
-
-def test_the_markdown_and_latex_ledger_prose_state_the_same_sum():
-    """Every bucket the tables print appears in both the Markdown and the LaTeX ledger formula."""
-    import inspect
-
-    from eval.artifact import paper_tables
-
-    src = inspect.getsource(paper_tables)
-    # Table 1: inst = n + CMSGen=0 + GPAP=0 + excluded, in both emitters
-    assert "`inst` = `n` + CMSGen=0 + GPAP=0 + excluded" in src, \
-        "the Markdown ledger formula is short of the printed columns"
-    assert r"\text{C}{=}0 + \text{G}{=}0 + \text{excl.}$" in src, \
-        "the LaTeX ledger formula is short of the printed columns"
-    # Table 2: cells = n + rival=0 + GPAP=0 + rival failed + excluded, in both emitters
-    assert "`cells` = `n` + rival=0 + GPAP=0 + rival failed + excluded" in src
-    assert r"\text{R}{=}0 + \text{G}{=}0 + \text{failed} + \text{excl.}$" in src
-    # the algebraic-identity caveat is in both Table 3 texts
-    assert src.count("ALGEBRAIC") >= 2, "the Table 3 caveat is in one emitter only"
 
 
 def test_tiny_solution_space_is_screened_in_BOTH_tables(tmp_path):
@@ -1046,8 +1029,8 @@ def test_the_generator_survives_a_stage_whose_every_cell_is_degenerate(tmp_path)
     (riv / "rivals_demotic_native.json").write_text(json.dumps({"rows": [rrow("c432")]}))
     root = _REPO_ROOT
     r = subprocess.run([sys.executable, os.path.join(root, "eval", "artifact", "paper_tables.py"),
-                        "--rivals", str(riv), "--out-md", str(tmp_path / "R.md"),
-                        "--out-tex", str(tmp_path / "T.tex")], capture_output=True, text=True)
+                        "--rivals", str(riv), "--out-md", str(tmp_path / "R.md")],
+                       capture_output=True, text=True)
     assert r.returncode == 0, r.stderr
     md = (tmp_path / "R.md").read_text()
     table1 = md.split("## Table 1")[1].split("## Table 2")[0]
@@ -1057,7 +1040,6 @@ def test_the_generator_survives_a_stage_whose_every_cell_is_degenerate(tmp_path)
     rare = next(ln for ln in t1 if "| rare |" in ln)
     assert "| — |" in rare and "CMSGen=0" not in rare, rare   # no geomean, and not blamed on CMSGen
     assert "no **search at all**" in md or "no search at all" in md
-    assert "ISCAS-85" in (tmp_path / "T.tex").read_text()
 
 
 def test_table_2_has_one_clock_the_rivals_own_and_no_end_to_end_column(tmp_path):
@@ -1080,18 +1062,16 @@ def test_table_2_has_one_clock_the_rivals_own_and_no_end_to_end_column(tmp_path)
     assert v["n"] == 2 and v["gm"] == pytest.approx((1e3 * 2e2) ** 0.5)
     assert v["vacuous"] == 1
     assert not any(k.startswith(("gm_e2e", "e2e", "startup")) for k in v), sorted(v)
-    md, tex = tmp_path / "R.md", tmp_path / "T.tex"
+    md = tmp_path / "R.md"
     subprocess.run([sys.executable, os.path.join(REPO_ROOT, "eval", "artifact", "paper_tables.py"),
-                    "--rivals", str(tmp_path), "--out-md", str(md), "--out-tex", str(tex)],
+                    "--rivals", str(tmp_path), "--out-md", str(md)],
                    check=True, capture_output=True, cwd=REPO_ROOT)
     t2 = md.read_text().split("## Table 2")[1].split("## Table 3")[0].split("\n## ")[0]
     header = next(ln for ln in t2.splitlines() if ln.startswith("| rival | task"))
     assert "| e2e |" not in header and "| GPAP/rival | wins |" in header
     assert "paper set" not in header, "one population per row (2026-09-07)"
-    assert "NO end-to-end column" in t2, "the table must say why the column is absent"
-    tex_hdr = next(ln for ln in tex.read_text().splitlines()
-                   if ln.strip().startswith("rival & task & cells"))
-    assert "e2e" not in tex_hdr
+    assert "no end-to-end column here by rule" in t2, \
+        "the table must say the column is absent on purpose, not by omission"
     t1 = md.read_text().split("## Table 1")[1].split("## Table 2")[0]
     assert "| e2e |" in next(ln for ln in t1.splitlines() if ln.startswith("| instance set")), \
         "Table 1 keeps its end-to-end column: both of ITS walls are the same kind of thing"
@@ -1216,9 +1196,10 @@ def test_a_nearly_free_cell_is_screened_like_a_free_one():
     assert zero_search(exact_zero), "the original exact-zero rule must still fire"
 
 
-def test_the_emitted_latex_ledger_sums_to_the_cell_count(tmp_path):
-    """Every ledger row of the emitted LaTeX sums to its cell count. This parses the file rather
-    than the dicts behind it, because the LaTeX and Markdown emitters can drift apart."""
+def test_the_emitted_ledger_sums_to_the_cell_count(tmp_path):
+    """Every ledger row of the emitted tables sums to its cell count. This parses the FILE rather
+    than the dicts behind it: the dicts are tested elsewhere, and what this catches is a renderer
+    printing the wrong column into the right place."""
     import json
     import re
     import subprocess
@@ -1232,56 +1213,78 @@ def test_the_emitted_latex_ledger_sums_to_the_cell_count(tmp_path):
     rows[6]["gpap"]["unsat_at_T"] = True                                 # ...and proved UNSAT
     for stem in ("demotic_native", "recurrent_table"):
         (tmp_path / f"rivals_{stem}.json").write_text(json.dumps({"rows": rows}))
-    tex = tmp_path / "t.tex"
+    md = tmp_path / "R.md"
     import os
 
     from tests.conftest import REPO_ROOT
     subprocess.run([sys.executable, os.path.join(REPO_ROOT, "eval", "artifact", "paper_tables.py"),
-                    "--rivals", str(tmp_path), "--out-tex", str(tex)],
+                    "--rivals", str(tmp_path), "--out-md", str(md)],
                    check=True, capture_output=True, cwd=REPO_ROOT)
 
-    checked = 0
-    for line in tex.read_text().splitlines():
-        if not line.startswith("    ") or "&" not in line or "multicolumn" in line:
+    # The two ledger identities, by COLUMN NAME: `total` must equal the sum of `parts`.
+    LEDGERS = (("inst", ("n", "CMSGen=0", "GPAP=0", "excluded")),
+               ("cells", ("n", "rival=0", "GPAP=0", "rival failed", "excluded")))
+
+    def cells_of(line):
+        return [c.strip() for c in line.strip().strip("|").split("|")]
+
+    checked, hdr = 0, None
+    for line in md.read_text().splitlines():
+        # A column map is only valid inside its own section. Without this reset the rows of
+        # every LATER table were read against Table 1's header, which on the real campaign's
+        # output parsed a ratio cell as a count -- green on a fixture with no table after it.
+        if line.startswith("#"):
+            hdr = None
+        if not line.startswith("| "):
             continue
-        col = [c.strip() for c in line.strip().rstrip("\\\\").split("&")]
-        # Table 1 (no encoder column when every row shares one):
-        #   family depth targets inst n ratio e2e pre% wins C=0 G=0 excl.  ->  inst = n+C0+G0+excl
-        # Table 3's rows have 12 cells too; their 4th is the encoder, Table 1's is `inst`.
-        if col[0].startswith(("ISCAS", "ITC")) and len(col) == 12 and re.fullmatch(r"\d+", col[3]):
-            total, parts = int(col[3]), [int(col[4])] + [int(c) for c in col[9:12]
-                                                         if re.fullmatch(r"\d+", c)]
-        # Table 2: rival task cells n ratio wins ties R=0 G=0 failed excl. -> cells = n+R0+G0+f+x
-        elif col[0] in ("DEMOTIC", "Recurrent-CircuitSAT") and len(col) == 11:
-            total, parts = int(col[2]), [int(col[3])] + [int(c) for c in col[7:11]
-                                                         if re.fullmatch(r"\d+", c)]
-        else:
+        col = cells_of(line)
+        if any(c in col for c, _ in LEDGERS):          # a header row: index it by name
+            hdr = {name: i for i, name in enumerate(col)}
             continue
-        assert sum(parts) == total, f"ledger does not close on {col[0]}: {parts} vs {total}"
-        checked += 1
+        if hdr is None or line.startswith("|---") or len(col) != len(hdr):
+            continue
+        for total_col, part_cols in LEDGERS:
+            if total_col not in hdr or not all(p in hdr for p in part_cols):
+                continue
+            want = col[hdr[total_col]]
+            if not re.fullmatch(r"\d+", want):
+                continue
+            parts = [int(col[hdr[p]]) for p in part_cols if re.fullmatch(r"\d+", col[hdr[p]])]
+            assert len(parts) == len(part_cols), f"a ledger column is not a count: {col}"
+            assert sum(parts) == int(want), \
+                f"ledger does not close on {col[0]}: {parts} vs {want}"
+            checked += 1
     assert checked >= 2, "no ledger rows were emitted to check"
 
 
-def test_the_generated_methodology_text_describes_the_harness_that_exists():
-    """The generated methods paragraph describes the current harness. Prose cannot be
-    re-derived, so it is gated by phrases: the old rules' wording is absent and the current
-    rules' wording present."""
-    import inspect
+def test_the_documented_protocol_describes_the_harness_that_exists():
+    """The protocol write-up describes the current harness.
 
-    from eval.artifact import paper_tables
-
-    src = inspect.getsource(paper_tables)
-    gone = ["a timeout recorded as the result",
-            "stepping down a rung only if the driver refuses",
-            "FIXED 1,000 GPU-projected support-bit rows"]
-    for phrase in gone:
-        assert phrase not in src, f"the methods paragraph still describes the old harness: {phrase!r}"
-    # phrases short enough not to straddle a string-literal break in the source
-    for phrase in ["LARGEST rung of that ladder it can run to completion",
-                   "deduplicates", "discarded before anything is", "`lr`",
-                   "SHIPPED script configuration", "1,200 s budget per instance",
-                   "not a search for the rival's fastest rung"]:
-        assert phrase in src, f"the methods paragraph does not state the current rule: {phrase!r}"
+    This gate used to read the generator's own methods paragraph, which recited the policy into
+    every RESULTS.md. The policy is standing, not per-run, so it now lives in the venue doc and
+    the generator emits numbers — but the gate is the same one and matters as much: prose cannot
+    be re-derived from the rows, so nothing except a phrase list stops it going stale while every
+    number around it stays correct. The old rules' wording must be absent, the current rules'
+    present."""
+    import re
+    # Whitespace-normalised: a phrase in a wrapped markdown paragraph straddles a line break,
+    # and a gate that depended on where the wrap fell would fail on a reflow and pass on a
+    # deleted rule.
+    doc = re.sub(r"\s+", " ",
+                 (Path(_REPO_ROOT) / "docs" / "papers" / "tacas-27" / "README.md").read_text())
+    for phrase in ["a timeout recorded as the result",
+                   "stepping down a rung only if the driver refuses",
+                   "scored on whichever of two encoders is higher"]:
+        assert phrase not in doc, f"the protocol doc still describes an old rule: {phrase!r}"
+    for phrase in ["largest rung of a ladder walked down from 30,000,000",
+                   "rejected only on feasibility, never on how fast",
+                   "shipped script",
+                   "Duplicates are removed after the timed run",
+                   "first run of every process is discarded",
+                   "1,200 s",
+                   "no best-of-encoders selection"]:
+        assert phrase.lower() in doc.lower(), \
+            f"the protocol doc does not state the current rule: {phrase!r}"
 
 
 def test_the_rival_calibration_evidence_is_printed_not_just_pointed_at(tmp_path):
