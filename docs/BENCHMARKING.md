@@ -131,7 +131,7 @@ K is hygiene, not a lever — 4× the batch bought +2.8%.
 ## 8. Which number to quote
 
 The reporting rules are enforced once, in `eval/artifact/paper_tables.py`, and every other table
-generator imports them ([`paper/README.md`](paper/README.md)).
+generator imports them ([`papers/tacas-27/README.md`](papers/tacas-27/README.md)).
 
 - **Steady-state vs end-to-end.** `samples_per_s` excludes parse, construction, ELS, warmup and
   mining (a median 21% of GPAP's wall); CMSGen's rate carries its setup. Print both; quote the

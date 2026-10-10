@@ -14,7 +14,7 @@ kernel as a function of instance size — the number the paper states beside the
 over 93 cells** (median 1.36×, WAVE faster on 81/93), rising monotonically with clause count.
 Tables: regenerate with `eval/artifact/kernel_ab_tables.py` over the raw data
 (`$GPAP_RESULTS/l4_campaign_20260823/kernel_ab_l4/kernel_ab.json`). The generated tables were
-removed from `docs/paper/` on 2026-09-02 rather than left stale.
+removed from the committed docs on 2026-09-02 rather than left stale.
 
 Concretely, what the shuffle schedule did to this A/B: `_wave_propagate` got 1.80× at the same K
 while scalar `_propagate` was unchanged, so the M≈0.5–9k tie band under-dispatches WAVE today.

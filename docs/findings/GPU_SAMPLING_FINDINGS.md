@@ -2,7 +2,7 @@
 
 > **Status:** HISTORICAL — the sampler's development log, kept for its rules and its negative
 > results. The engine, the portfolios and every absolute number have moved since, so **no rate or
-> ratio from this file is quotable**. Current numbers: [`docs/paper/`](../paper/README.md) and
+> ratio from this file is quotable**. Current numbers: [`docs/papers/tacas-27/`](../papers/tacas-27/README.md) and
 > [RIVAL_FAIRNESS_FINDINGS.md](RIVAL_FAIRNESS_FINDINGS.md).
 > **Measured:** 2026-06 → 2026-07-04, on the PyTorch engine and the first Triton kernels. No
 > card is named anywhere in this file, deliberately.

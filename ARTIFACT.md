@@ -34,7 +34,7 @@ anything extra (`matplotlib`); without it that step says so and the rest still c
 
 | what it writes | what it is |
 |---|---|
-| `RESULTS.md`, `tables.tex` | every table, and the ledger and caveats behind each one |
+| `RESULTS.md` | every table, and the ledger and caveats behind each one |
 | `paper_numbers.json` | every number the paper prints, machine-readable |
 | `PAPER_NUMBERS.txt` | `paper_numbers.json` against what the submitted PDF prints |
 | `VERIFICATION.txt` | the publishability gate: every caveat the paper's text is required to state |
@@ -61,7 +61,7 @@ numbers may not. A value is compared at its own printed precision, a count exact
 
 The exclusion rules live in exactly one place, `eval/artifact/paper_tables.py`; every other
 consumer (figures, slides, the gate) imports them, so a table and a figure cannot disagree about
-which cells count. `docs/paper/README.md` states each rule and what it costs us.
+which cells count. `docs/papers/tacas-27/README.md` states each rule and what it costs us.
 
 ## Tier 2–4 — re-measure on a GPU
 
