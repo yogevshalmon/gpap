@@ -28,7 +28,7 @@ import sys
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
 from gpap.verdict import sound_verdict                        # noqa: E402
 from eval.artifact.paper_tables import (CMS_FAMILIES, cms_arm_ran,          # noqa: E402
-                                        sound_failed, sound_unchecked)
+                                        recheck_cells, sound_failed, sound_unchecked)
 
 VACUOUS_PINS = {"b02", "b05", "b07", "s526"}
 
@@ -240,10 +240,9 @@ def main():
                         f"{', '.join(missing)} — Table 1 will silently have no row for them; "
                         f"confirm those families were deliberately not run")
 
-    # Table 6's deterministic-field claim, RE-DERIVED from the raw rows through the comparison
-    # tool's own cell reader.
+    # Table 6's deterministic-field claim, RE-DERIVED from the raw rows through the generator's
+    # own cell reader, so this gate and the table it gates read the same cells.
     if args.recheck:
-        from eval.recheck_compare import cells as recheck_cells
         det_bad, n_shared = [], 0
         for p in stages:
             stem = os.path.basename(p)[:-5]

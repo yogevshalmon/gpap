@@ -998,21 +998,33 @@ def barbarik(paths):
 
 # ------------------------------------------------------------------ reproducibility
 
+#: Absolute tolerance on the success rate between two runs of the same cell. Same seed and same
+#: config give the same trajectories, so anything near this means the sampler saw a different
+#: formula or a different config -- it is not clock noise.
+RECHECK_SUCC_TOL = 0.05
+
+
+def recheck_cells(path):
+    """One re-check stage's scored cells, keyed `(instance, encoder)`.
+
+    THE single reader of a re-check JSON: `verify_artifact.py` gates the deterministic fields over
+    it and `recheck()` below builds the reproducibility row from it. There were three copies of
+    this key, one of them in an `eval/recheck_compare.py` whose whole CLI restated what these two
+    callers already assert -- and three readers of a row shape is how two of them come to disagree
+    about which cells were compared."""
+    d = load(path) or {}
+    return {(r["name"].split(".")[0], r.get("enc_key") or r.get("encoder")): r
+            for r in d.get("results", []) if not r.get("skipped") and not r.get("error")}
+
+
 def recheck(orig, rec, stages=("seq-c25-rare", "comb-rare", "epfl-rare", "sk")):
     if not (orig and rec):
         return None
     exact = mismatch = succ_ok = succ_bad = 0
     rates = []
     for stage in stages:
-        a = load(os.path.join(orig, f"{stage}.json"))
-        b = load(os.path.join(rec, f"{stage}.json"))
-        if not (a and b):
-            continue
-
-        def cells(p):
-            return {(r["name"].split(".")[0], r.get("enc_key") or r.get("encoder")): r
-                    for r in p.get("results", []) if not r.get("skipped") and not r.get("error")}
-        ca, cb = cells(a), cells(b)
+        ca = recheck_cells(os.path.join(orig, f"{stage}.json"))
+        cb = recheck_cells(os.path.join(rec, f"{stage}.json"))
         for k in set(ca) & set(cb):
             ra, rb = ca[k], cb[k]
             ea, eb = ra.get("engine") or {}, rb.get("engine") or {}
@@ -1020,7 +1032,7 @@ def recheck(orig, rec, stages=("seq-c25-rare", "comb-rare", "epfl-rare", "sk")):
                     and ea.get("split") == eb.get("split") and ea.get("mode") == eb.get("mode"))
             exact += same
             mismatch += (not same)
-            if abs((ra.get("succ") or 0) - (rb.get("succ") or 0)) <= 0.05:
+            if abs((ra.get("succ") or 0) - (rb.get("succ") or 0)) <= RECHECK_SUCC_TOL:
                 succ_ok += 1
             else:
                 succ_bad += 1
