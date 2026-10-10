@@ -297,7 +297,8 @@ the way past. `metrics.py` holds the statistics; `fuzz_uniformity.py` is the exa
 campaign; `barbarik_gpap.py` the certificate harness (GPAP in-process or `--sampler cmsgen`,
 SPUR reference). The rules (docs/findings/UNIFORMITY_FINDINGS.md §4b):
 - Two parameter sets, never pooled (`barbarik_table.py` refuses): the CMSGen paper's
-  ε=0.3/η=1.8/δ=0.1 (1,872 samples) and barbarik's own ε=0.1/η=0.9/δ=0.05 (70,596 samples).
+  ε=0.3/η=1.8/δ=0.1 (1,872 samples, 1,836 of them drawn from the sampler under test — the
+  paper quotes that one) and barbarik's own ε=0.1/η=0.9/δ=0.05 (70,596 samples).
 - The guarantee is asymmetric: Reject is unconditional; Accept is "not caught", never "uniform".
   CMSGen's own Accept was tuned against this test, so parity is the honest framing.
 - A table is evidence only with both controls (`--sampler spur` must Accept, `--config soft` must
@@ -305,8 +306,9 @@ SPUR reference). The rules (docs/findings/UNIFORMITY_FINDINGS.md §4b):
   where the declared `c ind` is not an independent support. Bucket on the control's verdict.
 - Barbarik's kernel is adversarial for a rejection sampler, so an unfilled order is "no verdict",
   not a Reject. `k_cap` is a batch size, not a distribution knob.
-- Settled: `B ≥ |support|` is exactly uniform (rejection sampling); the shipped config is
-  Accepted 64/66 with zero rejections (CMSGen 66/66); `soft` is rejected on 64 of 65 circuit
+- Settled: `B ≥ |support|` is exactly uniform (rejection sampling); on the paper campaign's 65
+  eligible instances the shipped `circuit` portfolio is Accepted on 60 with zero rejections and
+  5 no-verdict, pinned `b8` on 63 (CMSGen 65/65); `soft` is rejected on 64 of 65 circuit
   instances and is therefore opt-in (`--allow-soft`), at a large parked throughput price
   (`eval/profile_soft_portfolio.py`; the user: keep it for now). The `l2_ratio` collision check
   is gross-skew only. 2-wise coverage (`gpap bench --twise`) is a spread metric, not uniformity.
