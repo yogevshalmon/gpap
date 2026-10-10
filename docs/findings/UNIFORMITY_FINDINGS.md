@@ -21,8 +21,11 @@ guarantee. The settled results:
    bounded by a yield collapse when `p_accept` is small.
 2. `soft` is Barbarik-Rejected on 64 of the 65 circuit instances it can sample and has been
    opt-in (`--allow-soft`) since 2026-07-30 (§4, §4b).
-3. The shipped `circuit` portfolio is Barbarik-Accepted 64/66 with zero Rejects (CMSGen 66/66),
-   and 6/6 at barbarik's own stricter default (§4b).
+3. The shipped `circuit` portfolio is Barbarik-Accepted on 60 of the paper campaign's 65
+   eligible instances, zero Rejects, 5 no-verdict; pinned `b8` 63/65; CMSGen 65/65; 6/6 at
+   barbarik's own stricter default (§4b). ⚠️ The 64/66 in the §4b table below is the EARLIER
+   campaign AND is its `gpap:b8` row — a pinned-b8 number, never the portfolio's. The portfolio
+   itself is only under test as `pipe:circuit`, in the paper campaign.
 4. Its TV cost is the bandit picking B=1 for throughput: the default reads 1.31-1.35× worse than
    CMSGen in TV median while never skewing where CMSGen does not; `--portfolio b8` holds the
    exact-uniform floor for ~10% throughput (§3c, §4c).
@@ -257,6 +260,12 @@ oracle (8 circuits × 3 seeds, `n = 100|S|`) batch and `--draw iid` are a wash: 
 vs 0.0399, 6/8 ok each, the same two instances skewed. `--draw iid` is in the harness and Accepts.
 
 ### Results — 66 circuit instances, the CMSGen paper's setting
+
+⚠️ SUPERSEDED for the shipped portfolio by the paper campaign (68 generated, `spur` Rejects 3,
+**65 eligible**; `pipe:circuit` 60/65 Accept + 5 no-verdict, `gpap:b8` 63/65 + 2, `cmsgen` 65/65,
+`spur` 65/65 — `$GPAP_RESULTS/paper/data/barbarik/circ_abc_*.jsonl`, in Table 4b of its
+`RESULTS.md`). This table has no portfolio row at all: it measures PINNED configs, so quoting its
+`gpap:b8` as "the shipped config" reads a b8 number as the bandit's. Kept as the earlier reading.
 
 92 generated, screened to 67, control Accepts 66 (`spur` was Rejected on `c6288-c1-rare`; at
 delta = 0.1 a uniform sampler may be Rejected up to 10% of the time, and the eligibility rule
