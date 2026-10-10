@@ -14,8 +14,10 @@
 # (one pattern inline in the packager) let through. Every shape below is one that shipped, or
 # reached staging.
 #
-# Literal names — a person, a hostname — cannot be spelled here: this file ships inside the tarball
-# it checks. They come from a denylist kept OUTSIDE the repository: one fixed string per line,
+# WHOSE identity: the operator's, not the authors'. The authors are named on purpose — this is not
+# a double-blind submission — and what must not ship is the machine that built the tarball. A
+# username or a hostname cannot be spelled here anyway, since this file ships inside the tarball it
+# checks, so they come from a denylist kept OUTSIDE the repository: one fixed string per line,
 # matched case-insensitively; blank lines, `#` comments and carriage returns are stripped, because
 # to `grep -F -f` an empty line is a pattern that matches EVERY line and a trailing CR is part of
 # the pattern — the two ways this gate can fail open. Gated by tests/experiments/test_artifact_gate.py.
