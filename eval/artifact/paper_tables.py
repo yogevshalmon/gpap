@@ -347,7 +347,6 @@ def cms_family(d, stem, encoder):
         # family it collapses onto the few that remain, and a paper must show that.
         "n_gm": len(gm_vals),
         "weird": len(weird), "has_vac": bool(vac), "tiny": len(tiny),
-        "tiny_names": sorted(tiny),
         # wins/n is counted over exactly the geomean's instances plus the two zero columns.
         "wins": sum(1 for r in finite.values() if r["ratio"] >= 1) + n_inf,
         "n": len(finite) + n_inf + n_g0, "inf": n_inf,
@@ -355,7 +354,6 @@ def cms_family(d, stem, encoder):
         "gpap0_names": sorted(gpap_zero), "both0_names": sorted(both_zero),
         "noarm": len(noarm), "noarm_names": noarm,
         "cms_err": len(cms_err), "cms_err_names": sorted(cms_err),
-        "weird_names": sorted(weird),
         # scored AND disclosed: geomean cells whose CMSGen count is under the threshold
         "thin_cells": sorted((k, int(r.get("cms_n_samples") or 0)) for k, r in finite.items()
                              if (r.get("cms_n_samples") or 0) < THIN_DENOMINATOR),
@@ -372,7 +370,6 @@ def cms_family(d, stem, encoder):
         "skipped": sum(1 for r in allr if r.get("skipped")),
         "errors": sum(1 for r in allr if r.get("error")),
         "unsound": sum(1 for r in rows if sound_failed(r)),
-        "unchecked": sum(1 for r in rows if sound_unchecked(r)),
         "gpu": (payload.get("gpu") or {}).get("name"),
         "cpu": (payload.get("cpu") or {}).get("model"),
         "patched": payload.get("cmsgen_patched"),
@@ -637,18 +634,6 @@ def _gpap_e2e(g):
     return med([s.get("sps_e2e") for s in (g.get("seeds") or []) if s.get("sps_e2e")])
 
 
-def _picked_seed(g):
-    """The `seeds[]` entry of the run the row publishes (`median_seed` is the seed VALUE)."""
-    seeds = g.get("seeds") or []
-    for s in seeds:
-        if s.get("seed") == g.get("median_seed"):
-            return s
-    for s in seeds:
-        if s.get("sps_e2e") and g.get("sps_e2e") and abs(s["sps_e2e"] - g["sps_e2e"]) < 1e-9:
-            return s
-    return None
-
-
 def seed_band(g, ours, rate):
     """(lo, hi): the cell's ratio at GPAP's slowest and fastest of its seeds, or None."""
     lo, hi, sps = g.get("sps_min"), g.get("sps_max"), g.get("sps")
@@ -780,10 +765,9 @@ def rival_cms_family(d, stem, key):
         "gm_e2e": gm(e2e), "pre_frac": statistics.median(pre) if pre else 0.0,
         "free": n.get("free", 0), "free_names": sorted(names.get("free", [])),
         "vac": len(vac), "vac_names": sorted(vac),
-        "unsat": n.get("unsat", 0), "unsat_names": sorted(names.get("unsat", [])),
+        "unsat": n.get("unsat", 0),
         "n_gm": len(finite), "weird": n.get("weird", 0), "has_vac": bool(vac),
-        "weird_names": sorted(names.get("weird", [])),
-        "tiny": n.get("tiny", 0), "tiny_names": sorted(names.get("tiny", [])),
+        "tiny": n.get("tiny", 0),
         "wins": sum(1 for x in finite.values() if x >= 1) + n_inf,
         "n": len(finite) + n_inf + n_g0, "inf": n_inf, "gpap0": n_g0, "both0": n_b0,
         "gpap0_names": sorted(names.get("gpap0", [])),
@@ -803,7 +787,6 @@ def rival_cms_family(d, stem, key):
         "refused_names": sorted(names.get("refused", [])),
         "unsound": sum(1 for r in measured.values()
                        if sound_failed(r["gpap"]) or r["gpap"].get("sim_check") == "BAD"),
-        "unchecked": sum(1 for r in measured.values() if sound_unchecked(r["gpap"])),
         "gpu": next(((r.get("gpu") or {}).get("name") for r in seen.values()
                      if (r.get("gpu") or {}).get("name")), None),
         "cpu": next(((r.get("cpu") or {}).get("model") for r in seen.values()
