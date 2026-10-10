@@ -52,7 +52,7 @@ $PY eval/uniformity/fuzz_uniformity.py \
 echo "UNIFORMITY_FUZZ_DONE"
 
 echo "########## SOFT PORTFOLIO PRICE  $(date -Is)"
-$PY eval/profile_soft_portfolio.py \
+$PY eval/profiling/profile_soft_portfolio.py \
     --glob 'benchmarks/circuits/bench/seq/*.bench' \
     --encoder abc --abc-opt fast --cycles 25 --target rare \
     --reps 2 --out "$OUT/soft_profile.json" 2>&1 | tail -40 \

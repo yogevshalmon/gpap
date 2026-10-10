@@ -28,7 +28,7 @@ Resumable (`--resume`): rows are keyed by (family, instance, encoder); the JSON 
 every CNF. Vacuous-pin and zero-search instances are measured but flagged and excluded from the
 headline geomean, exactly as the paper tables do.
 
-    PYTHONPATH=. python eval/kernel_ab.py --out .experiments/kernel_ab/kernel_ab.json --resume
+    PYTHONPATH=. python eval/profiling/kernel_ab.py --out .experiments/kernel_ab/kernel_ab.json --resume
 """
 import argparse
 import glob
@@ -38,7 +38,7 @@ import os
 import sys
 import time
 
-REPO_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
+REPO_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))
 sys.path.insert(0, REPO_ROOT)
 
 from gpap import paths                                        # noqa: E402

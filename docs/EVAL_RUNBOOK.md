@@ -210,11 +210,11 @@ pinned rather than re-derived, and the engine's memory budget is capped to the r
 and the cross-card gate `compare_campaign.py`. Evidence:
 [findings/ARTIFACT_FINDINGS.md](findings/ARTIFACT_FINDINGS.md).
 
-The other campaigns: the kernel A/B (`eval/kernel_ab.py`,
+The other campaigns: the kernel A/B (`eval/profiling/kernel_ab.py`,
 [findings/KERNEL_AB_FINDINGS.md](findings/KERNEL_AB_FINDINGS.md)); the Barbarik certificate and the
 exact-oracle TV fuzz (`eval/uniformity/`,
 [findings/UNIFORMITY_FINDINGS.md](findings/UNIFORMITY_FINDINGS.md) §4b, §4c, §6); the price of the
-uniformity-safe default (`eval/profile_soft_portfolio.py`) and the fresh-machine re-check
-(`eval/colab/colab_recheck_l4.sh` + `eval/recheck_compare.py`), both in
+uniformity-safe default (`eval/profiling/profile_soft_portfolio.py`) and the fresh-machine re-check
+(`eval/colab/colab_recheck_l4.sh`, compared by `verify_artifact.py --recheck`), both in
 [findings/L4_EVAL_FINDINGS.md](findings/L4_EVAL_FINDINGS.md) §4-§5; and the rivals' step-count
 tie-break (`eval/rivals/steps_calibration.py`).

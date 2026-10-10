@@ -891,14 +891,16 @@ def test_each_screening_rule_is_defined_exactly_once_across_eval():
             f"exactly one home, {home.name}")
 
 
-@pytest.mark.parametrize("mod", ["slide_tables.py", "soft_price_tables.py"])
+@pytest.mark.parametrize("mod", ["artifact/slide_tables.py", "profiling/soft_price_tables.py"])
 def test_the_other_generators_import_the_paper_rules_rather_than_restating_them(mod):
     """The deck and soft-price tables import `cms_family`, so their numbers cannot diverge from
-    the paper's."""
+    the paper's. Each is named by its path under `eval/`: they do not live in the same directory
+    (the soft-price pair is `eval/profiling/`, outside the artifact), and a bare basename made
+    that a silent skip rather than a failure the day one of them moved."""
     import ast
 
-    root = Path(_REPO_ROOT)
-    tree = ast.parse((root / "eval/artifact" / mod).read_text())
+    root = Path(_REPO_ROOT) / "eval"
+    tree = ast.parse((root / mod).read_text())
     imported = {alias.name for node in ast.walk(tree)
                 if isinstance(node, ast.ImportFrom) and (node.module or "").endswith("paper_tables")
                 for alias in node.names}
@@ -1522,7 +1524,7 @@ def test_a_narrower_end_to_end_cell_set_is_disclosed_not_assumed(tmp_path):
 
 
 def test_every_table_generator_still_imports():
-    """Every module under eval/artifact/ imports.
+    """Every module under eval/artifact/ and eval/profiling/ imports.
 
     `soft_price_tables.py` imported `tex_escape` from `paper_tables`, and removing that helper
     with the LaTeX renderer broke it silently: nothing in the suite imported the supplementary
@@ -1530,18 +1532,23 @@ def test_every_table_generator_still_imports():
     dead-code sweep and a broken script. This is that check, as a test rather than a habit.
 
     Discovered by running it, not by reading: the dead-code scan had looked inside
-    `paper_tables.py` and found no remaining use, which is true and not the question."""
+    `paper_tables.py` and found no remaining use, which is true and not the question.
+
+    BOTH directories, because the file that broke is now in the second one: the supplementary
+    generators moved to `eval/profiling/` so that `eval/artifact/` holds only what the artifact
+    drivers run, and a gate that followed the old path would have stopped covering the one script
+    it was written for."""
     import importlib
     import pkgutil
 
-    pkg = importlib.import_module("eval.artifact")
     broken = []
-    for mod in pkgutil.iter_modules(pkg.__path__):
-        if mod.name.startswith("_"):
-            continue
-        try:
-            importlib.import_module(f"eval.artifact.{mod.name}")
-        except Exception as e:                           # noqa: BLE001 — report, never hide
-            broken.append(f"{mod.name}: {type(e).__name__}: {e}")
-    assert not broken, "modules under eval/artifact/ that no longer import:\n  " + \
-        "\n  ".join(broken)
+    for where in ("eval.artifact", "eval.profiling"):
+        pkg = importlib.import_module(where)
+        for mod in pkgutil.iter_modules(pkg.__path__):
+            if mod.name.startswith("_"):
+                continue
+            try:
+                importlib.import_module(f"{where}.{mod.name}")
+            except Exception as e:                       # noqa: BLE001 — report, never hide
+                broken.append(f"{where}.{mod.name}: {type(e).__name__}: {e}")
+    assert not broken, "modules that no longer import:\n  " + "\n  ".join(broken)

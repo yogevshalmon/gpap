@@ -6,14 +6,14 @@ out of the default portfolio and opt-in behind `--allow-soft`: every shipped num
 sampler that cannot choose it. This prices that decision by pairing two complete sweeps differing
 in exactly one flag.
 
-    eval/artifact/soft_price_tables.py --safe <no-soft dir> --soft <--allow-soft dir> \\
+    eval/profiling/soft_price_tables.py --safe <no-soft dir> --soft <--allow-soft dir> \\
         --out-md $GPAP_RESULTS/paper/SOFT_PRICE.md
 
 By policy there is NO soft table in the paper (docs/findings/UNIFORMITY_FINDINGS.md §4), so this
 writes
 beside the campaign rather than into the repository; it emits no LaTeX, for the same reason
 the paper's own generator stopped. It exists to price the decision, not to
-publish it. `eval/profile_soft_portfolio.py` answers the narrower question of GPAP against
+publish it. `eval/profiling/profile_soft_portfolio.py` answers the narrower question of GPAP against
 itself. Three
 quantities here, because the first alone is misleading:
 

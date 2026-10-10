@@ -12,7 +12,7 @@ kernel as a function of instance size — the number the paper states beside the
 
 **Answer (NVIDIA L4, Colab, torch 2.11/cu12.8, 2026-08-23)**: WAVE / SCALAR = **1.30× geomean
 over 93 cells** (median 1.36×, WAVE faster on 81/93), rising monotonically with clause count.
-Tables: regenerate with `eval/artifact/kernel_ab_tables.py` over the raw data
+Tables: regenerate with `eval/profiling/kernel_ab_tables.py` over the raw data
 (`$GPAP_RESULTS/l4_campaign_20260823/kernel_ab_l4/kernel_ab.json`). The generated tables were
 removed from the committed docs on 2026-09-02 rather than left stale.
 
@@ -24,7 +24,7 @@ The bins agree with the RTX 4080 calibration (forced-kernel A/B at fixed K, 25 i
 the L4 whole-set geomean is lower only because this set holds many more small-M cells (the
 ABC-collapsed circuits), where the kernels tie.
 
-## Method (`eval/kernel_ab.py`, driver `eval/colab/colab_kernel_ab_l4.sh`)
+## Method (`eval/profiling/kernel_ab.py`, driver `eval/colab/colab_kernel_ab_l4.sh`)
 
 GPAP only. 141 (instance, encoder) cells: ITC'99+ISCAS-89 T=25, ISCAS-85 T=1 one pin, EPFL T=1,
 HWMCC'17 T=25, each with `tseitin` and `abc:fast`, `rare` targets, plus the 29 sk_ CNFs. Per cell:

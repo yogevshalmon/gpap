@@ -81,10 +81,14 @@ eval/                      # the experiment layer (raw data lives OUTSIDE the re
                            #   policy: circuit variants, the parallelism grant, the GPAP-arm cache)
                            #   + check_emission_symmetry.py + extract_grants.py + grants/
   uniformity/              # barbarik_gpap.py / _screen.py / _table.py, fuzz_uniformity.py, metrics.py
-  artifact/                # paper_tables.py (THE table generator; every rule lives there once),
-                           #   verify_artifact.py (publishability gate), slide/soft tables,
-                           #   reproduce.sh (THE artifact entry point), estimate_wall.py,
-                           #   compare_campaign.py (the cross-card gate), subset.json, make_artifact.sh
+  artifact/                # ONLY what the artifact drivers run: paper_tables.py (THE table
+                           #   generator; every rule lives there once), verify_artifact.py +
+                           #   check_paper_numbers.py (the gates), reproduce.sh (THE entry
+                           #   point), estimate_wall.py, compare_campaign.py (the cross-card
+                           #   gate), subset.json, make_artifact.sh, slide_tables.py
+  profiling/               # GPAP-vs-GPAP sweeps that price a CHOICE, + their own tables:
+                           #   kernel_ab{,_tables}.py (WAVE vs SCALAR),
+                           #   profile_soft_portfolio.py + soft_price_tables.py. Not in the artifact
   colab/                   # cross-GPU drivers + colab_supervisor.py (survives the ~1 h VM lifetime)
 scripts/                   # build_core.sh, build_abc.sh, build_cmsgen.sh (+ cmsgen_gpap_eval.patch),
                            #   fetch_benchmarks.sh, perf_ab_trees.py
@@ -310,7 +314,7 @@ SPUR reference). The rules (docs/findings/UNIFORMITY_FINDINGS.md §4b):
   eligible instances the shipped `circuit` portfolio is Accepted on 60 with zero rejections and
   5 no-verdict, pinned `b8` on 63 (CMSGen 65/65); `soft` is rejected on 64 of 65 circuit
   instances and is therefore opt-in (`--allow-soft`), at a large parked throughput price
-  (`eval/profile_soft_portfolio.py`; the user: keep it for now). The `l2_ratio` collision check
+  (`eval/profiling/profile_soft_portfolio.py`; the user: keep it for now). The `l2_ratio` collision check
   is gross-skew only. 2-wise coverage (`gpap bench --twise`) is a spread metric, not uniformity.
 
 ## Benchmark suite and CMSGen fairness (`gpap/benchmark.py`, schema 4)

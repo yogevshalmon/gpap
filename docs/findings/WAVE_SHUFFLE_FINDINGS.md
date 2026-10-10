@@ -97,7 +97,7 @@ bake-time constant.
 - The wave/scalar dispatch threshold (`M >= 2048`) was calibrated against the one-hot kernel.
   `_wave_propagate` got faster and scalar `_propagate` did not (the shared `_clean_packed` speeds
   both arms equally, so it cannot move the boundary), so the true crossover moved down and the
-  M≈0.5–9k tie band under-dispatches wave. Re-derive it with the next `eval/kernel_ab.py`
+  M≈0.5–9k tie band under-dispatches wave. Re-derive it with the next `eval/profiling/kernel_ab.py`
   campaign.
 - Unmeasured candidate: an `f == 1` fast path (one frontier literal, warp-uniform, every lane's
   `seg` is 0) would skip 5 probe gathers; it adds a branch to the innermost loop, so one
