@@ -378,9 +378,11 @@ absolute path to ship had no `/home/` in it: an agent's scratch directory with t
 flattened into its NAME, inside three Barbarik error rows, and the packager's inline `/home/` check
 passed it. The shapes now live in one script, `eval/artifact/check_leaks.sh`, proven to refuse
 each on its own (tests/experiments/test_artifact_gate.py); literal names come from a denylist outside the
-repository, because the script ships in the tarball it checks; and the double-blind copy is a
-transform over the packager's tarball, `$GPAP_RESULTS/artifact/anonymize.sh`, that must still pass
-the gate and the host suite. Running `pytest` inside the packaged tree for the first time found
+repository, because the script ships in the tarball it checks. The gate's subject is the
+OPERATOR's identity, not the authors': the submission is not double-blind (TACAS'27 tool track,
+so the anonymising copy is retired as of 2026-10-10), and a username or hostname in a shipped file
+names the machine that built the tarball regardless. Running `pytest` inside the packaged tree for
+the first time found
 six failures no checkout could show: no `.git`, and a card with no built core.
 docs/findings/ARTIFACT_FINDINGS.md §9.
 

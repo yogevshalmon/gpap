@@ -303,9 +303,14 @@ last-resort return handed the rival the whole fallback uncapped: the third route
 (§8 closed the CPU-only one), now capped and gated by
 `tests/experiments/test_rival_budget.py::test_rival_budget_is_capped_when_the_core_cannot_load`.
 
-**The double-blind copy** is a transform over the packager's tarball,
+**The double-blind copy — RETIRED 2026-10-10.** The submission is a TACAS'27 regular tool paper,
+which is not double-blind, so no anonymised copy is cut and the authors are named on purpose. The
+leak gate STAYS, and its subject is now stated as what it always was in practice: the *operator's*
+identity, not the authors' — a username or a hostname in a shipped file names the machine that
+built the tarball, which is a defect in a signed artifact just as much as in a blind one. Recorded
+because a venue can change: it was a transform over the packager's tarball,
 `$GPAP_RESULTS/artifact/anonymize.sh`, kept outside the repository because it spells the author's
-name: delete the brand kit and the development files, rewrite the identity lines (each
+name — delete the brand kit and the development files, rewrite the identity lines (each
 substitution must hit, or the script refuses as stale), the gate with the denylist, the host suite
 inside the result, the manifest rewritten, repacked as `<name>-anon`. `GPAP_ARTIFACT_TREE=<tree-ish>`
 lets the packager dry-run uncommitted work (`git write-tree` on a temporary index); the name and
