@@ -230,8 +230,20 @@ step_tables() {
     local bar=("$data"/barbarik/circ_abc_*.jsonl)
     local barargs=(); [ -e "${bar[0]}" ] && barargs=(--barbarik "${bar[@]}")
     $PY eval/artifact/paper_tables.py --rivals "$data" ${barargs[@]+"${barargs[@]}"} \
-        --out-md "$out/RESULTS.md" --out-tex "$out/tables.tex" | tail -3 \
+        --out-md "$out/RESULTS.md" --out-tex "$out/tables.tex" \
+        --out-json "$out/paper_numbers.json" | tail -3 \
         || fail "the table generator failed over $data"
+    # Does the PAPER still say what these rows say? The paper's tables are typeset by hand, so
+    # nothing else compares them: without this step a campaign can move a number under a
+    # published claim and every other gate here still passes. Not fatal when the published
+    # transcription is absent (a reviewer's own re-measurement has no paper to be held to), and
+    # fatal when it is there and disagrees.
+    if [ -f docs/papers/tacas-27/published_numbers.json ]; then
+        say "the paper's own numbers, against these rows"
+        $PY eval/artifact/check_paper_numbers.py --generated "$out/paper_numbers.json" \
+            2>&1 | tee "$out/PAPER_NUMBERS.txt" | tail -3 \
+            || fail "the paper prints numbers these rows do not produce — see $out/PAPER_NUMBERS.txt"
+    fi
     say "the publishability gate"
     $PY eval/artifact/verify_artifact.py --rivals "$data" ${barargs[@]+"${barargs[@]}"} \
         2>&1 | tee "$out/VERIFICATION.txt" | tail -4 \
@@ -246,7 +258,8 @@ step_tables() {
     $PY eval/eval_plots.py "$data" --out-dir "$out/plots" 2>&1 | tail -4 \
         || echo "(figures skipped — eval_plots.py needs matplotlib; the tables above do not)"
     echo
-    echo "wrote $out/{RESULTS.md,tables.tex,VERIFICATION.txt,emission_audit.txt,plots/}"
+    echo "wrote $out/{RESULTS.md,tables.tex,paper_numbers.json,VERIFICATION.txt,"
+    echo "              emission_audit.txt,PAPER_NUMBERS.txt,plots/}"
 }
 
 # ---------------------------------------------------------------------------- GPU tiers
