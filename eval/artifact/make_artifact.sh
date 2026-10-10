@@ -84,7 +84,7 @@ git archive "$TREE" | tar -x -C "$STAGE"
 # --- the rows the tables are generated from -----------------------------------------------------
 mkdir -p "$STAGE/artifact-data/paper"
 cp -r "$SRC_DATA/data" "$STAGE/artifact-data/paper/data"
-for f in README.md RESULTS.md tables.tex VERIFICATION.txt emission_audit.txt; do
+for f in README.md RESULTS.md VERIFICATION.txt emission_audit.txt; do
     [ -f "$SRC_DATA/$f" ] && cp "$SRC_DATA/$f" "$STAGE/artifact-data/paper/$f"
 done
 [ -d "$SRC_DATA/plots" ] && cp -r "$SRC_DATA/plots" "$STAGE/artifact-data/paper/plots"
@@ -132,7 +132,8 @@ BARARGS=(); [ -e "${BAR[0]}" ] && BARARGS=(--barbarik "${BAR[@]}")
 TABLES_OK=1
 ( cd "$STAGE" && $PY eval/artifact/paper_tables.py --rivals artifact-data/paper/data \
     ${BARARGS[@]+"${BARARGS[@]}"} \
-    --out-md artifact-data/paper/RESULTS.md --out-tex artifact-data/paper/tables.tex ) \
+    --out-md artifact-data/paper/RESULTS.md \
+    --out-json artifact-data/paper/paper_numbers.json ) \
     > "$STAGE/artifact-data/TABLES.log" 2>&1 || TABLES_OK=0
 if [ "$TABLES_OK" != 1 ]; then
     tail -20 "$STAGE/artifact-data/TABLES.log" >&2
@@ -161,6 +162,33 @@ if [ "$VERIFY_OK" != 1 ] && [ "${GPAP_ARTIFACT_ALLOW_FAIL:-0}" != "1" ]; then
     echo "[FATAL] the gate FAILED — refusing to package an artifact its own verifier calls" >&2
     echo "        unpublishable. GPAP_ARTIFACT_ALLOW_FAIL=1 packages anyway; the verdict" >&2
     echo "        ships inside either way." >&2
+    exit 1
+fi
+
+# --- do the staged tables still say what the PAPER says? ------------------------------------
+# The gate above asks whether these rows are publishable. This asks a different question: whether
+# the numbers the submitted PDF prints are the ones this tarball's own code derives from this
+# tarball's own rows. The paper typesets its tables by hand, so nothing else compares them, and the
+# artifact is exactly where the answer matters — a reviewer holding the PDF beside the tarball is
+# the first person to check it otherwise. Fatal, like the gate: an artifact whose tables disagree
+# with its paper is the one defect an evaluator cannot miss.
+NUMBERS_OK=1
+( cd "$STAGE" && $PY eval/artifact/check_paper_numbers.py \
+    --generated artifact-data/paper/paper_numbers.json ) \
+    > "$STAGE/artifact-data/paper/PAPER_NUMBERS.txt" 2>&1 || NUMBERS_OK=0
+# The count line, not `tail -1`: on a failure the last line is advice, not a verdict.
+echo "numbers    : $(grep 'published values' \
+    "$STAGE/artifact-data/paper/PAPER_NUMBERS.txt" | tail -1)"
+if [ "$NUMBERS_OK" != 1 ]; then
+    grep 'MISMATCH' "$STAGE/artifact-data/paper/PAPER_NUMBERS.txt" >&2 \
+        || tail -20 "$STAGE/artifact-data/paper/PAPER_NUMBERS.txt" >&2
+    # The EXIT trap deletes the stage, and with it the only copy of the evidence.
+    cp "$STAGE/artifact-data/paper/PAPER_NUMBERS.txt" "$OUT/$NAME.PAPER_NUMBERS.txt" 2>/dev/null \
+        && echo "        the mismatches are kept at $OUT/$NAME.PAPER_NUMBERS.txt" >&2
+    echo "[FATAL] the paper prints numbers these rows do not produce — refusing to package an" >&2
+    echo "        artifact that disagrees with the paper it supports. Find which row moved;" >&2
+    echo "        re-transcribing docs/papers/*/published_numbers.json to make this pass mints" >&2
+    echo "        a number no campaign produced." >&2
     exit 1
 fi
 
@@ -195,7 +223,9 @@ find "$STAGE" -type d \( -name __pycache__ -o -name .pytest_cache -o -name .ruff
 # tests/experiments/test_artifact_gate.py); the generators are fixed at the source
 # (`eval/paths.py::display_path`) and this is what says they stay fixed — over the STAGED BYTES,
 # like the verdict above, because that is what a reviewer receives. `GPAP_ARTIFACT_DENYLIST=<file>`
-# adds literal strings (a name, a hostname) that cannot be spelled in a script that ships.
+# adds literal strings — a username, a hostname — that cannot be spelled in a script that ships.
+# The AUTHORS' names ship deliberately: this is not a double-blind submission (TACAS'27 tool
+# track). What must not ship is whose machine built it.
 leaks="$(bash eval/artifact/check_leaks.sh "$STAGE" \
              ${GPAP_ARTIFACT_DENYLIST:+--denylist "$GPAP_ARTIFACT_DENYLIST"})"
 gate=$?
@@ -253,7 +283,7 @@ echo
 echo "artifact: $OUT/$NAME.tar.gz  ($(du -h "$OUT/$NAME.tar.gz" | cut -f1), $NFILES files)"
 echo "verdict : $VERDICT"
 echo
-echo "Next: for a double-blind review copy, \$GPAP_RESULTS/artifact/anonymize.sh <this tarball>"
-echo "      (outside the repository: it spells the author's name). Then upload to Zenodo for the"
-echo "      DOI (the Available badge), and put that DOI in CITATION.cff and the paper's Data"
-echo "      Availability Statement."
+echo "Next: upload to Zenodo for the DOI (the Available badge), and put the CONCEPT DOI — the"
+echo "      one Zenodo labels 'all versions', never a version DOI — in CITATION.cff and the"
+echo "      paper's Data Availability Statement. A version DOI goes stale the moment a corrected"
+echo "      artifact is uploaded, and the paper's link with it."
