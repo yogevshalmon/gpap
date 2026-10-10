@@ -822,25 +822,21 @@ def write_summary(stages, out_dir, src_dir):
     gpu = next((p.get("gpu", {}).get("name") for p in stages.values() if p.get("gpu")), "?")
     cpu = next((p.get("cpu", {}) for p in stages.values() if p.get("cpu")), {})
     cpu_s = f"{cpu.get('model', '?')} ({cpu.get('count', '?')} threads)" if cpu else "**not recorded**"
+    # AN INVENTORY, NOT A DISCUSSION. This file used to explain each column in prose carrying
+    # dated numbers ("up to 1.9x on the rare column", "EPFL 29.0x -> 9.4x", a CPU "~0.4x as
+    # fast"). Those are results, and a result written into a sentence in a source file is one
+    # nothing regenerates: the campaign moves and the sentence does not. What a column MEANS is
+    # a rule and lives with the generator; what it says is the paper's to discuss.
     lines += [f"GPU: **{gpu}**  |  CPU: **{cpu_s}**  |  source: `{src_dir}`", "",
-              "The CPU matters as much as the GPU here: CMSGen is single-core, so the ratio moves",
-              "with the host. The same instance set has been measured at roughly double the ratio",
-              "on a machine whose CPU is ~0.4x as fast — none of that difference is GPAP.",
-              "Never quote a ratio without the CPU beside it.", "",
-              "`GPAP/CMSGen` is per INSTANCE at its best encoder — the configuration a user would",
-              "ship. The per-ROW figure (every instance x every encoder) is given alongside it;",
-              "they differ whenever one encoder collapses on an instance the other handles, which",
-              "is a real per-instance effect, not an aggregate one.", "",
-              "`wins` is counted the paper's way: finite ratios >= 1 plus the instances CMSGen",
-              "scored ZERO on (our outright wins), over finite + both zero columns — the zeros",
-              "are their own columns, never silently inside a win count.", "",
-              "**clean** applies the two exclusions the paper generator applies, for the same",
-              "reason — a cell that measures the INSTANCE is not a measurement of the sampler:",
-              f"(1) VACUOUS PINS ({', '.join(sorted(VACUOUS_PINS))}), whose last-cycle outputs are",
-              "constant at T=25 so pinning them is a tautology (up to 1.9x on the rare column); and",
-              "(2) ZERO-SEARCH cells, which emit samples with no decisions AND no implications",
-              "because the support is free after propagation (EPFL 29.0x -> 9.4x). **Quote the",
-              "clean column.** `eval/artifact/paper_tables.py` is authoritative; this is the same rule.", "",
+              "What ran, what did not, and the aggregate per stage — for the supplementary "
+              "`gpap bench` families. `eval/artifact/paper_tables.py` is authoritative for every "
+              "published number, and `docs/papers/*/README.md` states what each column means.",
+              "",
+              "Two column rules, because the table is unreadable without them: **quote `clean`**, "
+              "which applies the paper's instance screens (vacuous pins, zero-search cells); and "
+              "`GPAP/CMSGen (best enc)` is per instance at its fastest encoder **by our own "
+              "rate**, never by the ratio — an argmax on the published statistic would let "
+              "CMSGen's number pick which of our runs is reported.", "",
               "| stage | rows | inst | skipped | errors | encoders | GPAP/CMSGen (best enc) | "
               "**clean** | (per row) | wins | CMSGen=0 | GPAP=0 | encoder A/B "
               "| CMSGen emission cost |",
