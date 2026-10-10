@@ -128,7 +128,7 @@ asked for a sampler.
 ## 5. Consistency re-check: are these numbers reproducible?
 
 23 cells across four families were re-measured on a **fresh L4** with the protocol pinned
-(`eval/colab/colab_recheck_l4.sh`) and compared field by field (`eval/recheck_compare.py`) against
+(`eval/colab/colab_recheck_l4.sh`) and compared field by field (`verify_artifact.py --recheck`) against
 agreement stated in advance: deterministic fields exact — **23/23**; `succ` within 0.05 — within
 0.01 everywhere; throughput reported, not asserted — geomean **1.032×**. At ~15 min this is the
 right thing to run after any multi-VM sweep.

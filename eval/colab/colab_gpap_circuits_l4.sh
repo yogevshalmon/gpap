@@ -4,7 +4,7 @@
 # Why this campaign exists: the sampling loop moved into libgpap after the last full L4
 # campaign, so every recorded GPAP circuit number predates the engine that ships. This re-runs
 # only the GPAP arm of the circuit matrix under the identical protocol, so new-vs-old GPAP is a
-# clean engine A/B (eval/recheck_compare.py) and the tables can be regenerated pairing it with
+# clean engine A/B (verify_artifact.py --recheck) and the tables can be regenerated pairing it with
 # the carried CMSGen and rival arms, whose numbers did not change. Seed-era note
 # (docs/BENCHMARKING.md §3): older counts are not same-seed-comparable, so the compare gates on
 # the deterministic fields and success rate, not counts.
