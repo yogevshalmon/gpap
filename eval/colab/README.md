@@ -66,5 +66,5 @@ checkouts must coexist on one VM, select the package by cwd + `PYTHONPATH`, neve
 ## Where the measurements went
 
 The campaigns these drivers ran are recorded in `docs/findings/CROSS_GPU_FINDINGS.md` (what a
-bigger GPU buys), `docs/findings/L4_EVAL_FINDINGS.md` (superseded) and `docs/paper/README.md`
+bigger GPU buys), `docs/findings/L4_EVAL_FINDINGS.md` (superseded) and `docs/papers/tacas-27/README.md`
 (the frozen campaign the paper reports).

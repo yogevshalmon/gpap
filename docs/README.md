@@ -5,7 +5,7 @@
 | understand how the engine works — state layout, the two kernels, the memory model, what is guaranteed | [ENGINE.md](ENGINE.md) |
 | use GPAP from Python or C++ | [PYTHON_API.md](PYTHON_API.md) · [../cpp/README.md](../cpp/README.md) |
 | measure GPAP, or compare it against another sampler, without fooling yourself | [BENCHMARKING.md](BENCHMARKING.md) |
-| reproduce the paper's experiments end to end | [EVAL_RUNBOOK.md](EVAL_RUNBOOK.md), then [paper/README.md](paper/README.md) |
+| reproduce a paper's experiments end to end | [EVAL_RUNBOOK.md](EVAL_RUNBOOK.md), then that paper's folder under [papers/](papers/) |
 
 **[`findings/`](findings/)** — the evidence. Every design decision in the code is backed by a
 measurement, and the measurement (date, GPU, per-instance table) lives here, never in a source
@@ -16,11 +16,11 @@ one paragraph each, with a note wherever a later measurement moved a number; the
 lemmas of CLEAN mode. Retired directions stay recorded so they are not re-tried without new
 evidence.
 
-**[`paper/`](paper/)** — the results record: which campaign the published numbers come from, the
-rules its generator enforces, and the generated tables themselves. Nothing in it is typed by hand;
-[paper/README.md](paper/README.md) says how to regenerate it from the raw results, which live
-outside the repository (`$GPAP_RESULTS`). The paper's LaTeX and the talk decks live there too —
-they are paper material, not documentation of the library.
+**[`papers/`](papers/)** — one folder per submission: what that paper evaluates, which rules its
+generator enforces, and the transcription of every number it prints, so the generated tables can be
+held to the PDF. **No generated table and no `.tex` section is committed** — a paper stands on its
+own, its LaTeX lives in its own tree, and the rows and tables live outside the repository in
+`$GPAP_RESULTS`. The talk decks are there too: paper material, not documentation of the library.
 
 Two conventions hold everywhere: **code carries the rule, docs carry the evidence** (a comment
 says what the code does and why it is correct; the number that settled it lives here), and

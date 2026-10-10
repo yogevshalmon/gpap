@@ -10,7 +10,7 @@
 > `docs/BENCHMARKING.md` §4b/§4c.
 > **Gated by:** `tests/experiments/test_rival_targets.py`, `tests/experiments/test_paper_tables.py`.
 > **SECTION NUMBERS ARE AN API.** Code, tests and the GENERATED paper prose cite this file by
-> section (`paper_tables.py` emits "§17" into `docs/paper/RESULTS.md`). Sections are in writing
+> section (`paper_tables.py` emits "§17" into the generated `RESULTS.md`). Sections are in writing
 > order, not numeric order — §10 follows §14 — and are append-only: never renumber one.
 
 Every audit here (§1–§16e) found a default that had flattered GPAP — the expected direction,
@@ -385,7 +385,7 @@ and not carried to another:
 - `probe_truncated` and `budget_bound` are row-level and counted by the gate, which also warns
   when the proved-UNSAT screen never ran.
 - Two claims of ours were wrong: the miter control's "at most 1%" (`b05` moves 4.3x) and
-  `docs/paper/README.md`'s numbers (it carries none now).
+  the committed paper docs' numbers (they carry none now).
 - The failure regime is generated from the rows: every loss to CMSGen has amplification at most
   1.94x and success at most 6.9e-4, and no winning cell meets both; cells whose baseline delivered
   fewer than 30 samples are named separately.
@@ -418,7 +418,7 @@ Against `l4_protocol_20260904`. Fixed, all gated:
    `s832`-table (1.15x, 0.61–1.16).
 8. Table 4b's provenance (`l4_abc_20260902/barbarik_abc`, RTX 4080, our pins) is printed;
    `verify_artifact --barbarik` checks one parameter setting, an Accepting control, one arm set.
-9. Stale prose in `docs/paper/README.md`, `INSIGHTS.md`, the campaign README and `protocol.tex`
+9. Stale prose in the committed paper docs, `INSIGHTS.md`, the campaign README and a `protocol.tex`
    (HTS "evaluates no circuit at all" → pre-encoded CNFs, two circuit-derived) corrected.
 
 Found, not fixed — protocol evidence: the 16.3x Recurrent-table headline was four cells
@@ -708,7 +708,7 @@ rival's; the marker is now the task's.
 
 One folder. `../gpap-results/paper/` holds copies of the nine stage/calibration JSONs and the four
 Barbarik JSONL files with a sha256 manifest, `regenerate.sh` (tables, gate, audit, figures, then
-the copy into `docs/paper/`), the generated outputs and `plots/`. The campaign directory stays the
+the copy into the repository, since removed), the generated outputs and `plots/`. The campaign directory stays the
 protocol record.
 
 What moved (before → after; every move is a thin cell entering a geomean, each named in the

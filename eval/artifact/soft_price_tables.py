@@ -11,7 +11,7 @@ in exactly one flag.
 
 By policy there is NO soft table in the paper (docs/findings/UNIFORMITY_FINDINGS.md §4), so this
 writes
-beside the campaign rather than into docs/paper/; it exists to price the decision, not to
+beside the campaign rather than into the repository; it exists to price the decision, not to
 publish it. `eval/profile_soft_portfolio.py` answers the narrower question of GPAP against
 itself. Three
 quantities here, because the first alone is misleading:

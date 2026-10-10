@@ -196,7 +196,7 @@ distance (probed).
 ## 7. After the sweep, and the other campaigns
 
 Raw results live outside the repo (`$GPAP_RESULTS`, default `../gpap-results`) and every published
-table is generated from them; [paper/README.md](paper/README.md) has the exact commands for
+table is generated from them; [papers/tacas-27/README.md](papers/tacas-27/README.md) has the exact commands for
 `eval/artifact/paper_tables.py` (the one place the exclusion rules live), `slide_tables.py` and
 `soft_price_tables.py` (which import it), `verify_artifact.py` (the publishability gate) and
 `make_artifact.sh`. The map of claims to files is [../ARTIFACT.md](../ARTIFACT.md).
