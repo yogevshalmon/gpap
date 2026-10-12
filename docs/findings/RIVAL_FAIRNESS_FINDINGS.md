@@ -33,8 +33,10 @@ inside its timed loop (`run.py:186`, 0.5–4.0 GiB per run): measured on the 408
 bit-identical with the copy removed, the meter agreeing with a 4-repetition A/B to 0.05 s. Do not
 trust one on/off pair: run-to-run spread is the effect size. The bound is per card (0.1–15% on the
 L4; worst case `s208.1` 36.9%, §16d). Decision: not corrected — deducting it would raise our
-ratio, so the rival's rate stays the one it publishes. Our timed loop pays a per-chunk soundness
-check no rival performs; likewise left alone.
+ratio, so the rival's rate stays the one it publishes. ⚠️ SUPERSEDED 2026-10-12 (§17c): the
+direction was backwards (the copy lengthens their clock, so leaving it in flattered GPAP), and the
+copy is now measured per run and deducted. Our timed loop pays a per-chunk soundness check no
+rival performs; left alone.
 
 ---
 
@@ -475,7 +477,8 @@ them as "on a 24 GB L4", and quote the structure of the Recurrent-table geomean 
 18.0x without `b09`; 10.6x over 16 without the top four; the bottom five 1.1–1.7x, three inside
 GPAP's seed band), not the geomean alone. The emission audit had read history files as rows (a
 208% bound from a superseded `s208.1` row); `campaign_jsons` reads the top level only; the live
-worst case is `s208.1` at 36.9% of its 18.8 s `runtime_s`, left uncorrected.
+worst case is `s208.1` at 36.9% of its 18.8 s `runtime_s`, left uncorrected (measured and
+deducted since 2026-10-12, §17c).
 
 ## 16e. Fourth review round — five reviewers against the completed T=25 tables (2026-09-06)
 
@@ -744,3 +747,47 @@ rows "widening the free / tiny / vacuous / thin screens" and "the paper set as t
 amended by it: the thin floor and the paper-set column are gone by the user's direction; the
 free / tiny / vacuous / unsat screens, and their mechanical, per-row, before-the-ledger
 application, are unchanged. Any further proposal to move a screen goes to that table, as before.
+
+### 17c. Recurrent's host copy is measured and deducted (2026-10-12, the user's decision)
+
+A reviewer of the paper found its "no tool's clock includes collecting samples" false for
+Recurrent-CircuitSAT: `run_back_prop_seq`, the function its own `timer` wraps, copies every
+depth's candidate assignments to the host (`run.py:186`). §1 had left the copy in because
+deducting it "would raise our ratio". It is the other way round: our ratio is GPAP's unique/s
+over `unique / model_runtime`, so the copy lowered their rate and raised ours. The audit also
+sized every row at `--cycles 25`, under-counting the T=50 rows about 4×.
+
+**The change, by the user** ("count out the time for the copy to the host so it will be fair
+across all tools"): `eval/rivals/recurrent_gpap_eval.patch`, applied by `rivals_setup.sh`,
+synchronizes after each depth's gradient steps and times the copy block on its own, exported as
+`egress_runtime` beside their unchanged `model_runtime`. The harness rates
+unique / (`model_runtime` − `egress_runtime`) and records `runtime_s` and `egress_s`. The guards:
+the harness refuses an unpatched checkout and a `--resume` into a file holding pre-patch rows
+(one clock per file); `colab_rivals_l4.sh` and `run_full_eval.sh` check the patch before any
+Recurrent stage, since behind `| tee` a refusal reads as a stage that produced nothing; the
+emission audit FAILs a stage file on both clocks; and `compare_campaign.py` rates Recurrent on
+its own `runtime_s` on both sides when one predates the deduction. It is GPAP's own rule applied
+to the rival: our steady state subtracts the wall that delivers rows. Not taken: keeping the
+copies on the GPU (it spends the VRAM that sets the rival's batch rung) and subtracting the
+modelled bound (approximate, see below).
+
+**Evidence** (RTX 4080 Laptop, T=25, `--num_steps 1`, batch 300k, four rotations of stock /
+patched / copy-free, the copy-free arm keeping the candidates on the GPU):
+
+| | stock | patched | patched − copy | copy-free | unique (all arms) |
+|---|---:|---:|---:|---:|---:|
+| `s386` | 8.59 s | 8.67 s | 6.90 s | 6.92 s | 6,378,648 |
+| `b03` | 8.37 s | 8.32 s | 7.36 s | 7.91 s | 5,361,802 |
+
+Medians. The patch leaves their clock where it was (+0.9%, −0.7%, inside a spread of ~10% on
+this box), and the deduction lands on the copy-free run (`s386` within 0.3%; `b03` inside its
+own 7.4–8.5 s spread). Solutions are identical in every arm. The copy is 11–20% of
+`model_runtime` here (`b01` at 1M: 19.9%).
+
+**What this does to the frozen campaign.** Its Recurrent rows carry the copy; the audit now
+labels them "modelled" and says they flatter GPAP. Modelled at each row's own depth, the share
+is median 1.7% (T=25) and 3.4% (T=50), max 18.4% (`s208.1`). Deducting it would lower each
+Recurrent geomean by 4–5%. The per-copy model under-reads the measured copy on the laptop by
+1.7–2.1×, so treat those as lower bounds. The next campaign measures it per row.
+
+A metric change after the freeze, made by the owner and recorded here as §17b's was.

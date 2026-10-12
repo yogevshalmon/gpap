@@ -231,6 +231,14 @@ sat_count decays into garbage forced literals. Gated by a regression test.
 user's direction).** An honest uniformity number needs the whole solution set or conditional
 sampling. The statistics are kept in `eval/uniformity/metrics.py`; `gpap/implications.py` went too.
 
+**Recurrent's host copy, measured and deducted (2026-10-12).** Its timed loop copies every
+depth's candidates to the host, which no other tool's clock includes. Left in, it lowers their
+rate and flatters GPAP (the earlier record had the direction backwards). A patch now times the
+copy on its own and the harness deducts it. On the 4080 Laptop, runtime minus the measured copy
+equals a copy-free run (`s386` within 0.2%), with identical solutions. The frozen rows carry it:
+modelled at 1.7% median at T=25 and 3.4% at T=50, a lower bound.
+[RIVAL_FAIRNESS_FINDINGS.md](RIVAL_FAIRNESS_FINDINGS.md) §17c.
+
 **Barbarik, circuit-only with both controls (2026-08-28): GPAP as shipped is Accepted on 64/66
 instances with zero Rejects — CMSGen 66/66, `soft` Rejected 64/65, pinned `b8`/`b1` 6/6 vs 6/6 at
 barbarik's own stricter default.** ⚠️ "As shipped" there is pinned-config verdicts joined to the
