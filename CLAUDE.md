@@ -262,12 +262,11 @@ scripts/build_abc.sh                                         # optional: pinned 
   delivered count. `--time-limit 0` = no cap on `gpap sample`; `gpap bench` refuses 0 because
   there the flag is also the rival's timeout.
 - **A budget is spent, not approached.** The early give-up on zero yield (`grace_chunks` /
-  `--give-up-chunks`) is OFF by default: a run that has found nothing keeps going until a
-  budget stops it. It defaulted to on and made every budget nominal — a 60 s campaign cell
-  could end after ~2 s and report zero, and on three of six of the published campaign's own
-  GPAP-zero cells the budget would have found samples. Deciding a formula is hopeless is the
-  caller's call. With no budget at all (`--time-limit 0`, no chunk cap) the run is unbounded,
-  which is what asking for it means.
+  `--give-up-chunks`) is OFF by default: a dry run keeps going until a budget stops it. On by
+  default it made every budget nominal — a 60 s cell could end after ~2 s and report zero, and
+  three of six of the published campaign's GPAP-zero cells did have samples. Deciding a formula
+  is hopeless is the caller's call; with no budget at all the run is unbounded, which is what
+  asking for it means.
 - Preprocessing is inside the honest rate: `samples_per_s` is the winning config's steady-state
   throughput and excludes parse, construction, ELS, warmup and mining; `sps_e2e_total` includes
   them. CMSGen's rate is samples per subprocess wall, which already carries its setup, so Table
