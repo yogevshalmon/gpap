@@ -376,15 +376,12 @@ extern "C" gpap_status gpap_sampler_run(gpap_sampler *s, int64_t n_target,
                 retry_soft = 1;
                 window_start = st.chunks;
             }
-            /* GIVE UP EARLY ONLY IF ASKED (grace_chunks > 0). Nothing found after the cold start
-             * plus a grace window is evidence the target is unreachable -- but it is only
-             * evidence, and it used to END THE RUN BY DEFAULT: measured on the paper campaign's
-             * own cells, four chunks and ~2 s of a 60 s budget, and on three of six instances
-             * samples existed that the full budget found. A budget the caller set is a promise
-             * about how long the call may take, not a ceiling the loop may decline to approach;
-             * deciding that a formula is hopeless is the CALLER's call, because only the caller
-             * knows what the run is for. `--time-limit 0` with no chunk cap therefore means
-             * exactly what it says: run until the target is met. */
+            /* GIVE UP EARLY ONLY IF ASKED (grace_chunks > 0). A dry grace window is evidence
+             * the target is unreachable, and it used to END THE RUN BY DEFAULT: four chunks and
+             * ~2 s of a 60 s budget on the paper campaign's cells, where three of six did have
+             * samples the full budget found. A budget is a promise about how long the call may
+             * take, not a ceiling the loop may decline to approach; deciding a formula is
+             * hopeless is the CALLER's call. */
             if (grace > 0 && st.n_models == 0 && !cold
                     && st.chunks - window_start >= cold_size + grace) {
                 st.stop = GPAP_SAMPLE_STOP_ZERO_YIELD;

@@ -275,11 +275,9 @@ def _sample_run(args, device, path, tmp, encode_s):
               "         trajectories rather than backtracking, so a tightly-constrained instance\n"
               "         can yield nothing. Try --portfolio b1 (one decision per round)\n"
               "         or --allow-soft (faster on tight circuits, NOT uniform).")
-        # AND SAY WHETHER THE BUDGET WAS EVEN SPENT. This advice used to include "a longer
-        # --time-limit", which is wrong precisely when it is most tempting: under `zero_yield`
-        # the clock was never the binding constraint, so a longer one changes nothing. Measured
-        # on b15 at T=25 rare: 2.0 s of a 60 s budget, and 30x the trajectories found nothing
-        # either. On b17 they did.
+        # AND SAY WHETHER THE BUDGET WAS EVEN SPENT. The advice used to include "a longer
+        # --time-limit", wrong precisely where it is most tempting: under `zero_yield` the clock
+        # never bound (b15 at T=25 rare: 2.0 s of 60), so a longer one changes nothing.
         if info.get("stop") == "zero_yield":
             print(f"         The run gave up after {info['wall_timed_s']:.2f}s of your "
                   f"--time-limit, not at the end of it: the\n"

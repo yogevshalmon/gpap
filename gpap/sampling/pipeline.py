@@ -245,11 +245,9 @@ def sample_clauses(nv, clauses, support, device, *, simplify=True, els=True, n_t
     `give_up_chunks`) are reported via `chunk_capped`, and `stop` says which one fired.
 
     `give_up_chunks=0` (the default) means the run spends the budget it was given. Set it only
-    where abandoning a dry formula early is worth more than the measurement -- it ends a run
-    that has found nothing after every config ran plus that many chunks, which on a
-    low-success instance is seconds into a minute-long budget. It was on by default in the core
-    and that is how a 60 s campaign cell came to report zero after 2 s on instances the budget
-    could sample.
+    where abandoning a dry formula early is worth more than the measurement: it ends a run that
+    has found nothing after every config ran plus that many chunks, which on a low-success
+    instance is seconds into a minute-long budget.
     `configs`: a portfolio run as a throughput bandit (one config per chunk at full K, switching
     to the winner); None runs the single fixed (`random_var`, `b`) config. The winner is reused
     for the coverage run, whose batch is `min(cov_k_cap, cov_batch(nv))` so reconstructing
@@ -518,13 +516,11 @@ def sample_clauses(nv, clauses, support, device, *, simplify=True, els=True, n_t
             # formula, where 0 models is the complete answer and nothing was cut: the flag is
             # what both printers mark with '<', and marking that row would invent a valve.
             "chunk_capped": (t["n_models"] < n_time) and not unsat,
-            # WHICH valve, not merely that one fired. `target` | `time` | `chunks` | `zero_yield`
-            # | `unsat` (gpap.engine._core.SAMPLE_STOP). The core has always distinguished them
-            # and this function used to discard the answer, leaving `chunk_capped` to conflate
-            # "spent its whole budget" with "abandoned after the cold start plus two grace
-            # chunks" -- which are opposite facts about a tool and about an instance. A row that
-            # delivered nothing cannot be read without it: on the paper campaign's 15 GPAP-zero
-            # cells nothing in the record says whether 60 s were spent or four chunks were.
+            # WHICH valve, not merely that one fired: `target` | `time` | `chunks` |
+            # `zero_yield` | `unsat` (gpap.engine._core.SAMPLE_STOP). Without it `chunk_capped`
+            # conflates "spent its whole budget" with "gave up early", which are opposite facts,
+            # and a row that delivered nothing cannot be read -- as on the paper campaign's 15
+            # GPAP-zero cells, where the record does not say which happened.
             "stop": t.get("stop"),
             "wall_timed_s": wall,                             # the solver's sampling wall (timed run)
             "wall_total_s": wall_total,                       # e2e wall incl. construction+simplify+mining
