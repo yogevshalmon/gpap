@@ -24,13 +24,13 @@ REPO_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
 sys.path.insert(0, REPO_ROOT)
 
 from eval.artifact.paper_tables import (RIVAL_CMS_SETS, RIVALS,  # noqa: E402 — shared rules
-                                        VACUOUS_PINS, _RIVAL_KEY, cms_arm_ran, rival_cells,
-                                        rival_cms_cells, zero_search)
+                                        _RIVAL_KEY, cms_arm_ran, rival_cells,
+                                        rival_cms_cells, vacuous_pin, zero_search)
 
 # Categorical palette: fixed slot order, never cycled, colorblind-safe; one role per hue.
 C_TSEITIN, C_ABC, C_CMS, C_RIVAL = "#2a78d6", "#eb6834", "#1baf7a", "#4a3aa7"
 
-# VACUOUS_PINS and zero_search are IMPORTED, never restated: a private copy of a paper rule drifts.
+# vacuous_pin and zero_search are IMPORTED, never restated: a private copy of a paper rule drifts.
 SURFACE, INK, INK2, GRID = "#fcfcfb", "#0b0b0b", "#52514e", "#d9d8d4"
 ENC_COLOR = {"tseitin": C_TSEITIN, "abc:fast": C_ABC, "abc:full": C_ABC, "abc:auto": C_ABC}
 
@@ -335,7 +335,7 @@ def fig_prop_summary(plt, stages, out_dir):
                 best[k] = r
         keep = []
         for k, r in best.items():
-            if k in VACUOUS_PINS:
+            if vacuous_pin(r, k):
                 continue
             a, b = r.get("implications_per_s"), r.get("cms_implications_per_s")
             s, t = r.get("gpap_sps"), r.get("cms_sps")
@@ -411,7 +411,7 @@ def fig_sps_scatter(plt, stages, out_dir):
             if not cms_arm_ran(r):
                 continue
             k = r["name"].split(".")[0]
-            if k in VACUOUS_PINS or zero_search(r):
+            if vacuous_pin(r, k) or zero_search(r):
                 n_deg += 1
                 continue
             g, c = r.get("gpap_sps") or 0, r.get("cms_sps") or 0
@@ -860,7 +860,7 @@ def write_summary(stages, out_dir, src_dir):
         gm = _gm([r.get("ratio") for r in best.values()])
         # `clean` = the paper's rule, IMPORTED: drop vacuous pins and no-search cells.
         gm_nv = _gm([r.get("ratio") for k, r in best.items()
-                     if k.split(".")[0] not in VACUOUS_PINS and not zero_search(r)])
+                     if not vacuous_pin(r, k.split(".")[0]) and not zero_search(r)])
         # THE SYMMETRIC LEDGER (paper_tables.cms_family's rule): a CMSGen-zero cell is an outright
         # win and a GPAP-zero cell an outright loss, neither with a finite ratio, so each gets its
         # own column and `wins` counts finite wins plus CMSGen's zeros.
