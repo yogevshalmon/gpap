@@ -16,7 +16,7 @@ import sys
 import time
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
-from eval.rivals.rival_common import BATCH_LADDER, grant_key  # noqa: E402
+from eval.rivals.rival_common import BATCH_LADDER, grant_key, grant_walk_rungs  # noqa: E402
 
 TOOLS = {"demotic": "demotic", "recurrent": "rcs"}      # stage stem prefix -> row key
 
@@ -71,8 +71,12 @@ def extract(campaign_dir):
                 sweep = rv.get("batch_sweep") or []
                 ooms = [x["batch"] for x in sweep
                         if "outofmemory" in str(x.get("error") or "").lower()]
+                # a PINNED row's sweep starts at the grant: carry the walk that chose it, or a
+                # campaign re-run on its own grants would erase the record of the rungs above
+                rec_oom = (rv.get("grant_walk") or {}).get("oom_min")
+                ooms += [rec_oom] if rec_oom else []
                 e = {"batch": int(rv["batch"]),
-                     "rungs_tried": [x.get("batch") for x in sweep],
+                     "rungs_tried": grant_walk_rungs(rv),
                      "oom_min": min(ooms) if ooms else None,
                      "unique_per_s": rv.get("unique_per_s"), "stage": stem}
                 if tool == "recurrent":

@@ -459,14 +459,28 @@ def load_grants(path):
 
 def lookup_grant(grants, tool, name, mode, cycles, variant="abc"):
     """The recorded grant for one cell, or None (unrecorded, or recorded as a rival failure).
-    Returns {"batch", "start_point", "source"}; `start_point` is None for DEMOTIC."""
+    Returns {"batch", "start_point", "source", "walk"}; `start_point` is None for DEMOTIC.
+
+    `walk` is the walk that CHOSE the rung, as recorded (`rungs_tried`, `oom_min`). A pinned run
+    starts at the grant, so its own `batch_sweep` cannot say whether a larger rung was refused;
+    the row carries the recorded walk as `grant_walk` instead (`grant_walk_rungs`)."""
     if not grants:
         return None
     e = (grants.get(tool) or {}).get(grant_key(name, mode, cycles, variant))
     if not e or not e.get("batch"):
         return None
     return {"batch": int(e["batch"]), "start_point": e.get("start_point"),
-            "source": f"pinned from {os.path.basename(grants.get('_path') or 'grants')}"}
+            "source": f"pinned from {os.path.basename(grants.get('_path') or 'grants')}",
+            "walk": {"rungs_tried": e.get("rungs_tried"), "oom_min": e.get("oom_min")}}
+
+
+def grant_walk_rungs(rv):
+    """Every rung the walk to this row's batch tried, largest first. A walked row's is its own
+    `batch_sweep`; a pinned row's is the recorded walk down to the grant (`grant_walk`), then
+    whatever this card walked below it. Pure: the table generators re-implement nothing."""
+    sweep = [x.get("batch") for x in (rv.get("batch_sweep") or [])]
+    rec = (rv.get("grant_walk") or {}).get("rungs_tried") or []
+    return [b for b in rec[:-1] if b not in sweep] + sweep if rec else sweep
 
 
 def lookup_recorded_failure(grants, tool, name, mode, cycles, variant="abc"):

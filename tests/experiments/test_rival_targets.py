@@ -1064,13 +1064,48 @@ def test_extract_grants_reads_the_grant_off_the_rows_and_never_pins_a_failure(tm
     path.write_text(json.dumps(g))
     grants = load_grants(str(path))
     assert lookup_grant(grants, "recurrent", "b06", "table", 25) == {
-        "batch": 3_000_000, "start_point": 1, "source": "pinned from g.json"}
+        "batch": 3_000_000, "start_point": 1, "source": "pinned from g.json",
+        "walk": {"rungs_tried": [3_000_000], "oom_min": None}}
     assert lookup_grant(grants, "recurrent", "b17", "table", 25) is None, "a failure is not pinned"
     assert lookup_grant(grants, "demotic", "c432", "native", 1)["start_point"] is None
     assert lookup_grant({}, "demotic", "c432", "native", 1) is None
     (tmp_path / "bad.json").write_text("{}")
     with pytest.raises(ValueError):
         load_grants(str(tmp_path / "bad.json"))
+
+
+def test_a_campaign_re_run_on_its_own_grants_keeps_the_recorded_walk(tmp_path, monkeypatch):
+    """A pinned run starts at the grant, so its `batch_sweep` holds one rung. The harness stamps
+    the recorded walk on the row (`grant_walk`) and `extract_grants` reads it back, so re-running
+    a campaign on its own grants writes the SAME grants file, not one that forgot the rungs
+    above every grant."""
+    import json
+
+    import eval.rivals.rival_common as rc
+    import eval.rivals.rivals_recurrent as rr
+    from eval.rivals.extract_grants import extract
+
+    rc._WARMED.add("recurrent")
+    monkeypatch.setattr(rr, "run_recurrent",
+                        lambda rival, f, key, T, steps, batch, sp, timeout=0, lr=None:
+                        {"unique_per_s": 1.0, "batch": batch, "start_point": sp})
+    bench = tmp_path / "x.bench"
+    bench.write_text("INPUT(a)\nOUTPUT(y)\ny = DFF(a)\n")
+    walk = {"rungs_tried": [3_000_000, 1_000_000, 300_000, 100_000, 30_000, 10_000],
+            "oom_min": 30_000}
+    grant = {"batch": 10_000, "start_point": 2, "source": "pinned from g.json", "walk": walk}
+    r = rr.run_recurrent_once("rival", str(bench), "x", 25, 1, 1_000, 2,
+                              cache_dir=str(tmp_path / "c"), grant=grant)
+    assert r["grant_walk"] == walk and [x["batch"] for x in r["batch_sweep"]] == [10_000]
+    assert rc.grant_walk_rungs(r) == walk["rungs_tried"]
+    run = tmp_path / "run"
+    run.mkdir()
+    (run / "rivals_recurrent_table.json").write_text(json.dumps([
+        {"name": "b14", "variant": "abc", "mode": "table", "cycles": 25, "rcs": r}]))
+    e = extract(str(run))["recurrent"]["b14|table|25|abc"]
+    assert e["rungs_tried"] == walk["rungs_tried"] and e["oom_min"] == 30_000
+    assert rc.grant_walk_rungs({"batch_sweep": [{"batch": 3}, {"batch": 1}]}) == [3, 1], \
+        "a walked row is read off its own sweep"
 
 
 def test_the_committed_grants_file_is_the_campaigns_and_every_pinned_rung_is_on_the_ladder():

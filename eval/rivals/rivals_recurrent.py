@@ -476,6 +476,8 @@ def run_recurrent_once(rival, bench_file, key, T, steps, batch, start_point,
         if spent0:
             r["ladder_spent_cached_s"] = round(spent0, 1)
         r["grant_source"] = grant_source(pinned, r, grant["source"] if grant else None)
+        if grant and grant.get("walk"):
+            r["grant_walk"] = grant["walk"]     # the recorded walk that chose the pin
     return r
 
 
