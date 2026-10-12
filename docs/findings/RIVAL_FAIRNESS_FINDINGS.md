@@ -805,8 +805,29 @@ there is no `p_accept` to read. `eval_plots.py` and `verify_artifact.py` had bee
 `name in VACUOUS_PINS` directly — the drift `eval_plots` warns against in writing — and now call
 `vacuous_pin`. Gated by `test_a_named_pin_that_measures_samplable_is_not_screened`.
 
-Re-derived from the frozen rows, only the four T=50 rows move, in both directions: Table 1
-their-pins n 14→15 and 1616→1433×, rare n 14→16 and 71.7→83.0×; Table 2 8.50→9.20× and
-119.3→101.8×. T=1 and T=25 are unchanged. A bug fix under the freeze, so the screen's definition
-is untouched; `check_paper_numbers.py` now fails on `paper/data`, which is the signal that the
-PDF's T=50 numbers must be re-cut from the next campaign rather than re-transcribed.
+Re-derived from the frozen rows, the four T=50 rows move in both directions: Table 1 their-pins
+n 14→15 and 1616→1433×, rare n 14→16 and 71.7→83.0×; Table 2 8.50→9.20× and 119.3→101.8×. Table 3's
+two T=50 rows and nine prose figures follow them — 48 of 159 published values in all. T=1 and T=25
+are unchanged. A bug fix under the freeze, so the screen's definition is untouched;
+`check_paper_numbers.py` now fails on `paper/data`, which is the signal that the PDF's T=50 numbers
+(and ARTIFACT.md's copies of them) must be re-cut from the next campaign rather than
+re-transcribed. The T=50 figures in §17b's table above and in INSIGHTS.md predate this fix.
+
+Two more name-only copies remain, both outside the artifact: `eval/profiling/kernel_ab.py` and
+`profile_soft_portfolio.py` stamp `vacuous` from a private set, and their rows carry no baseline to
+read instead, so the flag is only valid at their default `--cycles 25`.
+
+**Open, for the owner, before the next campaign launches: `p_accept >= 1.0` is exact, and
+`p_accept` is a Monte Carlo estimate.** With the name list no longer masking it, a tautology that
+measures one miss scores. It is not hypothetical: in `gpap_experiments_l4_20260805` **`b05` at T=25
+measures 0.9999998** (1 miss in ~5.1M sequences) and enters the seq-c25 geomeans at 95× (tseitin)
+/ 180× (abc), raising them 7.6→9.5× and 87.7→92.4×. The frozen `paper/data` records exactly 1.0
+for all four names, so nothing published moves, but that is luck on an estimate rather than a
+property of the cell. The same exactness already makes the supplementary hwmcc stage's screening
+run-dependent: `6s215rb0` measures 1.0 in some rows and 0.99969 in others. A near-vacuous
+tolerance is the fix, and the data says where it belongs: `1 - p_accept` over every recorded cell
+goes 0, then 1.9-2.1e-7 (`b05`), then 1.9e-5, 2.3-6.2e-4 (three hwmcc instances), then a clean
+80× gap to 1.7e-2 (`b12`). So a tolerance of ~1e-6 separates `b05` from its nearest neighbour by
+90× and catches nothing else, while the 1e-3 that looks natural would newly screen three hwmcc
+instances nobody has called vacuous. Tightening a screen is a metric change, so it is logged here,
+not taken.

@@ -81,7 +81,7 @@ a figure cannot disagree about which cells were screened.
 
 | screen | what it catches | what it costs us |
 |---|---|---|
-| **vacuous pin** | the target holds for every input, so pinning it is a tautology and every sampler scores ~100% | `b02`, `b05`, `b07`, `s526` leave the sequential geomeans |
+| **vacuous pin** | the target holds for every input, so pinning it is a tautology and every sampler scores ~100% — read per row from `p_accept`, not by name, because vacuity depends on the depth | at T=25 `b02`, `b05`, `b07`, `s526` leave the sequential geomeans; at T=50 only `b05`, `s526` and `b07` under its own pins do |
 | **free support** | propagation alone fixes the support, so sampling needs no search — detected per row from our own counters, not by name | `c432` at a rare pin was once an entire geomean at 89,786× |
 | **tiny space** | fewer than 1,000 solutions: both tools enumerate rather than sample, and the ratio is a race between two start-up costs | drops a 45,520× cell from Table 2 while *returning* 1,348× → 1,620× to Table 1 |
 | **proved UNSAT at this depth** | neither tool can produce a solution | — |
