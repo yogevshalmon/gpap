@@ -121,8 +121,8 @@ def zero_search(r):
     if not dec and not impl:
         return True
     # ...and the continuous version, because an exact zero is a knife-edge: a sampler doing ~one
-    # implication per model delivered is reading bits out of a hypercube. The threshold sits
-    # inside a two-order-of-magnitude gap in the measured values, not fitted to them.
+    # implication per model delivered is reading bits out of a hypercube. The threshold sits in a
+    # gap in the measured values (0.83, 1.13, then 6.32), not fitted to them.
     return bool(sps and impl / sps < NEARLY_FREE_IMPL_PER_MODEL)
 
 
