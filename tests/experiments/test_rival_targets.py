@@ -1254,3 +1254,26 @@ def test_honouring_a_recorded_failure_stays_opt_in_and_settings_bound():
                 "1200s initialization budget")
     assert settled_error(recorded, 1200, 1200) is True
     assert settled_error(recorded, 3600, 1200) is False
+
+
+# --------------------------------------------------------------- Recurrent's host snapshot, deducted
+
+
+def test_the_recurrent_eval_patch_applies_to_the_pinned_commit(tmp_path):
+    """The patch is a diff against the pinned commit, applied to that commit's pristine run.py in
+    a repository of its own: `git apply` in a directory with no .git inside another repository
+    prints "Skipped patch" and returns 0, which would pass this test on anything."""
+    import subprocess  # noqa: PLC0415
+
+    rival = os.path.dirname(os.path.dirname(os.path.dirname(RIVAL_RUN_PY)))
+    if not os.path.isdir(os.path.join(rival, ".git")):
+        pytest.skip("Recurrent git checkout absent (eval/rivals/rivals_setup.sh); nothing to verify")
+    pristine = subprocess.run(["git", "-C", rival, "show", "HEAD:src/pytorch/run.py"],
+                              capture_output=True, text=True, check=True).stdout
+    (tmp_path / "src" / "pytorch").mkdir(parents=True)
+    (tmp_path / "src" / "pytorch" / "run.py").write_text(pristine)
+    subprocess.run(["git", "init", "-q", str(tmp_path)], check=True)
+    patch = os.path.join(REPO_ROOT, "eval", "rivals", "recurrent_gpap_eval.patch")
+    subprocess.run(["git", "-C", str(tmp_path), "apply", patch], check=True)
+    patched = (tmp_path / "src" / "pytorch" / "run.py").read_text()
+    assert "egress_runtime" in patched and "torch.cuda.synchronize()" in patched

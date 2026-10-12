@@ -1,0 +1,65 @@
+From: GPAP evaluation harness
+Subject: [PATCH] Recurrent-CircuitSAT-Sampler: time the host snapshot on its own (GPAP eval only)
+
+One addition to arashardakani/Recurrent-CircuitSAT-Sampler @ b9b048a. The loop their timer
+wraps (`run_back_prop_seq`) copies every depth's candidate assignments to the host, so their
+`model_runtime` includes delivering samples, which no other tool's clock does. This patch
+times that copy block on its own and exports it beside `model_runtime` as `egress_runtime`,
+so a comparison can deduct it (eval/rivals/rivals_recurrent.py does).
+
+Nothing else changes: the same steps, the same copies, the same solutions, and
+`model_runtime` is still their own clock. The `torch.cuda.synchronize()` before the block
+finishes the steps on the step side of the split; without it the first `.cpu()` waits for
+them, so the copy would be charged with gradient work. It adds no wait the first `.cpu()` did
+not already pay. The copies are synchronous, so the block's end needs no second sync.
+
+diff --git a/src/pytorch/run.py b/src/pytorch/run.py
+index 5e683bf..104903b 100644
+--- a/src/pytorch/run.py
++++ b/src/pytorch/run.py
+@@ -3,6 +3,7 @@ import logging
+ import os
+ import pathlib
+ import random
++import time
+ 
+ import numpy as np
+ import pandas as pd
+@@ -166,7 +167,10 @@ class Runner(object):
+ 
+     def run_back_prop_seq(self, train_loop: range):
+         """Run backpropagation for the given number of epochs."""
+-        
++        # GPAP eval: the per-depth host snapshot below is timed on its own (`egress_runtime`),
++        # so a comparison can exclude delivery as it does for every other tool. `model_runtime`
++        # is unchanged: the first .cpu() already waited for the steps, as the sync now does.
++        self.egress_s = 0.0
+         for internal_loop_idx in range(self.args.start_point, self.args.num_clock_cycles):
+             for epoch in train_loop:
+                 self.model.train()
+@@ -178,6 +182,9 @@ class Runner(object):
+                 self.optimizer.step()
+                 self.optimizer.zero_grad()
+ 
++            if self.device == 'cuda':
++                torch.cuda.synchronize()
++            t_egress = time.perf_counter()
+             cnt = 0
+             self.solutions[self.args.num_clock_cycles - 1 - internal_loop_idx] = {}
+             for i in range(internal_loop_idx, -1, -1):
+@@ -186,6 +193,7 @@ class Runner(object):
+                     sub_solutions.append(param[:,self.args.num_clock_cycles - 1 - i].unsqueeze(-1).cpu())
+                 self.solutions[self.args.num_clock_cycles - 1 - internal_loop_idx][cnt] = sub_solutions
+                 cnt += 1
++            self.egress_s += time.perf_counter() - t_egress  # .cpu() is synchronous
+             self.model.emb.init(self.args.num_clock_cycles - 1 - internal_loop_idx, self.args.num_clock_cycles)
+         return self.loss_per_batch(output, self.target)
+ 
+@@ -251,6 +259,7 @@ class Runner(object):
+         self.results[prob_id].update(
+             {
+                 "model_runtime": elapsed_time,
++                "egress_runtime": self.egress_s,
+                 "model_epochs_ran": self.args.num_steps,
+             }
+         )
