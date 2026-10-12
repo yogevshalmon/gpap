@@ -97,6 +97,7 @@ PYFIX
     # the harness can deduct it, as no other tool's clock includes delivering its samples.
     # rivals_recurrent.py refuses to run without it. Idempotent.
     RCS_PATCH="$REPO_ROOT/eval/rivals/recurrent_gpap_eval.patch"
+    RCS_UNPATCHED=0
     RCS_DIR="$SRC/Recurrent-CircuitSAT-Sampler"
     # Judged by the file, not by git's exit status: in a checkout with no .git of its own, inside
     # another repository, `git apply` prints "Skipped patch" and returns 0.
@@ -108,6 +109,7 @@ PYFIX
         else
             echo "[warn] Recurrent eval patch did not apply to $RCS_DIR —" \
                  "eval/rivals/rivals_recurrent.py will refuse to run"
+            RCS_UNPATCHED=1
         fi
     fi
 
@@ -200,3 +202,10 @@ for name in "${!RIVALS[@]}"; do
 done
 echo
 echo "harnesses: eval/rivals/rivals_demotic.py  eval/rivals/rivals_recurrent.py  eval/rivals/rivals_hts.py"
+# The one setup failure that is not a warning: a campaign VM's bootstrap runs this script and
+# fails on its status, and an unpatched Recurrent would otherwise surface hours later as a
+# stage that wrote no rows.
+if [ "${RCS_UNPATCHED:-0}" = 1 ]; then
+    echo "[FATAL] the Recurrent checkout is not patched (eval/rivals/recurrent_gpap_eval.patch)" >&2
+    exit 1
+fi
