@@ -66,20 +66,15 @@ def by_arm(rows):
 
 
 def order_budget(rows):
-    """{arm: its per-order sampling budget}, None where we bound that arm at all. Raises if ONE
-    arm appears under two budgets, for the same reason `check_one_setting` does.
+    """{arm: its per-order sampling budget}, None for an arm we do not bound (SPUR) or a row from
+    before the flag. Raises if ONE arm appears under two budgets, for the same reason
+    `check_one_setting` does: the budget decides how often an order goes unfilled and unfilled
+    orders are what this table reports, so one arm pooled across two is a budget comparison
+    wearing a uniformity label, a single `cat` away.
 
-    The budget is not a performance detail here: it decides how often an order goes unfilled, and
-    unfilled orders are what this campaign reports ("accepted on 60 of 65, 5 no-verdict"). The
-    same arm under two budgets in one table is therefore a budget comparison wearing a uniformity
-    label, and the row format makes it a single `cat` away.
-
-    PER ARM, not one number per file, because the arms are deliberately NOT on one budget: GPAP
-    is held to `--order-seconds` and the rival is not (barbarik_gpap.CMSGEN_ORDER_SECONDS says
-    why — the asymmetry runs against us, and forcing our own number onto CMSGen was measured
-    taking an earned Accept off it). A global check would refuse that file, so it would have to
-    be bought with a lie in the rows. What the reader needs is both numbers, side by side, which
-    is what this returns and what the table prints. SPUR carries None: we do not bound it."""
+    PER ARM, because the arms are deliberately not on one budget (barbarik_gpap's
+    CMSGEN_ORDER_SECONDS). A per-file check would refuse the intended campaign, and could only
+    be satisfied by recording a number one arm never saw."""
     out, mixed = {}, {}
     for r in rows:
         arm, b = r.get("sampler"), r.get("order_seconds")
