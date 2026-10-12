@@ -92,7 +92,36 @@ def rate_pairs(ref_cells, new_cells, which):
             if a[k][idx] and b[k][idx]]
 
 
+def one_clock(ref_rows, new_rows):
+    """`(ref_rows, new_rows, converted)` with Recurrent's rate on one clock on both sides.
+
+    Its rate has its host copy deducted from 2026-10-12 (RIVAL_FAIRNESS_FINDINGS.md §17c); a
+    reference recorded before carries it. Across that change both sides are put on their own
+    `runtime_s`, or the speed factor and the near-tie verdicts would measure the metric change
+    rather than the card."""
+    def deducted(rows):
+        return any((r.get("rcs") or {}).get("egress_s") is not None for r in rows)
+
+    def theirs(rows):
+        out = []
+        for r in rows:
+            rcs = r.get("rcs") or {}
+            if rcs.get("egress_s") is not None and rcs.get("runtime_s"):
+                r = dict(r, rcs=dict(rcs, unique_per_s=rcs["unique"] / rcs["runtime_s"]))
+            out.append(r)
+        return out
+
+    if deducted(ref_rows) == deducted(new_rows):
+        return ref_rows, new_rows, False
+    return theirs(ref_rows), theirs(new_rows), True
+
+
 def compare_stage(stem, key, ref_rows, new_rows, report):
+    if key == "rcs":
+        ref_rows, new_rows, converted = one_clock(ref_rows, new_rows)
+        if converted:
+            report["notes"].append(f"{stem}: one side predates the host-copy deduction; "
+                                   f"Recurrent compared on its own model_runtime")
     ref, new = by_cell(ref_rows), by_cell(new_rows)
     shared = sorted(set(ref) & set(new))
     report["cells"][stem] = {"reference": len(ref), "fresh": len(new), "shared": len(shared),
