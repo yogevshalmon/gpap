@@ -684,6 +684,23 @@ def test_vacuous_pins_excluded_only_where_present(tmp_path):
     assert cms_family(d2, "t", "tseitin")["has_vac"] is False
 
 
+def test_a_named_pin_that_measures_samplable_is_not_screened(tmp_path):
+    """Vacuity is a property of (instance, depth, pin): `b02` is a tautology at T=25 and measures
+    p_accept 0.37-0.63 at T=50. The name list must not override the row, or a samplable cell is
+    dropped AND itemised as `p_accept 1.0`."""
+    from eval.artifact.paper_tables import rival_cms_cells
+    assert not vacuous_pin({"sim_baseline": {"p_accept": 0.375}}, "b02")
+    assert not vacuous_pin({"p_accept": 0.375}, "b02")
+    assert vacuous_pin({"p_accept": 1.0}, "b02")
+
+    rows = [rrow("s386", p_acc=0.05), rrow("b02", p_acc=0.375, cycles=50)]
+    got = {n: b for n, _v, b, _g, _c in rival_cms_cells(rows, "rcs")}
+    assert got == {"s386": "ok", "b02": "ok"}, "the T=50 b02 cell was screened on its name"
+    # ...and the T=25 row, where the measurement agrees with the name, still screens
+    t25 = {n: b for n, _v, b, _g, _c in rival_cms_cells([rrow("b02", p_acc=1.0)], "rcs")}
+    assert t25 == {"b02": "vacuous"}
+
+
 # ------------------------------------------------- the e2e column: who is charged for setup
 
 def timed_row(name, *, sps=1e6, cms_sps=1e4, pre=0.5, wall_total=2.0, **kw):
