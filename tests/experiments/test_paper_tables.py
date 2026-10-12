@@ -1557,13 +1557,11 @@ def test_every_table_generator_still_imports():
 def test_verify_artifact_tells_a_gpap_zero_we_measured_from_one_we_abandoned(tmp_path):
     """A GPAP zero is only a loss if we looked.
 
-    The sampler's zero-yield valve ends a run once a few chunks come back empty, which on a
-    low-success instance is seconds into a 60 s budget. So `n_models == 0` carries two opposite
-    readings -- the instance defeated us, or we stopped looking -- and only `stop` separates
-    them. Measured on the published campaign's own zero cells, three of six yielded once the
-    valve was lifted, so this is not a hypothetical: the gate must name the abandoned ones,
-    leave the ones that spent their budget alone, and say so when the field is missing (every
-    published row predates it).
+    `n_models == 0` carries two opposite readings -- the instance defeated us, or we stopped
+    looking -- and only `stop` separates them; three of the published campaign's six zero cells
+    yielded once the valve was lifted. So the gate must name the abandoned ones, leave the ones
+    that spent their budget alone, and say so where the field is missing (every published row
+    predates it).
     """
     riv = tmp_path / "riv"
     riv.mkdir()

@@ -82,7 +82,7 @@ def test_barbarik_fill_gives_up_on_dry_attempts_not_dry_calls(monkeypatch):
         # give-up rule, which is off by default. A stub that omits a parameter the caller
         # passes fails as a TypeError, which is the right outcome -- it is how this test
         # noticed the budget had been added.
-        def sample_bits(self, n, config=None, max_chunks=400, max_seconds=None):
+        def sample_bits(self, n, config=None, max_chunks=None, max_seconds=None):
             rows, empty = [], 0
             while len(rows) < n and empty < 3:
                 if self.rng.random() < Stub.p_dry:
@@ -133,15 +133,10 @@ def test_barbarik_fill_gives_up_on_dry_attempts_not_dry_calls(monkeypatch):
 def test_one_order_is_bounded_by_the_order_budget_not_by_the_attempt_count(monkeypatch, draw):
     """`--order-seconds` bounds ONE of barbarik's orders, so `72 x it` bounds a certificate.
 
-    The budget has to be a deadline shared by every call the collector makes, not an argument
-    handed to each of them: the `batch` arm makes up to `_FILL_ATTEMPTS` calls and the `iid` arm
-    up to `num_solutions` per attempt, so per-call it would bound an order at 24x (batch) to
-    1,200x (iid) the stated number. A trickling instance — one row, then dry, which is the shape
-    a Barbarik kernel produces from a rejection sampler — is exactly the case that walks the
-    whole attempt budget, so that is what this stub is.
-
-    The sampler's own give-up rule used to end a dry call after a few chunks and so hid the
-    arithmetic; it is off by default now, which is what makes the deadline load-bearing.
+    It has to be a deadline shared by every call the collector makes, not an argument handed to
+    each: per-call it would bound an order at 24x (batch) to 1,200x (iid) the stated number. The
+    stub is a trickling instance -- one row, then dry, the shape a Barbarik kernel produces from
+    a rejection sampler -- because that is the case that walks the whole attempt budget.
     """
     import math
     import sys
@@ -162,7 +157,7 @@ def test_one_order_is_bounded_by_the_order_budget_not_by_the_attempt_count(monke
         def from_clauses(cls, *a, **k):
             return cls()
 
-        def sample_bits(self, n, config=None, max_chunks=400, max_seconds=None):
+        def sample_bits(self, n, config=None, max_chunks=None, max_seconds=None):
             seen.append(max_seconds)
             clock[0] += per_call
             return np.ones((1, len(cols)), dtype=np.uint8), cols
@@ -199,15 +194,11 @@ def test_a_cmsgen_maxtime_exit_is_a_budget_stop_not_a_harness_failure(tmp_path, 
     """`--maxtime` makes CMSGen exit through its NORMAL path with the DIMACS "unknown" code (15,
     measured), having written the samples it managed. The arm must read them.
 
-    Measured consequence of getting this wrong: on `c6288-c1-random`, the one instance where
-    CMSGen needs real time, a `--maxtime` stop came back as `RuntimeError: cmsgen failed` — a
-    harness error where the truth is a short count on a spent budget, which is exactly the
-    confusion this change set is about. The arm now passes `--maxtime` at the rival's own large
-    budget (CMSGEN_ORDER_SECONDS) rather than at ours, so the path is reached late rather than
-    often, but it is reached: it is the difference between reading the samples CMSGen wrote and
-    discarding them with the kill. `gpap.benchmark.cmsgen_run` never looks at the return code
-    for this reason; here the code is still checked, so the patch's own marker is what
-    distinguishes a budget stop from a crash.
+    Measured: a `--maxtime` stop on `c6288-c1-random` came back as `RuntimeError: cmsgen failed`
+    -- a harness error where the truth is a short count on a spent budget. It is the difference
+    between reading the samples CMSGen wrote and discarding them with the kill.
+    `gpap.benchmark.cmsgen_run` ignores the return code for this reason; here it is still
+    checked, so the patch's own marker separates a budget stop from a crash.
     """
     import stat
 

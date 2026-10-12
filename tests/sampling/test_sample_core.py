@@ -139,11 +139,10 @@ def test_stop_valves_report_which_fired():
 def test_the_give_up_rule_is_opt_in_and_the_budget_is_spent_without_it():
     """`grace_chunks` is the OPT-IN early stop, and 0 (its `{0}` default) means run the budget.
 
-    It defaulted to 2, so a run that found nothing ended after the cold start plus two chunks
-    WHATEVER budget it was handed -- about 2 s of a 60 s campaign cell, and on three of six of
-    the published campaign's own zero cells the budget would have found samples. A budget the
-    caller set is a promise about how long the call may take, not a ceiling the loop may decline
-    to approach."""
+    It defaulted to 2, so a dry run ended after the cold start plus two chunks whatever budget it
+    was handed -- ~2 s of a 60 s campaign cell, where three of six of the published zero cells
+    did have samples. A budget is a promise about how long the call may take, not a ceiling the
+    loop may decline to approach."""
     # UNSAT with no unit clauses: the flush cannot prove it, every trajectory conflicts.
     clauses = [[1, 2], [1, -2], [-1, 2], [-1, -2]]
     st = _sampler(clauses, 2, seed=5).run(100, [B8], grace_chunks=2)
