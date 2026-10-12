@@ -29,6 +29,12 @@ import time
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
 from gpap.verdict import sound_verdict           # noqa: E402 — a stdlib-only leaf
 from eval.rivals.rival_common import space_from_distinct  # noqa: E402 — after sys.path
+# THE uniformity rules, imported rather than restated: eligibility buckets on the control's own
+# verdict, the refusal to pool two parameter settings, and what each setting costs. Stdlib-only,
+# like this module, so it cannot pull a GPU dependency in behind it.
+from eval.uniformity.barbarik_table import (SETTINGS as BARBARIK_SETTINGS,   # noqa: E402
+                                            arm_summary, buckets,
+                                            check_one_setting, load as barbarik_load)
 
 VACUOUS_PINS = {"b02", "b05", "b07", "s526"}
 
@@ -961,14 +967,6 @@ def uniformity(paths):
 
 # ------------------------------------------------------------------ barbarik
 
-#: What a CM_test Accept costs, per certified setting: (rounds, samples in all, samples drawn
-#: from the SAMPLER UNDER TEST). The two totals differ by the one reference draw per round, and
-#: BOTH are printed, because "1,872 samples" and "1,836 samples" are one run counted two ways
-#: and the gap between them has been read as a discrepancy. The paper quotes the second.
-BARBARIK_COST = {(0.3, 1.8, 0.1): (36, 1_872, 1_836),       # 36 x (1 + 1 + 50)
-                 (0.1, 0.9, 0.05): (477, 70_596, None)}     # breakdown not re-derived here
-
-
 def barbarik(paths):
     """The standard certificate, per sampler under test.
 
@@ -976,15 +974,10 @@ def barbarik(paths):
     counts only where the negative control (the trusted uniform reference, under test through
     the same hook) was itself Accepted, since where it is Rejected CM_test measures the
     instance."""
-    import os
-    import sys
-    sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "uniformity"))
-    from barbarik_table import arm_summary, buckets, check_one_setting, load as bload
-
     rows = []
     for p in paths or []:
         if os.path.exists(p):
-            rows += bload([p])
+            rows += barbarik_load([p])
     if not rows:
         return None
     eps, eta, delta = check_one_setting(rows)      # raises on a pooled loose+strict file list
@@ -1418,15 +1411,17 @@ def build(args):
     if barb:
         p = barb["params"]
         n_el = len(barb["eligible"])
-        setting = {(0.3, 1.8, 0.1): "the parameters CMSGen's own authors certify at (FMCAD'21 "
-                                    "Table I): 36 rounds x (1 + 1 + 50) = **1,872 samples** drawn "
-                                    "in all for an Accept, **1,836** of them from the sampler "
-                                    "under test (the one reference draw per round is the "
-                                    "difference, and the paper quotes the 1,836), per-round "
-                                    "accept band **[0.05, 0.95]**",
-                   (0.1, 0.9, 0.05): "barbarik's own default: 477 rounds, **70,596 samples** for "
-                                     "an Accept, per-round bands about +-0.21"
-                   }.get((p["epsilon"], p["eta"], p["delta"]), "a non-standard setting")
+        # Composed from barbarik_table.SETTINGS, not restated: the sentence a reader checks
+        # against the paper and the numbers the paper quotes come from one record.
+        c = BARBARIK_SETTINGS.get((p["epsilon"], p["eta"], p["delta"]))
+        setting = ("a non-standard setting" if not c else
+                   f"{c['source']}: {c['rounds']} rounds"
+                   + (f" x ({c['per_round']})" if c.get("per_round") else "")
+                   + f" = **{c['samples']:,} samples** drawn in all for an Accept"
+                   + (f", **{c['under_test']:,}** of them from the sampler under test (the one "
+                      f"reference draw per round is the difference, and the paper quotes the "
+                      f"{c['under_test']:,})" if c["under_test"] else "")
+                   + f", per-round accept band **{c['band']}**")
         M += ["", "## Table 4b — Barbarik CM_test (the standard certificate)", "",
               f"`eps={p['epsilon']} eta={p['eta']} delta={p['delta']}` — {setting}. "
               f"An Accept means *not caught being eta-far* (L1 >= {p['eta']}, i.e. TV >= "
@@ -1840,8 +1835,7 @@ def build(args):
 
     if getattr(args, "out_json", None):
         _bp = (barb or {}).get("params") or {}
-        _bcost = BARBARIK_COST.get((_bp.get("epsilon"), _bp.get("eta"), _bp.get("delta")),
-                                   (None, None, None))
+        _bcost = BARBARIK_SETTINGS.get((_bp.get("epsilon"), _bp.get("eta"), _bp.get("delta")), {})
         # THE CONTRACT with the paper: one machine-readable file holding every published number,
         # so checking the PDF is a diff and not a re-reading. Shapes may differ between the
         # generated table and the typeset one (the paper fits its own columns); the NUMBERS may
@@ -1889,8 +1883,8 @@ def build(args):
             # verdicts. `pipe:circuit` is the shipped default; `gpap:b8` is the pinned config.
             "uniformity": ({
                 "params": barb["params"],
-                "rounds": _bcost[0], "samples_total": _bcost[1],
-                "samples_under_test": _bcost[2],
+                "rounds": _bcost.get("rounds"), "samples_total": _bcost.get("samples"),
+                "samples_under_test": _bcost.get("under_test"),
                 "eligible": len(barb["eligible"]),
                 "control_rejected": len(barb["control_rejected"]),
                 "arms": {k: {"accept": v["accept"], "reject": v["reject"],

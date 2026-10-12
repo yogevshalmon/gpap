@@ -26,6 +26,26 @@ import sys
 
 CONTROL = "spur(control)"
 
+#: WHAT EACH CERTIFIED SETTING COSTS, and what a round of it accepts. One home, because these
+#: numbers travel: the paper quotes `under_test`, Table 4b prints both totals, this file's own
+#: header prints the band, and `barbarik_screen.py` sizes the reference budget from the round
+#: count. They were spelled out in four places and the first of them to move would have been
+#: right while the other three stayed plausible.
+#:
+#: `samples` is every draw a full Accept makes; `under_test` is the subset drawn from the sampler
+#: being certified. The gap is the one reference draw per round, and it has been read as a
+#: discrepancy, so both are carried rather than one derived on the spot.
+SETTINGS = {
+    (0.3, 1.8, 0.1): {
+        "rounds": 36, "samples": 1_872, "under_test": 1_836, "per_round": "1 + 1 + 50",
+        "band": "[0.05, 0.95]", "rejects_tv": 0.90,
+        "source": "the parameters CMSGen's own authors certify at (FMCAD'21 Table I)"},
+    (0.1, 0.9, 0.05): {
+        "rounds": 477, "samples": 70_596, "under_test": None, "per_round": None,
+        "band": "[0.29, 0.71] and [0.31, 0.69]", "rejects_tv": 0.45,
+        "source": "barbarik's OWN default"},
+}
+
 
 def load(paths):
     rows = []
@@ -49,9 +69,9 @@ def check_one_setting(rows):
     """Refuse to summarise rows from DIFFERENT (eps, eta, delta) settings in one table.
 
     The same instance under the CMSGen paper's eps=0.3/eta=1.8/delta=0.1 and under barbarik's own
-    eps=0.1/eta=0.9/delta=0.05 are two different tests — 1,872 samples with a [0.05, 0.95] band
-    versus 70,596 with a [0.29, 0.71] one. Pooling them would produce an Accept count that means
-    nothing, and the row format makes it a single `cat` away."""
+    eps=0.1/eta=0.9/delta=0.05 are two different tests, by two orders of magnitude in samples and
+    by their accept band (`SETTINGS` above has both). Pooling them would produce an Accept count
+    that means nothing, and the row format makes it a single `cat` away."""
     settings = {(r.get("epsilon"), r.get("eta"), r.get("delta")) for r in rows}
     if len(settings) > 1:
         found = ", ".join(f"(eps={e}, eta={t}, delta={d})" for e, t, d in sorted(settings))
@@ -110,13 +130,13 @@ def main():
         eligible, rejected, errored = buckets(rows, args.control)
     except ValueError as e:
         sys.exit(str(e))
-    known = {
-        (0.3, 1.8, 0.1): ("the CMSGen paper's setting (FMCAD'21 Table I): 1,872 samples, "
-                          "per-round band [0.05, 0.95], rejects TV >= 0.90", "[0.05, 0.95]"),
-        (0.1, 0.9, 0.05): ("barbarik's OWN default: 70,596 samples, per-round bands "
-                           "[0.29, 0.71] and [0.31, 0.69], rejects TV >= 0.45", "its per-round band"),
-    }
-    note, band = known.get((eps, eta, delta), ("", "its per-round band"))
+    cost = SETTINGS.get((eps, eta, delta))
+    note = ("" if not cost else
+            f"{cost['source']}: {cost['samples']:,} samples"
+            + (f" ({cost['under_test']:,} from the sampler under test)"
+               if cost["under_test"] else "")
+            + f", per-round band {cost['band']}, rejects TV >= {cost['rejects_tv']:.2f}")
+    band = cost["band"] if cost else "its per-round band"
     print(f"CM_test at eps={eps} eta={eta} delta={delta}" + (f"\n  {note}" if note else ""))
     total = len(eligible) + len(rejected) + len(errored)
 
