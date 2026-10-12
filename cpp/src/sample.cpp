@@ -332,7 +332,8 @@ extern "C" gpap_status gpap_sampler_run(gpap_sampler *s, int64_t n_target,
 
         const bool adaptive = n_configs > 1;
         const int32_t mmc = std::max<int32_t>(1, s->opt.min_measure_chunks);
-        const int32_t grace = s->opt.grace_chunks > 0 ? s->opt.grace_chunks : 2;
+        /* 0 = NEVER give up early: run the budget the caller gave out. See the header. */
+        const int32_t grace = s->opt.grace_chunks;
         const int64_t cold_size = adaptive ? n_configs : 1;
         const int64_t keep_cap = s->opt.keep_cap;
 
@@ -365,17 +366,29 @@ extern "C" gpap_status gpap_sampler_run(gpap_sampler *s, int64_t n_target,
                 st.timed_out = st.n_models < n_target ? 1 : 0;
                 break;
             }
-            /* Zero yield: nothing after the cold start plus a grace window, so the target is
-             * unreachable. The lookahead retry (opt-in, single-config) flips the polarity once. */
-            if (st.n_models == 0 && !cold && st.chunks - window_start >= cold_size + grace) {
-                if (s->opt.retry_with_lookahead && !adaptive && !st.retried) {
-                    st.retried = 1;
-                    retry_soft = 1;
-                    window_start = st.chunks;
-                } else {
-                    st.stop = GPAP_SAMPLE_STOP_ZERO_YIELD;
-                    break;
-                }
+            /* The polarity retry has its OWN window, and is not the give-up rule: flipping
+             * once after a few dry chunks is cheap and reversible, abandoning the caller's
+             * budget is neither. Keeping them separate is what lets the give-up rule default
+             * to off without silently disabling an opt-in the caller did ask for. */
+            if (st.n_models == 0 && !cold && s->opt.retry_with_lookahead && !adaptive
+                    && !st.retried && st.chunks - window_start >= cold_size + 2) {
+                st.retried = 1;
+                retry_soft = 1;
+                window_start = st.chunks;
+            }
+            /* GIVE UP EARLY ONLY IF ASKED (grace_chunks > 0). Nothing found after the cold start
+             * plus a grace window is evidence the target is unreachable -- but it is only
+             * evidence, and it used to END THE RUN BY DEFAULT: measured on the paper campaign's
+             * own cells, four chunks and ~2 s of a 60 s budget, and on three of six instances
+             * samples existed that the full budget found. A budget the caller set is a promise
+             * about how long the call may take, not a ceiling the loop may decline to approach;
+             * deciding that a formula is hopeless is the CALLER's call, because only the caller
+             * knows what the run is for. `--time-limit 0` with no chunk cap therefore means
+             * exactly what it says: run until the target is met. */
+            if (grace > 0 && st.n_models == 0 && !cold
+                    && st.chunks - window_start >= cold_size + grace) {
+                st.stop = GPAP_SAMPLE_STOP_ZERO_YIELD;
+                break;
             }
 
             int32_t ci = 0;

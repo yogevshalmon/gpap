@@ -297,7 +297,14 @@ typedef enum {
 } gpap_sample_stop;
 
 /* Per-RUN options for gpap_sampler_run (seed and batch cap live on the HANDLE). {0} == NULL ==
- * every default; fields whose useful default is "on" are named for the OPT-OUT. */
+ * every default; fields whose useful default is "on" are named for the OPT-OUT.
+ *
+ * `{0}` IS AN UNBOUNDED REQUEST. max_chunks, time_limit_s and grace_chunks are each "no bound"
+ * at zero, so a default-constructed options struct asks the loop to run until the target is
+ * met -- which never happens on a formula that yields nothing. That was always true of the
+ * first two; grace_chunks defaulting to 2 had been quietly acting as the safety net, at the
+ * price of ending every budgeted run early. A caller that needs a guaranteed return sets at
+ * least one of the three. */
 typedef struct {
     int64_t max_chunks;        /* 0 = unbounded */
     int64_t keep_cap;          /* rows KEPT per config for gpap_sampler_bits: 0 = none (count
@@ -305,8 +312,13 @@ typedef struct {
     double  time_limit_s;      /* 0 = no limit (checked between chunks) */
     int32_t min_measure_chunks;/* some config must accumulate >= this many chunks before the
                                 * target may stop the run (one chunk's rate is noisy); 0 -> 1 */
-    int32_t grace_chunks;      /* zero-yield stop: give up only after every config ran once
-                                * (cold start) PLUS this many chunks with nothing found; 0 -> 2 */
+    int32_t grace_chunks;      /* OPT-IN early give-up: stop once every config has run (cold
+                                * start) PLUS this many chunks have found nothing. 0 (the
+                                * default, like every field here) = never give up early, run
+                                * out max_chunks / time_limit_s / the target. It defaulted to 2
+                                * and that made every budget nominal: a 60 s run could end after
+                                * ~2 s and report zero on an instance the budget would have
+                                * sampled. Whether a formula is hopeless is the caller's call. */
     int32_t verify;            /* 1 = re-check ON DEVICE that every completed row satisfies every
                                 * clause: a self-test, off by default on every face, billed to
                                 * verify_s. The C ABI reports (unsound_rows), never aborts. */

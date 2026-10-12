@@ -66,12 +66,24 @@ CONFIGS = {"b8": (True, 8, False), "b1": (True, 1, False), "s1": (False, 1, Fals
            "soft": (True, 8, "soft"), "bsup": (True, None, False)}
 
 # How hard to try to fill one of barbarik's sample orders before recording "no verdict".
+#: THE PER-ORDER SAMPLING BUDGET, and the same one for every sampler under test. CM_test places
+#: about 72 orders per instance at the CMSGen paper's setting, so this times 72 bounds a
+#: certificate. Neither upstream tool offers a number to inherit: barbarik runs every sampler
+#: through a bare `os.system` with no timeout at all, and stock CMSGen has no wall budget either
+#: (`--maxtime` is our own patch, defaulting to unlimited). So the number is ours, and it rests
+#: on this campaign's own rows: the slowest instance that still ACCEPTED averaged 9.7 s per order
+#: (c2670-c1-random, 695 s over 72), so a 10 s budget would have turned a pass into a no-verdict.
+#: 30 s is about 3x that, and 1.5x the 20 s `barbarik_screen.py --spur-seconds` already uses for
+#: one reference order. The cost is bounded by the instances that would otherwise run forever:
+#: ~6 of 65, so 6 x 72 x 30 s = 3.6 h per arm in the worst case.
+ORDER_SECONDS = 30.0
+
 _FILL_ATTEMPTS = 24        # collector attempts per order
 _FILL_GIVE_UP = 3          # consecutive ATTEMPTS returning NOTHING -> the instance really is dry
 
 
 def _gpap_solutions(input_file, num_solutions, ind_var_list, seed, device, config, k_cap,
-                    draw="batch"):
+                    draw="batch", order_seconds=ORDER_SECONDS):
     """Sample `num_solutions` from GPAP on `input_file`, projected on ind_var_list (1-based).
     Returns solutions in barbarik's format: one list of signed ints per solution, consistently
     ordered — biasFind keys solutions by their literal string, and compares to the SPUR
@@ -110,18 +122,20 @@ def _gpap_solutions(input_file, num_solutions, ind_var_list, seed, device, confi
     # `iid` attempt ends at its first dry call, so budget that arm in CALLS or the same attempt
     # count would cap it far lower for purely structural reasons. A genuinely dry instance is
     # stopped by the give-up rule below, in 3 attempts either way.
-    rows, cols, empty = [], None, 0
+    rows, cols, empty, tries, gave_up = [], None, 0, 0, False
     for _ in range(_FILL_ATTEMPTS * (num_solutions if draw == "iid" else 1)):
+        tries += 1
         before = len(rows)
         if draw == "iid":                      # a fresh chunk == a fresh variable permutation
             for _ in range(num_solutions - len(rows)):
-                b, cols = smp.sample_bits(1, config=(rv, B, la), max_chunks=400)
+                b, cols = smp.sample_bits(1, config=(rv, B, la), max_chunks=400,
+                                          max_seconds=order_seconds)
                 if b is None or len(b) < 1:
                     break
                 rows.append(b[0])
         else:
             b, cols = smp.sample_bits(num_solutions - len(rows), config=(rv, B, la),
-                                      max_chunks=400)
+                                      max_chunks=400, max_seconds=order_seconds)
             if b is not None and len(b):
                 rows.extend(b)
         if len(rows) >= num_solutions:
@@ -131,11 +145,21 @@ def _gpap_solutions(input_file, num_solutions, ind_var_list, seed, device, confi
         # the sampler on a low-yield kernel.
         empty = 0 if len(rows) > before else empty + 1
         if empty >= _FILL_GIVE_UP:              # genuinely producing nothing, not merely rarely
+            gave_up = True
             break
     bits = rows
     if bits is None or len(bits) < num_solutions:
+        # WHICH STOPPING RULE ENDED THE ATTEMPT, in the row. `sample_bits` returns no stats, so
+        # the core's own `stop` is not reachable here (unlike the pipeline arm) -- but the
+        # COLLECTOR's accounting is, and it answers the same question: `gave_up` means three
+        # consecutive attempts came back empty, `attempts` says how many were spent of the
+        # budget. Without it a no-verdict cannot be told from a sampler that cannot do the
+        # instance at all.
+        why = (f"gave up on {_FILL_GIVE_UP} consecutive dry attempts" if gave_up
+               else "attempt budget exhausted")
         raise RuntimeError(f"GPAP produced {0 if bits is None else len(bits)}/{num_solutions} "
-                           f"samples on {display_path(input_file)}")
+                           f"samples on {display_path(input_file)} "
+                           f"[{tries} of {_FILL_ATTEMPTS} attempts; {why}]")
     if sorted(cols) != sorted(ind_var_list):   # biasFind needs one literal per declared indVar
         raise RuntimeError(f"projection columns {len(cols)} != declared support "
                            f"{len(ind_var_list)} on {display_path(input_file)}")
@@ -143,7 +167,7 @@ def _gpap_solutions(input_file, num_solutions, ind_var_list, seed, device, confi
 
 
 def _pipeline_solutions(input_file, num_solutions, ind_var_list, seed, device, portfolio_name,
-                        k_cap):
+                        k_cap, order_seconds=ORDER_SECONDS):
     """The SHIPPED pipeline under test, not one of its components.
 
     `sample_file` is exactly what `gpap sample` runs: parse, unit closure, ELS, entailed-clause
@@ -158,26 +182,56 @@ def _pipeline_solutions(input_file, num_solutions, ind_var_list, seed, device, p
     from gpap.sampling.pipeline import portfolio, sample_file
 
     info = sample_file(input_file, torch.device(device), n_time=num_solutions,
-                       out_cap=num_solutions, seed=seed, k_cap=k_cap, time_limit=120.0,
-                       configs=portfolio(portfolio_name))
+                       out_cap=num_solutions, seed=seed, k_cap=k_cap,
+                       time_limit=order_seconds, configs=portfolio(portfolio_name))
     bits, cols = info.get("samples"), info.get("cols") or []
     if bits is None or len(bits) < num_solutions:
+        # NAME THE VALVE IN THE ROW. This message becomes the `error` of a published no-verdict,
+        # and "produced 0/50" alone reads as "the sampler cannot do this instance" when what it
+        # often means is that OUR stopping rule ended the attempt after a few empty chunks — on
+        # a Barbarik kernel, which is adversarial for a rejection sampler by construction and is
+        # therefore exactly where the two readings diverge. Carry the wall too: a reader can then
+        # see at a glance that 120 s were available and 2 were used.
         raise RuntimeError(f"pipeline produced {0 if bits is None else len(bits)}/"
-                           f"{num_solutions} samples on {display_path(input_file)}")
+                           f"{num_solutions} samples on {display_path(input_file)} "
+                           f"[stop={info.get('stop')} after {info.get('wall_timed_s') or 0.0:.1f}s "
+                           f"of a {order_seconds:.1f}s budget]")
     if sorted(cols) != sorted(ind_var_list):
         raise RuntimeError(f"projection columns {len(cols)} != declared support "
                            f"{len(ind_var_list)} on {display_path(input_file)}")
     return [[v if row[i] else -v for i, v in enumerate(cols)] for row in bits[:num_solutions]]
 
 
-def _cmsgen_solutions(input_file, num_solutions, ind_var_list, seed, cmsgen_bin):
+def _cmsgen_solutions(input_file, num_solutions, ind_var_list, seed, cmsgen_bin,
+                      order_seconds=ORDER_SECONDS):
     """Same contract, CMSGen as the sampler under test. CMSGen emits FULL assignments (it ignores
-    `c ind`), so the projection onto ind_var_list happens here."""
+    `c ind`), so the projection onto ind_var_list happens here.
+
+    `order_seconds` IS THE SAME BUDGET THE GPAP ARMS GET, and that is the point. This call used
+    to be bounded only by a 1,800 s subprocess kill with no `--maxtime`, i.e. effectively
+    unbounded per order, while the GPAP arms were ended by the sampler's own give-up rule in
+    about two seconds. The headline of this campaign is a NO-VERDICT count -- "GPAP accepted on
+    60 of 65, CMSGen on 65" -- and a no-verdict is a coverage outcome, which is exactly what a
+    per-order budget decides. Two arms on two budgets make that number a budget comparison
+    wearing a uniformity label. `--maxtime` bounds CMSGen's own sampling loop so it exits
+    normally; the subprocess kill stays as a backstop above it, since the solver's deadline is
+    CPU time and does not cover reading a large CNF (the same split as
+    `gpap.benchmark.cmsgen_run`).
+
+    SPUR, the trusted reference, is deliberately left unbounded: barbarik invokes it through its
+    own stock path and it is not a tool under test. Stated here rather than discovered."""
+    from gpap.benchmark import cmsgen_supports_maxtime
     out = paths.scratch_file("cmsgen_barbarik", ".out")
+    cmd = [cmsgen_bin, "--samples", str(num_solutions), "--seed", str(int(seed)),
+           "--verb", "0", "--samplefile", out, input_file]
+    deadline = order_seconds if cmsgen_supports_maxtime(cmsgen_bin) else 0.0
+    if deadline:
+        cmd[1:1] = ["--maxtime", f"{deadline:g}"]
+    # Above the deadline, never instead of it: a stock binary has no deadline, so there the kill
+    # IS the budget and the arms are only as equal as that makes them (reported in the row).
+    hard = (deadline + max(30.0, 0.5 * deadline)) if deadline else order_seconds
     try:
-        p = subprocess.run([cmsgen_bin, "--samples", str(num_solutions), "--seed", str(int(seed)),
-                            "--verb", "0", "--samplefile", out, input_file],
-                           capture_output=True, text=True, timeout=1800)
+        p = subprocess.run(cmd, capture_output=True, text=True, timeout=hard)
         if p.returncode not in (0, 10):        # 10 = SATISFIABLE
             raise RuntimeError(f"cmsgen failed on {display_path(input_file)}: "
                                f"{p.stdout[-300:]}{p.stderr[-300:]}")
@@ -195,7 +249,10 @@ def _cmsgen_solutions(input_file, num_solutions, ind_var_list, seed, cmsgen_bin)
         except OSError:
             pass
     if len(sols) < num_solutions:
-        raise RuntimeError(f"cmsgen produced {len(sols)}/{num_solutions} on {display_path(input_file)}")
+        how = ("" if deadline else
+               ", enforced as a subprocess kill: this binary has no --maxtime")
+        raise RuntimeError(f"cmsgen produced {len(sols)}/{num_solutions} on "
+                           f"{display_path(input_file)} [{order_seconds:g}s budget{how}]")
     return sols[:num_solutions]
 
 
@@ -324,6 +381,14 @@ def main():
     ap.add_argument("--portfolio", default="circuit",
                     choices=["circuit", "default", "b8", "b1", "s1"],
                     help="for --sampler pipe: which portfolio the bandit selects from")
+    ap.add_argument("--order-seconds", type=float, default=ORDER_SECONDS,
+                    help=f"sampling budget for ONE order barbarik places, THE SAME for every "
+                         f"sampler under test -- GPAP and CMSGen alike (default "
+                         f"{ORDER_SECONDS:g} s). CM_test places about 72 orders per instance, so "
+                         f"72 x this bounds a certificate. Two arms on two budgets would make "
+                         f"the no-verdict count a budget comparison rather than a uniformity "
+                         f"one. SPUR, the trusted reference, stays unbounded on barbarik's own "
+                         f"stock path: it is not a tool under test")
     ap.add_argument("--draw", default="batch", choices=["batch", "iid"],
                     help="how the requested samples are drawn from GPAP. 'batch' = one chunk, as "
                          "the tool delivers (rows share the chunk's variable permutation). "
@@ -368,12 +433,13 @@ def main():
         seed = int(newSeed) + args.seed
         if args.sampler == "gpap":
             sols = _gpap_solutions(inputFile, numSolutions, indVarList, seed, args.device,
-                                   config, args.k_cap, args.draw)
+                                   config, args.k_cap, args.draw, args.order_seconds)
         elif args.sampler == "pipe":
             sols = _pipeline_solutions(inputFile, numSolutions, indVarList, seed, args.device,
-                                       args.portfolio, args.k_cap)
+                                       args.portfolio, args.k_cap, args.order_seconds)
         elif args.sampler == "cmsgen":
-            sols = _cmsgen_solutions(inputFile, numSolutions, indVarList, seed, args.cmsgen)
+            sols = _cmsgen_solutions(inputFile, numSolutions, indVarList, seed, args.cmsgen,
+                                     args.order_seconds)
         elif args.sampler == "spur":
             sols = _spur_solutions(stock, C, inputFile, numSolutions, indVarList, seed)
         else:

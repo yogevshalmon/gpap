@@ -1552,3 +1552,46 @@ def test_every_table_generator_still_imports():
             except Exception as e:                       # noqa: BLE001 — report, never hide
                 broken.append(f"{where}.{mod.name}: {type(e).__name__}: {e}")
     assert not broken, "modules that no longer import:\n  " + "\n  ".join(broken)
+
+
+def test_verify_artifact_tells_a_gpap_zero_we_measured_from_one_we_abandoned(tmp_path):
+    """A GPAP zero is only a loss if we looked.
+
+    The sampler's zero-yield valve ends a run once a few chunks come back empty, which on a
+    low-success instance is seconds into a 60 s budget. So `n_models == 0` carries two opposite
+    readings -- the instance defeated us, or we stopped looking -- and only `stop` separates
+    them. Measured on the published campaign's own zero cells, three of six yielded once the
+    valve was lifted, so this is not a hypothetical: the gate must name the abandoned ones,
+    leave the ones that spent their budget alone, and say so when the field is missing (every
+    published row predates it).
+    """
+    riv = tmp_path / "riv"
+    riv.mkdir()
+    f = riv / "rivals_recurrent_rare.json"
+
+    def zero(name, stop, wall):
+        r = rrow(name, models=0)
+        if stop is not None:
+            r["gpap"]["stop"], r["gpap"]["wall_timed_s"] = stop, wall
+        return r
+
+    # abandoned early, spent the clock, and recorded before the field existed
+    f.write_text(json.dumps([rrow("ok"), zero("gaveup", "zero_yield", 2.1),
+                             zero("spent", "time", 60.0), zero("silent", None, None)]))
+    out = _verify("--rivals", str(riv)).stdout
+    # the NAME LIST of the warning, not the whole line: its prose says "actually spent", which a
+    # substring check for the fixture's name matches -- a green-for-the-wrong-reason trap.
+    import re as _re
+    # greedy to the em dash: the list's own entries carry parentheses (`b17 (2.1s)`), so a
+    # non-greedy match to the first `)` truncates mid-entry.
+    flagged = _re.search(r"ZERO-YIELD valve[^(]*\((.*)\) —", out)
+    assert flagged, out
+    assert "gaveup (2.1s)" in flagged.group(1), flagged.group(1)
+    assert "spent" not in flagged.group(1), \
+        "a cell that spent its whole budget is a real zero and must NOT be flagged"
+    assert "record no `stop`" in out and "silent" in out, out
+
+    # nothing to warn about when every zero spent its budget
+    f.write_text(json.dumps([rrow("ok"), zero("spent", "time", 60.0)]))
+    out = _verify("--rivals", str(riv)).stdout
+    assert "ZERO-YIELD valve" not in out and "record no `stop`" not in out, out

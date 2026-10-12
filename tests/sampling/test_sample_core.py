@@ -136,15 +136,26 @@ def test_stop_valves_report_which_fired():
     assert _core.SAMPLE_STOP[st.stop] == "time" and st.timed_out == 1
 
 
-def test_zero_yield_gives_up_after_cold_start_plus_grace():
+def test_the_give_up_rule_is_opt_in_and_the_budget_is_spent_without_it():
+    """`grace_chunks` is the OPT-IN early stop, and 0 (its `{0}` default) means run the budget.
+
+    It defaulted to 2, so a run that found nothing ended after the cold start plus two chunks
+    WHATEVER budget it was handed -- about 2 s of a 60 s campaign cell, and on three of six of
+    the published campaign's own zero cells the budget would have found samples. A budget the
+    caller set is a promise about how long the call may take, not a ceiling the loop may decline
+    to approach."""
     # UNSAT with no unit clauses: the flush cannot prove it, every trajectory conflicts.
     clauses = [[1, 2], [1, -2], [-1, 2], [-1, -2]]
-    s = _sampler(clauses, 2, seed=5)
-    st = s.run(100, [B8])
+    st = _sampler(clauses, 2, seed=5).run(100, [B8], grace_chunks=2)
     assert st.n_models == 0
     assert _core.SAMPLE_STOP[st.stop] == "zero_yield"
-    assert st.chunks == 3, "single config: 1 cold chunk + grace 2, the sample_bits rule"
+    assert st.chunks == 3, "single config: 1 cold chunk + grace 2"
     assert st.retried == 0
+    # ...and by DEFAULT the same dry formula runs until a budget stops it, not before.
+    st = _sampler(clauses, 2, seed=5).run(100, [B8], max_chunks=25)
+    assert st.n_models == 0
+    assert _core.SAMPLE_STOP[st.stop] == "chunks" and st.chunks == 25, \
+        "with grace_chunks unset the run must spend the chunk budget, not abandon it at 3"
 
 
 @pytest.mark.parametrize("soft0", [False, True], ids=["off-to-on", "on-to-off"])
@@ -154,11 +165,18 @@ def test_retry_with_lookahead_flips_once_then_stops(soft0):
     Parametrized because only the on-to-off direction tells a flip from `soft || retry`."""
     clauses = [[1, 2], [1, -2], [-1, 2], [-1, -2]]
     s = _sampler(clauses, 2, seed=5)
-    st = s.run(100, [(True, 8, soft0)], retry_with_lookahead=True)
+    st = s.run(100, [(True, 8, soft0)], retry_with_lookahead=True, grace_chunks=2)
     assert _core.SAMPLE_STOP[st.stop] == "zero_yield"
     assert st.retried == 1
     assert st.lookahead_used == (0 if soft0 else 1), "the retry must run the OTHER polarity"
     assert st.chunks == 6, "one full window under each polarity"
+    # THE FLIP IS NOT THE GIVE-UP RULE. It has its own window, so an opt-in a caller DID ask for
+    # keeps working now that the give-up rule defaults to off -- otherwise turning one off would
+    # have silently disabled the other.
+    st = _sampler(clauses, 2, seed=5).run(100, [(True, 8, soft0)],
+                                          retry_with_lookahead=True, max_chunks=12)
+    assert st.retried == 1, "the polarity flip must still fire with grace_chunks unset"
+    assert _core.SAMPLE_STOP[st.stop] == "chunks"
 
 
 # ---------------------------------------------------------------- portfolio
@@ -235,7 +253,7 @@ def test_support_only_stops_after_phase_one():
     loose = [[1, 2], [3, 4]]
     s = _sampler(loose, 4, seed=5)
     s.set_support([0, 1])
-    st = s.run(200, [B8], support_only=True, max_chunks=4)
+    st = s.run(200, [B8], support_only=True, max_chunks=4, grace_chunks=2)
     assert st.n_models == 0, "a row with free variables left is not a model and must not count"
     assert st.n_support_complete > 0, "...but the support phase itself did complete"
     assert _core.SAMPLE_STOP[st.stop] == "zero_yield"

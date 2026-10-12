@@ -373,13 +373,14 @@ class GPUSampler:
         self._pyrng = _random.Random(seed)
 
     def sample_bits(self, n_target: int, *, config=(True, 8, False),
-                    max_chunks: "int | None" = None, max_seconds: "float | None" = None):
+                    max_chunks: "int | None" = None, max_seconds: "float | None" = None,
+                    give_up_chunks: int = 0):
         """Collect up to `n_target` support-projection bit-rows; only the (n, S) bit matrix
         crosses to host RAM per chunk, never full N-var models. Returns (matrix, cols_1based):
         a numpy uint8 (got, S) array of 0/1 and the original variable id of each column; every
         row is a valid support projection. `max_seconds` bounds the sampling wall between
         chunks. Prefer `sample(out_cap=...)`, which takes these rows off chunks the run runs
-        anyway."""
+        anyway. `give_up_chunks` as on `sample()`: 0 (default) runs the budget out."""
         rv, B, la = config[0], max(1, config[1]), (config[2] if len(config) > 2 else False)
         plan = self._build_projection_plan()
         self._push_support(self.support)
@@ -387,6 +388,7 @@ class GPUSampler:
         self._smp.run(int(n_target), [(rv, B, la in ("soft", "fsoft"))],
                       max_chunks=_chunk_budget(max_chunks),
                       time_limit_s=_time_budget(max_seconds),
+                      grace_chunks=int(give_up_chunks),
                       keep_cap=int(n_target))
         take = min(int(self._smp.config_stats(0).kept_rows), int(n_target))
         raw = (self._smp.bits(0, rows=take) if take
@@ -409,13 +411,15 @@ class GPUSampler:
         lookahead: bool = False,
         configs: "list[tuple[bool, int]] | None" = None,
         min_measure_chunks: int = 1,
+        give_up_chunks: int = 0,
         max_seconds: "float | None" = None,
         out_cap: int = 0,
         verify_sound: bool = False,
     ) -> dict:
         """Draw at least `n_target` valid models. Stops early on any optional valve: `max_chunks`
         chunks run, `max_seconds` of sampling wall elapsed (checked between chunks), or zero
-        models after every config was measured plus a couple of grace chunks.
+        models after every config was measured plus `give_up_chunks` more -- which is OFF by
+        default, so the budget the caller gave is the budget that gets spent.
 
         `support`: 0-based variables to restrict decisions to (the rest follow by propagation);
         "auto" (default) uses the support parsed from the CNF, None decides all variables.
@@ -440,6 +444,11 @@ class GPUSampler:
         second pass; only the winning config's bucket is returned, so the emitted set is ONE
         sampler and not a mixture of arms. Its wall is `out_project_s`, excluded from every rate
         (a pinned single config has no per-config wall, docs/findings/CLI_DELIVERY_FINDINGS.md).
+
+        `give_up_chunks` is the OPT-IN early stop: 0 (default) runs the budget out, N > 0 abandons
+        a run that has found nothing after every config ran plus N chunks. It defaulted to on in
+        the core and made every budget nominal -- a 60 s call could end after 2 s and report zero
+        on a formula the budget would have sampled. Only a caller knows when to give up.
 
         `verify_sound` (default off) re-checks on the device that every emitted model satisfies
         every clause, reporting `sound_check` ("ok" / "UNSOUND" / "off" — a tri-state, since
@@ -489,6 +498,7 @@ class GPUSampler:
             int(n_target), [(rv_c, b_c, la_c == "soft") for rv_c, b_c, la_c in plan],
             max_chunks=_chunk_budget(max_chunks), time_limit_s=_time_budget(max_seconds),
             min_measure_chunks=int(min_measure_chunks), keep_cap=keep_cap,
+            grace_chunks=int(give_up_chunks),
             verify=bool(verify_sound), support_only=not complete)
         self._sync()
         cbd = [self._smp.config_stats(i) for i in range(len(plan))]

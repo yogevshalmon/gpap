@@ -249,6 +249,7 @@ def _sample_run(args, device, path, tmp, encode_s):
                        seed=args.seed, simplify=not args.no_simplify, els=not args.no_els, mine=mine,
                        configs=portfolio, k_cap=args.k_cap,
                        verify_sound=args.verify_sound, progress=progress,
+                       give_up_chunks=args.give_up_chunks,
                        # 0 = no cap (the pipeline reads None that way); a literal 0 expires the
                        # sampling loop before its first chunk.
                        time_limit=args.time_limit or None)
@@ -272,8 +273,21 @@ def _sample_run(args, device, path, tmp, encode_s):
         # Every trajectory conflicted. The three causes want different responses, so name them.
         print("  [warn] no models: every trajectory hit a conflict. GPAP discards conflicted\n"
               "         trajectories rather than backtracking, so a tightly-constrained instance\n"
-              "         can yield nothing. Try --portfolio b1 (one decision per round), a longer\n"
-              "         --time-limit, or --allow-soft (faster on tight circuits, NOT uniform).")
+              "         can yield nothing. Try --portfolio b1 (one decision per round)\n"
+              "         or --allow-soft (faster on tight circuits, NOT uniform).")
+        # AND SAY WHETHER THE BUDGET WAS EVEN SPENT. This advice used to include "a longer
+        # --time-limit", which is wrong precisely when it is most tempting: under `zero_yield`
+        # the clock was never the binding constraint, so a longer one changes nothing. Measured
+        # on b15 at T=25 rare: 2.0 s of a 60 s budget, and 30x the trajectories found nothing
+        # either. On b17 they did.
+        if info.get("stop") == "zero_yield":
+            print(f"         The run gave up after {info['wall_timed_s']:.1f}s of your "
+                  f"--time-limit, not at the end of it: the\n"
+                  f"         zero-yield stop fires once a few chunks in a row come back empty, "
+                  f"so a longer\n"
+                  f"         --time-limit will NOT help.")
+        elif info.get("stop") == "time":
+            print("         The run spent its whole --time-limit: a longer one may help.")
     if info.get("n_collected"):
         nd, nc = info.get("n_distinct"), info["n_collected"]
         cpu = info.get("cpu_sound")
@@ -729,7 +743,16 @@ def main(argv=None):
                         "safety valve fires — the delivered count is always printed")
     s.add_argument("--time-limit", type=_NONNEG_SECS, default=60.0,
                    help="per-instance sampling wall cap in seconds (0 = no cap). Bounds the "
-                        "sampling loop AND any top-up needed to fill --out")
+                        "sampling loop AND any top-up needed to fill --out. The run spends it: "
+                        "see --give-up-chunks")
+    s.add_argument("--give-up-chunks", type=int, default=0, metavar="N",
+                   help="abandon a run that has found NOTHING after every config has run plus N "
+                        "chunks (0 = off, the default: spend --time-limit). Use it when a quick "
+                        "'this formula yields nothing' is worth more than the search -- a tight "
+                        "circuit can take most of a minute to produce its first model, and on "
+                        "some it never does. OFF by default because a budget you set should be "
+                        "the budget that gets spent; with --time-limit 0 and this off, the run "
+                        "continues until the target is met")
     s.add_argument("--seed", type=int, default=5)
     s.add_argument("--n-cov", type=_NONNEG_INT, default=0,
                    help="collect this many models for the quality/soundness readout (distinct "
