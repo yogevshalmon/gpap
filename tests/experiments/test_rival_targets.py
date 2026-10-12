@@ -1325,6 +1325,21 @@ def test_resume_refuses_a_file_on_the_old_clock():
     assert rows_on_the_old_clock([new, old, failed]) == ["b01"]
 
 
+def test_the_cross_card_comparison_puts_both_sides_on_one_clock():
+    """A reference recorded before the deduction against a fresh run after it: both sides are
+    rated on their own `runtime_s`, or the speed factor would measure the metric change."""
+    from eval.artifact.compare_campaign import one_clock  # noqa: PLC0415
+
+    ref = [{"name": "b03", "rcs": {"unique": 100, "runtime_s": 10.0, "unique_per_s": 10.0}}]
+    new = [{"name": "b03", "rcs": {"unique": 100, "runtime_s": 10.0, "egress_s": 2.0,
+                                   "unique_per_s": 12.5}}]
+    r, n, converted = one_clock(ref, new)
+    assert converted and r[0]["rcs"]["unique_per_s"] == 10.0 and n[0]["rcs"]["unique_per_s"] == 10.0
+    assert new[0]["rcs"]["unique_per_s"] == 12.5, "the caller's rows must not be modified"
+    r, n, converted = one_clock(new, new)
+    assert not converted and n[0]["rcs"]["unique_per_s"] == 12.5
+
+
 def test_the_recurrent_eval_patch_applies_to_the_pinned_commit(tmp_path):
     """The patch is a diff against the pinned commit, applied to that commit's pristine run.py in
     a repository of its own: `git apply` in a directory with no .git inside another repository
