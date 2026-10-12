@@ -37,6 +37,8 @@ from eval.uniformity.barbarik_table import (SETTINGS as BARBARIK_SETTINGS,   # n
                                             check_one_setting, load as barbarik_load,
                                             order_budget as barbarik_order_budget)
 
+#: Pre-`sim_baseline` fallback only, measured at T=25 — see `vacuous_pin`, which reads the row
+#: first. Every consumer goes through that function; a `name in VACUOUS_PINS` test does not.
 VACUOUS_PINS = {"b02", "b05", "b07", "s526"}
 
 
@@ -91,13 +93,18 @@ def vacuous_pin(r, name=None):
     """True when the pinned target is a tautology — every input sequence satisfies it.
 
     Then "sampling" is a free hypercube over the input bits, every sampler scores ~100%, and the
-    ratio measures the instance. Detected per row from `sim_baseline.p_accept`."""
-    if name and name in VACUOUS_PINS:
-        return True
+    ratio measures the instance. Detected per row from `sim_baseline.p_accept`.
+
+    THE MEASUREMENT DECIDES; `VACUOUS_PINS` is only the fallback for a row that carries no
+    baseline. Vacuity is a property of (instance, depth, pin), not of a name: at T=50 `b02`
+    measures 0.37-0.63 and `b07` 0.50, so a name list consulted first screens a cell the row
+    itself calls samplable — and itemises it in the table as `p_accept 1.0`."""
     p = (r.get("sim_baseline") or {}).get("p_accept")
     if p is None:
         p = r.get("p_accept")                  # rival rows carry it at the top level
-    return p is not None and p >= 1.0
+    if p is not None:
+        return p >= 1.0
+    return bool(name and name in VACUOUS_PINS)
 
 
 def zero_search(r):
