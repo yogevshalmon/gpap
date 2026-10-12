@@ -232,21 +232,31 @@ so "the pipeline is certified" means every member is (gated by
 distribution knob); one hang killed the sweep (rows are per instance now, errors recorded, bias
 values kept); and not every instance is a valid subject.
 
-Sixth, found 2026-10-12: **the arms were not on the same budget**, which matters because what
-this table reports is a no-verdict count and a no-verdict is a coverage outcome. The GPAP arms
-were ended by the sampler's own zero-yield give-up rule — the five `pipe:circuit` no-verdicts
-below spent 0.99, 1.01, 1.12, 1.77 and 3.87 s, and the two `gpap:b8` ones 9.8 s — while CMSGen
-was bounded only by a 1,800 s subprocess kill with no
-`--maxtime`, i.e. effectively unbounded per order. Neither upstream tool offers a number to
-inherit (barbarik launches every sampler through a bare `os.system` with no timeout; stock CMSGen
-has no wall budget), so `--order-seconds` is ours: 30 s per order for every sampler under test,
-about 3× the ~10 s/order the slowest *Accepting* instance averaged (`c2670-c1-random`: 695 s
-over 72 orders on `pipe:circuit`, 729 s on `gpap:b8`) and 1.5× the 20 s the reference budget
-already uses. It is the only bound on an order
-— no chunk cap — and it is recorded in every row, with `barbarik_table.order_budget` refusing to
-pool two budgets in one table for the same reason it refuses two parameter settings. SPUR is
-deliberately exempt: barbarik invokes the reference through its own stock path and it is not a
-tool under test. The counts below predate the flag and are re-run under it.
+Sixth, found 2026-10-12: **the GPAP arms were not given a budget at all** — they were ended by
+the sampler's own zero-yield give-up rule, which matters because what this table reports is a
+no-verdict count and a no-verdict is a coverage outcome. The five `pipe:circuit` no-verdicts
+below spent 0.99, 1.01, 1.12, 1.77 and 3.87 s, and the two `gpap:b8` ones 9.8 s. Neither upstream
+tool offers a number to inherit (barbarik launches every sampler through a bare `os.system` with
+no timeout; stock CMSGen has no wall budget), so `--order-seconds` is ours: 30 s per order, about
+3× the ~10 s/order the slowest *Accepting* instance averaged (`c2670-c1-random`: 695 s over 72
+orders on `pipe:circuit`, 729 s on `gpap:b8`) and 1.5× the 20 s the reference budget already
+uses. It is the only bound on an order — no chunk cap — and it is recorded in every row.
+
+**It binds the GPAP arms only, and that asymmetry is deliberate.** The symmetric version was
+tried first and measured: at 30 s an order CMSGen could not produce one sample from the
+`c6288-c1-random` kernel, so a number derived from *our* costs took an Accept off the rival that
+it had earned under the recorded campaign's effectively-unbounded budget. The rival therefore
+keeps that budget (`--cmsgen-order-seconds`, 1,800 s), and SPUR is likewise unbounded on
+barbarik's own stock path. The claim this table supports is not "both tools had the same budget"
+but the stronger-against-us one: **GPAP was held to 30 s an order and CMSGen was not held to
+anything**, so every no-verdict here is ours and no CMSGen Accept owes anything to a number we
+chose. `barbarik_table.order_budget` reports each arm's budget and refuses to pool one ARM across
+two of them, for the same reason it refuses two parameter settings.
+
+Re-measured locally 2026-10-12 on the five `pipe:circuit` no-verdicts, on the same instances
+(`--encoder abc --abc-opt fast` reproduces their shapes exactly): with the give-up rule off and
+30 s an order, **all five Accept** — 1,872 samples each except `c6288-c1-random` at 922 — and
+none Reject. The counts below predate all of this and are re-run under it.
 
 The screen: `spur(control)` is Rejected on `ActivityService`, `ActivityService2`,
 `IssueServiceImpl`, `IterationService` and `PhaseService`, also through barbarik's own
@@ -457,11 +467,14 @@ PYTHONPATH=. .venv/bin/python eval/uniformity/fuzz_uniformity.py --count 12 --se
 # the certificate (§4b), circuit-only: generate, SCREEN, then every arm including both controls
 PYTHONPATH=. .venv/bin/python eval/uniformity/barbarik_gpap.py --explain
 mkdir -p .gpap/tmp/circ
+# --encoder abc --abc-opt fast is NOT the default and IS what the recorded campaign used:
+# bare circuit2cnf writes Tseitin (2,711 vars on b08-c10 against 91), and --abc-opt full differs
+# again. Recovered 2026-10-12 by matching n_vars/n_clauses/n_ind against the published rows.
 for c in b01 b03 b04 b06 b08 b09 b10 b11 b13 s386 s832 s1196; do for T in 5 10 25; do for tg in rare random; do
-  gpap circuit2cnf benchmarks/circuits/bench/seq/$c.bench .gpap/tmp/circ/$c-c$T-$tg.cnf --cycles $T --target $tg --seed 1
+  gpap circuit2cnf benchmarks/circuits/bench/seq/$c.bench .gpap/tmp/circ/$c-c$T-$tg.cnf --cycles $T --target $tg --seed 1 --encoder abc --abc-opt fast
 done; done; done
 for c in c432 c499 c880 c1355 c1908 c2670 c3540 c5315 c6288 c7552; do for tg in rare random; do
-  gpap circuit2cnf benchmarks/circuits/bench/comb/$c.bench .gpap/tmp/circ/$c-c1-$tg.cnf --cycles 1 --target $tg --seed 1
+  gpap circuit2cnf benchmarks/circuits/bench/comb/$c.bench .gpap/tmp/circ/$c-c1-$tg.cnf --cycles 1 --target $tg --seed 1 --encoder abc --abc-opt fast
 done; done
 PYTHONPATH=. .venv/bin/python eval/uniformity/barbarik_screen.py .gpap/tmp/circ/*.cnf --out .gpap/tmp/eligible.txt
 for arm in "--sampler spur" "--sampler cmsgen" "--sampler pipe --portfolio circuit" \
@@ -469,6 +482,7 @@ for arm in "--sampler spur" "--sampler cmsgen" "--sampler pipe --portfolio circu
            "--sampler gpap --config s1" "--sampler gpap --config soft"; do
   PYTHONPATH=. .venv/bin/python eval/uniformity/barbarik_gpap.py $(cat .gpap/tmp/eligible.txt) \
       $arm --order-seconds 30 --out .experiments/barbarik/circ.jsonl    # CMSGen-paper setting
+      # --order-seconds binds the GPAP arms ONLY; the rival keeps --cmsgen-order-seconds (1800)
   PYTHONPATH=. .venv/bin/python eval/uniformity/barbarik_gpap.py $(head -6 .gpap/tmp/eligible.txt) \
       $arm --epsilon 0.1 --eta 0.9 --delta 0.05 --out .experiments/barbarik/circ_strict.jsonl
 done

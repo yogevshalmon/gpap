@@ -192,3 +192,51 @@ def test_one_order_is_bounded_by_the_order_budget_not_by_the_attempt_count(monke
         f"{len(seen)} calls x {per_call}s against a {budget}s order budget"
     # ...and no single call was ever handed more than the order had left.
     assert seen == [budget - i * per_call for i in range(len(seen))], seen
+
+
+@pytest.mark.parametrize("marker", [True, False], ids=["budget-stop", "real-crash"])
+def test_a_cmsgen_maxtime_exit_is_a_budget_stop_not_a_harness_failure(tmp_path, marker):
+    """`--maxtime` makes CMSGen exit through its NORMAL path with the DIMACS "unknown" code (15,
+    measured), having written the samples it managed. The arm must read them.
+
+    Measured consequence of getting this wrong: on `c6288-c1-random`, the one instance where
+    CMSGen needs real time, a `--maxtime` stop came back as `RuntimeError: cmsgen failed` — a
+    harness error where the truth is a short count on a spent budget, which is exactly the
+    confusion this change set is about. The arm now passes `--maxtime` at the rival's own large
+    budget (CMSGEN_ORDER_SECONDS) rather than at ours, so the path is reached late rather than
+    often, but it is reached: it is the difference between reading the samples CMSGen wrote and
+    discarding them with the kill. `gpap.benchmark.cmsgen_run` never looks at the return code
+    for this reason; here the code is still checked, so the patch's own marker is what
+    distinguishes a budget stop from a crash.
+    """
+    import stat
+
+    from eval.uniformity.barbarik_gpap import _cmsgen_solutions
+
+    said = "echo 'c gpap-maxtime reached after 30.0010s'" if marker else "echo 'c oh no'"
+    fake = tmp_path / "cmsgen"
+    # --help must advertise --maxtime or the arm never passes a deadline (capability-probed).
+    fake.write_text(
+        "#!/bin/sh\n"
+        'case "$1" in --help) echo "--nowrite --statsevery --maxtime"; exit 0;; esac\n'
+        'for a in "$@"; do case "$prev" in --samplefile) out="$a";; esac; prev="$a"; done\n'
+        'printf "1 -2 3 0\\n" > "$out"\n'
+        f"{said}\n"
+        "exit 15\n")
+    fake.chmod(fake.stat().st_mode | stat.S_IEXEC)
+    cnf = tmp_path / "toy.cnf"
+    cnf.write_text("p cnf 3 1\n1 0\n")
+
+    # one sample written, one asked for: the budget-stop path must SUCCEED on what it read
+    if marker:
+        assert _cmsgen_solutions(str(cnf), 1, [1, 2, 3], 0, str(fake),
+                                 order_seconds=30.0) == [[1, -2, 3]]
+        # ...and two asked for is a short count, reported with the budget, never as a failure
+        with pytest.raises(RuntimeError) as err:
+            _cmsgen_solutions(str(cnf), 2, [1, 2, 3], 0, str(fake), order_seconds=30.0)
+        assert "produced 1/2" in str(err.value) and "30s budget" in str(err.value), err.value
+        assert "failed" not in str(err.value), str(err.value)
+    else:
+        # the same exit code WITHOUT the patch's marker is still a crash
+        with pytest.raises(RuntimeError, match="cmsgen failed"):
+            _cmsgen_solutions(str(cnf), 1, [1, 2, 3], 0, str(fake), order_seconds=30.0)

@@ -72,28 +72,40 @@ def test_two_parameter_settings_are_refused_in_one_table():
                            row(CONTROL, "b", "Accept", epsilon=0.1, eta=0.9, delta=0.05)])
 
 
-def test_two_per_order_budgets_are_refused_in_one_table():
+def test_one_arm_under_two_per_order_budgets_is_refused_in_one_table():
     """The budget decides how often an order goes unfilled, and unfilled orders are what this
-    table reports — so two budgets pooled is a budget comparison wearing a uniformity label,
-    the same defect as running two arms on two budgets."""
+    table reports — so the SAME arm pooled across two budgets is a budget comparison wearing a
+    uniformity label, and the row format makes it a single `cat` away."""
     mixed = [row(CONTROL, "a", "Accept"), row("gpap:b8", "a", "Accept"),
-             row("cmsgen", "a", "Accept", order_seconds=300.0)]
-    with pytest.raises(ValueError, match="mix PER-ORDER BUDGETS"):
+             row("gpap:b8", "b", "Accept", order_seconds=300.0)]
+    with pytest.raises(ValueError, match="MORE THAN ONE per-order budget"):
         order_budget(mixed)
-    with pytest.raises(ValueError, match="mix PER-ORDER BUDGETS"):
+    with pytest.raises(ValueError, match="MORE THAN ONE per-order budget"):
         check_one_setting(mixed)              # the gate paper_tables actually calls
 
 
-def test_rows_from_before_the_budget_existed_are_not_a_third_budget():
-    """Every published row predates `--order-seconds`. A None must not read as its own value,
-    or the whole recorded campaign becomes unsummarisable."""
+def test_two_arms_on_two_budgets_is_the_design_and_is_recorded_not_refused():
+    """GPAP is held to `--order-seconds`; the rival is deliberately NOT (the asymmetry runs
+    against us — forcing our own number onto CMSGen was measured taking an earned Accept off
+    it). So a per-FILE budget check would refuse the intended campaign, and could only be
+    satisfied by recording a number one of the arms never saw. Both are reported instead."""
+    rows = [row(CONTROL, "a", "Accept", order_seconds=None),
+            row("pipe:circuit", "a", "Accept"),
+            row("cmsgen", "a", "Accept", order_seconds=1800.0)]
+    assert order_budget(rows) == {CONTROL: None, "pipe:circuit": 30.0, "cmsgen": 1800.0}
+    check_one_setting(rows)                   # must not raise
+
+
+def test_rows_from_before_the_budget_existed_are_not_a_second_budget():
+    """Every published row predates `--order-seconds`. A None must not read as a value of its
+    own, or the whole recorded campaign becomes unsummarisable."""
     legacy = [row(CONTROL, "a", "Accept", order_seconds=None),
               row("gpap:b8", "a", "Accept", order_seconds=None)]
-    assert order_budget(legacy) is None
-    # ...and SPUR's None beside a budgeted arm is consistent, not a mix: the budget never
-    # reaches the reference, so the harness records it as the None it is.
-    assert order_budget([row(CONTROL, "a", "Accept", order_seconds=None),
-                         row("gpap:b8", "a", "Accept")]) == 30.0
+    assert order_budget(legacy) == {CONTROL: None, "gpap:b8": None}
+    # ...and a legacy row beside a budgeted one FOR THE SAME ARM is not a mix either: it is one
+    # run recorded before the flag and one after, and only the recorded number can be reported.
+    assert order_budget([row("gpap:b8", "a", "Accept", order_seconds=None),
+                         row("gpap:b8", "b", "Accept")]) == {"gpap:b8": 30.0}
 
 
 def test_load_reads_jsonl_and_skips_blank_lines(tmp_path):
