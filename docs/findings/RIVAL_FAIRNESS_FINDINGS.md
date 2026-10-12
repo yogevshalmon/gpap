@@ -791,3 +791,22 @@ Recurrent geomean by 4–5%. The per-copy model under-reads the measured copy on
 1.7–2.1×, so treat those as lower bounds. The next campaign measures it per row.
 
 A metric change after the freeze, made by the owner and recorded here as §17b's was.
+
+### 17d. The vacuous-pin screen read a name before the row (2026-10-12)
+
+`VACUOUS_PINS = {b02, b05, b07, s526}` is documented as the fallback for rows recorded before
+`sim_baseline` existed, but `vacuous_pin` tested it FIRST, so a name was screened at every depth.
+Vacuity is a property of (instance, depth, pin), not of a name: in the frozen campaign **b02 at
+T=50 measures `p_accept` 0.375 and b07 at T=50 rare 0.4985**, and both were screened and itemised
+in the table as "p_accept 1.0" — an exclusion asserting a number its own row contradicts.
+
+The fix is the stated rule, not a new one: the row decides, and the name list answers only where
+there is no `p_accept` to read. `eval_plots.py` and `verify_artifact.py` had been testing
+`name in VACUOUS_PINS` directly — the drift `eval_plots` warns against in writing — and now call
+`vacuous_pin`. Gated by `test_a_named_pin_that_measures_samplable_is_not_screened`.
+
+Re-derived from the frozen rows, only the four T=50 rows move, in both directions: Table 1
+their-pins n 14→15 and 1616→1433×, rare n 14→16 and 71.7→83.0×; Table 2 8.50→9.20× and
+119.3→101.8×. T=1 and T=25 are unchanged. A bug fix under the freeze, so the screen's definition
+is untouched; `check_paper_numbers.py` now fails on `paper/data`, which is the signal that the
+PDF's T=50 numbers must be re-cut from the next campaign rather than re-transcribed.
