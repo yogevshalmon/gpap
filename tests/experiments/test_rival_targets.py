@@ -1258,6 +1258,72 @@ def test_honouring_a_recorded_failure_stays_opt_in_and_settings_bound():
 
 # --------------------------------------------------------------- Recurrent's host snapshot, deducted
 
+_FAKE_RUN_PY = '''import os, sys
+a = sys.argv
+key = os.path.basename(a[a.index("-d") + 1])[:-len(".bench")].replace(".", "")
+batch = a[a.index("--batch_size") + 1]
+res = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "results")
+os.makedirs(res, exist_ok=True)
+cols = {"num_unique_solutions": "100", "model_runtime": "10.0"}
+if os.environ.get("FAKE_EGRESS"):
+    cols["egress_runtime"] = os.environ["FAKE_EGRESS"]
+with open(os.path.join(res, f"sat_{key}_1_mse_15.0_{batch}.csv"), "w") as f:
+    f.write("\\t".join(cols) + "\\n" + "\\t".join(cols.values()) + "\\n")
+print("[[3], [7]]")
+'''
+
+
+def _fake_recurrent(tmp_path):
+    rival = tmp_path / "rcs"
+    (rival / "src" / "pytorch").mkdir(parents=True)
+    (rival / "script").mkdir()
+    (rival / "src" / "pytorch" / "run.py").write_text(_FAKE_RUN_PY)
+    bench = tmp_path / "s208.1.bench"
+    bench.write_text("INPUT(a)\nOUTPUT(a)\n")
+    return str(rival), str(bench)
+
+
+def test_recurrents_rate_excludes_its_host_snapshot(tmp_path, monkeypatch):
+    """Their timed loop copies every depth's candidates to the host; the eval patch reports that
+    copy as `egress_runtime`, and the rate is unique / (model_runtime - egress_runtime). Their own
+    clock stays `runtime_s`, the copy `egress_s`."""
+    from eval.rivals.rivals_recurrent import run_recurrent  # noqa: PLC0415
+
+    rival, bench = _fake_recurrent(tmp_path)
+    monkeypatch.setenv("FAKE_EGRESS", "2.0")
+    r = run_recurrent(rival, bench, "s208.1", 25, 1, 1000, 0)
+    assert "error" not in r, r
+    assert r["runtime_s"] == 10.0 and r["egress_s"] == 2.0
+    assert r["unique_per_s"] == pytest.approx(100 / 8.0)
+    assert r["unique_at_T"] == 7
+
+
+def test_an_unpatched_recurrent_stops_the_run(tmp_path, monkeypatch):
+    """Without `egress_runtime` the rate would carry the copy. It RAISES: returned as an error
+    row it would read as a refused rung, and the ladder walk would record a smaller grant for a
+    fault in the measurement."""
+    from eval.rivals.rivals_recurrent import run_recurrent  # noqa: PLC0415
+
+    rival, bench = _fake_recurrent(tmp_path)
+    monkeypatch.delenv("FAKE_EGRESS", raising=False)
+    with pytest.raises(RuntimeError, match="recurrent_gpap_eval.patch"):
+        run_recurrent(rival, bench, "s208.1", 25, 1, 1000, 0)
+    monkeypatch.setenv("FAKE_EGRESS", "10.0")       # the copy cannot be the whole clock
+    with pytest.raises(RuntimeError, match="outside model_runtime"):
+        run_recurrent(rival, bench, "s208.1", 25, 1, 1000, 0)
+
+
+def test_resume_refuses_a_file_on_the_old_clock():
+    """A row measured before the patch (no `egress_s`) carries the copy in its rate; resuming
+    into its file would pool two metrics in one geomean. Error rows carry no rate and pass."""
+    from eval.rivals.rivals_recurrent import rows_on_the_old_clock  # noqa: PLC0415
+
+    new = {"name": "b03", "rcs": {"runtime_s": 9.3, "egress_s": 0.97}}
+    old = {"name": "b01", "rcs": {"runtime_s": 8.1}}
+    failed = {"name": "b19", "rcs": {"error": "did not initialize"}}
+    assert rows_on_the_old_clock([new, failed]) == []
+    assert rows_on_the_old_clock([new, old, failed]) == ["b01"]
+
 
 def test_the_recurrent_eval_patch_applies_to_the_pinned_commit(tmp_path):
     """The patch is a diff against the pinned commit, applied to that commit's pristine run.py in

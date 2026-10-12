@@ -8,11 +8,12 @@ depths start_point..T, `model_runtime` = the gradient loop only (their timer exc
 and the solution re-check). Both are generous to them and kept as-is; we additionally parse their
 per-depth stdout for the depth-T-only count (`uniq@T`), comparable to GPAP's fixed-depth CNF.
 
-EMISSION SYMMETRY, the one asymmetry running the OTHER way and deliberately NOT corrected: this
-rival copies its candidate assignments to host INSIDE the loop its timer wraps, so its published
-rate is charged for delivery (bounded at ~2.2% of model_runtime, measured), while every other
-tool here is timed on generation alone. Leaving it in keeps their number as they publish it;
-re-derive with eval/rivals/check_emission_symmetry.py.
+EMISSION SYMMETRY: this rival copies its candidate assignments to the host INSIDE the loop its
+timer wraps, so `model_runtime` includes delivering its samples, which no other tool's clock
+does. eval/rivals/recurrent_gpap_eval.patch (applied by rivals_setup.sh) times that copy on its
+own as `egress_runtime`, and the rate is unique / (model_runtime - egress_runtime); `runtime_s`
+stays their clock and `egress_s` is recorded beside it. Left in, the copy lowers their rate and
+so flatters GPAP. Re-derive with eval/rivals/check_emission_symmetry.py.
 
 GPAP side: the identical constraint via an output-reordered .bench (their target_idx outputs
 first, then build_cnf pin_outputs=len(idx) with the same values, pinned at cycle T), sampled at
@@ -254,6 +255,15 @@ def run_recurrent(rival, bench_file, key, T, steps, batch, start_point,
         r = list(csv.DictReader(f, delimiter="\t"))[0]
     uniq = int(float(r["num_unique_solutions"]))
     rt = float(r["model_runtime"])
+    # Their clock minus their host snapshot (module docstring): generation alone, as every other
+    # tool is timed. RAISED, not returned: an error row reads as a refused rung, and the ladder
+    # walk would record a smaller grant for a fault in the measurement, not in the rung.
+    if not r.get("egress_runtime"):
+        raise RuntimeError("no egress_runtime in their results: the checkout lacks "
+                           "eval/rivals/recurrent_gpap_eval.patch")
+    egress = float(r["egress_runtime"])
+    if not 0 <= egress < rt:
+        raise RuntimeError(f"egress_runtime {egress:.3f}s outside model_runtime {rt:.3f}s")
     # their stdout prints the per-depth unique-count list; the last entry is depth T
     uniq_at_t = None
     for line in reversed(p.stdout.splitlines()):
@@ -263,9 +273,17 @@ def run_recurrent(rival, bench_file, key, T, steps, batch, start_point,
             except (ValueError, SyntaxError, IndexError):
                 pass
             break
-    return {"unique": uniq, "unique_at_T": uniq_at_t, "runtime_s": rt,
-            "unique_per_s": uniq / rt if rt else 0.0, "wall_s": wall,
+    return {"unique": uniq, "unique_at_T": uniq_at_t, "runtime_s": rt, "egress_s": egress,
+            "unique_per_s": uniq / (rt - egress), "wall_s": wall,
             "batch": batch, "steps": steps, "start_point": start_point}
+
+
+def rows_on_the_old_clock(rows):
+    """Names of the measured rows recorded before the eval patch: their rate carries the host
+    copy. ONE CLOCK PER FILE: appending deducted rows to them would pool two metrics in one
+    geomean, so `--resume` refuses such a file."""
+    return sorted(r["name"] for r in rows
+                  if (r.get("rcs") or {}).get("runtime_s") and "egress_s" not in r["rcs"])
 
 
 def settled_error(err, init_budget, run_timeout):
@@ -726,6 +744,10 @@ def main():
     args.names = expand_names(args.names, "rcs")
     if not os.path.isdir(os.path.join(args.rival, "src")):
         sys.exit(f"no rival checkout at {args.rival} (see module docstring)")
+    with open(os.path.join(args.rival, "src", "pytorch", "run.py")) as f:
+        if "egress_runtime" not in f.read():
+            sys.exit(f"{args.rival} lacks eval/rivals/recurrent_gpap_eval.patch, so its clock would "
+                     f"include copying its samples to the host: run eval/rivals/rivals_setup.sh")
     grants = load_grants(args.grants)          # {} = walk the ladder and probe, as always
     if grants:
         print(f"[grants] {args.grants}: {len(grants.get('recurrent') or {})} recorded "
@@ -743,7 +765,7 @@ def main():
           f"GPAP median of seeds {args.seeds} | CMSGen arm: "
           f"{'on (same CNF, --nowrite --maxtime)' if args.cmsgen else 'OFF'}")
     hdr = (f"{'instance':<10}{'circ':>6}{'pin':>12}{'p_acc':>10}{'RCS uniq':>11}{'@T':>9}"
-           f"{'t':>7}{'RCS u/s':>10}{'GPAP u/s~':>11}{'succ%':>7}{'ratio':>10}"
+           f"{'t (theirs)':>10}{'RCS u/s':>10}{'GPAP u/s~':>11}{'succ%':>7}{'ratio':>10}"
            f"{'CMS/s':>10}{'G/C':>9}")
     print(hdr)
     print("-" * len(hdr))
@@ -774,6 +796,12 @@ def main():
                           f"budget: {', '.join(sorted(retry))}")
             done = {(r["name"], r.get("variant", "-")) for r in out}
             print(f"[resume] {len(out)} rows already in {args.output}")
+            old = rows_on_the_old_clock(out)
+            if old:
+                sys.exit(f"[resume] {args.output} holds {len(old)} row(s) measured before "
+                         f"eval/rivals/recurrent_gpap_eval.patch ({', '.join(old[:5])}"
+                         f"{', ...' if len(old) > 5 else ''}): their rate carries the host copy. "
+                         f"Write to a new --output.")
         except Exception as e:      # noqa: BLE001 — a truncated checkpoint must not kill the run
             print(f"[resume] ignoring unreadable {args.output}: {e}")
             out, done = [], set()
@@ -977,7 +1005,7 @@ def main():
               f"{ratio:>9.1f}x")
         at_t = f"{rcs['unique_at_T']:,}" if rcs.get("unique_at_T") is not None else "—"
         print(f"{name:<10}{variant:>6}{pin_desc:>12}{pa_s:>10}{rcs['unique']:>11,}{at_t:>9}"
-              f"{rcs['runtime_s']:>6.1f}s{rcs['unique_per_s']:>10,.0f}"
+              f"{rcs['runtime_s']:>9.1f}s{rcs['unique_per_s']:>10,.0f}"
               f"{uq_s:>11}{100 * g['success']:>6.0f}%{rt}{_cms_cols(g, cms)}",
               flush=True)
     if len(args.circuit_variants) > 1:

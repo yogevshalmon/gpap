@@ -104,6 +104,17 @@ if [ "$CMSGEN" != "none" ]; then
     fi
     CMS_ARGS=(--cmsgen "$CMSGEN")
 fi
+# ...and so does Recurrent's: unpatched, its clock carries the host copy no other tool's does, and
+# rivals_recurrent.py refuses it behind `| tee`, so every Recurrent stage would end with no rows
+# and this driver would still say RIVALS_STAGE_COMPLETE. Every stage below that runs it:
+RCS_RUN="$GPAP_HOME/src/Recurrent-CircuitSAT-Sampler/src/pytorch/run.py"
+case " $STAGES " in *" recurrent-"*|*" steps-calib"*|*" lr-calib "*)
+    if ! grep -q egress_runtime "$RCS_RUN" 2>/dev/null; then
+        echo "[FATAL] $RCS_RUN lacks eval/rivals/recurrent_gpap_eval.patch: its clock would carry" >&2
+        echo "        the host copy. Run eval/rivals/rivals_setup.sh." >&2
+        exit 1
+    fi ;;
+esac
 
 DEADLINE_H="${DEADLINE_H:-24}"
 START=$(date +%s)
