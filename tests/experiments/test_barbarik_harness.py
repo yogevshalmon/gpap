@@ -127,3 +127,68 @@ def test_barbarik_fill_gives_up_on_dry_attempts_not_dry_calls(monkeypatch):
     for draw in ("batch", "iid"):
         with pytest.raises(RuntimeError, match="produced 0/50"):
             bg._gpap_solutions("f.cnf", 50, cols, 1, "cpu", (True, 8, False), 4096, draw=draw)
+
+
+@pytest.mark.parametrize("draw", ["batch", "iid"])
+def test_one_order_is_bounded_by_the_order_budget_not_by_the_attempt_count(monkeypatch, draw):
+    """`--order-seconds` bounds ONE of barbarik's orders, so `72 x it` bounds a certificate.
+
+    The budget has to be a deadline shared by every call the collector makes, not an argument
+    handed to each of them: the `batch` arm makes up to `_FILL_ATTEMPTS` calls and the `iid` arm
+    up to `num_solutions` per attempt, so per-call it would bound an order at 24x (batch) to
+    1,200x (iid) the stated number. A trickling instance — one row, then dry, which is the shape
+    a Barbarik kernel produces from a rejection sampler — is exactly the case that walks the
+    whole attempt budget, so that is what this stub is.
+
+    The sampler's own give-up rule used to end a dry call after a few chunks and so hid the
+    arithmetic; it is off by default now, which is what makes the deadline load-bearing.
+    """
+    import math
+    import sys
+    import types
+
+    import numpy as np
+
+    import eval.uniformity.barbarik_gpap as bg
+
+    cols, budget, per_call = [1, 2, 3], 30.0, 4.0
+    clock, seen = [1000.0], []
+
+    class Trickle:
+        """Yields one row per call and burns `per_call` seconds doing it: never dry, so the
+        collector's `_FILL_GIVE_UP` never fires and only the deadline can stop it."""
+
+        @classmethod
+        def from_clauses(cls, *a, **k):
+            return cls()
+
+        def sample_bits(self, n, config=None, max_chunks=400, max_seconds=None):
+            seen.append(max_seconds)
+            clock[0] += per_call
+            return np.ones((1, len(cols)), dtype=np.uint8), cols
+
+    class CNFStub:
+        def __init__(self, from_file=None):
+            self.nv, self.clauses = 4, [[1, 2]]
+
+    monkeypatch.setattr(bg, "time", types.SimpleNamespace(monotonic=lambda: clock[0],
+                                                          perf_counter=lambda: clock[0]))
+    monkeypatch.setitem(sys.modules, "torch", types.SimpleNamespace(device=lambda s: s))
+    monkeypatch.setitem(sys.modules, "pysat", types.ModuleType("pysat"))
+    pf = types.ModuleType("pysat.formula")
+    pf.CNF = CNFStub
+    monkeypatch.setitem(sys.modules, "pysat.formula", pf)
+    sm = types.ModuleType("gpap.sampling.sampler")
+    sm.GPUSampler = Trickle
+    monkeypatch.setitem(sys.modules, "gpap.sampling.sampler", sm)
+
+    with pytest.raises(RuntimeError, match="order budget was spent"):
+        bg._gpap_solutions("f.cnf", 50, cols, 1, "cpu", (True, 8, False), 4096, draw=draw,
+                           order_seconds=budget)
+    # The order spent its budget ONCE, not a multiple of it: the last call is the one that
+    # starts with time left and runs past the deadline. `_FILL_ATTEMPTS` alone would have
+    # allowed 24 calls in the batch arm (96 s) and up to 1,200 in the iid arm.
+    assert len(seen) == math.ceil(budget / per_call), \
+        f"{len(seen)} calls x {per_call}s against a {budget}s order budget"
+    # ...and no single call was ever handed more than the order had left.
+    assert seen == [budget - i * per_call for i in range(len(seen))], seen

@@ -75,7 +75,10 @@ CONFIGS = {"b8": (True, 8, False), "b1": (True, 1, False), "s1": (False, 1, Fals
 #: (c2670-c1-random, 695 s over 72), so a 10 s budget would have turned a pass into a no-verdict.
 #: 30 s is about 3x that, and 1.5x the 20 s `barbarik_screen.py --spur-seconds` already uses for
 #: one reference order. The cost is bounded by the instances that would otherwise run forever:
-#: ~6 of 65, so 6 x 72 x 30 s = 3.6 h per arm in the worst case.
+#: ~6 of 65, so 6 x 72 x 30 s = 3.6 h per arm in the worst case. It is a SAMPLING budget: the
+#: `pipe` arm re-runs the whole shipped pipeline per order, so parse, ELS and up to MINE_SECONDS
+#: of mining sit outside it (~5-10 s an order). That setup is part of what the arm certifies and
+#: is not stripped to make the arithmetic tidier -- it is stated instead.
 ORDER_SECONDS = 30.0
 
 _FILL_ATTEMPTS = 24        # collector attempts per order
@@ -114,31 +117,62 @@ def _gpap_solutions(input_file, num_solutions, ind_var_list, seed, device, confi
         B = max(1, len(ind_var_list))
     smp = GPUSampler.from_clauses(cnf.nv, cnf.clauses, torch.device(device), support=sup0,
                                   seed=seed, k_cap=k_cap)
-    # `sample_bits` gives up after one empty chunk past its cold start: right for "produces
-    # nothing", wrong for "produces rarely", and Barbarik's kernel is the second case by
-    # construction (it enlarges the sampling set while pinning the support, so a rejection
-    # sampler's yield drops). Retry until the order is filled or the budget is spent; every call
-    # is a fresh set of independent chunks, so concatenating them changes no distribution. An
+    # WHY RETRY AT ALL, now that `sample_bits` no longer gives up on its own. It used to stop
+    # after the cold start plus two dry chunks -- right for "produces nothing", wrong for
+    # "produces rarely", and Barbarik's kernel is the second case by construction (it enlarges
+    # the sampling set while pinning the support, so a rejection sampler's yield drops). That
+    # rule is opt-in now and this arm does not ask for it, so a single call already runs to its
+    # budget. The loop stays because the two stopping rules answer different questions: a call
+    # ends when ITS budget or chunk cap is out, the loop ends when the ORDER is filled, dry, or
+    # out of time. Every call is a fresh set of independent chunks, so concatenating them
+    # changes no distribution. An
     # `iid` attempt ends at its first dry call, so budget that arm in CALLS or the same attempt
     # count would cap it far lower for purely structural reasons. A genuinely dry instance is
     # stopped by the give-up rule below, in 3 attempts either way.
-    rows, cols, empty, tries, gave_up = [], None, 0, 0, False
-    for _ in range(_FILL_ATTEMPTS * (num_solutions if draw == "iid" else 1)):
+    # ONE DEADLINE FOR THE WHOLE ORDER, and it is the ONLY bound: `max_chunks=None`. The wall
+    # is the budget we mean to give, so nothing else may end an order first.
+    #
+    # Both halves of that were wrong before and in opposite directions. `order_seconds` per CALL
+    # is not a per-order budget at all -- the `batch` arm makes up to _FILL_ATTEMPTS calls
+    # (24 x 30 s = 12 min for one of ~72 orders) and the `iid` arm up to num_solutions per
+    # attempt -- while a `max_chunks` cap ended an order far SHORT of the budget: 400 chunks is
+    # 0.17 s on a 20-var formula (measured), so three dry attempts abandoned the order in 1.4 s
+    # of its 30 s and the arms were not on the same budget after all, which is the whole claim
+    # this number exists to support. The sampler's own give-up rule used to hide both; it is
+    # off by default now, so the bound has to be exactly the one we state.
+    #
+    # The retry loop survives as a safety net, not as the budget: one call now either fills the
+    # order or spends the deadline, so `_FILL_GIVE_UP` is reachable only on a sampler that
+    # returns short for its own reasons.
+    rows, cols, empty, tries, gave_up, spent = [], None, 0, 0, False, False
+    # Named, because the error below quotes it: the iid arm's cap is NOT `_FILL_ATTEMPTS` (see
+    # the note above on why it is scaled), and a row reading "173 of 24 attempts" is a defect.
+    attempt_cap = _FILL_ATTEMPTS * (num_solutions if draw == "iid" else 1)
+    deadline = time.monotonic() + order_seconds
+    for _ in range(attempt_cap):
+        left = deadline - time.monotonic()
+        if left <= 0.0:
+            spent = True
+            break
         tries += 1
         before = len(rows)
         if draw == "iid":                      # a fresh chunk == a fresh variable permutation
             for _ in range(num_solutions - len(rows)):
-                b, cols = smp.sample_bits(1, config=(rv, B, la), max_chunks=400,
-                                          max_seconds=order_seconds)
+                left = deadline - time.monotonic()
+                if left <= 0.0:
+                    spent = True
+                    break
+                b, cols = smp.sample_bits(1, config=(rv, B, la), max_chunks=None,
+                                          max_seconds=left)
                 if b is None or len(b) < 1:
                     break
                 rows.append(b[0])
         else:
             b, cols = smp.sample_bits(num_solutions - len(rows), config=(rv, B, la),
-                                      max_chunks=400, max_seconds=order_seconds)
+                                      max_chunks=None, max_seconds=left)
             if b is not None and len(b):
                 rows.extend(b)
-        if len(rows) >= num_solutions:
+        if len(rows) >= num_solutions or spent:
             break
         # "Dry" is an ATTEMPT that produced nothing, never one call inside it: both draws obey
         # the rule `_FILL_GIVE_UP` states, so the collector's stopping rule is never charged to
@@ -156,10 +190,11 @@ def _gpap_solutions(input_file, num_solutions, ind_var_list, seed, device, confi
         # budget. Without it a no-verdict cannot be told from a sampler that cannot do the
         # instance at all.
         why = (f"gave up on {_FILL_GIVE_UP} consecutive dry attempts" if gave_up
+               else f"the {order_seconds:g}s order budget was spent" if spent
                else "attempt budget exhausted")
         raise RuntimeError(f"GPAP produced {0 if bits is None else len(bits)}/{num_solutions} "
                            f"samples on {display_path(input_file)} "
-                           f"[{tries} of {_FILL_ATTEMPTS} attempts; {why}]")
+                           f"[{tries} of {attempt_cap} attempts; {why}]")
     if sorted(cols) != sorted(ind_var_list):   # biasFind needs one literal per declared indVar
         raise RuntimeError(f"projection columns {len(cols)} != declared support "
                            f"{len(ind_var_list)} on {display_path(input_file)}")
@@ -230,8 +265,22 @@ def _cmsgen_solutions(input_file, num_solutions, ind_var_list, seed, cmsgen_bin,
     # Above the deadline, never instead of it: a stock binary has no deadline, so there the kill
     # IS the budget and the arms are only as equal as that makes them (reported in the row).
     hard = (deadline + max(30.0, 0.5 * deadline)) if deadline else order_seconds
+    # The budget, in the words both failure paths use. A reader of a no-verdict row has to be
+    # able to tell "could not fill the order" from "we cut it off", and on a stock binary the
+    # kill IS the budget, so the kill is an ordinary outcome of this arm.
+    budget = (f"[{order_seconds:g}s budget" +
+              ("" if deadline else ", enforced as a subprocess kill: this binary has no "
+                                  "--maxtime") + "]")
     try:
-        p = subprocess.run(cmd, capture_output=True, text=True, timeout=hard)
+        try:
+            p = subprocess.run(cmd, capture_output=True, text=True, timeout=hard)
+        except subprocess.TimeoutExpired:
+            # Reached on a stock binary (no deadline to exit on) or when a patched one's CPU
+            # deadline did not cover the wall. Either way it is the same fact as a short count,
+            # and reporting it as `TimeoutExpired` would leave the row unreadable.
+            raise RuntimeError(f"cmsgen produced 0/{num_solutions} on "
+                               f"{display_path(input_file)} {budget} — killed at {hard:g}s of "
+                               f"wall, so no samples could be read back") from None
         if p.returncode not in (0, 10):        # 10 = SATISFIABLE
             raise RuntimeError(f"cmsgen failed on {display_path(input_file)}: "
                                f"{p.stdout[-300:]}{p.stderr[-300:]}")
@@ -249,10 +298,8 @@ def _cmsgen_solutions(input_file, num_solutions, ind_var_list, seed, cmsgen_bin,
         except OSError:
             pass
     if len(sols) < num_solutions:
-        how = ("" if deadline else
-               ", enforced as a subprocess kill: this binary has no --maxtime")
         raise RuntimeError(f"cmsgen produced {len(sols)}/{num_solutions} on "
-                           f"{display_path(input_file)} [{order_seconds:g}s budget{how}]")
+                           f"{display_path(input_file)} {budget}")
     return sols[:num_solutions]
 
 
@@ -412,6 +459,15 @@ def main():
     if not args.cnfs:
         sys.exit("no instances given (use --explain to see what the parameters mean)")
 
+    # ABSOLUTE BEFORE THE CHDIR. Everything else a caller can pass is already resolved against
+    # REPO_ROOT (the instances below, `--out`) because this process moves its own cwd; `--barbarik`
+    # was not, so a relative `--barbarik .gpap/src/barbarik` inserted a relative sys.path entry
+    # and then chdir'd out from under it -- `ModuleNotFoundError: No module named 'interfaces'`,
+    # pointing at the checkout rather than at the path handling. Same for the binary: the chdir
+    # would strip a relative `--cmsgen` of its meaning inside the sampler arm.
+    args.barbarik = os.path.abspath(args.barbarik)
+    if args.cmsgen:
+        args.cmsgen = os.path.abspath(args.cmsgen)
     if not os.path.isdir(os.path.join(args.barbarik, "interfaces")):
         sys.exit(f"no barbarik checkout at {args.barbarik} (see module docstring)")
     sys.path.insert(0, args.barbarik)
@@ -458,9 +514,19 @@ def main():
         cnf = cnf if os.path.isabs(cnf) else os.path.abspath(os.path.join(REPO_ROOT, cnf))
         print(f"\n=== barbarik CM_test: {label} on {cnf} "
               f"(eta={args.eta} eps={args.epsilon} delta={args.delta}) ===", flush=True)
+        # THE KNOBS THAT MOVE A VERDICT, IN THE ROW THAT CARRIES IT. `order_seconds` decides
+        # how often an order goes unfilled, and the unfilled orders ARE this campaign's headline
+        # ("accepted on 60 of 65, 5 no-verdict"), so a row without it cannot be compared with
+        # another run of the same instance -- ours included. `k_cap` sizes the chunk and so
+        # decides how much one order yields (see --k-cap's help). None on the SPUR arms: the
+        # budget does not reach them (barbarik's own stock path invokes the reference), and
+        # stamping a number they never saw would make `order_budget` below refuse a file that is
+        # perfectly consistent.
+        under_test = args.sampler in ("gpap", "pipe", "cmsgen")
         row = {"sampler": label, "instance": os.path.basename(cnf), "seed": args.seed,
                "eta": args.eta, "epsilon": args.epsilon, "delta": args.delta,
-               **_instance_shape(cnf)}
+               "order_seconds": args.order_seconds if under_test else None,
+               "k_cap": args.k_cap, **_instance_shape(cnf)}
         t0 = time.perf_counter()
         tee = _Tee(sys.stdout)
         try:

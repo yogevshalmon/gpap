@@ -1591,6 +1591,31 @@ def test_verify_artifact_tells_a_gpap_zero_we_measured_from_one_we_abandoned(tmp
         "a cell that spent its whole budget is a real zero and must NOT be flagged"
     assert "record no `stop`" in out and "silent" in out, out
 
+    # AN ARM THAT NEVER RAN IS NOT A ZERO. The published campaign has exactly this row
+    # (rivals_recurrent_table b19/abc: `{"error": "encode failed: ... abc failed (rc=-6)"}`), and
+    # naming it here claims GPAP sampled a cell it never encoded — the gate stating something
+    # false about a published cell, which is worse than the gap it was added to close.
+    # `silent` is there to make the warning FIRE: with only the error row the list would be
+    # empty and the check below would pass on nothing at all.
+    f.write_text(json.dumps([rrow("ok"), zero("silent", None, None),
+                             {"name": "noenc", "variant": "raw",   # rrow's variant: a second
+                              # one would trip the unrelated variant-consistency warning, and
+                              # then "noenc" appears in the output for a reason this test is not
+                              # about — the fixture trap the comment above describes.
+                              "rcs": {"unique_per_s": 10.0, "num_inputs": 40},
+                              "gpap": {"error": "encode failed: abc failed (rc=-6)"}}]))
+    out = _verify("--rivals", str(riv)).stdout
+    # Scoped to the lines that NAME zero cells: `noenc` may legitimately appear elsewhere (any
+    # future gate that lists instance names), and a whole-output check would then fail for a
+    # reason this test is not about — the same trap as the prose match above.
+    named = [ln for ln in out.splitlines()
+             if "GPAP-zero" in ln or "ZERO-YIELD" in ln or "emitted nothing" in ln]
+    assert any("silent" in ln for ln in named), \
+        "precondition: a real zero with no `stop` must still be named\n" + out
+    assert not [ln for ln in named if "noenc" in ln], \
+        "an encode failure is neither a GPAP zero nor a cell that emitted nothing:\n" \
+        + "\n".join(named)
+
     # nothing to warn about when every zero spent its budget
     f.write_text(json.dumps([rrow("ok"), zero("spent", "time", 60.0)]))
     out = _verify("--rivals", str(riv)).stdout

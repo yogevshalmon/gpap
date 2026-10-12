@@ -40,6 +40,19 @@ def load(p):
         return None
 
 
+def gpap_zero(row):
+    """True iff the GPAP arm RAN on this cell and returned no models.
+
+    Three things are NOT that, and `not g.get("n_models")` reads all three as a zero: an absent
+    arm, an `error` row (an ABC encode failure writes one), and a `None` count. The published
+    campaign has such a row -- rivals_recurrent_table b19/abc failed to encode, `abc (rc=-6)` --
+    so every gate that asked the loose question stated something false about it: once as "a
+    GPAP-zero cell records no `stop`", once in the count of "cells where GPAP emitted nothing".
+    Both ask the same question, so it is answered in one place."""
+    g = row.get("gpap") or {}
+    return bool(g) and not g.get("error") and "n_models" in g and not g.get("n_models")
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("cmsgen_dir", nargs="?", default=None,
@@ -315,9 +328,9 @@ def main():
             # published number against us, so it is named rather than counted.
             early, unknown = [], []
             for (n_, _v), r in sorted(seen.items()):
-                g = r.get("gpap") or {}
-                if g.get("n_models") or not g:
+                if not gpap_zero(r):          # an arm that never ran is not a zero
                     continue
+                g = r["gpap"]                 # non-empty, by gpap_zero
                 st = g.get("stop")
                 if st == "zero_yield":
                     early.append(f"{n_} ({(g.get('wall_timed_s') or 0.0):.1f}s)")
@@ -360,7 +373,7 @@ def main():
                             f"by the rival's capability; state it or re-run them longer")
             # A SCREEN THAT NEVER RAN IS NOT A SCREEN THAT FOUND NOTHING: the proved-UNSAT column
             # reads `gpap.unsat_at_T`, absent on older rows (the `sound_check` tri-state).
-            zero_models = [r for r in seen.values() if not ((r.get("gpap") or {}).get("n_models"))]
+            zero_models = [r for r in seen.values() if gpap_zero(r)]
             asked = [r for r in zero_models if "unsat_at_T" in (r.get("gpap") or {})]
             if zero_models and not asked:
                 warn.append(f"{stem}: {len(zero_models)} cells where GPAP emitted nothing, and "
