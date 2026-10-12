@@ -261,6 +261,42 @@ def test_rival_table_scores_every_measured_instance_and_has_no_paper_subset_colu
     assert v["cells"] == v["n"] + v["errors"] + v["excl"] == 2
 
 
+def test_a_pinned_row_is_classified_by_the_walk_that_chose_its_grant(tmp_path):
+    """A campaign re-run on recorded grants starts each walk AT the grant, so its own
+    `batch_sweep` is one rung long. Read off that sweep, every pinned cell looked like a top rung
+    that completed first try and none like a small grant, which silently emptied the published
+    small-grant split. The row carries the recorded walk (`grant_walk`); a pinned row must be
+    classified exactly as the walked row it replays."""
+    walked = [3_000_000, 1_000_000, 300_000, 100_000, 30_000, 10_000]
+    gp = {"unique_per_s_est": 1000.0, "n_models": 5}
+    rows_walked = [
+        {"name": "b14", "variant": "abc", "gpap": gp,
+         "rcs": {"unique_per_s": 10.0, "unique": 500, "batch": 10_000,
+                 "batch_sweep": [{"batch": b, "error": "OOM" if b > 10_000 else None}
+                                 for b in walked]}},
+        {"name": "c17", "variant": "abc", "gpap": gp,
+         "rcs": {"unique_per_s": 10.0, "unique": 500, "batch": 30_000_000,
+                 "batch_sweep": [{"batch": 30_000_000, "error": None}]}}]
+    rows_pinned = [
+        {"name": "b14", "variant": "abc", "gpap": gp,
+         "rcs": {"unique_per_s": 10.0, "unique": 500, "batch": 10_000,
+                 "batch_sweep": [{"batch": 10_000, "error": None}],
+                 "grant_source": "pinned from g.json",
+                 "grant_walk": {"rungs_tried": walked, "oom_min": 30_000}}},
+        {"name": "c17", "variant": "abc", "gpap": gp,
+         "rcs": {"unique_per_s": 10.0, "unique": 500, "batch": 30_000_000,
+                 "batch_sweep": [{"batch": 30_000_000, "error": None}],
+                 "grant_source": "pinned from g.json",
+                 "grant_walk": {"rungs_tried": [30_000_000], "oom_min": None}}}]
+    (tmp_path / "rivals_w.json").write_text(json.dumps(rows_walked))
+    (tmp_path / "rivals_p.json").write_text(json.dumps(rows_pinned))
+    w = rival_family(str(tmp_path), "w", "rcs")
+    p = rival_family(str(tmp_path), "p", "rcs")
+    assert [nm for _, nm, _ in w["small_grant"]] == ["b14"] and w["ladder_top"] == [("c17", 30_000_000)]
+    assert p["small_grant"] == w["small_grant"], "a pinned small grant was not recognised"
+    assert p["ladder_top"] == w["ladder_top"], "a pinned rung read as the ladder's top"
+
+
 def test_vacuous_pin_is_detected_per_row_not_by_a_name_list(tmp_path):
     """A vacuous pin is read off the row (`p_accept == 1.0`), not only a fixed name list, so a new
     instance with a tautological pin (`b19` here) cannot enter the geomean."""
