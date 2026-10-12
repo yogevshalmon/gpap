@@ -28,9 +28,8 @@ import sys
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
 from gpap.verdict import sound_verdict                        # noqa: E402
 from eval.artifact.paper_tables import (CMS_FAMILIES, cms_arm_ran,          # noqa: E402
-                                        recheck_cells, sound_failed, sound_unchecked)
-
-VACUOUS_PINS = {"b02", "b05", "b07", "s526"}
+                                        recheck_cells, sound_failed, sound_unchecked,
+                                        vacuous_pin)
 
 
 def load(p):
@@ -153,7 +152,7 @@ def main():
         # cells), or this warning disagrees with the table.
         finite = [r["ratio"] for (k, _e), r in best.items()
                   if r.get("ratio") and math.isfinite(r["ratio"])
-                  and k not in VACUOUS_PINS
+                  and not vacuous_pin(r, k)
                   and not ((r.get("n_models") or 0) > 0
                            and not (r.get("decisions_per_s") or 0)
                            and not (r.get("implications_per_s") or 0))]
@@ -208,7 +207,7 @@ def main():
                 for r in d.get("results", []) if not r.get("skipped") and not r.get("error")}
         quad = []
         for (k, _e), r in best.items():
-            if k in VACUOUS_PINS:
+            if vacuous_pin(r, k):
                 continue
             a, b = r.get("implications_per_s"), r.get("cms_implications_per_s")
             s, t = r.get("gpap_sps"), r.get("cms_sps")
