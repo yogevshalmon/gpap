@@ -85,10 +85,9 @@ def test_one_arm_under_two_per_order_budgets_is_refused_in_one_table():
 
 
 def test_two_arms_on_two_budgets_is_the_design_and_is_recorded_not_refused():
-    """GPAP is held to `--order-seconds`; the rival is deliberately NOT (the asymmetry runs
-    against us — forcing our own number onto CMSGen was measured taking an earned Accept off
-    it). So a per-FILE budget check would refuse the intended campaign, and could only be
-    satisfied by recording a number one of the arms never saw. Both are reported instead."""
+    """GPAP is held to `--order-seconds` and the rival deliberately is not, so a per-FILE check
+    would refuse the intended campaign and could only be satisfied by recording a number one arm
+    never saw. Both are reported instead."""
     rows = [row(CONTROL, "a", "Accept", order_seconds=None),
             row("pipe:circuit", "a", "Accept"),
             row("cmsgen", "a", "Accept", order_seconds=1800.0)]
