@@ -92,6 +92,25 @@ for p in files:
     print(f"[fix]  py3.13 exec-namespace shim: {p}")
 PYFIX
 
+    # --- Recurrent: time its host snapshot on its own (eval/rivals/recurrent_gpap_eval.patch) ---
+    # Its timed loop copies every depth's candidates to the host; the patch measures that copy so
+    # the harness can deduct it, as no other tool's clock includes delivering its samples.
+    # rivals_recurrent.py refuses to run without it. Idempotent.
+    RCS_PATCH="$REPO_ROOT/eval/rivals/recurrent_gpap_eval.patch"
+    RCS_DIR="$SRC/Recurrent-CircuitSAT-Sampler"
+    # Judged by the file, not by git's exit status: in a checkout with no .git of its own, inside
+    # another repository, `git apply` prints "Skipped patch" and returns 0.
+    if [ -d "$RCS_DIR/src" ]; then
+        if grep -q egress_runtime "$RCS_DIR/src/pytorch/run.py"; then
+            echo "[ok]   Recurrent eval patch already applied"
+        elif git -C "$RCS_DIR" apply "$RCS_PATCH" && grep -q egress_runtime "$RCS_DIR/src/pytorch/run.py"; then
+            echo "[fix]  Recurrent eval patch applied (egress_runtime)"
+        else
+            echo "[warn] Recurrent eval patch did not apply to $RCS_DIR —" \
+                 "eval/rivals/rivals_recurrent.py will refuse to run"
+        fi
+    fi
+
     # Rival python deps: none of the three ships a requirements file. python-sat (imported as
     # `pysat`) is in all three import chains, so without it every rival run of every stage dies
     # at import and a whole campaign is error rows. Its version is BOUNDED, because it
@@ -170,6 +189,10 @@ for name in "${!RIVALS[@]}"; do
             [ "$head" = "${PINS[$name]}" ] && state="$state (pinned)" \
                                            || state="$state (DRIFTED from ${PINS[$name]:0:12})"
         fi
+        [ "$name" = Recurrent-CircuitSAT-Sampler ] \
+            && { grep -q egress_runtime "$SRC/$name/src/pytorch/run.py" \
+                 && state="$state  [eval patch: egress_runtime]" \
+                 || state="$state  [UNPATCHED: the harness refuses it]"; }
         printf '%-34s %s  %s\n' "$name" "$SRC/$name" "$state"
     else
         printf '%-34s %s\n' "$name" "MISSING (${RIVALS[$name]})"
