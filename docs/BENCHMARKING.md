@@ -152,9 +152,10 @@ generator imports them ([`papers/tacas-27/README.md`](papers/tacas-27/README.md)
   the rival's number choose which of our runs is shown.
 - **A CMSGen ratio travels with its CPU** (`cpu` is in every row): the same suite reads 46× on
   one host and 99× on a host whose CPU is 0.41× as fast.
-- **Uniformity claims name a config and carry both controls** — an exactly uniform sampler that
-  must pass and a known-biased one that must fail — and an Accept is "not caught", never
-  "uniform" ([`findings/UNIFORMITY_FINDINGS.md`](findings/UNIFORMITY_FINDINGS.md) §4b).
+- **Uniformity claims name a config and carry their control** — an exactly uniform sampler that
+  must pass on the same instances; a known-biased one that must fail shows the test can Reject
+  at all, and is cited from where it was measured rather than re-run per campaign — and an
+  Accept is "not caught", never "uniform" ([`findings/UNIFORMITY_FINDINGS.md`](findings/UNIFORMITY_FINDINGS.md) §4b).
 
 ## 9. Result JSON is versioned
 

@@ -220,7 +220,10 @@ step_setup() {
 # wheels. `verify_artifact.py` is the publishability gate and prints the caveats the paper's
 # text is required to carry.
 step_tables() {
-    local data="${1:-$REFERENCE}" out="${2:-$OUT}"
+    # $3 = "fresh": a re-measurement's own rows. They are held to the published rows, cell by
+    # cell, by step_compare, never to the PDF: their rates differ by construction, and a smoke
+    # or subset tier has no T=50 rows at all.
+    local data="${1:-$REFERENCE}" out="${2:-$OUT}" fresh="${3:-}"
     # Rows, not a directory: `tables` over an empty directory used to run every generator to
     # completion and print a publishable verdict about nothing.
     [ -n "$(ls "$data"/rivals_*.json 2>/dev/null)" ] || {
@@ -248,10 +251,8 @@ step_tables() {
         || fail "the table generator failed over $data"
     # Does the PAPER still say what these rows say? The paper's tables are typeset by hand, so
     # nothing else compares them: without this step a campaign can move a number under a
-    # published claim and every other gate here still passes. Not fatal when the published
-    # transcription is absent (a reviewer's own re-measurement has no paper to be held to), and
-    # fatal when it is there and disagrees.
-    if [ -f docs/papers/tacas-27/published_numbers.json ]; then
+    # published claim and every other gate here still passes. Fatal when they disagree.
+    if [ -z "$fresh" ]; then
         say "the paper's own numbers, against these rows"
         $PY eval/artifact/check_paper_numbers.py --generated "$out/paper_numbers.json" \
             2>&1 | tee "$out/PAPER_NUMBERS.txt" | tail -3 \
@@ -271,8 +272,9 @@ step_tables() {
     $PY eval/eval_plots.py "$data" --out-dir "$out/plots" 2>&1 | tail -4 \
         || echo "(figures skipped — eval_plots.py needs matplotlib; the tables above do not)"
     echo
+    local pn="PAPER_NUMBERS.txt,"; [ -z "$fresh" ] || pn=""
     echo "wrote $out/{RESULTS.md,paper_numbers.json,VERIFICATION.txt,emission_audit.txt,"
-    echo "              PAPER_NUMBERS.txt,plots/}"
+    echo "              ${pn}plots/}"
 }
 
 # ---------------------------------------------------------------------------- GPU tiers
@@ -356,7 +358,7 @@ step_full() {
 
 # Tables over the FRESH rows, then the cell-by-cell comparison against the published ones.
 step_after_run() {
-    step_tables "$OUT" "$OUT"
+    step_tables "$OUT" "$OUT" fresh
     step_compare
     # The last line a supervisor greps for. A rented GPU is reclaimed mid-run, so the driver has
     # to say "finished" rather than "stopped": every step above is resumable, and only this line
