@@ -54,6 +54,11 @@ INIT_BUDGET="${INIT_BUDGET:-1200}"
 # campaign's measurements: the rule is unchanged, the search is skipped.
 GRANT_ARGS=()
 [ -n "${GRANTS:-}" ] && GRANT_ARGS=(--grants "$GRANTS")
+# HONOUR_FAILURES=1 also pins each cell the grants file records as a rival FAILURE instead of
+# re-deriving it at the full init budget; every such row says `not_remeasured`. Off by default,
+# as RIVAL_HONOUR_FAILURES is in run_full_eval.sh.
+[ "${HONOUR_FAILURES:-0}" = "1" ] && [ ${#GRANT_ARGS[@]} -gt 0 ] \
+    && GRANT_ARGS+=(--honour-recorded-failures)
 # RETRY_ERRORS=1 re-runs errored rows; off by default, because a rival timeout costs the full
 # budget to rediscover on every restart.
 RETRY_ARGS=()
