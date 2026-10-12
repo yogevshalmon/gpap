@@ -232,31 +232,27 @@ so "the pipeline is certified" means every member is (gated by
 distribution knob); one hang killed the sweep (rows are per instance now, errors recorded, bias
 values kept); and not every instance is a valid subject.
 
-Sixth, found 2026-10-12: **the GPAP arms were not given a budget at all** — they were ended by
-the sampler's own zero-yield give-up rule, which matters because what this table reports is a
+Sixth, found 2026-10-12: **the GPAP arms had no budget at all** — they were ended by the
+sampler's own zero-yield give-up rule, which matters because what this table reports is a
 no-verdict count and a no-verdict is a coverage outcome. The five `pipe:circuit` no-verdicts
-below spent 0.99, 1.01, 1.12, 1.77 and 3.87 s, and the two `gpap:b8` ones 9.8 s. Neither upstream
-tool offers a number to inherit (barbarik launches every sampler through a bare `os.system` with
-no timeout; stock CMSGen has no wall budget), so `--order-seconds` is ours: 30 s per order, about
-3× the ~10 s/order the slowest *Accepting* instance averaged (`c2670-c1-random`: 695 s over 72
-orders on `pipe:circuit`, 729 s on `gpap:b8`) and 1.5× the 20 s the reference budget already
-uses. It is the only bound on an order — no chunk cap — and it is recorded in every row.
+below spent 0.99–3.87 s, the two `gpap:b8` ones 9.8 s. Neither upstream tool offers a number to
+inherit (barbarik times no sampler; stock CMSGen has no wall budget), so `--order-seconds` is
+ours: 30 s an order, 3× the ~10 s the slowest *Accepting* instance averaged (`c2670-c1-random`,
+695 s over 72 orders) and 1.5× the reference's 20 s. It is the only bound on an order — no chunk
+cap — and every row records it.
 
-**It binds the GPAP arms only, and that asymmetry is deliberate.** The symmetric version was
+**It binds the GPAP arms only, and the asymmetry runs against us.** The symmetric version was
 tried first and measured: at 30 s an order CMSGen could not produce one sample from the
 `c6288-c1-random` kernel, so a number derived from *our* costs took an Accept off the rival that
-it had earned under the recorded campaign's effectively-unbounded budget. The rival therefore
-keeps that budget (`--cmsgen-order-seconds`, 1,800 s), and SPUR is likewise unbounded on
-barbarik's own stock path. The claim this table supports is not "both tools had the same budget"
-but the stronger-against-us one: **GPAP was held to 30 s an order and CMSGen was not held to
-anything**, so every no-verdict here is ours and no CMSGen Accept owes anything to a number we
-chose. `barbarik_table.order_budget` reports each arm's budget and refuses to pool one ARM across
-two of them, for the same reason it refuses two parameter settings.
+it had earned. The rival keeps its own budget (`--cmsgen-order-seconds`, 1,800 s) and SPUR stays
+unbounded on barbarik's stock path, so the claim here is not "the same budget" but **GPAP was
+held to 30 s an order and CMSGen was not held to anything** — every no-verdict is ours, and no
+CMSGen Accept owes anything to a number we chose. `barbarik_table.order_budget` reports each
+arm's and refuses to pool one ARM across two.
 
-Re-measured locally 2026-10-12 on the five `pipe:circuit` no-verdicts, on the same instances
-(`--encoder abc --abc-opt fast` reproduces their shapes exactly): with the give-up rule off and
-30 s an order, **all five Accept** — 1,872 samples each except `c6288-c1-random` at 922 — and
-none Reject. The counts below predate all of this and are re-run under it.
+Re-measured locally 2026-10-12 on those five, same instances (`--encoder abc --abc-opt fast`
+reproduces their shapes exactly): with the give-up rule off and 30 s an order **all five
+Accept**, none Reject, CMSGen unchanged at 5/5. The counts below predate all of this.
 
 The screen: `spur(control)` is Rejected on `ActivityService`, `ActivityService2`,
 `IssueServiceImpl`, `IterationService` and `PhaseService`, also through barbarik's own
