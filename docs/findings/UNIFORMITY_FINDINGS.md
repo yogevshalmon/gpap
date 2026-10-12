@@ -19,13 +19,15 @@ guarantee. The settled results:
 
 1. `B >= |support|` is exactly uniform (rejection sampling, §3), at every scale measured (§4c),
    bounded by a yield collapse when `p_accept` is small.
-2. `soft` is Barbarik-Rejected on 64 of the 65 circuit instances it can sample and has been
-   opt-in (`--allow-soft`) since 2026-07-30 (§4, §4b).
+2. `soft` is Barbarik-Rejected on 64 of the 65 circuit instances it can sample (2026-08-28; the
+   paper campaign runs no `soft` arm) and has been opt-in (`--allow-soft`) since 2026-07-30
+   (§4, §4b).
 3. The shipped `circuit` portfolio is Barbarik-Accepted on 60 of the paper campaign's 65
-   eligible instances, zero Rejects, 5 no-verdict; pinned `b8` 63/65; CMSGen 65/65; 6/6 at
-   barbarik's own stricter default (§4b). ⚠️ The 64/66 in the §4b table below is the EARLIER
-   campaign AND is its `gpap:b8` row — a pinned-b8 number, never the portfolio's. The portfolio
-   itself is only under test as `pipe:circuit`, in the paper campaign.
+   eligible instances, zero Rejects, 5 no-verdict; pinned `b8` 63/65; CMSGen 65/65 (§4b). At
+   barbarik's own stricter default only pinned configs were run: `b8` and `b1` 6/6, CMSGen 6/6.
+   ⚠️ The 64/66 "as shipped" in §4b is the EARLIER campaign, and no arm there ran the portfolio:
+   it is the pinned-config verdicts joined to the config the bandit delivers. The paper campaign
+   is the first to put the portfolio itself under test (`pipe:circuit`).
 4. Its TV cost is the bandit picking B=1 for throughput: the default reads 1.31-1.35× worse than
    CMSGen in TV median while never skewing where CMSGen does not; `--portfolio b8` holds the
    exact-uniform floor for ~10% throughput (§3c, §4c).
@@ -264,8 +266,9 @@ vs 0.0399, 6/8 ok each, the same two instances skewed. `--draw iid` is in the ha
 ⚠️ SUPERSEDED for the shipped portfolio by the paper campaign (68 generated, `spur` Rejects 3,
 **65 eligible**; `pipe:circuit` 60/65 Accept + 5 no-verdict, `gpap:b8` 63/65 + 2, `cmsgen` 65/65,
 `spur` 65/65 — `$GPAP_RESULTS/paper/data/barbarik/circ_abc_*.jsonl`, in Table 4b of its
-`RESULTS.md`). This table has no portfolio row at all: it measures PINNED configs, so quoting its
-`gpap:b8` as "the shipped config" reads a b8 number as the bandit's. Kept as the earlier reading.
+`RESULTS.md`; it runs no `soft` arm). This table measures PINNED configs only: its "as shipped"
+64/66 below is their verdicts joined to the config the bandit delivers, not a run of the
+portfolio. Kept as the earlier reading, and as the record of the `soft` positive control.
 
 92 generated, screened to 67, control Accepts 66 (`spur` was Rejected on `c6288-c1-rare`; at
 delta = 0.1 a uniform sampler may be Rejected up to 10% of the time, and the eligibility rule
@@ -330,6 +333,9 @@ verdict against the sensitive instrument: `spur` TV 0.063-0.068, `cmsgen` 0.139-
 
 ### The bottom line for a circuits paper
 
+⚠️ The 2026-08-28 reading; its first row is the join above. The shipped portfolio's measured
+verdict is the paper campaign's `pipe:circuit` 60/65 (the note above the 66-instance table).
+
 | | Accept | Reject | no verdict |
 |---|---:|---:|---:|
 | GPAP as shipped (`--portfolio circuit`, delivered config) | 64/66 | 0 | 2 |
@@ -337,7 +343,8 @@ verdict against the sensitive instrument: `spur` TV 0.063-0.068, `cmsgen` 0.139-
 | `spur` — exactly uniform (control) | 66/66 | 0 | 0 |
 | `soft` (positive control) | 1/66 | 64 | 1 |
 
-plus 6/6 with zero rejections at barbarik's own stricter default, where CMSGen is also 6/6. This
+plus pinned `b8` and `b1` 6/6 with zero rejections at barbarik's own stricter default, where
+CMSGen is also 6/6. This
 is a parity claim at the bar the field certifies samplers by, and all `CM_test` can support; the
 quantitative claim belongs to §4c.
 
@@ -388,7 +395,8 @@ Confirmed paired on 80 fresh circuit instances (independent generation seed):
 |S| ≈ 380 (0.039) and then breaks (0.166 and 0.168 against CMSGen's 0.131 and 0.144).
 
 What may be claimed about the release default (`--portfolio circuit` as shipped), all paired:
-Barbarik 64/66 Accept, 0 Reject (CMSGen 66/66) and 6/6 vs 6/6 at the stricter setting (§4b); it
+Barbarik 60/65 Accept, 0 Reject on the paper campaign (CMSGen 65/65), and pinned `b8`/`b1` 6/6
+vs 6/6 at the stricter setting (§4b); it
 never skews where CMSGen does not (0/120 and 0/80); it is statistically indistinguishable from
 uniform ~2× as often as CMSGen (36/80 vs 16/80; 46/120 vs 23/120); zero unsound rows. Not
 claimable: that the default has lower TV than CMSGen — it is 0.1471 vs 0.1125 (1.31× worse),
@@ -460,8 +468,9 @@ PYTHONPATH=. .venv/bin/python eval/profiling/profile_soft_portfolio.py --glob 'b
 ```
 
 The 2026-08-28 rows are in `.experiments/barbarik_20260828/`: 92 generated instances, 67 pass
-the cost screen, 66 pass the control. `--sampler spur` (must Accept) and `--config soft` (must
-Reject) are the two controls; a table without both is not evidence. `--draw iid` re-runs any
+the cost screen, 66 pass the control. `--sampler spur` (must Accept) is the control every table
+needs; `--config soft` (must Reject) is the positive control, run here and not re-run by the
+paper campaign. `--draw iid` re-runs any
 GPAP arm with one chunk per sample, the independence premise barbarik's guarantee is stated
 under. `tests/experiments/test_uniformity_fuzz.py` gates the invariants (oracle self-consistency, both
 controls, soundness at every B, `B >= |support|` indistinguishable from uniform on every generated

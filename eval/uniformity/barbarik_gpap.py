@@ -18,9 +18,10 @@ How to read a verdict:
     sensitive test on enumerable spaces use eval/uniformity/fuzz_uniformity.py.
   * CMSGen's own Accept was fitted to this test (their Remark 1 tunes its restarts against
     Barbarik's rejections), so passing here is parity with a sampler tuned to pass here.
-  * Both controls are required: `--config soft` is deliberately biased and must Reject;
-    `--sampler spur` puts the trusted uniform reference under test through this file's own hook
-    and must Accept, or "GPAP Accepts" cannot be told from "our hook hides bias".
+  * The control: `--sampler spur` puts the trusted uniform reference under test through this
+    file's own hook and must Accept, or "GPAP Accepts" cannot be told from "our hook hides bias".
+    The positive control `--config soft` is deliberately biased and must Reject; it shows the
+    test can Reject at all, and UNIFORMITY_FINDINGS.md §4b records it rather than each campaign.
 
 GPAP is hooked in-process (their SolutionRetriever monkeypatched) for one CUDA init per test; SPUR
 keeps their stock ./samplers/spur path; CMSGen runs as a subprocess, as it normally is.

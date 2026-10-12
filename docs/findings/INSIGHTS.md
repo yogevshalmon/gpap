@@ -232,8 +232,10 @@ user's direction).** An honest uniformity number needs the whole solution set or
 sampling. The statistics are kept in `eval/uniformity/metrics.py`; `gpap/implications.py` went too.
 
 **Barbarik, circuit-only with both controls (2026-08-28): GPAP as shipped is Accepted on 64/66
-instances with zero Rejects — CMSGen 66/66, `soft` Rejected 64/65, 6/6 vs 6/6 at barbarik's own
-stricter default.** Accept is asymmetric; the two parameter settings are never pooled. CM_test
+instances with zero Rejects — CMSGen 66/66, `soft` Rejected 64/65, pinned `b8`/`b1` 6/6 vs 6/6 at
+barbarik's own stricter default.** ⚠️ "As shipped" there is pinned-config verdicts joined to the
+config the bandit delivers; the paper campaign measures the portfolio itself (`pipe:circuit`
+60/65, zero Rejects, 5 no-verdict; CMSGen 65/65) and runs no `soft` arm. Accept is asymmetric; the two parameter settings are never pooled. CM_test
 rejects its own reference where `c ind` is not an independent support (spread 4–103.7×). Exact TV at
 |S| 128–1920: `b16` 0.0398, `b8` 0.0571, CMSGen 0.1219, pipeline 0.1651 — a TV claim must name a
 config, and pinning B=8 costs ~10%. [UNIFORMITY_FINDINGS.md](UNIFORMITY_FINDINGS.md) §4b–§4c.

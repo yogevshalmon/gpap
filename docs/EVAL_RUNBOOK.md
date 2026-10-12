@@ -60,7 +60,8 @@ and end to end (our whole wall vs its whole subprocess); quote `e2e` for a deliv
 Table 2 (GPAP vs each rival): one clock, the rival's own metric — unique solutions per second of
 its `model_runtime`, its model build excluded as our construction is — and no end-to-end column, by
 rule (§17). Table 3: the implication rate and the identity splitting engine from rejection cost,
-over Table 1's rows. Table 4b: Barbarik CM_test with both controls, the only uniformity claim.
+over Table 1's rows. Table 4b: Barbarik CM_test with the `spur` control, the only uniformity claim (the `soft`
+positive control is not re-run; it is UNIFORMITY_FINDINGS.md §4b's).
 Screens, applied before any ledger and in every table: vacuous pin, free cell, tiny space,
 proved-UNSAT, and a tie for any cell whose sign lies inside GPAP's own seed band. Every ledger
 column sums to the cell count, and every headline is quoted with its structure (median, seed band,
