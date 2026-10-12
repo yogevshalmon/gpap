@@ -58,8 +58,10 @@ delivered row for unique/s, as both rivals compute theirs. CMSGen: patched, `--n
 each charging both sides alike — steady state (sampling rate vs CMSGen's samples per sampling wall)
 and end to end (our whole wall vs its whole subprocess); quote `e2e` for a delivered-samples claim.
 Table 2 (GPAP vs each rival): one clock, the rival's own metric — unique solutions per second of
-its `model_runtime`, its model build excluded as our construction is — and no end-to-end column, by
-rule (§17). Table 3: the implication rate and the identity splitting engine from rejection cost,
+its `model_runtime`, its model build excluded as our construction is, and Recurrent's in-loop copy
+of its candidates to the host excluded as our delivery is (on rows from 2026-10-12;
+RIVAL_FAIRNESS_FINDINGS.md §17c) — and
+no end-to-end column, by rule (§17). Table 3: the implication rate and the identity splitting engine from rejection cost,
 over Table 1's rows. Table 4b: Barbarik CM_test with the `spur` control, the only uniformity claim (the `soft`
 positive control is not re-run; it is UNIFORMITY_FINDINGS.md §4b's).
 Screens, applied before any ledger and in every table: vacuous pin, free cell, tiny space,

@@ -2,7 +2,8 @@
 """Summarise the GPU-rival head-to-heads, for one machine or as a cross-GPU A/B — the rows
 `eval/eval_plots.py` draws, plus a pairing of two machines so "does our margin depend on the
 card?" has a number. Only cells present on BOTH sides at the same (instance, variant) enter a
-paired geomean; the metric is the RIVALS' own, unique solutions / their `model_runtime`."""
+paired geomean; the metric is the RIVALS' own, unique solutions / their `model_runtime`
+(Recurrent's less its host copy on rows that record `egress_s`)."""
 import argparse
 import json
 import os

@@ -87,9 +87,10 @@ a stock binary's row `cms_mode="write"` rather than hiding the handicap. The rat
 like with like: `cms_sps` (per CMSGen's own sampling wall) against GPAP's steady-state rate,
 `cms_sps_e2e` (per subprocess wall) against `wall_total`. The GPU rivals are held to the same
 rule, re-derived rather than assumed: `eval/rivals/check_emission_symmetry.py` AST-scans what
-each rival's own timer wraps. Evidence, and the one documented exception (Recurrent-CircuitSAT,
-~1%, left uncorrected because correcting it would raise our number):
-[`findings/RIVAL_FAIRNESS_FINDINGS.md`](findings/RIVAL_FAIRNESS_FINDINGS.md) §1, §7.
+each rival's own timer wraps. One rival, Recurrent-CircuitSAT, copies its candidates to the host
+inside its timed loop; a patch times that copy on its own and the harness deducts it, as GPAP's
+own delivery is deducted. Left in, it would lower the rival's rate and flatter us. Evidence:
+[`findings/RIVAL_FAIRNESS_FINDINGS.md`](findings/RIVAL_FAIRNESS_FINDINGS.md) §1, §7, §17c.
 
 ### 4c. Grant a rival the same share of the machine you take
 
@@ -137,7 +138,8 @@ generator imports them ([`papers/tacas-27/README.md`](papers/tacas-27/README.md)
   mining (a median 21% of GPAP's wall); CMSGen's rate carries its setup. Print both; quote the
   `e2e` column for a delivered-samples claim.
 - **Against the GPU rivals, one clock — theirs.** Table 2 is unique solutions per second of the
-  rival's own `model_runtime` against GPAP's steady-state unique/s, and has no end-to-end column
+  rival's own `model_runtime` (Recurrent's less the host copy inside it, which no other clock
+  carries) against GPAP's steady-state unique/s, and has no end-to-end column
   by rule (protocol v1.0, [`EVAL_RUNBOOK.md`](EVAL_RUNBOOK.md) §0). The headline is the full
   circuit set.
 - **Rare targets.** At random output pins CPU rejection sampling beats every CNF sampler, so a

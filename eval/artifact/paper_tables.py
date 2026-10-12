@@ -587,7 +587,9 @@ def rival_family(d, stem, key):
     # NO SECOND CLOCK IN THIS TABLE (protocol v1.0, docs/findings/RIVAL_FAIRNESS_FINDINGS.md
     # §17). Table 2 is the rivals' OWN metric — unique solutions per second of their
     # `model_runtime`, which excludes their model build — and GPAP's figure excludes
-    # construction the same way. The end-to-end comparison is Table 1's. Nothing reads `wall_s`.
+    # construction the same way. On rows that record `egress_s` (from 2026-10-12, §17c) the
+    # harness has also deducted Recurrent's in-loop host copy, as GPAP's rate excludes delivery.
+    # The end-to-end comparison is Table 1's. Nothing reads `wall_s`.
     okc, unsat_rival, low_vram, ladder_top, small, thin = [], [], [], [], [], []
     for name, variant, bucket, ours, rate in cells:
         r = seen[(name, variant)]
@@ -1355,7 +1357,8 @@ def build(args):
           "docs/findings/RIVAL_FAIRNESS_FINDINGS.md §16–§17."]
     M += ["",
           "**One clock**: the rivals' own metric, unique solutions per second of their "
-          "`model_runtime`, and GPAP's steady state excludes construction the same way. There is "
+          "`model_runtime` (Recurrent's less its in-loop copy to the host on rows that record it, "
+          "`egress_s`), and GPAP's steady state excludes construction the same way. There is "
           "no end-to-end column here by rule; Table 1 is where both walls are the same kind of "
           "thing. `ties` counts cells whose win/loss sign lies inside GPAP's own seed band, and "
           "`wins` excludes them, so wins + ties + losses = the win denominator."]
