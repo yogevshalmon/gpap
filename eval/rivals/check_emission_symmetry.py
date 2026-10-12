@@ -14,7 +14,9 @@ RE-DERIVED from the pinned rival sources, never asserted in prose:
   2. GPAP timed region    — every `.sample(...)` in the timed window passes `collect=False`,
      and the wall subtracts the projection.
   3. CMSGen               — anything but `cms_mode: nowrite` timed it WITH sample emission.
-  4. Recurrent egress bound — the one documented exception, quantified per recorded cell.
+  4. Recurrent's host snapshot — the one transfer inside a rival's timer: measured per run by
+     eval/rivals/recurrent_gpap_eval.patch and deducted from its rate (rows recorded before the
+     patch carry it, and get a modelled bound instead).
 """
 import argparse
 import ast
@@ -34,20 +36,20 @@ EGRESS_ATTRS = {"cpu", "item", "numpy", "tolist", "to_csv", "save", "write", "wr
 EGRESS_NAMES = {"open", "print"}
 
 # The ONLY tolerated host transfer inside a timed region, kept because removing it would edit the
-# rival's measured algorithm. Bounded in section 4 and charged to THEM.
+# rival's measured algorithm. Timed on its own by the eval patch and deducted (section 4).
 ALLOWED = {
     ("Recurrent-CircuitSAT-Sampler", "run_back_prop_seq", "cpu"):
-        "per-depth candidate-solution snapshot — its share of their model_runtime is bounded "
-        "per row in section 4 (it depends on the card), left uncorrected so their rate stays "
-        "the one they publish",
+        "per-depth candidate-solution snapshot — timed on its own (`egress_runtime`, "
+        "eval/rivals/recurrent_gpap_eval.patch) and deducted from their rate (section 4)",
 }
 
 RIVALS = [("Demotic", "src/pytorch/run.py"),
           ("Recurrent-CircuitSAT-Sampler", "src/pytorch/run.py"),
           ("High-Throughput-SAT-Sampler", "src/pytorch/run.py")]
 
-# Per-copy cost of THEIR access pattern (a strided (batch,T) column to pageable host), measured
-# as t(ms) ~ COPY_FIXED_MS + COPY_MS_PER_MB * MB; PESSIMISM doubles it for a slower PCIe path.
+# For rows recorded before the patch: the per-copy cost of THEIR access pattern (a strided
+# (batch,T) column to pageable host), measured as t(ms) ~ COPY_FIXED_MS + COPY_MS_PER_MB * MB;
+# PESSIMISM doubles it for a slower PCIe path.
 COPY_FIXED_MS, COPY_MS_PER_MB, PESSIMISM = 0.069, 0.261, 2.0
 
 
@@ -194,8 +196,7 @@ def scan_gpap():
     print("    => the timed run never gathers a MODEL row to the host (collect=False on every "
           "benchmarked call); `out_cap` is a parameter the benchmark driver passes as 0 and the "
           "rival arm as UNIQUE_ROWS (one projected support-bit row per delivered sample, up to "
-          "4,000,000), whose wall `out_project_s` is subtracted from the steady-state wall here "
-          "and CHARGED in Table 2's e2e" if ok else "    => TIMED RUN MAY EMIT")
+          "4,000,000), whose wall `out_project_s` is subtracted from the steady-state wall here" if ok else "    => TIMED RUN MAY EMIT")
     return ok
 
 
@@ -238,45 +239,61 @@ def scan_cmsgen(results):
 
 
 def recurrent_egress(results, cycles=25):
-    """Bound the one allowed exception per recorded cell from its own parameters: copy count x
-    the measured per-copy cost, corroborated by timing the block inside the rival."""
+    """Recurrent's host snapshot per recorded cell. A row from a patched checkout carries the
+    measured `egress_s`, already deducted from its `unique_per_s`; an older row does not, and its
+    share is modelled from its own parameters (copy count x the measured per-copy cost, at the
+    row's own depth). Returns `(ok, carried)`: `carried` counts the rows whose rate still
+    carries the copy, and `ok` is False when one stage file mixes the two clocks."""
     bench = os.path.join(REPO_ROOT, "benchmarks", "circuits", "bench", "seq")
-    print("\n[4] Recurrent-CircuitSAT per-depth host snapshot — measured bound")
-    rows = []
+    print("\n[4] Recurrent-CircuitSAT per-depth host snapshot")
+    rows, mixed = [], []
     for f in campaign_jsons(results, "rivals_recurrent_*.json"):
         mode = os.path.basename(f).replace("rivals_recurrent_", "").replace(".json", "")
+        hows = set()
         for r in json.load(open(f)):
             rcs = r.get("rcs") or {}
-            if not rcs.get("runtime_s"):
+            rt = rcs.get("runtime_s")
+            if not rt:
                 continue
+            if rcs.get("egress_s") is not None:
+                hows.add("measured")
+                rows.append((mode, r["name"], "measured", 100 * rcs["egress_s"] / rt))
+                continue
+            hows.add("modelled")
             bf = os.path.join(bench, r["name"] + ".bench")
-            if not os.path.isfile(bf):
+            if not os.path.isfile(bf):          # still carries the copy; only the size is unknown
+                rows.append((mode, r["name"], "modelled", None))
                 continue
             pi = sum(1 for l in open(bf) if l.strip().upper().startswith("INPUT("))
-            sp, batch = rcs["start_point"], rcs["batch"]
-            copies = pi * sum(d + 1 for d in range(sp, cycles))
-            mb = batch * 4 / 2 ** 20
-            sec = copies * (COPY_FIXED_MS + COPY_MS_PER_MB * mb) / 1e3
-            rows.append((mode, r["name"], copies, copies * mb / 1024, rcs["runtime_s"], sec))
+            # the row's own depth: a T=50 row makes twice the depths, each copying more columns
+            T = r.get("cycles") or cycles
+            copies = pi * sum(d + 1 for d in range(rcs["start_point"], T))
+            sec = copies * (COPY_FIXED_MS + COPY_MS_PER_MB * rcs["batch"] * 4 / 2 ** 20) / 1e3
+            rows.append((mode, r["name"], "modelled", 100 * sec / rt))
+        if len(hows) > 1:
+            mixed.append(mode)
     if not rows:
         print("    no timed Recurrent cells found")
-        return True
-    print(f"    {'mode':<7}{'inst':<9}{'copies':>8}{'GiB':>7}{'their rt':>10}"
-          f"{'egress s':>10}{'%':>9}{'% pessim':>11}")
-    worst = 0.0
-    for mode, name, copies, gib, rt, sec in rows:
-        pct, pes = 100 * sec / rt, 100 * sec * PESSIMISM / rt
-        worst = max(worst, pes)
-        # a share >= 100% is the row a reader must be able to see, so it must not fuse with the
-        # egress column
-        print(f"    {mode:<7}{name:<9}{copies:>8,}{gib:>7.2f}{rt:>10.1f}{sec:>10.2f}"
-              f"{pct:>8.2f}%{pes:>10.2f}%")
-    print(f"    => worst case {worst:.2f}% of their reported model_runtime (the bound is per "
-          f"card and per row; it is\n       typically a few percent and can exceed 100% on a row "
-          f"whose reported runtime is anomalously short). NOT corrected:\n       deducting it "
-          f"would RAISE our ratio — so an uncorrected cell under-reports us, it never flatters "
-          f"us.")
-    return True
+        return True, 0
+    print(f"    {'stage':<12}{'inst':<11}{'how':<10}{'% of their model_runtime':>26}")
+    for mode, name, how, pct in rows:
+        share = "(no .bench)" if pct is None else f"{pct:.2f}%"
+        print(f"    {mode:<12}{name:<11}{how:<10}{share:>26}")
+    for how in ("measured", "modelled"):
+        p = sorted(x for _, _, h, x in rows if h == how and x is not None)
+        if p:
+            print(f"    {how}: {len(p)} rows, median {p[len(p) // 2]:.2f}%, max {p[-1]:.2f}%")
+    carried = sum(1 for _, _, h, _ in rows if h == "modelled")
+    if carried:
+        print(f"    => {carried} row(s) predate the eval patch: their rate CARRIES the copy, which "
+              f"lowers it and so FLATTERS GPAP:\n       deducting it would lower our ratio by about "
+              f"the share above, a LOWER bound (the model under-reads a measured copy ~{PESSIMISM:g}x)")
+    else:
+        print("    => measured and deducted on every row: Recurrent is timed on generation alone")
+    if mixed:
+        print(f"    => FAIL: {', '.join(mixed)} mix rows on both clocks — one geomean would pool "
+              f"two metrics")
+    return not mixed, carried
 
 
 def main():
@@ -284,8 +301,9 @@ def main():
     ap.add_argument("--rivals-root", default=None,
                     help="checkout root (default: the repo's .gpap/src)")
     ap.add_argument("--results", default=None,
-                    help="campaign dir to audit (cms_mode + the Recurrent egress bound)")
-    ap.add_argument("--cycles", type=int, default=25, help="unroll depth the rival rows used")
+                    help="campaign dir to audit (cms_mode + Recurrent's host snapshot)")
+    ap.add_argument("--cycles", type=int, default=25,
+                    help="unroll depth for a Recurrent row that does not record its own")
     args = ap.parse_args()
     root = args.rivals_root
     if root is None:
@@ -299,9 +317,17 @@ def main():
     ok &= scan_gpap()
     if args.results:
         ok &= scan_cmsgen(args.results)
-        recurrent_egress(args.results, args.cycles)
-    print("\n" + ("PASS — every tool is timed on generation alone (allowed exception quantified)"
-                  if ok else "FAIL — an unaccounted emission cost is inside a timed region"))
+        rec_ok, carried = recurrent_egress(args.results, args.cycles)
+        ok &= rec_ok
+    else:
+        carried = 0
+    if not ok:
+        print("\nFAIL — an unaccounted emission cost is inside a timed region")
+    elif carried:
+        print(f"\nPASS — every tool is timed on generation alone, except {carried} Recurrent "
+              f"row(s) recorded before its eval patch (section 4)")
+    else:
+        print("\nPASS — every tool is timed on generation alone")
     return 0 if ok else 1
 
 

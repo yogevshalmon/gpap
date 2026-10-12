@@ -1343,3 +1343,48 @@ def test_the_recurrent_eval_patch_applies_to_the_pinned_commit(tmp_path):
     subprocess.run(["git", "-C", str(tmp_path), "apply", patch], check=True)
     patched = (tmp_path / "src" / "pytorch" / "run.py").read_text()
     assert "egress_runtime" in patched and "torch.cuda.synchronize()" in patched
+
+
+def test_the_emission_audit_reads_the_measured_copy_and_models_only_older_rows(tmp_path, capsys):
+    """Section 4: a row carrying `egress_s` is reported as measured; a row recorded before the
+    patch gets the modelled share at ITS OWN depth (a T=50 row once was sized at T=25), and is
+    counted as still carrying the copy."""
+    import json  # noqa: PLC0415
+
+    from eval.rivals.check_emission_symmetry import recurrent_egress  # noqa: PLC0415
+
+    def row(cycles, egress):
+        rcs = {"runtime_s": 20.0, "start_point": 1, "batch": 100000}
+        if egress is not None:
+            rcs["egress_s"] = egress
+        return {"name": "b01", "cycles": cycles, "rcs": rcs}
+
+    (tmp_path / "rivals_recurrent_table.json").write_text(json.dumps([row(25, 1.0)]))
+    assert recurrent_egress(str(tmp_path)) == (True, 0)
+    assert "5.00%" in capsys.readouterr().out
+
+    (tmp_path / "rivals_recurrent_table_t50.json").write_text(
+        json.dumps([row(50, None), row(25, None)]))
+    assert recurrent_egress(str(tmp_path)) == (True, 2)
+    out = capsys.readouterr().out
+    shares = [float(m) for m in re.findall(r"modelled\s+([\d.]+)%", out)]
+    assert len(shares) == 2 and shares[0] > 3 * shares[1], \
+        "the T=50 row must be modelled at 50 depths, not 25"
+    assert "FLATTERS GPAP" in out
+
+
+def test_the_emission_audit_fails_a_stage_file_on_two_clocks(tmp_path, capsys):
+    """One file holding measured and pre-patch rows would pool two metrics in one geomean. A
+    pre-patch row whose .bench is absent (b17-b22 are fetched) still counts as carrying the copy."""
+    import json  # noqa: PLC0415
+
+    from eval.rivals.check_emission_symmetry import recurrent_egress  # noqa: PLC0415
+
+    rows = [{"name": "b01", "cycles": 25,
+             "rcs": {"runtime_s": 20.0, "start_point": 1, "batch": 1000, "egress_s": 1.0}},
+            {"name": "no_such_bench", "cycles": 25,
+             "rcs": {"runtime_s": 20.0, "start_point": 1, "batch": 1000}}]
+    (tmp_path / "rivals_recurrent_table.json").write_text(json.dumps(rows))
+    ok, carried = recurrent_egress(str(tmp_path))
+    assert not ok and carried == 1
+    assert "FAIL" in capsys.readouterr().out
