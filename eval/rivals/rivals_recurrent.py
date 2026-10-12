@@ -578,6 +578,11 @@ def run_gpap(bench_file, T, pin_outputs, target, seeds, n_time, device, time_lim
                          "unique_rows": n_coll, "unique_distinct": n_distinct,
                          "sim_check_bad": sim_bad, "sim_check_rows": sim_rows,
                          "success": g["success_rate"], "n_models": g["n_models"],
+                         # WHICH valve ended the run, and the wall it actually spent. Without
+                         # these a zero row is unreadable: "spent its 60 s and found nothing"
+                         # and "abandoned after four chunks" are opposite facts, and the
+                         # published campaign recorded neither on any of its GPAP-zero cells.
+                         "stop": g.get("stop"), "wall_timed_s": g.get("wall_timed_s"),
                          # engine provenance per row: dec/s + impl/s let paper_tables.zero_search
                          # read rival rows too
                          "sound_check": g.get("sound_check"),
@@ -626,6 +631,11 @@ def run_gpap(bench_file, T, pin_outputs, target, seeds, n_time, device, time_lim
             "implications_per_s": pick.get("implications_per_s") or 0.0,
             # spread over the seeds, so a reader can see what the median is worth
             "sps_min": order[0]["sps"], "sps_max": order[-1]["sps"],
+            # The MEDIAN RUN's valve and wall, chosen the same way `sps` is, with every seed's
+            # own pair kept in `seeds`. `stops` folds the set, because "one seed gave up early"
+            # and "every seed did" are different readings of the same median.
+            "stop": pick.get("stop"), "wall_timed_s": pick.get("wall_timed_s"),
+            "stops": sorted({r.get("stop") for r in runs if r.get("stop")}),
             "n_models": int(pick["n_models"])}
 
 

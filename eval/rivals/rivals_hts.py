@@ -87,6 +87,9 @@ def run_gpap(cnf, n_time, device, time_limit=60.0, n_cov=1000):
             "n_models": g["n_models"], "distinct_frac": (g["n_distinct"] / len(g["models"])
                                                          if g.get("models") else None),
             "wall_total_s": g["wall_total_s"],
+            # which valve ended it, and the sampling wall it spent: a zero row says nothing
+            # without them (see gpap.cli.STOP_WHY)
+            "stop": g.get("stop"), "wall_timed_s": g.get("wall_timed_s"),
             # engine provenance, as on the CMSGen sweeps: dec/s + impl/s let the zero-search screen run
             "sound_check": g.get("sound_check"),
             "decisions_per_s": g.get("decisions_per_s"),
