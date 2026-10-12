@@ -202,7 +202,7 @@ for name in "${!RIVALS[@]}"; do
 done
 echo
 echo "harnesses: eval/rivals/rivals_demotic.py  eval/rivals/rivals_recurrent.py  eval/rivals/rivals_hts.py"
-# The one setup failure that is not a warning: a campaign VM's bootstrap runs this script and
+# A failure, not a warning (as no libgpap is): a campaign VM's bootstrap runs this script and
 # fails on its status, and an unpatched Recurrent would otherwise surface hours later as a
 # stage that wrote no rows.
 if [ "${RCS_UNPATCHED:-0}" = 1 ]; then

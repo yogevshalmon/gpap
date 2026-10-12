@@ -177,6 +177,15 @@ stage_hwmcc() {
 }
 
 stage_rivals() {
+    # Recurrent's clock must not carry its host copy: unpatched, rivals_recurrent.py refuses, and
+    # behind `| tee` that refusal would read as a stage that simply produced nothing. Checked
+    # before DEMOTIC runs, not after it.
+    local rcs_run="$GPAP_HOME/src/Recurrent-CircuitSAT-Sampler/src/pytorch/run.py"
+    if [ -f "$rcs_run" ] && ! grep -q egress_runtime "$rcs_run"; then
+        echo "[FATAL] the Recurrent checkout lacks eval/rivals/recurrent_gpap_eval.patch" >&2
+        echo "        Apply it:  eval/rivals/rivals_setup.sh" >&2
+        exit 1
+    fi
     # Instance sets: Recurrent-CircuitSAT runs every b*/s* in benchmarks/circuits/bench/seq, on
     # its own table's pins where it names the instance and on our rare pin everywhere; DEMOTIC
     # runs its 11 ISCAS-85. What a tool cannot process becomes an error row, omitted from the
@@ -251,13 +260,6 @@ stage_rivals() {
         echo "[skip] DEMOTIC not installed (eval/rivals/rivals_setup.sh)"
     fi
     if [ -d "$GPAP_HOME/src/Recurrent-CircuitSAT-Sampler/src" ]; then
-        # Its clock must not carry its host copy: unpatched, rivals_recurrent.py refuses, and
-        # behind `| tee` that refusal would read as a stage that simply produced nothing.
-        if ! grep -q egress_runtime "$GPAP_HOME/src/Recurrent-CircuitSAT-Sampler/src/pytorch/run.py"; then
-            echo "[FATAL] the Recurrent checkout lacks eval/rivals/recurrent_gpap_eval.patch" >&2
-            echo "        Apply it:  eval/rivals/rivals_setup.sh" >&2
-            exit 1
-        fi
         banner "rivals: Recurrent-CircuitSAT (their target table, then our rare pins)"
         "$PY" eval/rivals/rivals_recurrent.py $seq_insts -T "$T" --seeds $rseeds --steps "$rsteps" --init-budget "$rib" \
             --timeout "$rto" \

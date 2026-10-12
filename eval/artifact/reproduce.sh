@@ -209,7 +209,9 @@ step_setup() {
     say "the engine (libgpap: cmake + a C++17 compiler + the NVIDIA driver; no CUDA toolkit)"
     scripts/build_core.sh || { echo "[FAIL] libgpap did not build — nothing else can run"; exit 1; }
     say "abc, patched CMSGen, and the pinned rival checkouts"
-    bash eval/rivals/rivals_setup.sh
+    # Its own failures are warnings except two, which exit 1: no libgpap, or an unpatched
+    # Recurrent (whose clock would carry its host copy).
+    bash eval/rivals/rivals_setup.sh || { echo "[FAIL] rival setup failed — see above"; exit 1; }
     say "benchmarks not committed to the repository (ITC'99 b17-b22)"
     bash scripts/fetch_benchmarks.sh itc99
     step_check
