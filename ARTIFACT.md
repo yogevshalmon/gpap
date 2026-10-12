@@ -69,7 +69,7 @@ which cells count. `docs/papers/tacas-27/README.md` states each rule and what it
 ## Tier 2–4 — re-measure on a GPU
 
 ```bash
-eval/artifact/reproduce.sh setup            # libgpap, abc, patched CMSGen, the pinned rivals
+eval/artifact/reproduce.sh setup            # libgpap, abc, patched CMSGen and Recurrent, the pinned rivals
 eval/artifact/reproduce.sh smoke            # 4 cells: does this machine reproduce the pipeline?
 eval/artifact/reproduce.sh subset           # the reviewer tier
 eval/artifact/reproduce.sh full             # every cell of the published campaign
@@ -197,6 +197,7 @@ initialize where the L4 could not — so a full, faithful reproduction is
 | berkeley-abc | `scripts/build_abc.sh`, commit pinned (`GPAP_ABC_COMMIT`) | its own (permissive) |
 | CMSGen + our eval patch | `scripts/build_cmsgen.sh` + `scripts/cmsgen_gpap_eval.patch` | MIT |
 | DEMOTIC, Recurrent-CircuitSAT, HTS | `eval/rivals/rivals_setup.sh`, commits pinned; each result row records the checkout's actual HEAD | **none stated by their authors** — therefore fetched, never redistributed here |
+| our Recurrent eval patch | `eval/rivals/recurrent_gpap_eval.patch`, applied by `rivals_setup.sh`: times Recurrent's in-loop copy to the host so its rate can exclude it | ours; its diff context quotes a few lines of their `run.py` |
 | barbarik + SPUR | manual; the commit is in `eval/uniformity/barbarik_gpap.py`'s docstring | MIT (barbarik) |
 | ITC'99 `b17`–`b22` | bundled with the artifact (the repository fetches them; they are too large to commit) | public benchmark set |
 | every other benchmark | committed under `benchmarks/` | public benchmark sets |
