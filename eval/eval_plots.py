@@ -536,7 +536,8 @@ def _ledger_note(drop, note):
 
 
 def fig_rivals(plt, path, out_dir):
-    """GPU gradient-descent rivals, their own metric (unique solutions / their model_runtime),
+    """GPU gradient-descent rivals, their own metric (unique solutions / their model_runtime,
+    Recurrent's less its host copy on rows that record `egress_s`),
     one dumbbell per cell of ONE stage — Table 2's row, drawn. Classification is
     `paper_tables.rival_cells`, IMPORTED, so the subtitle's geomean is Table 2's over Table 2's
     cells; a cell where ONE side scored zero stays at the axis floor but not in the geomean."""
@@ -567,7 +568,7 @@ def fig_rivals(plt, path, out_dir):
     return _dumbbell(
         plt, [x[0] for x in items], [x[2] for x in items], [x[1] for x in items], label, "GPAP",
         C_RIVAL, C_TSEITIN,
-        xlabel="unique solutions/s (their metric: uniques / model_runtime)",
+        xlabel="unique solutions/s (their own metric)",
         title=f"GPAP vs {label} — {_plain(proto)}" if proto else f"GPAP vs {label}",
         subtitle=sub, path=os.path.join(out_dir, f"{stem}.png"))
 

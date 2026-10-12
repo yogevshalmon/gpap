@@ -219,7 +219,8 @@ def main():
     a(r"    \bottomrule")
     a(r"  \end{tabular}")
     a(r"  \\[0.7em]")
-    a(r"  \rem{Their metric: unique solutions $/$ their \texttt{model\_runtime}, which excludes"
+    a(r"  \rem{Their metric: unique solutions $/$ their \texttt{model\_runtime} (Recurrent's less"
+      r"  its host copy where recorded), which excludes"
       r"  their model build while ours includes construction. \keyw{failed} = timeout or"
       r"  no gradient path; those rows are reported, never folded in as a zero."
       r"  \keyw{R$=$0} the rival emitted nothing, \bad{G$=$0} \emph{we} emitted nothing,"
