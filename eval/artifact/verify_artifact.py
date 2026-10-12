@@ -315,6 +315,13 @@ def main():
                          f"— quote {tabled}")
                 warn.append(f"{stem}: {errs}/{len(seen)} rival runs failed "
                             f"(reported, not folded in as zeros){extra}")
+            # A failure carried over from a grants file (`--honour-recorded-failures`) is the
+            # earlier campaign's outcome, not this one's: the text has to say which.
+            carried = sorted(n_ for (n_, _v), r in seen.items()
+                             if (r.get(key) or {}).get("not_remeasured"))
+            if carried:
+                warn.append(f"{stem}: {len(carried)} rival failure(s) pinned from a grants file, "
+                            f"NOT re-measured in this campaign ({', '.join(carried)}) — say so")
             # A GPAP ZERO IS ONLY A LOSS IF WE LOOKED. `n_models == 0` means either "the
             # instance defeated us" or "we stopped looking", and only `stop` tells them apart:
             # three of the published campaign's six zero cells yielded once the valve was lifted
