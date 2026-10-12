@@ -199,6 +199,8 @@ def run_demotic_ladder(root, bench_file, key, *, steps, batch, circuit_type, T,
     if isinstance(r, dict):
         r = dict(r, batch_sweep=sweep)
         r["grant_source"] = grant_source(pinned, r, grant["source"] if grant else None)
+        if grant and grant.get("walk"):
+            r["grant_walk"] = grant["walk"]     # the recorded walk that chose the pin
     return r
 
 
