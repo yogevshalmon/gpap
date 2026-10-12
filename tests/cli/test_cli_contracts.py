@@ -123,6 +123,7 @@ def test_delivery_delivers_what_it_collected(tmp_path):
     info = sample_file(_cnf(tmp_path, SMALL), torch.device("cuda"), n_time=4000, out_cap=1500,
                        k_cap=64, seed=5, time_limit=60.0, mine=False)
     assert not info["chunk_capped"], "precondition: the run met its target, so nothing was cut"
+    assert info["stop"] == "target", "a run that met its target must say so, not merely not-capped"
     assert info["n_models"] >= 1500
     assert len(info["samples"]) == 1500, "asked for 1,500 deliverable rows and got fewer"
 
@@ -130,11 +131,19 @@ def test_delivery_delivers_what_it_collected(tmp_path):
 @pytest.mark.gpu
 def test_delivery_bound_holds_when_a_valve_other_than_the_clock_stops_the_run(tmp_path):
     """The delivery bound also holds when a valve other than --time-limit ends the run
-    (max_chunks, the zero-progress stop)."""
+    (max_chunks, the zero-progress stop).
+
+    And the row says WHICH valve. `chunk_capped` is one boolean over four outcomes -- spent the
+    clock, hit the chunk ceiling, gave up on zero yield -- which read as one fact and are not:
+    the first is a property of the instance and the last of our stopping rule. The pair of
+    asserts here and in the target test above is what makes the field discriminate rather than
+    merely exist."""
     from gpap.sampling.pipeline import sample_file
     info = sample_file(_cnf(tmp_path, SMALL), torch.device("cuda"), n_time=1_000_000,
                        out_cap=5000, k_cap=64, time_limit=30.0, max_chunks=2, mine=False)
     assert info["chunk_capped"]
+    assert info["stop"] == "chunks", \
+        f"the chunk ceiling ended this run, not the clock; row says {info['stop']!r}"
     assert len(info["samples"]) <= info["n_models"]
 
 

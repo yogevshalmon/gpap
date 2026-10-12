@@ -57,6 +57,18 @@ _SOUND_LABEL = {"ok": "OK", "UNSOUND": "*** UNSOUND ***", "off": "not run (--ver
 _UNSAT_LINE = ("  UNSAT: the formula has no models (proved by propagation, before sampling). "
                "Nothing to sample.")
 
+#: Why a run ended, in words, keyed by the core's own `stop` (gpap.engine._core.SAMPLE_STOP).
+#: Each of these was "the run stopped short" to a reader, and they are different facts: `time`
+#: says the instance is slow, `zero_yield` says WE stopped looking.
+STOP_WHY = {
+    "target": "delivered what was asked",
+    "time": "--time-limit reached",
+    "chunks": "the chunk ceiling was reached",
+    "zero_yield": "no models after every config ran plus two grace chunks — the run gave up "
+                  "early, it did NOT spend its budget",
+    "unsat": "the formula has no models",
+}
+
 
 def _sound_label(info):
     """The printed verdict; `sound_verdict` is the ONE rule, shared with the bench and paper
@@ -329,8 +341,12 @@ def _sample_run(args, device, path, tmp, encode_s):
             # A short file is explained where it happens: rows come off the timed run, so a
             # capped run writes what it delivered and says why.
             if short:
-                why = ("the run stopped at {:,} models (--time-limit / no progress)".format(
-                    info["n_models"]) if info.get("chunk_capped") else
+                # NAME THE VALVE. "--time-limit / no progress" read as one cause and they are
+                # not: spending the whole budget is a property of the instance, giving up after
+                # the cold start plus two grace chunks is a property of our stopping rule.
+                why = ("the run stopped at {:,} models ({})".format(
+                    info["n_models"], STOP_WHY.get(info.get("stop"), info.get("stop") or "?"))
+                    if info.get("chunk_capped") else
                     "the winning config produced {:,} rows".format(len(mat)))
                 print(f"         short because {why}; emitted rows all come from ONE config "
                       f"({describe_config(info.get('out_config'))}), never a mix of the portfolio's")

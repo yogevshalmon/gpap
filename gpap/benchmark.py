@@ -683,6 +683,9 @@ def _run_one(path0, row, args, device, portfolio, mine, quality, sample_file):
         "gpap_sps": g["samples_per_s"], "gpap_sps_e2e": g.get("sps_e2e_total"),
         "n_models": g["n_models"], "wall_timed_s": g["wall_timed_s"],
         "wall_total_s": g["wall_total_s"], "chunk_capped": g.get("chunk_capped"),
+        # WHICH valve: `chunk_capped` says a run fell short, never whether it spent its budget
+        # doing so. target | time | chunks | zero_yield | unsat.
+        "stop": g.get("stop"),
         "sim_baseline": sim,
         # "ok" | "UNSOUND" | "off" (gpap.sampling.pipeline). Not a bool: "off" is neither
         # verdict; `sound_rows_checked` is the evidence a verdict is a statement about.

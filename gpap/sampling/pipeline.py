@@ -510,6 +510,14 @@ def sample_clauses(nv, clauses, support, device, *, simplify=True, els=True, n_t
             # formula, where 0 models is the complete answer and nothing was cut: the flag is
             # what both printers mark with '<', and marking that row would invent a valve.
             "chunk_capped": (t["n_models"] < n_time) and not unsat,
+            # WHICH valve, not merely that one fired. `target` | `time` | `chunks` | `zero_yield`
+            # | `unsat` (gpap.engine._core.SAMPLE_STOP). The core has always distinguished them
+            # and this function used to discard the answer, leaving `chunk_capped` to conflate
+            # "spent its whole budget" with "abandoned after the cold start plus two grace
+            # chunks" -- which are opposite facts about a tool and about an instance. A row that
+            # delivered nothing cannot be read without it: on the paper campaign's 15 GPAP-zero
+            # cells nothing in the record says whether 60 s were spent or four chunks were.
+            "stop": t.get("stop"),
             "wall_timed_s": wall,                             # the solver's sampling wall (timed run)
             "wall_total_s": wall_total,                       # e2e wall incl. construction+simplify+mining
             "mined": mine_info,                               # entailed-clause mining stats (None = skipped)
