@@ -66,20 +66,37 @@ CONFIGS = {"b8": (True, 8, False), "b1": (True, 1, False), "s1": (False, 1, Fals
            "soft": (True, 8, "soft"), "bsup": (True, None, False)}
 
 # How hard to try to fill one of barbarik's sample orders before recording "no verdict".
-#: THE PER-ORDER SAMPLING BUDGET, and the same one for every sampler under test. CM_test places
-#: about 72 orders per instance at the CMSGen paper's setting, so this times 72 bounds a
+#: OUR PER-ORDER SAMPLING BUDGET -- ours alone, and deliberately the tighter one. CM_test places
+#: about 72 orders per instance at the CMSGen paper's setting, so this times 72 bounds a GPAP
 #: certificate. Neither upstream tool offers a number to inherit: barbarik runs every sampler
 #: through a bare `os.system` with no timeout at all, and stock CMSGen has no wall budget either
 #: (`--maxtime` is our own patch, defaulting to unlimited). So the number is ours, and it rests
-#: on this campaign's own rows: the slowest instance that still ACCEPTED averaged 9.7 s per order
-#: (c2670-c1-random, 695 s over 72), so a 10 s budget would have turned a pass into a no-verdict.
-#: 30 s is about 3x that, and 1.5x the 20 s `barbarik_screen.py --spur-seconds` already uses for
-#: one reference order. The cost is bounded by the instances that would otherwise run forever:
-#: ~6 of 65, so 6 x 72 x 30 s = 3.6 h per arm in the worst case. It is a SAMPLING budget: the
-#: `pipe` arm re-runs the whole shipped pipeline per order, so parse, ELS and up to MINE_SECONDS
-#: of mining sit outside it (~5-10 s an order). That setup is part of what the arm certifies and
-#: is not stripped to make the arithmetic tidier -- it is stated instead.
+#: on this campaign's own rows: the slowest instance that still ACCEPTED averaged ~10 s per order
+#: (c2670-c1-random, 695 s over 72 on `pipe:circuit`), so a 10 s budget would have turned a pass
+#: into a no-verdict. 30 s is about 3x that, and 1.5x the 20 s `barbarik_screen.py
+#: --spur-seconds` already uses for one reference order. Worst case ~6 of 65 instances x 72 x
+#: 30 s = 3.6 h per GPAP arm. It is a SAMPLING budget: the `pipe` arm re-runs the whole shipped
+#: pipeline per order, so parse, ELS and up to MINE_SECONDS of mining sit outside it (~5-10 s an
+#: order). That setup is part of what the arm certifies and is not stripped to make the
+#: arithmetic tidier -- it is stated instead.
 ORDER_SECONDS = 30.0
+
+#: CMSGEN'S BUDGET, LEFT WHERE IT WAS: effectively unbounded per order, as in the recorded
+#: campaign. THE ASYMMETRY IS DELIBERATE AND IT RUNS AGAINST US, which is the only direction an
+#: asymmetry may run. A no-verdict is a coverage outcome and a per-order budget decides it, so
+#: the honest question is who the number favours. ORDER_SECONDS was derived from OUR arm's
+#: costs; imposing it on CMSGen measured 30 s as more than it needs on `c6288-c1-random` and
+#: turned an Accept it had earned into a no-verdict -- our chosen number taking a verdict off
+#: the rival. Leaving CMSGen unbounded cannot do that: every no-verdict in this campaign is then
+#: OURS, and no CMSGen Accept owes anything to a budget we picked. The claim the table supports
+#: is therefore not "both tools had the same budget" but the stronger-against-us one: "GPAP was
+#: held to 30 s an order; CMSGen was not held to anything."
+#:
+#: `--maxtime` is still passed, at THIS value: it makes CMSGen end its own sampling loop and
+#: exit normally, so the samples it did write can be read, where the subprocess kill alone
+#: discards them (`gpap.benchmark.cmsgen_run` splits them the same way). The kill stays as a
+#: backstop above it. 1,800 s is the kill this call already carried.
+CMSGEN_ORDER_SECONDS = 1800.0
 
 _FILL_ATTEMPTS = 24        # collector attempts per order
 _FILL_GIVE_UP = 3          # consecutive ATTEMPTS returning NOTHING -> the instance really is dry
@@ -238,22 +255,17 @@ def _pipeline_solutions(input_file, num_solutions, ind_var_list, seed, device, p
 
 
 def _cmsgen_solutions(input_file, num_solutions, ind_var_list, seed, cmsgen_bin,
-                      order_seconds=ORDER_SECONDS):
+                      order_seconds=CMSGEN_ORDER_SECONDS):
     """Same contract, CMSGen as the sampler under test. CMSGen emits FULL assignments (it ignores
     `c ind`), so the projection onto ind_var_list happens here.
 
-    `order_seconds` IS THE SAME BUDGET THE GPAP ARMS GET, and that is the point. This call used
-    to be bounded only by a 1,800 s subprocess kill with no `--maxtime`, i.e. effectively
-    unbounded per order, while the GPAP arms were ended by the sampler's own give-up rule in
-    about two seconds. The headline of this campaign is a NO-VERDICT count -- "GPAP accepted on
-    60 of 65, CMSGen on 65" -- and a no-verdict is a coverage outcome, which is exactly what a
-    per-order budget decides. Two arms on two budgets make that number a budget comparison
-    wearing a uniformity label. `--maxtime` bounds CMSGen's own sampling loop so it exits
-    normally; the subprocess kill stays as a backstop above it, since the solver's deadline is
-    CPU time and does not cover reading a large CNF (the same split as
-    `gpap.benchmark.cmsgen_run`).
+    `order_seconds` DEFAULTS TO CMSGen'S OWN, MUCH LARGER BUDGET, not to `ORDER_SECONDS`: see
+    CMSGEN_ORDER_SECONDS for why the asymmetry is the conservative choice rather than the
+    convenient one. `--maxtime` bounds CMSGen's own sampling loop so it exits normally and the
+    samples it wrote can be read; the subprocess kill stays as a backstop above it, since a
+    stock binary has no deadline at all.
 
-    SPUR, the trusted reference, is deliberately left unbounded: barbarik invokes it through its
+    SPUR, the trusted reference, is likewise not bounded by us: barbarik invokes it through its
     own stock path and it is not a tool under test. Stated here rather than discovered."""
     from gpap.benchmark import cmsgen_supports_maxtime
     out = paths.scratch_file("cmsgen_barbarik", ".out")
@@ -281,7 +293,16 @@ def _cmsgen_solutions(input_file, num_solutions, ind_var_list, seed, cmsgen_bin,
             raise RuntimeError(f"cmsgen produced 0/{num_solutions} on "
                                f"{display_path(input_file)} {budget} — killed at {hard:g}s of "
                                f"wall, so no samples could be read back") from None
-        if p.returncode not in (0, 10):        # 10 = SATISFIABLE
+        # 10 = SATISFIABLE. A `--maxtime` exit is NOT a failure: the patch returns the DIMACS
+        # "unknown" code (15, measured) through its normal path, having written the samples it
+        # managed, and `gpap.benchmark.cmsgen_run` reads the file without looking at the code at
+        # all for exactly that reason. Keyed on the patch's own marker rather than on 15, so a
+        # genuine crash that happens to exit 15 is still a failure. Without this the budget this
+        # branch exists to give CMSGen came back as "cmsgen failed on c6288-c1-random" -- a
+        # harness error where the truth is a no-verdict on a spent budget, which is the very
+        # confusion the whole change set is about.
+        stopped_on_budget = "c gpap-maxtime reached" in (p.stdout or "")
+        if p.returncode not in (0, 10) and not stopped_on_budget:
             raise RuntimeError(f"cmsgen failed on {display_path(input_file)}: "
                                f"{p.stdout[-300:]}{p.stderr[-300:]}")
         sols = []
@@ -429,13 +450,20 @@ def main():
                     choices=["circuit", "default", "b8", "b1", "s1"],
                     help="for --sampler pipe: which portfolio the bandit selects from")
     ap.add_argument("--order-seconds", type=float, default=ORDER_SECONDS,
-                    help=f"sampling budget for ONE order barbarik places, THE SAME for every "
-                         f"sampler under test -- GPAP and CMSGen alike (default "
-                         f"{ORDER_SECONDS:g} s). CM_test places about 72 orders per instance, so "
-                         f"72 x this bounds a certificate. Two arms on two budgets would make "
-                         f"the no-verdict count a budget comparison rather than a uniformity "
-                         f"one. SPUR, the trusted reference, stays unbounded on barbarik's own "
-                         f"stock path: it is not a tool under test")
+                    help=f"sampling budget for ONE order barbarik places, for the GPAP arms only "
+                         f"(default {ORDER_SECONDS:g} s). CM_test places about 72 orders per "
+                         f"instance, so 72 x this bounds a GPAP certificate. The rival is NOT "
+                         f"held to it -- see --cmsgen-order-seconds -- so every no-verdict this "
+                         f"campaign reports is ours. SPUR is likewise unbounded on barbarik's "
+                         f"own stock path: it is not a tool under test")
+    ap.add_argument("--cmsgen-order-seconds", type=float, default=CMSGEN_ORDER_SECONDS,
+                    help=f"the rival's per-order budget, deliberately NOT --order-seconds "
+                         f"(default {CMSGEN_ORDER_SECONDS:g} s, effectively unbounded and what "
+                         f"the recorded campaign gave it). Ours was derived from our own costs, "
+                         f"so imposing it on CMSGen let a number we chose take a verdict off the "
+                         f"rival -- measured: it turned an earned Accept on c6288-c1-random into "
+                         f"a no-verdict. The asymmetry runs against us, which is the only "
+                         f"direction it may run")
     ap.add_argument("--draw", default="batch", choices=["batch", "iid"],
                     help="how the requested samples are drawn from GPAP. 'batch' = one chunk, as "
                          "the tool delivers (rows share the chunk's variable permutation). "
@@ -494,8 +522,9 @@ def main():
             sols = _pipeline_solutions(inputFile, numSolutions, indVarList, seed, args.device,
                                        args.portfolio, args.k_cap, args.order_seconds)
         elif args.sampler == "cmsgen":
+            # NOT args.order_seconds: the rival keeps its own, far larger budget on purpose.
             sols = _cmsgen_solutions(inputFile, numSolutions, indVarList, seed, args.cmsgen,
-                                     args.order_seconds)
+                                     args.cmsgen_order_seconds)
         elif args.sampler == "spur":
             sols = _spur_solutions(stock, C, inputFile, numSolutions, indVarList, seed)
         else:
@@ -518,15 +547,18 @@ def main():
         # how often an order goes unfilled, and the unfilled orders ARE this campaign's headline
         # ("accepted on 60 of 65, 5 no-verdict"), so a row without it cannot be compared with
         # another run of the same instance -- ours included. `k_cap` sizes the chunk and so
-        # decides how much one order yields (see --k-cap's help). None on the SPUR arms: the
-        # budget does not reach them (barbarik's own stock path invokes the reference), and
-        # stamping a number they never saw would make `order_budget` below refuse a file that is
-        # perfectly consistent.
-        under_test = args.sampler in ("gpap", "pipe", "cmsgen")
+        # decides how much one order yields (see --k-cap's help).
+        #
+        # It is THIS ARM's budget, not the invocation's: the arms are deliberately NOT on one
+        # budget (see CMSGEN_ORDER_SECONDS), so one number per file would have to be a lie about
+        # one of them. None on the SPUR arms, which we do not bound at all -- barbarik's own
+        # stock path invokes the reference -- because stamping a number they never saw would be
+        # the same lie in the other direction.
+        budget = {"gpap": args.order_seconds, "pipe": args.order_seconds,
+                  "cmsgen": args.cmsgen_order_seconds}.get(args.sampler)
         row = {"sampler": label, "instance": os.path.basename(cnf), "seed": args.seed,
                "eta": args.eta, "epsilon": args.epsilon, "delta": args.delta,
-               "order_seconds": args.order_seconds if under_test else None,
-               "k_cap": args.k_cap, **_instance_shape(cnf)}
+               "order_seconds": budget, "k_cap": args.k_cap, **_instance_shape(cnf)}
         t0 = time.perf_counter()
         tee = _Tee(sys.stdout)
         try:
