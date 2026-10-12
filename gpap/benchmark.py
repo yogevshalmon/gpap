@@ -709,6 +709,8 @@ def _run_one(path0, row, args, device, portfolio, mine, quality, sample_file):
         row["per_seed"] = [{"seed": r["seed"], "sps": r["samples_per_s"],
                             "sps_e2e": r.get("sps_e2e_total"), "succ": r["success_rate"],
                             "n_models": r["n_models"], "wall_timed_s": r["wall_timed_s"],
+                            # as on the row above: one seed's 0 models is unreadable without it
+                            "stop": r.get("stop"),
                             "sound_check": sound_verdict(r),
                             "unsound_rows": r.get("unsound_rows")}
                            for r in runs]

@@ -78,8 +78,10 @@ BENCH_DIRS = [os.path.join(REPO, "benchmarks", "circuits", "bench", d) for d in 
 #: about the clock alone — it cannot select for cells we win, which a hand-picked list could.
 SUBSET_MINUTES = 10.0
 #: The per-seed wall the rival harnesses give our arm (`--gpap-time-limit`, default 60 s in
-#: rivals_recurrent.py / rivals_demotic.py). It is what a seed costs when it delivers nothing,
-#: and the rows record no wall of their own to read it from.
+#: rivals_recurrent.py / rivals_demotic.py): what a seed costs when it delivers nothing. A
+#: FALLBACK only, for rows recorded before the seed's own `wall_timed_s` was. It is also only
+#: true now: such a seed used to end on the zero-yield give-up rule in ~2 s, so this overpriced
+#: it by ~58 s; with that rule off by default the seed really does spend the wall.
 GPAP_SEED_LIMIT_S = 60.0
 
 
@@ -110,12 +112,12 @@ def cell_cost(row, rival_key, mode):
         if rate and n:
             ours += n / rate
         elif g.get("encoder"):
-            # A SEED THAT DELIVERED NOTHING IS NOT A FREE SEED: it ran to the harness's per-seed
-            # wall and stopped. Pricing it at zero made every hard cell look free, and the tiers
-            # are full of them (11 cells of the campaign, 7 of which spent three full seeds).
-            # The condition is `encoder`, i.e. the cell was built at all — a GPAP error row
-            # never reached the sampler and really did cost nothing here.
-            ours += GPAP_SEED_LIMIT_S
+            # A SEED THAT DELIVERED NOTHING IS NOT A FREE SEED: it ran to its wall and stopped.
+            # Pricing it at zero made every hard cell look free, and the tiers are full of them
+            # (11 cells of the campaign, 7 of which spent three full seeds). The condition is
+            # `encoder`, i.e. the cell was built at all — a GPAP error row never reached the
+            # sampler and really did cost nothing here. Its OWN recorded wall where there is one.
+            ours += float(s.get("wall_timed_s") or GPAP_SEED_LIMIT_S)
         ours += float(s.get("distinct_s") or 0.0)
     failed = bool(rv.get("error"))
     rival = float(rv.get("wall_s") or 0.0)          # a failure records no successful run
