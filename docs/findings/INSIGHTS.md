@@ -239,6 +239,13 @@ equals a copy-free run (`s386` within 0.2%), with identical solutions. The froze
 modelled at 1.7% median at T=25 and 3.4% at T=50, a lower bound.
 [RIVAL_FAIRNESS_FINDINGS.md](RIVAL_FAIRNESS_FINDINGS.md) §17c.
 
+**A degeneracy screen must read the row, not a name (2026-10-12).** `vacuous_pin` tested its
+pre-`sim_baseline` fallback list first, so `b02` and `b07` were screened at T=50 where they
+measure `p_accept` 0.375 and 0.4985 — an exclusion itemised as "p_accept 1.0" against its own
+row. Vacuity is a property of (instance, depth, pin). Two consumers were testing
+`name in VACUOUS_PINS` directly, which is how a paper rule drifts into a private copy.
+[RIVAL_FAIRNESS_FINDINGS.md](RIVAL_FAIRNESS_FINDINGS.md) §17d.
+
 **Barbarik, circuit-only with both controls (2026-08-28): GPAP as shipped is Accepted on 64/66
 instances with zero Rejects — CMSGen 66/66, `soft` Rejected 64/65, pinned `b8`/`b1` 6/6 vs 6/6 at
 barbarik's own stricter default.** ⚠️ "As shipped" there is pinned-config verdicts joined to the
