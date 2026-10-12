@@ -28,7 +28,7 @@ import time
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
 from gpap.verdict import sound_verdict           # noqa: E402 — a stdlib-only leaf
-from eval.rivals.rival_common import space_from_distinct  # noqa: E402 — after sys.path
+from eval.rivals.rival_common import grant_walk_rungs, space_from_distinct  # noqa: E402 — after sys.path
 # THE uniformity rules, imported rather than restated: eligibility buckets on the control's own
 # verdict, the refusal to pool two parameter settings, and what each setting costs. Stdlib-only,
 # like this module, so it cannot pull a GPU dependency in behind it.
@@ -615,13 +615,16 @@ def rival_family(d, stem, key):
         # scored, and disclosed: a ratio that stands on a handful of rival solutions
         if rv.get("unique") is not None and 0 < rv["unique"] < THIN_DENOMINATOR:
             thin.append((name, int(rv["unique"]), x))
-        sweep = rv.get("batch_sweep") or []
+        # the walk that reached this batch: a pinned row's own sweep starts AT the grant, so it
+        # is read through the recorded walk (`grant_walk_rungs`), or every pinned cell would
+        # look like a top rung that completed first try and none like a small grant
+        walk = grant_walk_rungs(rv)
         # cells the rival ran at its smallest surviving rung, the one above rejected: the card
         # bound the grant there, so the cell measures the tool at a small batch
-        if rv.get("batch") and rv["batch"] <= 10_000 and len(sweep) > 1:
+        if rv.get("batch") and rv["batch"] <= 10_000 and len(walk) > 1:
             small.append((x, name, rv["batch"]))
         # cells where the ladder's TOP rung completed first try: the ladder bound the grant
-        if rv.get("batch") and len(sweep) == 1 and rv["batch"] == (sweep[0].get("batch") or 0):
+        if rv.get("batch") and len(walk) == 1 and rv["batch"] == (walk[0] or 0):
             ladder_top.append((name, rv["batch"]))
     okc.sort(key=lambda t: -t[0])
     ties = sum(1 for _, _, _, st in okc if st)
