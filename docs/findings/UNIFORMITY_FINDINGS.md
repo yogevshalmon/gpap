@@ -232,6 +232,22 @@ so "the pipeline is certified" means every member is (gated by
 distribution knob); one hang killed the sweep (rows are per instance now, errors recorded, bias
 values kept); and not every instance is a valid subject.
 
+Sixth, found 2026-10-12: **the arms were not on the same budget**, which matters because what
+this table reports is a no-verdict count and a no-verdict is a coverage outcome. The GPAP arms
+were ended by the sampler's own zero-yield give-up rule — the five `pipe:circuit` no-verdicts
+below spent 0.99, 1.01, 1.12, 1.77 and 3.87 s, and the two `gpap:b8` ones 9.8 s — while CMSGen
+was bounded only by a 1,800 s subprocess kill with no
+`--maxtime`, i.e. effectively unbounded per order. Neither upstream tool offers a number to
+inherit (barbarik launches every sampler through a bare `os.system` with no timeout; stock CMSGen
+has no wall budget), so `--order-seconds` is ours: 30 s per order for every sampler under test,
+about 3× the ~10 s/order the slowest *Accepting* instance averaged (`c2670-c1-random`: 695 s
+over 72 orders on `pipe:circuit`, 729 s on `gpap:b8`) and 1.5× the 20 s the reference budget
+already uses. It is the only bound on an order
+— no chunk cap — and it is recorded in every row, with `barbarik_table.order_budget` refusing to
+pool two budgets in one table for the same reason it refuses two parameter settings. SPUR is
+deliberately exempt: barbarik invokes the reference through its own stock path and it is not a
+tool under test. The counts below predate the flag and are re-run under it.
+
 The screen: `spur(control)` is Rejected on `ActivityService`, `ActivityService2`,
 `IssueServiceImpl`, `IterationService` and `PhaseService`, also through barbarik's own
 unreformatted path (`--sampler spur-raw`), so our marshalling is exonerated. The kernel pins every
@@ -448,11 +464,11 @@ for c in c432 c499 c880 c1355 c1908 c2670 c3540 c5315 c6288 c7552; do for tg in 
   gpap circuit2cnf benchmarks/circuits/bench/comb/$c.bench .gpap/tmp/circ/$c-c1-$tg.cnf --cycles 1 --target $tg --seed 1
 done; done
 PYTHONPATH=. .venv/bin/python eval/uniformity/barbarik_screen.py .gpap/tmp/circ/*.cnf --out .gpap/tmp/eligible.txt
-for arm in "--sampler spur" "--sampler cmsgen" "--sampler gpap --config b8" \
-           "--sampler gpap --config b1" "--sampler gpap --config s1" \
-           "--sampler gpap --config soft"; do
+for arm in "--sampler spur" "--sampler cmsgen" "--sampler pipe --portfolio circuit" \
+           "--sampler gpap --config b8" "--sampler gpap --config b1" \
+           "--sampler gpap --config s1" "--sampler gpap --config soft"; do
   PYTHONPATH=. .venv/bin/python eval/uniformity/barbarik_gpap.py $(cat .gpap/tmp/eligible.txt) \
-      $arm --out .experiments/barbarik/circ.jsonl                       # CMSGen-paper setting
+      $arm --order-seconds 30 --out .experiments/barbarik/circ.jsonl    # CMSGen-paper setting
   PYTHONPATH=. .venv/bin/python eval/uniformity/barbarik_gpap.py $(head -6 .gpap/tmp/eligible.txt) \
       $arm --epsilon 0.1 --eta 0.9 --delta 0.05 --out .experiments/barbarik/circ_strict.jsonl
 done

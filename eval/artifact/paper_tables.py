@@ -34,7 +34,8 @@ from eval.rivals.rival_common import space_from_distinct  # noqa: E402 — after
 # like this module, so it cannot pull a GPU dependency in behind it.
 from eval.uniformity.barbarik_table import (SETTINGS as BARBARIK_SETTINGS,   # noqa: E402
                                             arm_summary, buckets,
-                                            check_one_setting, load as barbarik_load)
+                                            check_one_setting, load as barbarik_load,
+                                            order_budget as barbarik_order_budget)
 
 VACUOUS_PINS = {"b02", "b05", "b07", "s526"}
 
@@ -984,7 +985,12 @@ def barbarik(paths):
     eligible, rejected, errored = buckets(rows)
     return {"summary": arm_summary(rows, eligible), "eligible": sorted(eligible),
             "control_rejected": sorted(rejected), "control_errored": sorted(errored),
-            "params": {"epsilon": eps, "eta": eta, "delta": delta},
+            # The budget belongs with the parameters: it is the other axis along which two of
+            # these tables are not comparable, and the claim the re-run supports ("both samplers
+            # under test had the same per-order budget") is only quotable if it is recorded.
+            # None on rows from before the flag.
+            "params": {"epsilon": eps, "eta": eta, "delta": delta,
+                       "order_seconds": barbarik_order_budget(rows)},
             # provenance: this table is its own campaign, and the header above it is not its host
             "source": sorted(os.path.abspath(p) for p in (paths or []) if os.path.exists(p))}
 

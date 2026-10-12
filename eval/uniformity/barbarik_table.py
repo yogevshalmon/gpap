@@ -65,8 +65,28 @@ def by_arm(rows):
     return out
 
 
+def order_budget(rows):
+    """The one per-order sampling budget these rows were produced under, or None for rows from
+    before the budget existed. Raises on a mix, for the same reason `check_one_setting` does.
+
+    The budget is not a performance detail here: it decides how often an order goes unfilled, and
+    unfilled orders are what this campaign reports ("accepted on 60 of 65, 5 no-verdict"). Two
+    budgets in one table is therefore a budget comparison wearing a uniformity label — the same
+    defect as running two ARMS on two budgets, which is what `--order-seconds` was introduced to
+    end. SPUR rows carry None (the budget never reaches the reference) and are ignored here."""
+    seen = {r.get("order_seconds") for r in rows} - {None}
+    if len(seen) > 1:
+        raise ValueError(
+            "rows mix PER-ORDER BUDGETS (--order-seconds "
+            f"{', '.join(f'{s:g}' for s in sorted(seen))}) — the budget decides the no-verdict "
+            "count this table reports, so these are DIFFERENT tests; summarise each separately. "
+            "Rows with no budget recorded predate the flag and are not counted as a third.")
+    return seen.pop() if seen else None
+
+
 def check_one_setting(rows):
-    """Refuse to summarise rows from DIFFERENT (eps, eta, delta) settings in one table.
+    """Refuse to summarise rows from DIFFERENT settings in one table: the (eps, eta, delta)
+    parameters, and the per-order budget (`order_budget` above).
 
     The same instance under the CMSGen paper's eps=0.3/eta=1.8/delta=0.1 and under barbarik's own
     eps=0.1/eta=0.9/delta=0.05 are two different tests, by two orders of magnitude in samples and
@@ -77,6 +97,7 @@ def check_one_setting(rows):
         found = ", ".join(f"(eps={e}, eta={t}, delta={d})" for e, t, d in sorted(settings))
         raise ValueError("rows mix Barbarik parameter settings — these are DIFFERENT tests, "
                          f"summarise each separately. Found: {found}")
+    order_budget(rows)                        # same gate, the other axis of "one test"
     return settings.pop() if settings else (None, None, None)
 
 
@@ -138,6 +159,13 @@ def main():
             + f", per-round band {cost['band']}, rejects TV >= {cost['rejects_tv']:.2f}")
     band = cost["band"] if cost else "its per-round band"
     print(f"CM_test at eps={eps} eta={eta} delta={delta}" + (f"\n  {note}" if note else ""))
+    # The budget belongs in the header for the same reason (eps, eta, delta) does: it is part of
+    # which test this is. Rows from before the flag say so rather than printing nothing, because
+    # "no budget recorded" and "30 s" are both facts and only one of them is reproducible.
+    ob = order_budget(rows)
+    print("  per-order sampling budget: "
+          + (f"{ob:g} s for every sampler under test (SPUR exempt: not a tool under test)"
+             if ob else "NOT RECORDED — these rows predate --order-seconds"))
     total = len(eligible) + len(rejected) + len(errored)
 
     print(f"instances the negative control ran on: {total}")

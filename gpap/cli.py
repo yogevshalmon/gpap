@@ -64,8 +64,8 @@ STOP_WHY = {
     "target": "delivered what was asked",
     "time": "--time-limit reached",
     "chunks": "the chunk ceiling was reached",
-    "zero_yield": "no models after every config ran plus two grace chunks — the run gave up "
-                  "early, it did NOT spend its budget",
+    "zero_yield": "no models after every config ran plus the --give-up-chunks grace window — "
+                  "the run gave up early, it did NOT spend its budget",
     "unsat": "the formula has no models",
 }
 
@@ -281,7 +281,7 @@ def _sample_run(args, device, path, tmp, encode_s):
         # on b15 at T=25 rare: 2.0 s of a 60 s budget, and 30x the trajectories found nothing
         # either. On b17 they did.
         if info.get("stop") == "zero_yield":
-            print(f"         The run gave up after {info['wall_timed_s']:.1f}s of your "
+            print(f"         The run gave up after {info['wall_timed_s']:.2f}s of your "
                   f"--time-limit, not at the end of it: the\n"
                   f"         zero-yield stop fires once a few chunks in a row come back empty, "
                   f"so a longer\n"
