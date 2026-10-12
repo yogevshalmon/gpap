@@ -1050,6 +1050,22 @@ def test_a_rivals_only_sweep_has_no_table_1_and_a_refusal_is_not_a_zero(tmp_path
     assert v["excl"] == 1 and v["excl_names"] == {"refused": ["c7552"]}
 
 
+def test_verify_artifact_names_a_rival_failure_carried_over_from_a_grants_file(tmp_path):
+    """A failure pinned with `--honour-recorded-failures` is the earlier campaign's outcome, not
+    this one's. It still counts as a failure, but the gate names it so the text can say so."""
+    riv = tmp_path / "riv"
+    riv.mkdir()
+    carried = rrow("b17", rcs={"error": "did not initialize", "not_remeasured": True,
+                               "grant_source": "recorded failure pinned from g.json"})
+    (riv / "rivals_recurrent_table.json").write_text(json.dumps([rrow("s386"), carried]))
+    r = _verify("--rivals", str(riv))
+    assert "NOT re-measured in this campaign (b17)" in r.stdout, r.stdout
+    (riv / "rivals_recurrent_table.json").write_text(json.dumps(
+        [rrow("s386"), rrow("b17", rcs={"error": "did not initialize"})]))
+    assert "NOT re-measured" not in _verify("--rivals", str(riv)).stdout, \
+        "a failure measured in this campaign was reported as carried over"
+
+
 def test_verify_artifact_gates_the_cmsgen_arm_on_rival_rows(tmp_path):
     """Table 1 can come from rival rows alone, under the same gates: a clean stage passes; a
     floored zero, a mixed-arm stage and a crashed CMSGen each fail."""
