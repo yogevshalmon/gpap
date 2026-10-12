@@ -43,12 +43,10 @@ def load(p):
 def gpap_zero(row):
     """True iff the GPAP arm RAN on this cell and returned no models.
 
-    Three things are NOT that, and `not g.get("n_models")` reads all three as a zero: an absent
-    arm, an `error` row (an ABC encode failure writes one), and a `None` count. The published
-    campaign has such a row -- rivals_recurrent_table b19/abc failed to encode, `abc (rc=-6)` --
-    so every gate that asked the loose question stated something false about it: once as "a
-    GPAP-zero cell records no `stop`", once in the count of "cells where GPAP emitted nothing".
-    Both ask the same question, so it is answered in one place."""
+    `not g.get("n_models")` reads three non-zeros as a zero: an absent arm, an `error` row (an
+    ABC encode failure writes one) and a `None` count. The published campaign has one --
+    rivals_recurrent_table b19/abc, `abc (rc=-6)` -- and both gates below asked the loose
+    question, so both stated something false about a cell GPAP never sampled."""
     g = row.get("gpap") or {}
     return bool(g) and not g.get("error") and "n_models" in g and not g.get("n_models")
 
@@ -318,14 +316,11 @@ def main():
                          f"— quote {tabled}")
                 warn.append(f"{stem}: {errs}/{len(seen)} rival runs failed "
                             f"(reported, not folded in as zeros){extra}")
-            # A GPAP ZERO IS ONLY A LOSS IF WE LOOKED. The sampler's zero-yield valve ends a run
-            # once a few chunks in a row come back empty, which on a low-success instance can be
-            # seconds into a 60 s budget — so `n_models == 0` means either "the instance defeated
-            # us" or "we stopped looking", and only `stop` tells them apart. Measured on the
-            # published campaign's own zero cells: three of six yielded once the valve was
-            # lifted (docs/findings/RIVAL_FAIRNESS_FINDINGS.md). A zero booked as an outright
-            # loss against a rival that DID sample the cell is the one error here that moves a
-            # published number against us, so it is named rather than counted.
+            # A GPAP ZERO IS ONLY A LOSS IF WE LOOKED. `n_models == 0` means either "the
+            # instance defeated us" or "we stopped looking", and only `stop` tells them apart:
+            # three of the published campaign's six zero cells yielded once the valve was lifted
+            # (docs/findings/RIVAL_FAIRNESS_FINDINGS.md). Named rather than counted, because it
+            # is the one error here that moves a published number against us.
             early, unknown = [], []
             for (n_, _v), r in sorted(seen.items()):
                 if not gpap_zero(r):          # an arm that never ran is not a zero

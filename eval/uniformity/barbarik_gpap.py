@@ -65,39 +65,26 @@ from eval.paths import display_path  # noqa: E402 — after sys.path
 CONFIGS = {"b8": (True, 8, False), "b1": (True, 1, False), "s1": (False, 1, False),
            "soft": (True, 8, "soft"), "bsup": (True, None, False)}
 
-# How hard to try to fill one of barbarik's sample orders before recording "no verdict".
-#: OUR PER-ORDER SAMPLING BUDGET -- ours alone, and deliberately the tighter one. CM_test places
-#: about 72 orders per instance at the CMSGen paper's setting, so this times 72 bounds a GPAP
-#: certificate. Neither upstream tool offers a number to inherit: barbarik runs every sampler
-#: through a bare `os.system` with no timeout at all, and stock CMSGen has no wall budget either
-#: (`--maxtime` is our own patch, defaulting to unlimited). So the number is ours, and it rests
-#: on this campaign's own rows: the slowest instance that still ACCEPTED averaged ~10 s per order
-#: (c2670-c1-random, 695 s over 72 on `pipe:circuit`), so a 10 s budget would have turned a pass
-#: into a no-verdict. 30 s is about 3x that, and 1.5x the 20 s `barbarik_screen.py
-#: --spur-seconds` already uses for one reference order. Worst case ~6 of 65 instances x 72 x
-#: 30 s = 3.6 h per GPAP arm. It is a SAMPLING budget: the `pipe` arm re-runs the whole shipped
-#: pipeline per order, so parse, ELS and up to MINE_SECONDS of mining sit outside it (~5-10 s an
-#: order). That setup is part of what the arm certifies and is not stripped to make the
-#: arithmetic tidier -- it is stated instead.
+#: OUR per-order sampling budget, for the GPAP arms alone. CM_test places ~72 orders per
+#: instance at the CMSGen paper's setting, so 72x this bounds a GPAP certificate (worst case ~6
+#: of 65 instances x 72 x 30 s = 3.6 h an arm). Neither upstream tool offers a number to inherit
+#: -- barbarik times no sampler, stock CMSGen has no wall budget -- so it rests on our own rows:
+#: 3x the ~10 s an order the slowest instance that still ACCEPTED averaged (c2670-c1-random,
+#: 695 s over 72), and 1.5x the 20 s `barbarik_screen.py --spur-seconds` uses. A SAMPLING budget:
+#: the `pipe` arm's parse, ELS and up to MINE_SECONDS of mining sit outside it (~5-10 s).
 ORDER_SECONDS = 30.0
 
-#: CMSGEN'S BUDGET, LEFT WHERE IT WAS: effectively unbounded per order, as in the recorded
-#: campaign. THE ASYMMETRY IS DELIBERATE AND IT RUNS AGAINST US, which is the only direction an
-#: asymmetry may run. A no-verdict is a coverage outcome and a per-order budget decides it, so
-#: the honest question is who the number favours. ORDER_SECONDS was derived from OUR arm's
-#: costs; imposing it on CMSGen measured 30 s as more than it needs on `c6288-c1-random` and
-#: turned an Accept it had earned into a no-verdict -- our chosen number taking a verdict off
-#: the rival. Leaving CMSGen unbounded cannot do that: every no-verdict in this campaign is then
-#: OURS, and no CMSGen Accept owes anything to a budget we picked. The claim the table supports
-#: is therefore not "both tools had the same budget" but the stronger-against-us one: "GPAP was
-#: held to 30 s an order; CMSGen was not held to anything."
-#:
-#: `--maxtime` is still passed, at THIS value: it makes CMSGen end its own sampling loop and
-#: exit normally, so the samples it did write can be read, where the subprocess kill alone
-#: discards them (`gpap.benchmark.cmsgen_run` splits them the same way). The kill stays as a
-#: backstop above it. 1,800 s is the kill this call already carried.
+#: The rival's budget, left where the recorded campaign had it: effectively unbounded.
+#: THE ASYMMETRY RUNS AGAINST US, the only direction it may run. ORDER_SECONDS came from OUR
+#: costs, and imposing it on CMSGen was measured taking an Accept it had earned off
+#: `c6288-c1-random`; unbounded it cannot, so every no-verdict here is ours and no CMSGen Accept
+#: owes anything to a number we chose. The table's claim is therefore not "the same budget" but
+#: "GPAP was held to 30 s an order; CMSGen was not held to anything".
+#: `--maxtime` is still passed, at THIS value, so CMSGen ends its own loop and exits normally and
+#: the samples it wrote can be read; the kill stays above it (as `gpap.benchmark.cmsgen_run`).
 CMSGEN_ORDER_SECONDS = 1800.0
 
+# How hard to try to fill one of barbarik's sample orders before recording "no verdict".
 _FILL_ATTEMPTS = 24        # collector attempts per order
 _FILL_GIVE_UP = 3          # consecutive ATTEMPTS returning NOTHING -> the instance really is dry
 
@@ -134,36 +121,19 @@ def _gpap_solutions(input_file, num_solutions, ind_var_list, seed, device, confi
         B = max(1, len(ind_var_list))
     smp = GPUSampler.from_clauses(cnf.nv, cnf.clauses, torch.device(device), support=sup0,
                                   seed=seed, k_cap=k_cap)
-    # WHY RETRY AT ALL, now that `sample_bits` no longer gives up on its own. It used to stop
-    # after the cold start plus two dry chunks -- right for "produces nothing", wrong for
-    # "produces rarely", and Barbarik's kernel is the second case by construction (it enlarges
-    # the sampling set while pinning the support, so a rejection sampler's yield drops). That
-    # rule is opt-in now and this arm does not ask for it, so a single call already runs to its
-    # budget. The loop stays because the two stopping rules answer different questions: a call
-    # ends when ITS budget or chunk cap is out, the loop ends when the ORDER is filled, dry, or
-    # out of time. Every call is a fresh set of independent chunks, so concatenating them
-    # changes no distribution. An
-    # `iid` attempt ends at its first dry call, so budget that arm in CALLS or the same attempt
-    # count would cap it far lower for purely structural reasons. A genuinely dry instance is
-    # stopped by the give-up rule below, in 3 attempts either way.
-    # ONE DEADLINE FOR THE WHOLE ORDER, and it is the ONLY bound: `max_chunks=None`. The wall
-    # is the budget we mean to give, so nothing else may end an order first.
+    # ONE DEADLINE FOR THE WHOLE ORDER, and the ONLY bound: `max_chunks=None`, so nothing ends an
+    # order before the budget we mean to give. Per CALL it would not be a per-order budget at all
+    # (the batch arm makes up to _FILL_ATTEMPTS calls, the iid arm num_solutions per attempt);
+    # with the 400-chunk cap it was the opposite, ending an order after 1.4 s of 30 (400 chunks
+    # is 0.17 s on a 20-var formula, measured).
     #
-    # Both halves of that were wrong before and in opposite directions. `order_seconds` per CALL
-    # is not a per-order budget at all -- the `batch` arm makes up to _FILL_ATTEMPTS calls
-    # (24 x 30 s = 12 min for one of ~72 orders) and the `iid` arm up to num_solutions per
-    # attempt -- while a `max_chunks` cap ended an order far SHORT of the budget: 400 chunks is
-    # 0.17 s on a 20-var formula (measured), so three dry attempts abandoned the order in 1.4 s
-    # of its 30 s and the arms were not on the same budget after all, which is the whole claim
-    # this number exists to support. The sampler's own give-up rule used to hide both; it is
-    # off by default now, so the bound has to be exactly the one we state.
-    #
-    # The retry loop survives as a safety net, not as the budget: one call now either fills the
-    # order or spends the deadline, so `_FILL_GIVE_UP` is reachable only on a sampler that
-    # returns short for its own reasons.
+    # The loop stays as a safety net, not as the budget: `sample_bits` no longer gives up on its
+    # own, so one call fills the order or spends the deadline. Every call is a fresh set of
+    # independent chunks, so concatenating them changes no distribution. An `iid` attempt ends at
+    # its first dry call, so budgeting that arm in CALLS would cap it far lower for structural
+    # reasons -- hence the scaled `attempt_cap`, which the error below quotes so no row can read
+    # "173 of 24 attempts".
     rows, cols, empty, tries, gave_up, spent = [], None, 0, 0, False, False
-    # Named, because the error below quotes it: the iid arm's cap is NOT `_FILL_ATTEMPTS` (see
-    # the note above on why it is scaled), and a row reading "173 of 24 attempts" is a defect.
     attempt_cap = _FILL_ATTEMPTS * (num_solutions if draw == "iid" else 1)
     deadline = time.monotonic() + order_seconds
     for _ in range(attempt_cap):
@@ -200,12 +170,9 @@ def _gpap_solutions(input_file, num_solutions, ind_var_list, seed, device, confi
             break
     bits = rows
     if bits is None or len(bits) < num_solutions:
-        # WHICH STOPPING RULE ENDED THE ATTEMPT, in the row. `sample_bits` returns no stats, so
-        # the core's own `stop` is not reachable here (unlike the pipeline arm) -- but the
-        # COLLECTOR's accounting is, and it answers the same question: `gave_up` means three
-        # consecutive attempts came back empty, `attempts` says how many were spent of the
-        # budget. Without it a no-verdict cannot be told from a sampler that cannot do the
-        # instance at all.
+        # WHICH STOPPING RULE ENDED THE ATTEMPT, in the row: `sample_bits` returns no stats, so
+        # the core's own `stop` is out of reach here and the collector's own accounting stands in.
+        # Without it a no-verdict reads as a sampler that cannot do the instance at all.
         why = (f"gave up on {_FILL_GIVE_UP} consecutive dry attempts" if gave_up
                else f"the {order_seconds:g}s order budget was spent" if spent
                else "attempt budget exhausted")
@@ -238,12 +205,9 @@ def _pipeline_solutions(input_file, num_solutions, ind_var_list, seed, device, p
                        time_limit=order_seconds, configs=portfolio(portfolio_name))
     bits, cols = info.get("samples"), info.get("cols") or []
     if bits is None or len(bits) < num_solutions:
-        # NAME THE VALVE IN THE ROW. This message becomes the `error` of a published no-verdict,
-        # and "produced 0/50" alone reads as "the sampler cannot do this instance" when what it
-        # often means is that OUR stopping rule ended the attempt after a few empty chunks — on
-        # a Barbarik kernel, which is adversarial for a rejection sampler by construction and is
-        # therefore exactly where the two readings diverge. Carry the wall too: a reader can then
-        # see at a glance that 120 s were available and 2 were used.
+        # NAME THE VALVE AND THE WALL IN THE ROW. This becomes the `error` of a published
+        # no-verdict, and "produced 0/50" alone reads as "the sampler cannot do this instance"
+        # where it may mean our own stopping rule ended the attempt seconds into the budget.
         raise RuntimeError(f"pipeline produced {0 if bits is None else len(bits)}/"
                            f"{num_solutions} samples on {display_path(input_file)} "
                            f"[stop={info.get('stop')} after {info.get('wall_timed_s') or 0.0:.1f}s "
@@ -259,14 +223,9 @@ def _cmsgen_solutions(input_file, num_solutions, ind_var_list, seed, cmsgen_bin,
     """Same contract, CMSGen as the sampler under test. CMSGen emits FULL assignments (it ignores
     `c ind`), so the projection onto ind_var_list happens here.
 
-    `order_seconds` DEFAULTS TO CMSGen'S OWN, MUCH LARGER BUDGET, not to `ORDER_SECONDS`: see
-    CMSGEN_ORDER_SECONDS for why the asymmetry is the conservative choice rather than the
-    convenient one. `--maxtime` bounds CMSGen's own sampling loop so it exits normally and the
-    samples it wrote can be read; the subprocess kill stays as a backstop above it, since a
-    stock binary has no deadline at all.
-
-    SPUR, the trusted reference, is likewise not bounded by us: barbarik invokes it through its
-    own stock path and it is not a tool under test. Stated here rather than discovered."""
+    `order_seconds` defaults to CMSGEN_ORDER_SECONDS, not `ORDER_SECONDS` -- see there for why
+    the asymmetry is the conservative choice. SPUR is likewise not bounded by us: barbarik
+    invokes the reference on its own stock path and it is not a tool under test."""
     from gpap.benchmark import cmsgen_supports_maxtime
     out = paths.scratch_file("cmsgen_barbarik", ".out")
     cmd = [cmsgen_bin, "--samples", str(num_solutions), "--seed", str(int(seed)),
@@ -274,12 +233,11 @@ def _cmsgen_solutions(input_file, num_solutions, ind_var_list, seed, cmsgen_bin,
     deadline = order_seconds if cmsgen_supports_maxtime(cmsgen_bin) else 0.0
     if deadline:
         cmd[1:1] = ["--maxtime", f"{deadline:g}"]
-    # Above the deadline, never instead of it: a stock binary has no deadline, so there the kill
-    # IS the budget and the arms are only as equal as that makes them (reported in the row).
+    # Above the deadline, never instead of it. On a stock binary (no --maxtime) the kill IS the
+    # budget, and the row says so.
     hard = (deadline + max(30.0, 0.5 * deadline)) if deadline else order_seconds
-    # The budget, in the words both failure paths use. A reader of a no-verdict row has to be
-    # able to tell "could not fill the order" from "we cut it off", and on a stock binary the
-    # kill IS the budget, so the kill is an ordinary outcome of this arm.
+    # The budget, in the words both failure paths use: a no-verdict row has to distinguish
+    # "could not fill the order" from "we cut it off".
     budget = (f"[{order_seconds:g}s budget" +
               ("" if deadline else ", enforced as a subprocess kill: this binary has no "
                                   "--maxtime") + "]")
@@ -287,20 +245,16 @@ def _cmsgen_solutions(input_file, num_solutions, ind_var_list, seed, cmsgen_bin,
         try:
             p = subprocess.run(cmd, capture_output=True, text=True, timeout=hard)
         except subprocess.TimeoutExpired:
-            # Reached on a stock binary (no deadline to exit on) or when a patched one's CPU
-            # deadline did not cover the wall. Either way it is the same fact as a short count,
-            # and reporting it as `TimeoutExpired` would leave the row unreadable.
+            # A stock binary has no deadline to exit on, so the kill is its budget: the same
+            # fact as a short count, and `TimeoutExpired` would leave the row unreadable.
             raise RuntimeError(f"cmsgen produced 0/{num_solutions} on "
                                f"{display_path(input_file)} {budget} — killed at {hard:g}s of "
                                f"wall, so no samples could be read back") from None
         # 10 = SATISFIABLE. A `--maxtime` exit is NOT a failure: the patch returns the DIMACS
-        # "unknown" code (15, measured) through its normal path, having written the samples it
-        # managed, and `gpap.benchmark.cmsgen_run` reads the file without looking at the code at
-        # all for exactly that reason. Keyed on the patch's own marker rather than on 15, so a
-        # genuine crash that happens to exit 15 is still a failure. Without this the budget this
-        # branch exists to give CMSGen came back as "cmsgen failed on c6288-c1-random" -- a
-        # harness error where the truth is a no-verdict on a spent budget, which is the very
-        # confusion the whole change set is about.
+        # "unknown" code (15, measured) through its normal path having written what it managed,
+        # which is why `gpap.benchmark.cmsgen_run` ignores the code entirely. Keyed on the
+        # patch's own marker, not on 15, so a genuine crash exiting 15 is still a failure.
+        # Measured: without this a budget stop on c6288-c1-random read as "cmsgen failed".
         stopped_on_budget = "c gpap-maxtime reached" in (p.stdout or "")
         if p.returncode not in (0, 10) and not stopped_on_budget:
             raise RuntimeError(f"cmsgen failed on {display_path(input_file)}: "
@@ -543,17 +497,11 @@ def main():
         cnf = cnf if os.path.isabs(cnf) else os.path.abspath(os.path.join(REPO_ROOT, cnf))
         print(f"\n=== barbarik CM_test: {label} on {cnf} "
               f"(eta={args.eta} eps={args.epsilon} delta={args.delta}) ===", flush=True)
-        # THE KNOBS THAT MOVE A VERDICT, IN THE ROW THAT CARRIES IT. `order_seconds` decides
-        # how often an order goes unfilled, and the unfilled orders ARE this campaign's headline
-        # ("accepted on 60 of 65, 5 no-verdict"), so a row without it cannot be compared with
-        # another run of the same instance -- ours included. `k_cap` sizes the chunk and so
-        # decides how much one order yields (see --k-cap's help).
-        #
-        # It is THIS ARM's budget, not the invocation's: the arms are deliberately NOT on one
-        # budget (see CMSGEN_ORDER_SECONDS), so one number per file would have to be a lie about
-        # one of them. None on the SPUR arms, which we do not bound at all -- barbarik's own
-        # stock path invokes the reference -- because stamping a number they never saw would be
-        # the same lie in the other direction.
+        # THE KNOBS THAT MOVE A VERDICT, IN THE ROW THAT CARRIES IT: `order_seconds` decides how
+        # often an order goes unfilled and the unfilled orders ARE the headline, `k_cap` sizes
+        # the chunk and so how much an order yields. THIS ARM's budget, not the invocation's --
+        # the arms are deliberately not on one (CMSGEN_ORDER_SECONDS), so one number per file
+        # would be a lie about one of them, and so would stamping one on the unbounded SPUR arms.
         budget = {"gpap": args.order_seconds, "pipe": args.order_seconds,
                   "cmsgen": args.cmsgen_order_seconds}.get(args.sampler)
         row = {"sampler": label, "instance": os.path.basename(cnf), "seed": args.seed,
