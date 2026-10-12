@@ -96,28 +96,19 @@ def _resolve_device(device) -> torch.device:
     return torch.device(device)
 
 
-# --- CMSGen build helper (Colab has no pip wheel; build meelgroup/cmsgen from source) ---
+# --- CMSGen: scripts/build_cmsgen.sh is the one builder (pinned commit + the eval patch) ---
 
-def build_cmsgen(dest: str | None = None) -> str | None:
-    """Clone + cmake-build meelgroup/cmsgen, returning the binary path (or None on failure).
-
-    Idempotent: an existing binary is returned immediately. Needs cmake, build-essential, zlib1g-dev."""
-    dest = dest or str(gpap_paths.src_dir() / "cmsgen")   # ONE tool root, not a second one
-    binp = os.path.join(dest, "build", "cmsgen")
-    if os.path.exists(binp):
-        return binp
+def build_cmsgen() -> str | None:
+    """The patched CMSGen at its pinned commit, returning the binary path (or None on failure).
+    The script reuses an existing binary, so this is cheap after the first call."""
     try:
-        if not os.path.isdir(dest):
-            subprocess.run(["git", "clone", "--depth", "1",
-                            "https://github.com/meelgroup/cmsgen", dest], check=True)
-        build = os.path.join(dest, "build")
-        os.makedirs(build, exist_ok=True)
-        subprocess.run(["cmake", ".."], cwd=build, check=True)
-        subprocess.run(["make", "-j"], cwd=build, check=True)
+        subprocess.run(["bash", os.path.join(REPO_ROOT, "scripts", "build_cmsgen.sh")],
+                       env=dict(os.environ, PYTHON=sys.executable), check=True)
     except Exception as e:  # noqa: BLE001
         print(f"  [cmsgen] build failed ({e}); running GPAP-only")
         return None
-    return binp if os.path.exists(binp) else None
+    binp = gpap_paths.tool("cmsgen")
+    return str(binp) if binp.exists() else None
 
 
 # --- K-scaling sweep (throughput vs K, VRAM-limited) ---

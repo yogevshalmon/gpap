@@ -1,19 +1,18 @@
 From: GPAP evaluation harness
-Subject: [PATCH] cmsgen: --nowrite + machine-parseable work-rate stats (GPAP eval only)
+Subject: [PATCH] cmsgen: --nowrite, --statsevery, --maxtime (GPAP eval only)
 
-Two additions to meelgroup/cmsgen @ 8210aa9, both OFF by default (stock behaviour is
+Three additions to meelgroup/cmsgen @ 8210aa9, all OFF by default (stock behaviour is
 bit-identical unless the new flags are passed). They exist so a GPU-vs-CPU sampling
-comparison can be made on equal terms:
+comparison can be made on equal terms; the measurements behind them are in GPAP's
+docs/findings/RIVAL_FAIRNESS_FINDINGS.md (§1, §7).
 
   --nowrite       Generate the samples but emit none: no samplefile is opened, no sample is
                   formatted, and the every-10-samples console line is suppressed. This is the
                   apples-to-apples mode against GPAP's timed run, which likewise emits nothing
                   (its models stay on the GPU; delivery is a separate, off-timing pass).
-                  MEASURED on 27.sk_3_32, 50,000 samples, single core: 0.42 s with --nowrite vs
-                  3.6 s with --samplefile — i.e. ~88% of stock CMSGen's wall on that instance is
-                  ostream formatting of full N-variable assignments (373 MB of samplefile),
-                  not sampling. The effect grows with |vars|, so it is largest exactly on the
-                  big circuit unrolls.
+                  Formatting full N-variable assignments is most of stock CMSGen's wall, and
+                  the cost grows with |vars|, so it is largest exactly on the big circuit
+                  unrolls.
 
   --statsevery N  Print `c gpap-stats samples=.. props=.. decisions=.. conflicts=.. cpu_s=..
                   wall_s=..` every N samples (default 1000) and once at the end, flushed, so a
@@ -26,11 +25,10 @@ comparison can be made on equal terms:
                   completed run takes, so the final `c gpap-stats ... final=1` line is printed
                   with an EXACT sample count. Without it a harness enforcing a per-instance time
                   budget has to kill the process, and everything sampled since the last
-                  --statsevery line is lost: MEASURED on the 2026-08-23 L4 campaign, all 174
-                  killed CMSGen runs reported a count that was an exact multiple of 1000 (the
-                  cadence), 81 of them 0 — i.e. "CMSGen sampled nothing" really meant "CMSGen
-                  sampled fewer than 1000". The budget is armed per solve() call (CMS resets
-                  conf.maxTime on return) and measures the SAMPLING loop, not parsing.
+                  --statsevery line is lost: a killed run reports a multiple of the cadence, and
+                  "sampled nothing" can mean "sampled fewer than N". The budget is armed per
+                  solve() call (CMS resets conf.maxTime on return) and measures the SAMPLING
+                  loop, not parsing.
 
 Apply with:  git apply /path/to/cmsgen_gpap_eval.patch   (scripts/build_cmsgen.sh does it)
 

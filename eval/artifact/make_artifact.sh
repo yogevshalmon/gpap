@@ -107,8 +107,8 @@ done
 echo "manifest   : the rows match data/MANIFEST.sha256"
 
 # --- the benchmarks the repository does not carry ------------------------------------------------
-# Gitignored because of their size, fetched at run time from a raw GitHub URL that is neither
-# pinned nor guaranteed to exist in three years. Six files, 25 MB, and without them a third of
+# Gitignored because of their size, fetched at run time from a raw GitHub URL that is pinned to
+# a commit but not guaranteed to exist in three years. Six files, 25 MB, and without them a third of
 # the sequential set silently does not run.
 n_extra=0
 for b in b17 b18 b19 b20 b21 b22; do
