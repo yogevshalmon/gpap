@@ -305,6 +305,35 @@ def main():
                          f"— quote {tabled}")
                 warn.append(f"{stem}: {errs}/{len(seen)} rival runs failed "
                             f"(reported, not folded in as zeros){extra}")
+            # A GPAP ZERO IS ONLY A LOSS IF WE LOOKED. The sampler's zero-yield valve ends a run
+            # once a few chunks in a row come back empty, which on a low-success instance can be
+            # seconds into a 60 s budget — so `n_models == 0` means either "the instance defeated
+            # us" or "we stopped looking", and only `stop` tells them apart. Measured on the
+            # published campaign's own zero cells: three of six yielded once the valve was
+            # lifted (docs/findings/RIVAL_FAIRNESS_FINDINGS.md). A zero booked as an outright
+            # loss against a rival that DID sample the cell is the one error here that moves a
+            # published number against us, so it is named rather than counted.
+            early, unknown = [], []
+            for (n_, _v), r in sorted(seen.items()):
+                g = r.get("gpap") or {}
+                if g.get("n_models") or not g:
+                    continue
+                st = g.get("stop")
+                if st == "zero_yield":
+                    early.append(f"{n_} ({(g.get('wall_timed_s') or 0.0):.1f}s)")
+                elif st is None:
+                    unknown.append(n_)
+            if early:
+                warn.append(f"{stem}: {len(early)} GPAP-zero cell(s) ended on the ZERO-YIELD "
+                            f"valve, not on their time budget ({', '.join(early[:6])}"
+                            f"{', …' if len(early) > 6 else ''}) — each is booked as an outright "
+                            f"loss, and the wall beside it is what was actually spent. Re-run "
+                            f"them past the valve before publishing the zero.")
+            if unknown:
+                warn.append(f"{stem}: {len(unknown)} GPAP-zero cell(s) record no `stop` "
+                            f"({', '.join(unknown[:6])}{', …' if len(unknown) > 6 else ''}) — "
+                            f"measured before the field existed, so whether the budget was spent "
+                            f"is NOT in the record. The zero cannot be defended from these rows.")
             # MULTIPLE CIRCUIT VARIANTS ARE EXPECTED (the table scores the one BETTER FOR THE
             # RIVAL per instance); what must be checked is that every instance has the same ones.
             variants = {v for _n, v in seen}

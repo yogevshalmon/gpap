@@ -236,13 +236,20 @@ def sample_clauses(nv, clauses, support, device, *, simplify=True, els=True, n_t
                    lookahead=False, verify_clauses=None, verify_cpu=False, cov_k_cap=2048,
                    verify_sound=False,
                    random_var=True, configs="default", mine="auto",
-                   mine_gate=0.15, min_measure_chunks=3, seed=5, progress=None,
+                   mine_gate=0.15, min_measure_chunks=3, give_up_chunks=0, seed=5, progress=None,
                    _t_start=None, _phases=None, _wire_map=None):
     """The throughput run, timed end-to-end, plus an optional collect run for coverage/soundness.
 
     `n_time` is a contract: the timed run samples until it has delivered that many models; the
-    safety valves (`time_limit` seconds of sampling wall, the sampler's zero-progress stop,
-    `max_chunks`) are reported via `chunk_capped`.
+    safety valves (`time_limit` seconds of sampling wall, `max_chunks`, and the OPT-IN
+    `give_up_chunks`) are reported via `chunk_capped`, and `stop` says which one fired.
+
+    `give_up_chunks=0` (the default) means the run spends the budget it was given. Set it only
+    where abandoning a dry formula early is worth more than the measurement -- it ends a run
+    that has found nothing after every config ran plus that many chunks, which on a
+    low-success instance is seconds into a minute-long budget. It was on by default in the core
+    and that is how a 60 s campaign cell came to report zero after 2 s on instances the budget
+    could sample.
     `configs`: a portfolio run as a throughput bandit (one config per chunk at full K, switching
     to the winner); None runs the single fixed (`random_var`, `b`) config. The winner is reused
     for the coverage run, whose batch is `min(cov_k_cap, cov_batch(nv))` so reconstructing
@@ -397,12 +404,13 @@ def sample_clauses(nv, clauses, support, device, *, simplify=True, els=True, n_t
         t = smp.sample(n_time, configs=configs,
                        max_chunks=max_chunks, collect=False, lookahead=lookahead,
                        min_measure_chunks=mmc, max_seconds=time_limit, out_cap=out_cap,
-                       verify_sound=verify_sound)
+                       give_up_chunks=give_up_chunks, verify_sound=verify_sound)
     else:
         t = smp.sample(n_time, decisions_per_round=b, random_var=random_var,
                        max_chunks=max_chunks, collect=False,
                        lookahead=lookahead, min_measure_chunks=mmc, max_seconds=time_limit,
-                       out_cap=out_cap, verify_sound=verify_sound)
+                       out_cap=out_cap, give_up_chunks=give_up_chunks,
+                       verify_sound=verify_sound)
     if device.type == "cuda":
         torch.cuda.synchronize()
     # The `--out` projection is delivery, not sampling: bill it to phases["output"] and keep it

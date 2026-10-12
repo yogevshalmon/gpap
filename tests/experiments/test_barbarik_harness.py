@@ -77,7 +77,12 @@ def test_barbarik_fill_gives_up_on_dry_attempts_not_dry_calls(monkeypatch):
         def from_clauses(cls, *a, **k):
             return cls()
 
-        def sample_bits(self, n, config=None, max_chunks=400):
+        # The signature MIRRORS the real one, `max_seconds` included: the harness now hands
+        # every order an explicit wall budget instead of relying on the sampler's own
+        # give-up rule, which is off by default. A stub that omits a parameter the caller
+        # passes fails as a TypeError, which is the right outcome -- it is how this test
+        # noticed the budget had been added.
+        def sample_bits(self, n, config=None, max_chunks=400, max_seconds=None):
             rows, empty = [], 0
             while len(rows) < n and empty < 3:
                 if self.rng.random() < Stub.p_dry:
