@@ -319,9 +319,9 @@ SPUR reference). The rules (docs/findings/UNIFORMITY_FINDINGS.md §4b):
   paper campaign does not re-run it.
 - Barbarik's kernel is adversarial for a rejection sampler, so an unfilled order is "no verdict",
   not a Reject. `k_cap` is a batch size, not a distribution knob.
-- Settled: `B ≥ |support|` is exactly uniform (rejection sampling); on the paper campaign's 65
-  eligible instances the shipped `circuit` portfolio is Accepted on 60 with zero rejections and
-  5 no-verdict, pinned `b8` on 63 (CMSGen 65/65); `soft` was rejected on 64 of the 65 circuit
+- Settled: `B ≥ |support|` is exactly uniform (rejection sampling); on the paper's 65 eligible
+  instances (re-run 2026-10-13 with the give-up fix) the shipped `circuit` portfolio, pinned `b8`
+  and CMSGen are each Accepted on all 65, zero rejections, zero no-verdict; `soft` was rejected on 64 of the 65 circuit
   instances it could sample (2026-08-28) and is therefore opt-in (`--allow-soft`), at a large parked throughput price
   (`eval/profiling/profile_soft_portfolio.py`; the user: keep it for now). The `l2_ratio` collision check
   is gross-skew only. 2-wise coverage (`gpap bench --twise`) is a spread metric, not uniformity.
