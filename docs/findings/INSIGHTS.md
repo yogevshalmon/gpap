@@ -382,6 +382,14 @@ headline.
 
 ## Measurement methodology (the traps that actually bit)
 
+**The paper's numbers come from the 2026-10-12 re-run, and a fair clock cost us 13–17% against
+Recurrent (2026-10-13; RIVAL_FAIRNESS_FINDINGS.md §17e).** Deducting Recurrent's in-loop host
+copy raised its rate by a median 8.3% and up to 51% (s208.1), so Table 2 fell 21.5→18.7×,
+173→147×, 9.2→8.0× and 102→84.7×, and four small circuits became losses; turning the early
+give-up off scored six cells that had been both-zero. Everything the fixes did not touch
+reproduced: identical rival unique counts at the pinned rungs, and the grants file re-extracted
+unchanged. Barbarik's no-verdicts were the same give-up: every arm is now 65/65.
+
 **A reproduction on another card can only flatter us, in two directions, and both are now
 counted (2026-09-09; [ARTIFACT_FINDINGS.md](ARTIFACT_FINDINGS.md)).** All 92 pinned
 Recurrent-CircuitSAT rungs sit at the reference L4's memory ceiling, so a card under 24 GB walks

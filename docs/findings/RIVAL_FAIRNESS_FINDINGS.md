@@ -831,3 +831,27 @@ goes 0, then 1.9-2.1e-7 (`b05`), then 1.9e-5, 2.3-6.2e-4 (three hwmcc instances)
 90× and catches nothing else, while the 1e-3 that looks natural would newly screen three hwmcc
 instances nobody has called vacuous. Tightening a screen is a metric change, so it is logged here,
 not taken.
+
+### 17e. The re-run the paper reports: l4_protocol_20261012 (2026-10-12/13, the user's go)
+
+Protocol v1.0 re-run on the fixed tree (tag `paper_campaign_v2_run`, e821180; engine
+`libgpap 0.3.0+318406dfa9dc3199`) after §17c (Recurrent's host copy deducted), §17d (the row
+decides vacuity) and the give-up fix (GPAP's zero-yield early stop off by default, so a budget is
+spent). Two Colab L4 sessions, 9 h, every stage resumed cleanly across ~8 VM reclaims each; record
+in `$GPAP_RESULTS/l4_protocol_20261012/README.md`, rows in `$GPAP_RESULTS/paper/data/`.
+
+**Shortcuts, the user's call (2026-10-12), stated in every row:** every rival rung and Recurrent
+`start_point` pinned from `eval/rivals/grants/l4_protocol_20260904.json`, and the 28 recorded rival
+initialization failures carried over rather than re-measured (`not_remeasured`, named by
+`verify_artifact`). The three calibrations ran on this harness in the campaign's rehearsal and agree
+with the pinned config (steps 1 at T=25 and T=50, lr 15).
+
+**Against 2026-09-04 (what moved and why, cell by cell):** every measured rival unique count is
+identical at its pinned rung, and `extract_grants.py` over the new rows writes the grants file back
+unchanged (142 cells: rungs, walks, start points, failures). DEMOTIC's rate ±1%; GPAP +1–3%; CMSGen
+−4–6% (same CPU model; VM drift). Recurrent's rate rose by its measured copy share — median 8.3%,
+max 51% (s208.1), ×1.14–1.18 per stage in geomean — so Table 2's Recurrent ratios fell 21.5→18.7×
+(table, T=25), 173→147× (rare, T=25), 9.2→8.0× (table, T=50, after §17d) and 102→84.7× (rare,
+T=50); GPAP now loses b10, s208.1, s386 and s832 on Recurrent's own table at T=25 (16/20 wins).
+The 6 verdicts that changed are all old give-up cells now scored (both-zero → CMSGen=0 or
+rival=0: b17, b22, s35932 at T=25; b15, b21 at T=50). Table 1 spans 83.4–1,571× (was 71.7–1,616×).

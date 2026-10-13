@@ -22,8 +22,11 @@ guarantee. The settled results:
 2. `soft` is Barbarik-Rejected on 64 of the 65 circuit instances it can sample (2026-08-28; the
    paper campaign runs no `soft` arm) and has been opt-in (`--allow-soft`) since 2026-07-30
    (§4, §4b).
-3. The shipped `circuit` portfolio is Barbarik-Accepted on 60 of the paper campaign's 65
-   eligible instances, zero Rejects, 5 no-verdict; pinned `b8` 63/65; CMSGen 65/65 (§4b). At
+3. The shipped `circuit` portfolio is Barbarik-Accepted on all 65 of the paper's eligible
+   instances, zero Rejects, zero no-verdict; pinned `b8` and CMSGen 65/65 too (re-run 2026-10-13,
+   `$GPAP_RESULTS/uniformity_20261013`, RTX 4080, e821180). Every earlier no-verdict (`pipe` 5,
+   `b8` 2) was our own early give-up ending an order 1-10 s into its 30 s budget; with it opt-in
+   the same cells fill in 1.5-3.3 s and bias means did not move (0.555-0.558) (§4b). At
    barbarik's own stricter default only pinned configs were run: `b8` and `b1` 6/6, CMSGen 6/6.
    ⚠️ The 64/66 "as shipped" in §4b is the EARLIER campaign, and no arm there ran the portfolio:
    it is the pinned-config verdicts joined to the config the bandit delivers. The paper campaign
@@ -286,8 +289,9 @@ vs 0.0399, 6/8 ok each, the same two instances skewed. `--draw iid` is in the ha
 ### Results — 66 circuit instances, the CMSGen paper's setting
 
 ⚠️ SUPERSEDED for the shipped portfolio by the paper campaign (68 generated, `spur` Rejects 3,
-**65 eligible**; `pipe:circuit` 60/65 Accept + 5 no-verdict, `gpap:b8` 63/65 + 2, `cmsgen` 65/65,
-`spur` 65/65 — `$GPAP_RESULTS/paper/data/barbarik/circ_abc_*.jsonl`, in Table 4b of its
+**65 eligible**; 2026-09-02: `pipe:circuit` 60/65 Accept + 5 no-verdict, `gpap:b8` 63/65 + 2,
+`cmsgen` 65/65; re-run 2026-10-13 after the give-up fix: every arm 65/65 —
+`$GPAP_RESULTS/paper/data/barbarik/circ_abc_*.jsonl`, in Table 4b of its
 `RESULTS.md`; it runs no `soft` arm). This table measures PINNED configs only: its "as shipped"
 64/66 below is their verdicts joined to the config the bandit delivers, not a run of the
 portfolio. Kept as the earlier reading, and as the record of the `soft` positive control.
