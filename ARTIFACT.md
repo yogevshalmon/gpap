@@ -33,7 +33,9 @@ numpy** (gated by
 `tests/experiments/test_paper_tables.py::test_the_table_generators_import_without_torch_or_numpy`), so they
 run under a stock `python3` in the TACAS evaluation VM. Their output is byte-identical to the
 paper's tables apart from a date and commit line in each header. Only the two figures need
-anything extra (`matplotlib`); without it that step says so and the rest still completes.
+anything extra (`matplotlib`); without it that step says so and the rest still completes. With
+matplotlib 3.10.8 (numpy 2.4.4), `plots/sps_scatter_cmsgen.png` is byte-identical to the paper's
+Figure 1; another version draws the same points with different pixels.
 
 | what it writes | what it is |
 |---|---|
