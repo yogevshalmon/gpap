@@ -615,7 +615,7 @@ def fig_vs_cmsgen_rival(plt, path, out_dir):
 
 # The paper's figures are drawn at their print width, the LNCS text width (12.2 cm), so LaTeX
 # places them 1:1 and the point size set here is the one printed. The height is the page budget.
-PRINT_W, PRINT_H = 4.8, 3.5
+PRINT_W, PRINT_H = 4.8, 2.8
 
 
 def _save_print(fig, path):
@@ -684,9 +684,9 @@ def _ratio_guides(ax, lo, hi, dots=(), boxes=()):
 
 
 def _row_label(name, rare, depth):
-    """A legend entry in the paper tables' words, "Sequential, rare, $T$=25"; a combinational
+    """A legend entry in the paper's words, "Sequential, original, $T$=25"; a combinational
     set (T=1, nothing unrolled) carries no depth."""
-    pin = "rare" if rare else "theirs"
+    pin = "rare" if rare else "original"
     return f"{name}, {pin}" + (f", $T$={depth}" if (depth or 1) > 1 else "")
 
 
@@ -764,7 +764,7 @@ def fig_cmsgen_sps_scatter(plt, rival_paths, out_dir):
         groups.append((_row_label(SET_NAME[key], tgt == "rare", depth), SET_COLOR[key],
                        "o" if tgt == "their pins" else "^", depth == 50,
                        [p[4] for p in sub], [p[5] for p in sub]))
-    return _cells_scatter(plt, groups, drop, CMS_NOTE, "CMSGen samples/s", "GpapS samples/s",
+    return _cells_scatter(plt, groups, drop, CMS_NOTE, "CMSGen samples/s", "Gpap-S samples/s",
                           os.path.join(out_dir, "sps_scatter_cmsgen.png"))
 
 
@@ -812,7 +812,7 @@ def fig_rivals_sps_scatter(plt, rival_paths, out_dir):
                        RIVAL_COLOR[rival], "^" if "rare" in proto else "o", depth == 50,
                        [p[2] for p in sub], [p[3] for p in sub]))
     return _cells_scatter(plt, groups, drop, RIVAL_NOTE, "Rival unique solutions/s",
-                          "GpapS unique solutions/s",
+                          "Gpap-S unique solutions/s",
                           os.path.join(out_dir, "sps_scatter_rivals.png"))
 
 
