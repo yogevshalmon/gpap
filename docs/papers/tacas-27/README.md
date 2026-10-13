@@ -169,14 +169,22 @@ under test itself, must Accept. Details and both controls:
 
 ## The campaign these numbers come from
 
-**`$GPAP_RESULTS/l4_protocol_20260904`**, measured 2026-09-04 to 2026-09-06 on a Colab **NVIDIA
-L4** (host CPU Intel Xeon @ 2.20 GHz, recorded per row), engine `libgpap 0.3.0+abf8f5e147090437` —
-the build id every row carries and the generated header re-derives. T=50 was run 2026-09-06/07
-beside T=25; the deeper unroll lifts Recurrent's init-budget failures from 4 to 10.
+**`$GPAP_RESULTS/l4_protocol_20261012`**, measured 2026-10-12/13 on two Colab **NVIDIA L4**
+sessions (host CPU Intel Xeon @ 2.20 GHz, recorded per row), from tag `paper_campaign_v2_run`
+(e821180), engine `libgpap 0.3.0+318406dfa9dc3199`: the build id every row carries. It re-ran
+protocol v1.0 after three fixes: Recurrent's in-loop host copy is deducted from its rate (§17c),
+GPAP's early give-up on zero yield is off, and the vacuous screen reads the row (§17d). Every
+rival rung and Recurrent `start_point` is pinned from `eval/rivals/grants/l4_protocol_20260904.json`,
+and so are the 28 recorded rival initialization failures (marked `not_remeasured`, named by the
+gate). Against 2026-09-04 every measured rival unique count is identical, and re-extracting grants
+from the new rows reproduces the grants file exactly (`RIVAL_FAIRNESS_FINDINGS.md` §17e).
 
-It supersedes `l4_protocol_20260903`, whose numbers rested on four defects that each moved a number
-in our favour (`RIVAL_FAIRNESS_FINDINGS.md` §16, §16b, §16c). That campaign is kept as the record
-of how it was wrong.
+The uniformity rows are a separate run, `$GPAP_RESULTS/uniformity_20261013` (RTX 4080, e821180),
+on the 68 instances of the earlier campaign: every arm 65/65.
+
+It supersedes `l4_protocol_20260904` (kept, with its paper folder as `$GPAP_RESULTS/paper_20260904`),
+which in turn superseded `l4_protocol_20260903`, whose numbers rested on four defects that each
+moved a number in our favour (§16, §16b, §16c).
 
 The working copy is `$GPAP_RESULTS/paper/`: the stage and calibration JSONs plus the Barbarik arm
 under `data/`, sha256-manifested, and the generated outputs beside them. The manifest is what makes
