@@ -144,10 +144,18 @@ below for whatever card and settings you ask about, and `reproduce.sh check` run
 | `full` | 142 | ~12.3 h | every cell, T=25 and T=50 |
 | `full --remeasure-failures` | 142 | ~22.6 h | the same, re-deriving every recorded rival failure |
 
-The `subset` row is the one that has been run end to end (`docs/findings/ARTIFACT_FINDINGS.md`
-§5): every cell agreed with the published campaign — 66/66 against CMSGen, 58/58 of the
-cells whose rival side was measured rather than pinned — and the estimate was within 1% of the wall
-the work itself took.
+What has been run end to end, and against which reference:
+
+- `tables`, from this package, in an offline Ubuntu 24.04 container with only the stock
+  `python3` (no GPU, no numpy, no network): the manifest verified, all 163 published values
+  reproduced, the gate and the audit passed (2026-10-13, against the 2026-10-12 rows).
+- `setup` then `smoke`, from this package, in a fresh virtualenv built from
+  `requirements-artifact.txt` on an RTX 4080 Laptop GPU (12 GB): every tool built from its pinned
+  source, 4/4 cells with the same formula, sound samples and the same verdicts (2026-10-13,
+  against the 2026-10-12 rows; DEMOTIC's two rungs walked down on the smaller card, as stated).
+- `subset` on a rented L4 (`docs/findings/ARTIFACT_FINDINGS.md` §5), against the earlier
+  2026-09-04 rows: 66/66 against CMSGen, 58/58 of the cells whose rival side was measured rather
+  than pinned, and the estimate within 1% of the wall the work itself took.
 
 The estimate is the recorded per-cell walls plus a measured overhead the rows do not carry
 (start-up, the ABC pass and its equivalence check, the soundness replay). It assumes the batch
