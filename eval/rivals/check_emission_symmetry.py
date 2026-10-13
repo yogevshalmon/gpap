@@ -84,7 +84,8 @@ def timed_functions(tree):
 
 
 def scan_rivals(root):
-    ok = True
+    """(ok, skipped): `skipped` names the rivals whose source was not there to read."""
+    ok, skipped = True, []
     for name, rel in RIVALS:
         path = os.path.join(root, name, rel)
         print(f"\n[1] {name}")
@@ -93,6 +94,7 @@ def scan_rivals(root):
             # prints a raw path is the one that fires when a checkout is missing — which is
             # exactly the machine whose layout nobody else should be reading about.
             print(f"    SKIP — no checkout at {display_path(path)}")
+            skipped.append(name)
             continue
         src = open(path).read()
         tree = ast.parse(src)
@@ -138,7 +140,7 @@ def scan_rivals(root):
             ok = False
         else:
             print("    reachable modules (model/, utils/): CLEAN")
-    return ok
+    return ok, skipped
 
 
 def scan_gpap():
@@ -313,7 +315,7 @@ def main():
     # the artifact as artifact-data/paper/emission_audit.txt, and that goes to Zenodo.
     print(f"emission symmetry check | rivals={display_path(root)}"
           + (f" | results={display_path(args.results)}" if args.results else ""))
-    ok = scan_rivals(root)
+    ok, skipped = scan_rivals(root)
     ok &= scan_gpap()
     if args.results:
         ok &= scan_cmsgen(args.results)
@@ -323,6 +325,13 @@ def main():
         carried = 0
     if not ok:
         print("\nFAIL — an unaccounted emission cost is inside a timed region")
+    elif skipped:
+        # A PASS that read no rival source must not say it did: in the artifact's VM there are
+        # no checkouts (they ship no licence), so section 1 cannot run there.
+        print(f"\nPASS on what this machine can check — GPAP's timed region, CMSGen's mode and "
+              f"Recurrent's measured copy (sections 2-4). Section 1 did NOT run: no checkout of "
+              f"{', '.join(skipped)}. The full audit, with their source read, ships as "
+              f"artifact-data/paper/emission_audit.txt")
     elif carried:
         print(f"\nPASS — every tool is timed on generation alone, except {carried} Recurrent "
               f"row(s) recorded before its eval patch (section 4)")
