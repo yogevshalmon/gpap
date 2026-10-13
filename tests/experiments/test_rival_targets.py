@@ -1438,3 +1438,18 @@ def test_the_emission_audit_fails_a_stage_file_on_two_clocks(tmp_path, capsys):
     ok, carried = recurrent_egress(str(tmp_path))
     assert not ok and carried == 1
     assert "FAIL" in capsys.readouterr().out
+
+
+def test_the_emission_audit_says_when_it_read_no_rival_source(tmp_path, monkeypatch, capsys):
+    """The artifact's VM has no rival checkouts (they ship no licence), so section 1 cannot read
+    their timed loops there. The verdict must say so rather than claim every tool was checked."""
+    import sys  # noqa: PLC0415
+
+    from eval.rivals import check_emission_symmetry as ces  # noqa: PLC0415
+
+    monkeypatch.setattr(sys, "argv", ["check_emission_symmetry.py", "--rivals-root", str(tmp_path)])
+    assert ces.main() == 0
+    out = capsys.readouterr().out
+    assert "Section 1 did NOT run" in out and "every tool is timed on generation alone" not in out
+    ok, skipped = ces.scan_rivals(str(tmp_path))
+    assert ok and len(skipped) == len(ces.RIVALS)
