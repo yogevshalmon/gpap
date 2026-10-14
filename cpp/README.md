@@ -1,5 +1,7 @@
 # libgpap — the GPAP engine as a C/C++ library
 
+> **Reader:** C and C++ users of libgpap — the entry points, the two API tiers, and how to build and link against it.
+
 The K-parallel packed BCP engine (`docs/ENGINE.md`) as a shared library with a C ABI, linkable from
 C++ and driven from Python. The kernels are not rewritten: [`kernels/bcp.py`](kernels/bcp.py) stays
 the single source of truth, AOT-compiled into embedded cubins (bit-identical at SASS level to the

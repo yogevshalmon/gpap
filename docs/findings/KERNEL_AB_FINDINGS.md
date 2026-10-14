@@ -1,5 +1,7 @@
 # WAVE vs SCALAR propagate kernel — the L4 A/B (2026-08-23)
 
+> **Reader:** contributors and researchers — the evidence behind the rule that picks the WAVE or the scalar kernel. A dated research log, not a user guide.
+>
 > **Status:** the RULE is current, the NUMBERS are superseded — re-measure before quoting one.
 > The shuffle schedule of 2026-08-27 ([WAVE_SHUFFLE_FINDINGS.md](WAVE_SHUFFLE_FINDINGS.md))
 > moved the crossover down; the bins' ORDER stands, the threshold and the ratios do not.
@@ -13,7 +15,7 @@ kernel as a function of instance size — the number the paper states beside the
 **Answer (NVIDIA L4, Colab, torch 2.11/cu12.8, 2026-08-23)**: WAVE / SCALAR = **1.30× geomean
 over 93 cells** (median 1.36×, WAVE faster on 81/93), rising monotonically with clause count.
 Tables: regenerate with `eval/profiling/kernel_ab_tables.py` over the raw data
-(`$GPAP_RESULTS/l4_campaign_20260823/kernel_ab_l4/kernel_ab.json`). The generated tables were
+(campaign `l4_campaign_20260823`, `kernel_ab_l4/kernel_ab.json`). The generated tables were
 removed from the committed docs on 2026-09-02 rather than left stale.
 
 Concretely, what the shuffle schedule did to this A/B: `_wave_propagate` got 1.80× at the same K

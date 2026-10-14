@@ -1,5 +1,7 @@
 # GPAP brand assets
 
+> **Reader:** maintainers of the project's logo and images — what each asset is, where it is used, and how to regenerate it.
+
 | folder | what it is | where it is used |
 |---|---|---|
 | `icon/` | the baseline mark, master SVG + PNGs (576 = 12× the 48px grid) | docs, badges, PyPI, anywhere inline |

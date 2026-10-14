@@ -1,5 +1,7 @@
 # GPU BCP-completion sampling — findings
 
+> **Reader:** contributors and researchers — a historical record of the first GPU sampling experiments. A dated research log, not a user guide.
+>
 > **Status:** HISTORICAL — the sampler's development log, kept for its rules and its negative
 > results. The engine, the portfolios and every absolute number have moved since, so **no rate or
 > ratio from this file is quotable**. Current numbers: [`docs/papers/tacas-27/`](../papers/tacas-27/README.md) and

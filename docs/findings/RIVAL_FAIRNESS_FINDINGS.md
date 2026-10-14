@@ -1,5 +1,7 @@
 # Rival-comparison fairness: what we were measuring, and what we should have been
 
+> **Reader:** contributors and researchers — how the comparison with other samplers was made fair, and the record of the paper's evaluation protocol. A dated research log, not a user guide.
+>
 > **Status:** settled record. §17 is protocol v1.0, FROZEN 2026-09-06 (`docs/EVAL_RUNBOOK.md` §0
 > is the frozen text); §17b is the presentation revision v1.1 of 2026-09-07. Campaign headlines
 > in §15–§16e are superseded by §17 and §17b.
@@ -316,7 +318,7 @@ choice" (a wording problem; §8 removed the argmax anyway).
 
 ## 15. The campaign under the protocol: Colab L4, 2026-09-03/04 — and what the rows taught
 
-`$GPAP_RESULTS/l4_protocol_20260903`: 80 cells, 0 errors, 0 unsound, `verify_artifact --rivals`
+Campaign `l4_protocol_20260903`: 80 cells, 0 errors, 0 unsound, `verify_artifact --rivals`
 0 failures, emission audit PASS, 6 VM lifetimes, no row lost. Run on the L4 because the laptop's
 4080 sat at a 40 W power cap (~1.1 GHz under load, un-liftable from WSL) — check
 `nvidia-smi -q -d POWER,PERFORMANCE` before any local measurement. Its headlines are superseded
@@ -366,7 +368,7 @@ number-moving ones in our favour. The campaign is superseded.
   `steps_calibration.py --axis lr`).
 - Left standing: soundness 80/80; emission symmetry; absent-is-not-zero; `cms_count_exact`
   80/80; one build id across 6 VM rebuilds; `pin_check_ok` 80/80; no rival run timed out (max
-  wall 259 s). Deferred by the user: the uniformity claim (Barbarik counts only; our exact-oracle
+  wall 259 s). Deferred: the uniformity claim (Barbarik counts only; our exact-oracle
   instrument reads the shipped configuration 1.31x worse than CMSGen on TV).
 
 ### §16b — Second referee pass, on the fixed tree (2026-09-04)
@@ -438,7 +440,7 @@ CM_test verdict is hardware-independent; the missing provenance line was the def
 
 ## 16d. The three converged decisions, and finishing T=25 under them (2026-09-05)
 
-The user closed the open questions ("ONE config ... for all the circuits everywhere for everyone"):
+We closed the open questions:
 1. Recurrent's `start_point` initialization gets 1,200 s per instance (the per-run timeout is
    1,200 s too). It bounds the search; its wall is not added to any published rate (§16e). Under
    it `b14` initializes and delivers 2 unique, `b15`/`b20`/`b21`/`s35932`/`s38584` initialize and
@@ -521,8 +523,7 @@ Table 2's end-to-end ratio was defined four ways in three rounds (0.8x, 7.6x, 20
 1,200 s; the circuit handed to the rivals raw → raw+abc (best for the rival) → abc; the depth
 25 → 25+50 → 25; the step count from our 10 to their script's 1, to the paper-config question, to
 the script with the paper values measured beside it. Each change was defensible alone; together
-they are why the user called a halt ("each time we are going from one point to another, back and
-forth, with no end") and asked for a protocol that does not change.
+they are why we stopped revising and froze a protocol that does not change.
 
 Diagnosis: (1) reviews were allowed to change metric definitions, not only fix errors, and a
 redefinition always has a fairer next version; (2) some quantities have no right answer — an
@@ -535,7 +536,7 @@ Principle: publish only quantities each tool defines for itself, under one state
 hand it; remove the columns that are our invention across tools; every tool at the configuration
 its authors ship, and the batch by one rule.
 
-Decided (the user, 2026-09-06); `docs/EVAL_RUNBOOK.md` §0 is the frozen text:
+Decided 2026-09-06; `docs/EVAL_RUNBOOK.md` §0 is the frozen text:
 1. The headline is the full set (30 sequential circuits; 11 ISCAS-85): "We don't want to present
    a partial result as the headline." The rival paper's 16 were printed beside it until §17b
    dropped that column.
@@ -593,10 +594,10 @@ pointed here, not a re-run.
 | the raw circuit variant, or raw+abc best-for-rival | decided 2026-09-05 (§16d): one variant everywhere; the axis stays implemented, not run |
 | more rival seeds | decided 2026-09-04 (§16b): one run at its own default, the asymmetry stated |
 | HTS | its paper evaluates no circuit (§0 of the runbook) |
-| a TV / exact-oracle uniformity number in the paper tables | uniformity is Barbarik CM_test with both controls, only (the user's rule, 2026-09-01) |
-| widening the free / tiny / vacuous screens | mechanical, per row, applied before the ledger in every table; a threshold moved after seeing the rows is a fitted screen (the THIN floor was removed by the user's presentation revision, §17b — its disclosure kept) |
+| a TV / exact-oracle uniformity number in the paper tables | uniformity is Barbarik CM_test with both controls, only (our rule since 2026-09-01) |
+| widening the free / tiny / vacuous screens | mechanical, per row, applied before the ledger in every table; a threshold moved after seeing the rows is a fitted screen (the THIN floor was removed by the presentation revision, §17b — its disclosure kept) |
 | a taller ladder still, or a per-rung optimum for the rival | the 30M top is above the card's reach on every scored cell and the generator checks it; the grant is a share-of-the-machine rule, not a search for the rival's fastest rung (§16d) |
-| the paper set as the headline | the user's rule: the full set is the headline — and since §17b the ONLY set printed (no paper-set column) |
+| the paper set as the headline | our rule: the full set is the headline — and since §17b the ONLY set printed (no paper-set column) |
 
 What still changes numbers after the freeze, legitimately: the cleanup run's rows (item 3,
 below), the T=50 appendix rows (additive), and a bug in a number — fixed, regenerated and
@@ -622,8 +623,8 @@ regenerated off the merged rows (74 pinned cells, 8 recorded failures). The prot
 from here.
 
 The T=50 appendix, measured (2026-09-06/07, two concurrent Colab L4 sessions): the rival's own
-script depth (`--num_clock_cycles 50`), the identical protocol otherwise, run after the freeze on
-the user's go, printed beside the T=25 rows and replacing none. Both Recurrent stages 30/30
+script depth (`--num_clock_cycles 50`), the identical protocol otherwise, run after the freeze by
+a deliberate decision, printed beside the T=25 rows and replacing none. Both Recurrent stages 30/30
 (`recurrent-{rare,table}-t50`), 20 measured / 10 init-budget failures. Headlines beside T=25: vs
 CMSGen 1,031.7x their pins / 34.5x rare (steady state; 338.6x / 15.9x e2e); vs Recurrent 8.5x
 their table (paper set 7.1x) and 77.8x our rare pins (paper set 439.1x); engine advantage 512x /
@@ -655,17 +656,16 @@ budget or cell set, and each appears only when a run outlasts a ~1 h Colab VM:
    so neither its batch nor its cap moves a number. Per-cell rival work longer than a VM lifetime
    must checkpoint per step, and a warmup must be time-capped, never sized by the input.
 
-### 17b. Presentation revision v1.1 — the tables, not the protocol (2026-09-07, the user's direction)
+### 17b. Presentation revision v1.1 — the tables, not the protocol (2026-09-07)
 
-With T=50 complete the user turned to the tables: "everything we are doing now is only to modify
-a bit and polish how the tables are produced — only how we analyze and present the data, nothing
-about how we ran; that's frozen." Item 5's governance binds a review; this is the owner revising
+With T=50 complete we turned to the tables: only how the data is analysed and presented changed,
+never how it was run, which stays frozen. Item 5's governance binds a review; this is the owner revising
 the presentation, recorded here with every number it moved so nothing can look like a silent
 re-cut. Nothing was re-run: every row is the frozen campaign's (the paper folder's
 `data/MANIFEST.sha256` pins them); only `eval/artifact/paper_tables.py`, `eval/eval_plots.py` and
 their tests changed.
 
-What changed, and why (the user's four points, in order):
+What changed, and why (four points, in order):
 
 1. One `excluded` column instead of seven. Table 1 printed `both=0 | no-search | tiny-space |
    vacuous | unsat | CMSGen<30 | refused`, Table 2 `both=0 | u/s unmeasured | rival<30 |
@@ -709,10 +709,11 @@ are hollow on both scatters. One figure bug: the rival scatter chose its marker 
 `proto.startswith("their")`, so "their ISCAS-85, our rare pin" — our task — was drawn as the
 rival's; the marker is now the task's.
 
-One folder. `../gpap-results/paper/` holds copies of the nine stage/calibration JSONs and the four
-Barbarik JSONL files with a sha256 manifest, `regenerate.sh` (tables, gate, audit, figures, then
-the copy into the repository, since removed), the generated outputs and `plots/`. The campaign directory stays the
-protocol record.
+One folder, the paper's data folder, holds copies of the nine stage/calibration JSONs and the four
+Barbarik JSONL files with a sha256 manifest, a regeneration script (tables, gate, audit, figures;
+it once also copied them into the repository, since removed), the generated outputs and `plots/`.
+It ships with the artifact as `artifact-data/paper/`. The campaign directory stays the protocol
+record.
 
 What moved (before → after; every move is a thin cell entering a geomean, each named in the
 caveats):
@@ -738,17 +739,17 @@ where CMSGen delivered 9 samples in 60 s against GPAP's ~80,000/s — and the ca
 names it; the T=25 and T=50 rare rows likewise carry one thin cell each. The DEMOTIC rare-pin
 782,617x stands on two cells with one and four rival solutions and is printed with the ‡ and a
 caveat that says to report 7/7 and the five rival zeros, not the ratio. The rival papers publish
-exactly such cells (0.1 unique/s rows), which is the user's ground for scoring them; the ratios on
+exactly such cells (0.1 unique/s rows), which is our ground for scoring them; the ratios on
 them are orders of magnitude, and the text must say so where it quotes them.
 
 Governance note. This revision is the owner's, not a reviewer's, and the protocol (what ran, at
 what configuration, on which cells, with which budgets) is untouched. The considered-not-adopted
 rows "widening the free / tiny / vacuous / thin screens" and "the paper set as the headline" are
-amended by it: the thin floor and the paper-set column are gone by the user's direction; the
+amended by it: the thin floor and the paper-set column are gone by this revision; the
 free / tiny / vacuous / unsat screens, and their mechanical, per-row, before-the-ledger
 application, are unchanged. Any further proposal to move a screen goes to that table, as before.
 
-### 17c. Recurrent's host copy is measured and deducted (2026-10-12, the user's decision)
+### 17c. Recurrent's host copy is measured and deducted (2026-10-12)
 
 A reviewer of the paper found its "no tool's clock includes collecting samples" false for
 Recurrent-CircuitSAT: `run_back_prop_seq`, the function its own `timer` wraps, copies every
@@ -757,8 +758,7 @@ deducting it "would raise our ratio". It is the other way round: our ratio is GP
 over `unique / model_runtime`, so the copy lowered their rate and raised ours. The audit also
 sized every row at `--cycles 25`, under-counting the T=50 rows about 4×.
 
-**The change, by the user** ("count out the time for the copy to the host so it will be fair
-across all tools"): `eval/rivals/recurrent_gpap_eval.patch`, applied by `rivals_setup.sh`,
+**The change**, so that no tool's rate includes the time spent copying its samples to the host: `eval/rivals/recurrent_gpap_eval.patch`, applied by `rivals_setup.sh`,
 synchronizes after each depth's gradient steps and times the copy block on its own, exported as
 `egress_runtime` beside their unchanged `model_runtime`. The harness rates
 unique / (`model_runtime` − `egress_runtime`) and records `runtime_s` and `egress_s`. The guards:
@@ -832,15 +832,16 @@ goes 0, then 1.9-2.1e-7 (`b05`), then 1.9e-5, 2.3-6.2e-4 (three hwmcc instances)
 instances nobody has called vacuous. Tightening a screen is a metric change, so it is logged here,
 not taken.
 
-### 17e. The re-run the paper reports: l4_protocol_20261012 (2026-10-12/13, the user's go)
+### 17e. The re-run the paper reports: l4_protocol_20261012 (2026-10-12/13)
 
 Protocol v1.0 re-run on the fixed tree (tag `paper_campaign_v2_run`, e821180; engine
 `libgpap 0.3.0+318406dfa9dc3199`) after §17c (Recurrent's host copy deducted), §17d (the row
 decides vacuity) and the give-up fix (GPAP's zero-yield early stop off by default, so a budget is
-spent). Two Colab L4 sessions, 9 h, every stage resumed cleanly across ~8 VM reclaims each; record
-in `$GPAP_RESULTS/l4_protocol_20261012/README.md`, rows in `$GPAP_RESULTS/paper/data/`.
+spent). Two Colab L4 sessions, 9 h, every stage resumed cleanly across ~8 VM reclaims each; the
+campaign's own README is the record, and its rows ship with the artifact as
+`artifact-data/paper/data/`.
 
-**Shortcuts, the user's call (2026-10-12), stated in every row:** every rival rung and Recurrent
+**Shortcuts, decided 2026-10-12 and stated in every row:** every rival rung and Recurrent
 `start_point` pinned from `eval/rivals/grants/l4_protocol_20260904.json`, and the 28 recorded rival
 initialization failures carried over rather than re-measured (`not_remeasured`, named by
 `verify_artifact`). The three calibrations ran on this harness in the campaign's rehearsal and agree

@@ -1,5 +1,7 @@
 # Running the GPAP engine on non-NVIDIA GPUs
 
+> **Reader:** contributors and researchers — an analysis of what running the engine on non-NVIDIA GPUs would take. A dated research log, not a user guide.
+>
 > **Status:** analysis, not a measurement — estimates except where a line says MEASURED.
 > **Measured:** 2026-07-29, after the libgpap port. Hardware-independent by subject: it is about
 > other vendors' GPUs, and no GPAP rate appears in it. The gfx cross-compile result predates

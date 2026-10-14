@@ -1,5 +1,7 @@
 # Examples
 
+> **Reader:** Python users looking for working code to start from — one example per application.
+
 Runnable programs for both faces of GPAP; they need CUDA and a built `libgpap`
 (`scripts/build_core.sh`; `gpap info` checks).
 

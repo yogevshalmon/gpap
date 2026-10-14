@@ -1,5 +1,7 @@
 # INSIGHTS — settled results index
 
+> **Reader:** contributors and researchers — every settled result in one paragraph, with the file that holds its evidence.
+
 One-paragraph summaries of every settled result in this project. The code that produced a negative
 result may be deleted; the insight lives here. Entries are dated and newest-first within a section.
 Do not re-litigate without new evidence.
@@ -414,7 +416,7 @@ docs/findings/ARTIFACT_FINDINGS.md §9.
 **An absolute path in a generated file is a leak with a long half-life (2026-09-12).** Two
 generators, asked to record their provenance, printed the argument they were handed:
 `slide_tables.py` put `/home/<user>/…` into a committed slide table, where it sat for a month (the
-decks have since moved to `$GPAP_RESULTS/paper/slides/`), and `check_emission_symmetry.py` put one
+decks have since moved out of the repository), and `check_emission_symmetry.py` put one
 into `emission_audit.txt`, which
 `make_artifact.sh` ships as `artifact-data/paper/emission_audit.txt` — permanent once the archive
 has a DOI. A header is provenance for a reader who does not have our disk, so the path belongs in

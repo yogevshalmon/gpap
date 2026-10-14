@@ -1,5 +1,7 @@
 # Cross-GPU scaling — what a bigger GPU actually buys
 
+> **Reader:** contributors and researchers — what a bigger GPU buys, measured on three cards. A dated research log, not a user guide.
+>
 > **Status:** settled.
 > **Measured:** 2026-08-03 on three cards — RTX 4080 Laptop (12 GB, 58 SM, the reference box),
 > Colab L4 (24 GB, 58 SM, sm_89), Colab A100-SXM4 (40 GB, 108 SM, sm_80).

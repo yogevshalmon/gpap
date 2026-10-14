@@ -1,5 +1,7 @@
 # eval/ — the experiment layer
 
+> **Reader:** people running or extending the experiments behind the paper — what each part of the evaluation layer does.
+
 Everything here produces *numbers*, not library behaviour. Nothing in `gpap/` imports from here,
 so it may depend on third-party tools and result files outside the repo.
 

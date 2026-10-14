@@ -1,9 +1,10 @@
 # Running the evaluation on a Colab L4 — results, and what the platform does to you
 
+> **Reader:** contributors and researchers — a historical record of running the evaluation on a Colab L4. A dated research log, not a user guide.
+>
 > **Status:** SUPERSEDED as a campaign — it predates protocol v1.0
-> ([../EVAL_RUNBOOK.md](../EVAL_RUNBOOK.md) §0, frozen 2026-09-06). The current campaign is
-> `$GPAP_RESULTS/l4_protocol_20260904`, paper folder `../gpap-results/paper/`
-> ([../papers/tacas-27/README.md](../papers/tacas-27/README.md)). **Quote no number from this file.**
+> ([../EVAL_RUNBOOK.md](../EVAL_RUNBOOK.md) §0, frozen 2026-09-06). The paper's campaign is described in
+> [../papers/tacas-27/README.md](../papers/tacas-27/README.md). **Quote no number from this file.**
 > **Measured:** 2026-08-03/04, Colab NVIDIA L4 (24 GB, 58 SM, sm_89).
 > **Rule lives in:** the screens and the zero ledger are `eval/artifact/paper_tables.py`
 > (`zero_search`, `tiny_space`, `VACUOUS_PINS`), gated by `tests/experiments/test_paper_tables.py`.

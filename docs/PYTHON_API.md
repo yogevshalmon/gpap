@@ -1,5 +1,7 @@
 # The GPAP Python API — a map
 
+> **Reader:** Python users choosing where to enter the API — the tiers, the conventions every public surface follows, and the engine's contract.
+
 What the tiers are, which one to use, and the conventions that hold everywhere. The reference
 documentation is the docstrings (every public module, class and method carries one); this page
 says where to look. C++ consumers get the same map in [`cpp/README.md`](../cpp/README.md) — the

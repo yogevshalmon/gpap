@@ -1,5 +1,7 @@
 # WAVE shuffle-gather schedule — the O(W²) one-hot lane→segment machinery replaced by warp shuffles
 
+> **Reader:** contributors and researchers — the evidence behind the WAVE kernel's lane schedule. A dated research log, not a user guide.
+>
 > **Status:** settled — shipped 2026-08-27.
 > **Measured:** 2026-08-27, RTX 4080 Laptop (12 GB, WSL2), on top of the binary-occ segregation.
 > **Rule lives in:** `cpp/kernels/bcp.py` (the shuffle schedule), `WAVE_W = 32` in

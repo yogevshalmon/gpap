@@ -1,5 +1,7 @@
 # GPU Equivalent-Literal Substitution (ELS) + complete vivification — findings
 
+> **Reader:** contributors and researchers — a historical record of GPU equivalent-literal substitution and vivification. A dated research log, not a user guide.
+>
 > **Status:** HISTORICAL — a RETIRED direction. GPU inprocessing for a CDCL solver was measured
 > out on both legs: discovery is 7–15× slower than CaDiCaL's incremental probe, and the reduction
 > helps CaDiCaL but not kissat.
