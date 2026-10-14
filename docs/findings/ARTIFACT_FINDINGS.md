@@ -1,8 +1,9 @@
 # Artifact-evaluation findings
 
 > **Status:** settled.
-> **Measured:** 2026-09-09/10 against the frozen campaign `l4_protocol_20260904` — NVIDIA L4
-> (24 GB, Colab) for the reference rows, RTX 4080 Laptop (12 GB) for the smoke tier.
+> **Measured:** 2026-09-09/10 against the frozen campaign `l4_protocol_20260904`, and again
+> 2026-10-13/14 against its re-run `l4_protocol_20261012`, the rows the paper prints (§5b) —
+> NVIDIA L4 (24 GB, Colab) for the reference rows, RTX 4080 Laptop (12 GB) for the smoke tier.
 > **Rule lives in:** `GPAP_VRAM_BUDGET_MIB`, clamped once inside `gpap_mem_available`
 > (`cpp/src/calibrate.cpp`); `eval/artifact/reproduce.sh --vram-cap`;
 > `eval/artifact/compare_campaign.py`; `eval/artifact/subset.json`.
@@ -189,6 +190,34 @@ hourly reclaims, so the pure work is if anything slightly under the estimate.
 An earlier reading of this run put the estimate at 2.44 h and called the 2 h 50 a +17% overrun
 attributable to the VM. That was the cost model's own gap, not the VM's: zero-model cells were
 being priced at zero (§3), and the reviewer tier contains two of them.
+
+## 5b. The tiers again, from the submitted package (2026-10-13/14)
+
+The paper's rows moved to the re-run `l4_protocol_20261012` (RIVAL_FAIRNESS_FINDINGS.md §17e),
+so every tier was run again from the package that goes to Zenodo
+(`gpap-artifact-20261013-d1e274d`), against the rows it bundles:
+
+* **`tables`**, offline Ubuntu 24.04 container, stock `python3` only: manifest verified, 163/163
+  published values, gate 27 ok / 8 warnings / 0 failures, Figure 1 byte-identical to the paper's.
+* **`setup` + `smoke`**, RTX 4080 Laptop, fresh virtualenv from `requirements-artifact.txt`:
+  every tool built from its pinned source; 4/4 cells, same formulas, sound, same verdicts.
+* **`subset`**, Colab L4: the package repacked unmodified (each VM checked all 363 files against
+  its `MANIFEST.sha256` before starting), about 2 h 50 min of running across three VMs, two reclaims
+  resumed. `compare_campaign.py --expect-cells 66`: PASS, 66/66 against CMSGen and 58/58 against
+  the rival (8 pinned failures not scored), every grant honoured. The third VM was reclaimed
+  after the last cell and before it wrote its reports; they were generated from the mirrored
+  rows with the same code instead of paying for a fourth.
+
+Against the published rows restricted to the same 66 cells, **every count in Tables 1-3 is
+identical** (`n`, wins, zeros, failures, exclusions) and every ratio is within 0-5.5%, all of
+them slightly lower: GPAP ran ×0.95-0.98 of the reference, CMSGen and both rivals ×0.99-1.01.
+
+| row | Table 1 (ss) fresh / reference | Table 2 fresh / reference |
+|---|---|---|
+| demotic native | 1,263.8x / 1,335.2x | 2.15x / 2.25x |
+| demotic comb rare | 232.4x / 240.0x | 7.6e5x / 8.0e5x |
+| recurrent table, T=25 | 543.6x / 562.0x | 8.13x / 8.39x |
+| recurrent rare, T=25 | 42.7x / 43.4x | 147.7x / 149.2x |
 
 ## 6. A cross-card reproduction, demonstrated
 

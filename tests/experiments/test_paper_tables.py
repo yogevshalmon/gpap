@@ -1556,6 +1556,32 @@ def test_a_published_number_is_checked_at_its_own_precision():
     assert not agrees("2.31e6", None)[0], "a number the generator does not produce is a failure"
 
 
+def test_a_printed_range_bounds_every_row_it_covers():
+    """"Stays between 512x and 565x" is a claim about EVERY row it covers, not about the two rows
+    that happened to be the extremes when it was written: a middle row drifting outside the range
+    makes the sentence false while both endpoints still match. So a range is checked as the
+    minimum and maximum over all its rows, each at its printed precision."""
+    from eval.artifact.check_paper_numbers import check
+
+    seq = "ITC'99 + ISCAS-89 (Recurrent's set)"
+    gen = {"table3": [{"set": seq, "target": t, "depth": d, "impl_ratio": v}
+                      for t, d, v in (("their pins", "T=25", 534.2), ("rare", "T=25", 535.0),
+                                      ("their pins", "T=50", 512.3), ("rare", "T=50", 564.8))]
+           + [{"set": "ISCAS-85 (DEMOTIC's set)", "target": "rare", "depth": "T=1",
+               "impl_ratio": 328.0}]}
+    pub = {"ranges": [{"claim": "between 512x and 565x", "table": "table3",
+                       "field": "impl_ratio", "rows": {"set": seq}, "min": "512", "max": "565"}]}
+    assert list(check(pub, gen)) == [], "ISCAS-85's 328 is outside the filter, not a violation"
+
+    gen["table3"][0]["impl_ratio"] = 600.0          # a MIDDLE row leaves the range
+    bad = list(check(pub, gen))
+    assert len(bad) == 1 and bad[0][1] == "impl_ratio max", bad
+
+    pub["ranges"][0]["rows"] = {"set": "no such set"}
+    assert any("no generated row" in d for _, _, d in check(pub, gen)), \
+        "a range that covers nothing is a failure, not a vacuous pass"
+
+
 def test_a_narrower_end_to_end_cell_set_is_disclosed_not_assumed(tmp_path):
     """A row prints ONE `n` and TWO rate columns. They cover the same cells only while every
     scored row carries both clocks: a row with no `sps_e2e` narrows the end-to-end geomean while

@@ -613,8 +613,9 @@ def fig_vs_cmsgen_rival(plt, path, out_dir):
         path=os.path.join(out_dir, f"vs_cmsgen_{short}.png"))
 
 
-# The paper's figures are drawn at their print width, the LNCS text width (12.2 cm), so LaTeX
-# places them 1:1 and the point size set here is the one printed. The height is the page budget.
+# The paper's figures are drawn at the LNCS text width (12.2 cm), so the point sizes set here are
+# the printed ones scaled only by the paper's own \includegraphics width (Figure 1 is placed at
+# 0.8 of it). The height is the page budget.
 PRINT_W, PRINT_H = 4.8, 2.8
 
 

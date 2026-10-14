@@ -323,20 +323,22 @@ def main():
         ok &= rec_ok
     else:
         carried = 0
+    # The verdict line is all `reproduce.sh` shows, so it names exactly the sections that ran and
+    # always carries the pre-patch caveat: that one flatters GPAP.
+    caveat = (f", except {carried} Recurrent row(s) recorded before its eval patch, whose rate "
+              f"carries the copy (section 4)" if carried else "")
     if not ok:
         print("\nFAIL — an unaccounted emission cost is inside a timed region")
     elif skipped:
         # A PASS that read no rival source must not say it did: in the artifact's VM there are
         # no checkouts (they ship no licence), so section 1 cannot run there.
-        print(f"\nPASS on what this machine can check — GPAP's timed region, CMSGen's mode and "
-              f"Recurrent's measured copy (sections 2-4). Section 1 did NOT run: no checkout of "
-              f"{', '.join(skipped)}. The full audit, with their source read, ships as "
-              f"artifact-data/paper/emission_audit.txt")
-    elif carried:
-        print(f"\nPASS — every tool is timed on generation alone, except {carried} Recurrent "
-              f"row(s) recorded before its eval patch (section 4)")
+        ran = ("GPAP's timed region, CMSGen's mode and Recurrent's copy (sections 2-4)"
+               if args.results else "GPAP's timed region (section 2)")
+        print(f"\nPASS on what this machine can check — {ran}{caveat}. Section 1 did NOT run: "
+              f"no checkout of {', '.join(skipped)}. The full audit, with their source read, "
+              f"ships as artifact-data/paper/emission_audit.txt")
     else:
-        print("\nPASS — every tool is timed on generation alone")
+        print(f"\nPASS — every tool is timed on generation alone{caveat}")
     return 0 if ok else 1
 
 
