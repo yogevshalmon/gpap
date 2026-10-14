@@ -5,9 +5,9 @@
 
 Per rival row (calibration files skipped) the grant is the batch rung it was granted — the
 largest ladder rung it completed — plus Recurrent-CircuitSAT's settled `start_point`, read off
-the row. A FAILED row is recorded without a batch. The campaign driver re-measures such a cell
-rather than copying it (RIVAL_FAIRNESS_FINDINGS.md §17); only the artifact's reproduction may
-pin it, opt-in via `--honour-recorded-failures`, and then says so in the row."""
+the row. A FAILED row is recorded without a batch. The campaign driver re-measures such a cell by
+default (RIVAL_FAIRNESS_FINDINGS.md §17); a run may pin it instead, opt-in via
+`--honour-recorded-failures`, and then every row that took it says so (§17e)."""
 import argparse
 import glob
 import json
@@ -41,8 +41,8 @@ def extract(campaign_dir):
                    "down from the top and rejected only on feasibility; start_point = where "
                    "Recurrent's initialization settled. Read off the campaign rows, never "
                    "recomputed. An entry without a batch is a recorded rival failure: the "
-                   "campaign driver re-measures it, and only the artifact's reproduction may "
-                   "pin it (--honour-recorded-failures), marking every row it does that to.",
+                   "campaign driver re-measures it by default; a run may pin it instead "
+                   "(--honour-recorded-failures), marking every row it does that to.",
            "ladder": list(BATCH_LADDER), "gpu": None, "demotic": {}, "recurrent": {}}
     gpus = set()
     for path in sorted(glob.glob(os.path.join(campaign_dir, "rivals_*.json"))):

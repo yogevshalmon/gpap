@@ -1451,5 +1451,30 @@ def test_the_emission_audit_says_when_it_read_no_rival_source(tmp_path, monkeypa
     assert ces.main() == 0
     out = capsys.readouterr().out
     assert "Section 1 did NOT run" in out and "every tool is timed on generation alone" not in out
+    assert "section 2" in out and "sections 3-4" not in out, \
+        "without --results only section 2 ran; the verdict must not claim 3 and 4"
     ok, skipped = ces.scan_rivals(str(tmp_path))
     assert ok and len(skipped) == len(ces.RIVALS)
+
+
+def test_the_emission_audit_keeps_the_pre_patch_caveat_when_sources_are_missing(
+        tmp_path, monkeypatch, capsys):
+    """Rows recorded before Recurrent's eval patch carry its host copy, which flatters GPAP. The
+    verdict line is what `reproduce.sh` shows, so that caveat must survive a machine with no rival
+    checkouts too, not only the full audit."""
+    import json  # noqa: PLC0415
+    import sys  # noqa: PLC0415
+
+    from eval.rivals import check_emission_symmetry as ces  # noqa: PLC0415
+
+    res = tmp_path / "results"
+    res.mkdir()
+    row = {"name": "no_such_bench", "cycles": 25,
+           "rcs": {"runtime_s": 20.0, "start_point": 1, "batch": 1000}}
+    (res / "rivals_recurrent_table.json").write_text(json.dumps([row]))
+    monkeypatch.setattr(sys, "argv", ["check_emission_symmetry.py", "--rivals-root",
+                                      str(tmp_path / "none"), "--results", str(res)])
+    assert ces.main() == 0
+    verdict = capsys.readouterr().out.strip().splitlines()[-1]
+    assert "Section 1 did NOT run" in verdict
+    assert "1 Recurrent row(s) recorded before its eval patch" in verdict

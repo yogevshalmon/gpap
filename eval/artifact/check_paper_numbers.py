@@ -112,6 +112,23 @@ def check(pub, gen):
                 ok, detail = agrees(want, got.get(field))
                 if not ok:
                     yield where, field, detail
+    # A printed RANGE ("stays between 512x and 565x") is a claim about every row it covers, so it
+    # is checked as the min and max over all of them: two endpoint entries would pass while a
+    # middle row drifted out of the range and made the sentence false.
+    for rng in pub.get("ranges") or []:
+        table, field = rng["table"], rng["field"]
+        where = f"{table} [{rng.get('claim') or field}]"
+        vals = [r.get(field) for r in gen.get(table) or []
+                if all(r.get(k) == v for k, v in rng["rows"].items())]
+        vals = [v for v in vals if isinstance(v, (int, float))]
+        if not vals:
+            yield where, field, "no generated row matches " + ", ".join(
+                f"{k}={v!r}" for k, v in rng["rows"].items())
+            continue
+        for end, got in (("min", min(vals)), ("max", max(vals))):
+            ok, detail = agrees(rng[end], got)
+            if not ok:
+                yield where, f"{field} {end}", f"{detail} (over {len(vals)} rows)"
     for block in ("text", "uniformity"):
         want_b, got_b = pub.get(block) or {}, gen.get(block) or {}
         for field, want in want_b.items():
@@ -169,6 +186,7 @@ def main():
     checked += sum(len(v) if k == "arms" else 1
                    for k, v in (pub.get("uniformity") or {}).items()
                    if not k.startswith("_") and k != "params")
+    checked += 2 * len(pub.get("ranges") or [])          # a range is two claims: its ends
     if not bad:
         print(f"{checked} published values, all reproduced by the generator.")
         print("\nThe paper's tables and the campaign agree.")

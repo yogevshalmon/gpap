@@ -34,8 +34,9 @@ numpy** (gated by
 run under a stock `python3` in the TACAS evaluation VM. Their output is byte-identical to the
 paper's tables apart from a date and commit line in each header. Only the two figures need
 anything extra (`matplotlib`); without it that step says so and the rest still completes. With
-matplotlib 3.10.8 (numpy 2.4.4), `plots/sps_scatter_cmsgen.png` is byte-identical to the paper's
-Figure 1; another version draws the same points with different pixels.
+matplotlib 3.10.8 (numpy 2.4.4), `plots/sps_scatter_cmsgen.pdf` (the file the paper includes as
+Figure 1) and its `.png` are byte-identical to the paper's; another version draws the same points
+with different pixels.
 
 | what it writes | what it is |
 |---|---|
@@ -153,9 +154,11 @@ What has been run end to end, and against which reference:
   `requirements-artifact.txt` on an RTX 4080 Laptop GPU (12 GB): every tool built from its pinned
   source, 4/4 cells with the same formula, sound samples and the same verdicts (2026-10-13,
   against the 2026-10-12 rows; DEMOTIC's two rungs walked down on the smaller card, as stated).
-- `subset` on a rented L4 (`docs/findings/ARTIFACT_FINDINGS.md` §5), against the earlier
-  2026-09-04 rows: 66/66 against CMSGen, 58/58 of the cells whose rival side was measured rather
-  than pinned, and the estimate within 1% of the wall the work itself took.
+- `subset`, from this package, on a rented L4 (`docs/findings/ARTIFACT_FINDINGS.md` §5b):
+  66/66 against CMSGen and 58/58 of the cells whose rival side was measured rather than pinned
+  reach the same verdict; every count in Tables 1-3 equals the published rows restricted to the
+  same cells, and every ratio is within 5.5% (2026-10-14, against the 2026-10-12 rows). The same
+  tier against the earlier 2026-09-04 rows is §5.
 
 The estimate is the recorded per-cell walls plus a measured overhead the rows do not carry
 (start-up, the ABC pass and its equivalence check, the soundness replay). It assumes the batch

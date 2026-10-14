@@ -215,9 +215,10 @@ stage_rivals() {
     [ "$grants" != "none" ] && [ -f "$grants" ] && GRANT_ARGS=(--grants "$grants")
     # RIVAL_HONOUR_FAILURES=1 accepts a cell the grants file records as a rival FAILURE instead
     # of re-deriving it, which costs the full init budget each (9.3 h of a 19 h campaign). OFF
-    # here: this driver runs the frozen protocol, where a failure is measured on the card in
-    # front of it. The artifact's reproduce.sh turns it on and says so in every row
-    # (`not_remeasured`) — see ARTIFACT.md.
+    # by default: the frozen protocol measures a failure on the card in front of it. Turning it
+    # on is a stated choice, never a silent one: every row that took it says `not_remeasured`
+    # and verify_artifact names them. The artifact's reproduce.sh turns it on (ARTIFACT.md), and
+    # so did the paper's own re-run (RIVAL_FAIRNESS_FINDINGS.md §17e).
     [ "${RIVAL_HONOUR_FAILURES:-0}" = "1" ] && [ ${#GRANT_ARGS[@]} -gt 0 ] \
         && GRANT_ARGS+=(--honour-recorded-failures)
     # The CMSGen arm rides on every rival row: the patched binary on the very CNF the GPAP arm

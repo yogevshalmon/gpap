@@ -427,9 +427,10 @@ BATCH_LADDER = (1_000, 3_000, 10_000, 30_000, 100_000, 300_000, 1_000_000, 3_000
 # THE GRANT IS PART OF THE RECORD (protocol v1.0). A campaign's rows say which rung each rival
 # was granted and which `start_point` Recurrent settled on; `eval/rivals/extract_grants.py`
 # writes them per campaign and `--grants FILE` PINS them — no walk, no probe, one run at the
-# recorded rung. A cell recorded as a rival FAILURE is re-measured by default; the artifact's
-# reproduction may pin it instead, opt-in per harness (`--honour-recorded-failures`,
-# `lookup_recorded_failure`), and every row that took that shortcut says so.
+# recorded rung. A cell recorded as a rival FAILURE is re-measured by default; a run may pin it
+# instead, opt-in per harness (`--honour-recorded-failures`, `lookup_recorded_failure`), and
+# every row that took that shortcut says so. The artifact's reproduction does; so did the
+# paper's own re-run (RIVAL_FAIRNESS_FINDINGS.md §17e).
 
 def grant_key(name, mode, cycles, variant="abc"):
     """One cell: circuit | task | unroll depth | circuit variant."""

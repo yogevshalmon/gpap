@@ -1,7 +1,7 @@
 {
   "paper": "SAT Sampling at Scale via GPU-based Boolean Constraint Propagation",
   "venue": "TACAS 2027, regular tool paper",
-  "pdf": "overleaf/gpap-tacas-27/main.pdf, built 2026-10-13 (overleaf commit 7370b6e)",
+  "pdf": "the submitted PDF, built 2026-10-13 from the paper source at commit 7d0f5f7",
   "campaign": "l4_protocol_20261012 (protocol v1.0 re-run: Recurrent's host copy deducted, early give-up off, per-row vacuous screen; grants and recorded rival failures pinned from l4_protocol_20260904) + uniformity_20261013 (Barbarik)",
   "_why": [
     "Every number the submitted PDF prints, transcribed BY HAND from the .tex, so that",
@@ -115,16 +115,19 @@
                 "work_ratio": "6.41"}},
     {"row": {"set": "ITC'99 + ISCAS-89 (Recurrent's set)", "target": "their pins", "depth": "T=50"},
      "paper": "Sequential / orig / 50",
-     "_impl_ratio": "the low end of the prose's sequential 'between 512x and 565x'",
      "values": {"n": 15, "cms_impl_per_s": "4.29e6", "gpap_impl_per_s": "2.20e9",
                 "cms_impl_per_sample": "22177", "gpap_impl_per_sample": "7233",
-                "work_ratio": "0.33", "impl_ratio": "512"}},
+                "work_ratio": "0.33"}},
     {"row": {"set": "ITC'99 + ISCAS-89 (Recurrent's set)", "target": "rare", "depth": "T=50"},
      "paper": "Sequential / rare / 50",
-     "_impl_ratio": "the high end of the prose's sequential 'between 512x and 565x'",
      "values": {"n": 16, "cms_impl_per_s": "4.01e6", "gpap_impl_per_s": "2.27e9",
                 "cms_impl_per_sample": "10869", "gpap_impl_per_sample": "71607",
-                "work_ratio": "6.59", "impl_ratio": "565"}}
+                "work_ratio": "6.59"}}
+  ],
+  "ranges": [
+    {"claim": "the sequential rate ratio 'stays between 512x and 565x' (evaluation, the propagation-rate paragraph)",
+     "table": "table3", "field": "impl_ratio",
+     "rows": {"set": "ITC'99 + ISCAS-89 (Recurrent's set)"}, "min": "512", "max": "565"}
   ],
   "text": {
     "sample_request": 50000,

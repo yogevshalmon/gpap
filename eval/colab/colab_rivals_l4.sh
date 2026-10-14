@@ -56,9 +56,15 @@ GRANT_ARGS=()
 [ -n "${GRANTS:-}" ] && GRANT_ARGS=(--grants "$GRANTS")
 # HONOUR_FAILURES=1 also pins each cell the grants file records as a rival FAILURE instead of
 # re-deriving it at the full init budget; every such row says `not_remeasured`. Off by default,
-# as RIVAL_HONOUR_FAILURES is in run_full_eval.sh.
-[ "${HONOUR_FAILURES:-0}" = "1" ] && [ ${#GRANT_ARGS[@]} -gt 0 ] \
-    && GRANT_ARGS+=(--honour-recorded-failures)
+# as RIVAL_HONOUR_FAILURES is in run_full_eval.sh; the paper's re-run turned it on
+# (RIVAL_FAIRNESS_FINDINGS.md §17e). It needs GRANTS: there is nothing to pin without one.
+if [ "${HONOUR_FAILURES:-0}" = "1" ]; then
+    if [ ${#GRANT_ARGS[@]} -gt 0 ]; then
+        GRANT_ARGS+=(--honour-recorded-failures)
+    else
+        echo "[warn] HONOUR_FAILURES=1 without GRANTS does nothing: every failure is re-measured" >&2
+    fi
+fi
 # RETRY_ERRORS=1 re-runs errored rows; off by default, because a rival timeout costs the full
 # budget to rediscover on every restart.
 RETRY_ARGS=()
