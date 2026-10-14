@@ -19,8 +19,9 @@ launch**. A foundation for SAT on the GPU, and a library to build on.
 [![C++17](https://img.shields.io/badge/C%2B%2B-17-8E5EFA?labelColor=2C125A)](cpp/)
 [![runtime: libcuda only](https://img.shields.io/badge/runtime-libcuda%20only-E4C470?labelColor=2C125A)](#install)
 
-[**Docs**](docs/) · [**Engine internals**](docs/ENGINE.md) · [**Python API**](docs/PYTHON_API.md) ·
-[**C++ API**](cpp/README.md) · [**Examples**](examples/)
+[**Docs**](docs/) · [**Sampling guide**](docs/SAMPLING.md) · [**Engine internals**](docs/ENGINE.md) ·
+[**Python API**](docs/PYTHON_API.md) · [**C++ API**](cpp/README.md) · [**Examples**](examples/) ·
+[**Contributing**](CONTRIBUTING.md)
 
 </div>
 
@@ -193,7 +194,8 @@ combinational circuits.
 </div>
 
 The library makes no uniformity claim. Testing one needs the whole solution set or conditional
-sampling, so it lives in the evaluation layer ([below](#evaluation)).
+sampling, so it lives in the evaluation layer ([below](#evaluation)). Every option, its default and
+how to read a run's statistics: [`docs/SAMPLING.md`](docs/SAMPLING.md).
 
 <details>
 <summary><b>Circuits: inputs, unrolling and targets</b></summary>
@@ -273,8 +275,10 @@ it is correct. The measurement that settled a design decision lives in
 ```bash
 pytest                             # the engine, the applications and repo checks (GPU tests skip off-CUDA)
 pytest -m "not gpu and not slow"   # portable smoke suite, no GPU needed
-pytest tests/experiments                  # the experiment layer's tests, not part of the default run
+pytest tests/experiments           # the experiment layer's tests, not part of the default run
 ```
+
+Building from source, the conventions and how to propose a change: [`CONTRIBUTING.md`](CONTRIBUTING.md).
 
 ## Evaluation
 
@@ -289,7 +293,8 @@ The experiments for the paper live outside the library:
 
 ## Citation and license
 
-[`CITATION.cff`](CITATION.cff). MIT — see [`LICENSE`](LICENSE).
+[`CITATION.cff`](CITATION.cff). GPAP is MIT — see [`LICENSE`](LICENSE). Benchmark files and quoted
+upstream code keep their own licences: see [`THIRD_PARTY.md`](THIRD_PARTY.md).
 
 <div align="center">
 <br>
