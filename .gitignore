@@ -121,3 +121,8 @@ benchmarks/circuits/bench/seq/b19.bench
 benchmarks/circuits/bench/seq/b20.bench
 benchmarks/circuits/bench/seq/b21.bench
 benchmarks/circuits/bench/seq/b22.bench
+
+# A coding agent's local state: per-user settings and its scratch worktrees. A shared
+# .claude/settings.json, if one is ever added, stays trackable.
+.claude/settings.local.json
+.claude/worktrees/

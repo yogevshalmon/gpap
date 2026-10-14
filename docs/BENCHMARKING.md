@@ -1,5 +1,7 @@
 # Benchmarking GPAP — the measurement protocol
 
+> **Reader:** anyone measuring GPAP or comparing it with another sampler — the rules that keep a number honest on this class of hardware.
+
 Every rule below was once a wrong number in this project. The measurements that established
 them are in [`findings/INSIGHTS.md`](findings/INSIGHTS.md) ("Measurement methodology") and in
 the findings files each section links.
@@ -131,22 +133,25 @@ K is hygiene, not a lever — 4× the batch bought +2.8%.
 
 ## 8. Which number to quote
 
-The reporting rules are enforced once, in `eval/artifact/paper_tables.py`, and every other table
-generator imports them ([`papers/tacas-27/README.md`](papers/tacas-27/README.md)).
+These rules apply to any comparison. The paper's evaluation enforces them in one place,
+`eval/artifact/paper_tables.py`, which every table and figure imports
+([`papers/tacas-27/README.md`](papers/tacas-27/README.md)).
 
 - **Steady-state vs end-to-end.** `samples_per_s` excludes parse, construction, ELS, warmup and
   mining (a median 21% of GPAP's wall); CMSGen's rate carries its setup. Print both; quote the
   `e2e` column for a delivered-samples claim.
-- **Against the GPU rivals, one clock — theirs.** Table 2 is unique solutions per second of the
-  rival's own `model_runtime` (Recurrent's less the host copy inside it, which no other clock
-  carries) against GPAP's steady-state unique/s, and has no end-to-end column
-  by rule (protocol v1.0, [`EVAL_RUNBOOK.md`](EVAL_RUNBOOK.md) §0). The headline is the full
-  circuit set.
+- **Against another GPU sampler, one clock — its own.** Compare unique solutions per second on
+  the rival's own timer, less anything inside it that is not sampling (such as copying samples to
+  the host), against GPAP's steady-state unique/s. Report the rival's whole published benchmark
+  set, not a subset. The paper's protocol applies this rule ([`EVAL_RUNBOOK.md`](EVAL_RUNBOOK.md)
+  §0).
 - **Rare targets.** At random output pins CPU rejection sampling beats every CNF sampler, so a
   win there is not a sampling result. Quote `--target rare` and report `p_acc` / `amp` beside it.
-- **Screen degenerate cells first, then bucket**: vacuous pins (constant outputs — `b02`, `b05`,
-  `b07`, `s526` at T=25) and zero-search cells (models emitted with zero decisions and zero
-  implications).
+- **Screen degenerate cells first, then bucket**: vacuous pins (the pinned outputs are constant,
+  so every input sequence hits them) and zero-search cells (models emitted with zero decisions and
+  zero implications). Vacuity belongs to an instance at a depth and a pin, so measure it per
+  row (the rejection baseline's acceptance rate); a list of instance names is only a fallback
+  for rows recorded without that measurement.
 - **The zero ledger is symmetric**: `CMSGen=0`, `GPAP=0` and `both=0` are columns that sum, with
   the geomean's instances, to the instance count. A geomean over fewer than three instances is
   flagged, not quoted.
@@ -165,3 +170,24 @@ generator imports them ([`papers/tacas-27/README.md`](papers/tacas-27/README.md)
 sit in one file; the version tells a reader which columns a row could possibly have. A field
 that changes meaning is a version bump, never a silent rename. Schema 4 dropped the `uniformity`
 column: the readout moved out of the library into `eval/uniformity/`.
+
+## 10. Running the suite: `gpap bench`
+
+`gpap bench 'path/*.cnf'` samples every instance the glob matches and writes one JSON row per
+instance to `--output` (the schema is §9). Circuits are unrolled the way `gpap sample` does it
+(`--cycles`, `--target`, `--pin-outputs`; [SAMPLING.md](SAMPLING.md)).
+
+- `--cmsgen BIN` adds a CMSGen arm on the very CNF GPAP sampled, with the same request and
+  budget. Build the binary with `scripts/build_cmsgen.sh`, whose patch lets it be timed without
+  writing samples (§4b).
+- `--encoders tseitin abc:fast` runs each circuit through each encoder in one process: one row
+  per (instance, encoder), and never the better of the two (§8).
+- `--time-limit` is also the CMSGen arm's timeout, so `0` (no limit) is refused here.
+- A failing instance becomes an `error` or `skipped` row instead of stopping the suite. Rows are
+  written after each instance, and `--resume` skips the ones already in `--output`; it refuses to
+  append rows whose CMSGen arm differs from the file's, because a missing count would read as a
+  zero.
+- Every row records the engine it ran on (`engine`: the packed split, the kernel, the batch and
+  its cap), so a run on another machine can be checked against it (§7).
+- `--seeds` repeats each instance under several seeds; `--twise` adds 2-wise coverage, a spread
+  metric and not a uniformity test; `--sim-baseline` adds the rejection-sampling baseline.

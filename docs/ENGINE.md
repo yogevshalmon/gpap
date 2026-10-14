@@ -1,5 +1,7 @@
 # The GPAP engine — how it works
 
+> **Reader:** library users and contributors who want to know how the engine works — its data layout, kernels and batch sizing, and what it guarantees.
+
 GPAP's engine runs Boolean Constraint Propagation (BCP) over K independent partial assignments
 at once, entirely on the GPU. K ranges from a few thousand rows on the largest formulas to
 262,144; each row is its own assumption set over the same formula, propagated to its own
@@ -195,6 +197,8 @@ The cap is a saturation limit, not a safety one: on the cards measured, 4× the 
 | `GPAP_CLEAN=0` | disable CLEAN mode and the reset skip (exact legacy behaviour) | on |
 | `vscan = -1` in `gpap_engine_options` | disable the warp-wide decision scan | on in WAVE |
 | `GPAP_LIB=/path/libgpap.so` | which library the Python face loads | `$GPAP_BUILD_DIR`, `build/`, `cpp/build/`, then the installed copy |
+| `GPAP_VRAM_BUDGET_MIB=<MiB>` | caps the memory the batch is sized from, for every caller of `gpap_mem_available` (C, C++ and Python alike). A ceiling only: it lets a larger card reproduce a smaller card's batch, and changes nothing on a card with less free memory | unset (no cap) |
+| `PYTORCH_CUDA_ALLOC_CONF` | `import gpap` sets `expandable_segments:True` unless you set the variable yourself: the sampler's temporaries vary in size, and the default caching allocator fragments on them and loses batch size | set on import |
 | `WAVE_W` in `cpp/tools/build_kernels.py` | lane width, a power of two, baked at build time | 32 (both ways of raising it measured out) |
 
 ## 9. What is guaranteed
