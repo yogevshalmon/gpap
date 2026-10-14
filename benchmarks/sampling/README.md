@@ -1,16 +1,18 @@
 # CNF sampling benchmarks — provenance, license, citations
 
+> **Reader:** anyone using or redistributing the CNF sampling benchmarks — where they come from, their licence, and what to cite.
+
 The 29 committed `*.cnf` files are the **`sk_` Sketch/service family** of the standard sampling
 suite — constraints blasted from [Sketch](https://people.csail.mit.edu/asolar/) synthesis problems,
 `<name>.sk_<x>_<y>` being the upstream naming — used to evaluate UniGen, QuickSampler, CMSGen and
 Barbarik. They are GPAP's CNF-native reference point (`eval/run_full_eval.sh sk`), the examples'
 default input (`10.sk_1_46.cnf`), and Barbarik material.
 
-- Source: the meelgroup sampling-benchmark distribution,
-  [zenodo record 4022395](https://zenodo.org/record/4022395) — the same files ship with
-  [QuickSampler](https://github.com/RafaelTupynamba/quicksampler) and
-  [Barbarik](https://github.com/meelgroup/barbarik). Research use; no license file accompanies
-  them.
+- Source: the `Benchmarks/` folder of [QuickSampler](https://github.com/RafaelTupynamba/quicksampler)
+  at commit `f9a3e0996710303fe0d9fc2b2e795a0557c18f0b`; all 29 files are byte-identical to it.
+  That repository is licensed BSD-3-Clause (notice in
+  [LICENSE-QuickSampler.BSD-3-Clause.txt](LICENSE-QuickSampler.BSD-3-Clause.txt)); the files
+  carry no notice of their own, and the suite's original authors state no licence.
 - Suite: Chakraborty, Meel & Vardi, *A Scalable and Nearly Uniform Generator of SAT
   Witnesses*, CAV 2013. Sampling use: Dutra, Laeufer, Bachrach & Sen, *Efficient Sampling
   of SAT Solutions for Testing*, ICSE 2018 (QuickSampler); Golia, Soos, Chakraborty & Meel,
@@ -28,5 +30,5 @@ Notes:
 - The Java **service-class instances** (`ActivityService`, `ProcessBean`, ...) are the
   individually-free/jointly-constrained regime, where CDCL learning helps and GPAP's
   rejection-only search is weakest; kept for that.
-- The full suite is larger (blasted/or/tire/modexp/hash, same record); only this subset is
+- The full suite is larger (blasted/or/tire/modexp/hash); only this subset is
   committed, unmodified upstream bytes.

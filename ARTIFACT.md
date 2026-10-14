@@ -1,5 +1,7 @@
 # GPAP — artifact guide
 
+> **Reader:** artifact evaluators of the TACAS 2027 paper — how to regenerate every table and figure, and how to re-measure them on a GPU.
+
 Everything in the paper's evaluation section, and how to re-derive it. One script does all of it:
 
 ```bash
@@ -214,9 +216,9 @@ them.
 | CMSGen + our eval patch | `scripts/build_cmsgen.sh` + `scripts/cmsgen_gpap_eval.patch` | MIT |
 | DEMOTIC, Recurrent-CircuitSAT, HTS | `eval/rivals/rivals_setup.sh`, commits pinned; each result row records the checkout's actual HEAD | **none stated by their authors** — therefore fetched, never redistributed here |
 | our Recurrent eval patch | `eval/rivals/recurrent_gpap_eval.patch`, applied by `rivals_setup.sh`: times Recurrent's in-loop copy to the host so its rate can exclude it | ours; its diff context quotes a few lines of their `run.py` |
-| barbarik + SPUR | manual; the commit is in `eval/uniformity/barbarik_gpap.py`'s docstring | MIT (barbarik) |
-| ITC'99 `b17`–`b22` | bundled with the artifact (the repository fetches them; they are too large to commit) | public benchmark set |
-| every other benchmark | committed under `benchmarks/` | public benchmark sets |
+| barbarik + SPUR | manual; the commit is in `eval/uniformity/barbarik_gpap.py`'s docstring | MIT (both) |
+| ITC'99 `b17`–`b22` | bundled with the artifact (the repository fetches them; they are too large to commit) | EUPL-1.2, text in `benchmarks/circuits/LICENSE-ITC99.EUPL-1.2.txt`, shipped beside them |
+| every other benchmark | committed under `benchmarks/` | ITC'99: EUPL-1.2; EPFL: MIT; the CNF sampling set: BSD-3-Clause; ISCAS-85/89 and HWMCC'17: none stated — see `THIRD_PARTY.md` |
 
 ## Reusing the engine
 
