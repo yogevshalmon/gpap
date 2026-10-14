@@ -1,5 +1,7 @@
 # TACAS 2027 — *SAT Sampling at Scale via GPU-based Boolean Constraint Propagation*
 
+> **Reader:** readers and reviewers of the TACAS 2027 paper — what its evaluation measures, the rules its tables enforce, and how the paper's numbers are held to the data.
+
 Regular tool paper. Artifact evaluation is **mandatory** for this track.
 
 **The paper lives outside this repository and stands on its own.** No `.tex` section is kept here
@@ -9,7 +11,7 @@ paper's own argument — why any of it matters — is the paper's job.
 
 | | |
 |---|---|
-| the rows, tables, figures | `$GPAP_RESULTS/paper/` — outside the checkout, by rule |
+| the rows, tables, figures | shipped with the artifact as `artifact-data/paper/`; `eval/artifact/reproduce.sh tables` regenerates them |
 | the protocol, in full | [`docs/EVAL_RUNBOOK.md`](../../EVAL_RUNBOOK.md) §0 |
 | the evidence behind every settled number | [`docs/findings/`](../../findings/) |
 | the artifact's tiers and costs | [`ARTIFACT.md`](../../../ARTIFACT.md) |
@@ -169,7 +171,7 @@ under test itself, must Accept. Details and both controls:
 
 ## The campaign these numbers come from
 
-**`$GPAP_RESULTS/l4_protocol_20261012`**, measured 2026-10-12/13 on two Colab **NVIDIA L4**
+**Campaign `l4_protocol_20261012`**, measured 2026-10-12/13 on two Colab **NVIDIA L4**
 sessions (host CPU Intel Xeon @ 2.20 GHz, recorded per row), from tag `paper_campaign_v2_run`
 (e821180), engine `libgpap 0.3.0+318406dfa9dc3199`: the build id every row carries. It re-ran
 protocol v1.0 after three fixes: Recurrent's in-loop host copy is deducted from its rate (§17c),
@@ -179,27 +181,26 @@ and so are the 28 recorded rival initialization failures (marked `not_remeasured
 gate). Against 2026-09-04 every measured rival unique count is identical, and re-extracting grants
 from the new rows reproduces the grants file exactly (`RIVAL_FAIRNESS_FINDINGS.md` §17e).
 
-The uniformity rows are a separate run, `$GPAP_RESULTS/uniformity_20261013` (RTX 4080, e821180),
+The uniformity rows are a separate run, campaign `uniformity_20261013` (RTX 4080, e821180),
 on the 68 instances of the earlier campaign: every arm 65/65.
 
-It supersedes `l4_protocol_20260904` (kept, with its paper folder as `$GPAP_RESULTS/paper_20260904`),
+It supersedes `l4_protocol_20260904` (kept, with the data its tables were made from),
 which in turn superseded `l4_protocol_20260903`, whose numbers rested on four defects that each
 moved a number in our favour (§16, §16b, §16c).
 
-The working copy is `$GPAP_RESULTS/paper/`: the stage and calibration JSONs plus the Barbarik arm
-under `data/`, sha256-manifested, and the generated outputs beside them. The manifest is what makes
+The data the paper's numbers come from ships with the artifact as `artifact-data/paper/`: the stage
+and calibration JSONs plus the Barbarik rows under `data/`, with a sha256 manifest. The manifest is what makes
 a regenerated table one that can only have come from the frozen rows — `reproduce.sh tables`
 verifies it before generating anything.
 
 ## Regenerating, and the contract with the paper
 
 ```bash
-bash $GPAP_RESULTS/paper/regenerate.sh          # the record, in place
-eval/artifact/reproduce.sh tables --out DIR     # the same thing, any rows, no GPU
+eval/artifact/reproduce.sh tables --out DIR     # every table and figure, from the shipped rows
 ```
 
-Both run the same code — the wrapper only knows where things are. Neither needs a GPU, CUDA wheels
-or even numpy: a stock `python3` runs them, which is what the TACAS evaluation VM provides.
+It needs no GPU, no CUDA wheels and not even numpy: a stock `python3` runs it, which is what the
+TACAS evaluation VM provides.
 
 What comes out:
 

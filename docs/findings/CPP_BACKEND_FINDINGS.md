@@ -1,5 +1,7 @@
 # A C++ core for the GPAP engine — what was measured, and what it cost
 
+> **Reader:** contributors and researchers — the evidence behind moving the engine into a C++ core. A dated research log, not a user guide.
+>
 > **Status:** settled — the port shipped; the engine is `libgpap`.
 > **Measured:** 2026-07-28, RTX 4080 Laptop (WSL2), torch 2.11 + triton 3.6.
 > **Rule lives in:** `cpp/` (the core itself), `cpp/tools/build_kernels.py` (the AOT build), and

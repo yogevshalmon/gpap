@@ -1,5 +1,7 @@
 # Binary clauses as implication edges — design, gates, measurements
 
+> **Reader:** contributors and researchers — the evidence behind treating binary clauses as implication edges. A dated research log, not a user guide.
+>
 > **Status:** settled — shipped 2026-08-27.
 > **Measured:** 2026-08-27, RTX 4080 Laptop (12 GB, WSL2).
 > **Rule lives in:** `cpp/src/formula.cpp` (builder segregation), `cpp/kernels/bcp.py` +

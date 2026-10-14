@@ -1,5 +1,7 @@
 # CLI delivery — the rules for `--out`, counters and accounting
 
+> **Reader:** contributors and researchers — the evidence behind how `gpap sample` writes samples and accounts for time. A dated research log, not a user guide.
+>
 > **Status:** settled — `--out` accounting shipped 2026-08-27; the print layer's phase order and
 > the shared renderings (§7) shipped 2026-09-12.
 > **Measured:** 2026-08-27, RTX 4080 Laptop (12 GB, WSL2), engine at `65623ed`. The walls below

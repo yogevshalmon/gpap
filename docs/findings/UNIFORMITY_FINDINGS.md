@@ -1,5 +1,7 @@
 # How uniform is GPAP — against an exact oracle, against CMSGen, and under Barbarik
 
+> **Reader:** contributors and researchers — the evidence on how uniformly GPAP samples. A dated research log, not a user guide.
+>
 > **Status:** settled. §4b supersedes §4's verdict counts; §4c supersedes §2's TV reading for
 > the shipped pipeline.
 > **Measured:** exact-oracle campaigns 2026-07-29/30; Barbarik re-derivation (§4b) and the
@@ -24,7 +26,7 @@ guarantee. The settled results:
    (§4, §4b).
 3. The shipped `circuit` portfolio is Barbarik-Accepted on all 65 of the paper's eligible
    instances, zero Rejects, zero no-verdict; pinned `b8` and CMSGen 65/65 too (re-run 2026-10-13,
-   `$GPAP_RESULTS/uniformity_20261013`, RTX 4080, e821180). Every earlier no-verdict (`pipe` 5,
+   campaign `uniformity_20261013`, RTX 4080, e821180). Every earlier no-verdict (`pipe` 5,
    `b8` 2) was our own early give-up ending an order 1-10 s into its 30 s budget; with it opt-in
    the same cells fill in 1.5-3.3 s and bias means did not move (0.555-0.558) (§4b). At
    barbarik's own stricter default only pinned configs were run: `b8` and `b1` 6/6, CMSGen 6/6.
@@ -291,8 +293,8 @@ vs 0.0399, 6/8 ok each, the same two instances skewed. `--draw iid` is in the ha
 ⚠️ SUPERSEDED for the shipped portfolio by the paper campaign (68 generated, `spur` Rejects 3,
 **65 eligible**; 2026-09-02: `pipe:circuit` 60/65 Accept + 5 no-verdict, `gpap:b8` 63/65 + 2,
 `cmsgen` 65/65; re-run 2026-10-13 after the give-up fix: every arm 65/65 —
-`$GPAP_RESULTS/paper/data/barbarik/circ_abc_*.jsonl`, in Table 4b of its
-`RESULTS.md`; it runs no `soft` arm). This table measures PINNED configs only: its "as shipped"
+the artifact's `artifact-data/paper/data/barbarik/circ_abc_*.jsonl`, in Table 4b of the
+generated `RESULTS.md`; it runs no `soft` arm). This table measures PINNED configs only: its "as shipped"
 64/66 below is their verdicts joined to the config the bandit delivers, not a run of the
 portfolio. Kept as the earlier reading, and as the record of the `soft` positive control.
 

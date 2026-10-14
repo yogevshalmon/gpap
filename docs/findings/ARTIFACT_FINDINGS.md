@@ -1,5 +1,7 @@
 # Artifact-evaluation findings
 
+> **Reader:** contributors and researchers — the evidence behind the artifact's reproduction tiers. A dated research log, not a user guide.
+>
 > **Status:** settled.
 > **Measured:** 2026-09-09/10 against the frozen campaign `l4_protocol_20260904`, and again
 > 2026-10-13/14 against its re-run `l4_protocol_20261012`, the rows the paper prints (§5b) —
@@ -149,7 +151,7 @@ by cell against these rows, never against the paper's geomeans, which are over a
 ## 5. The reviewer tier, run for real (2026-09-09/10)
 
 `eval/artifact/reproduce.sh subset` on a rented L4 — the same card the campaign was measured on —
-mirrored to `$GPAP_RESULTS/paper-artifact`. 66 cells, 2 h 50 min wall across three VM lifetimes,
+mirrored to a local run folder. 66 cells, 2 h 50 min wall across three VM lifetimes,
 `--vram-cap l4` and recorded failures pinned (the artifact's defaults).
 
 **Every cell agreed.** `compare_campaign.py`: PASS on all four stages, **66/66 cells reaching
@@ -338,7 +340,7 @@ leak gate STAYS, and its subject is now stated as what it always was in practice
 identity, not the authors' — a username or a hostname in a shipped file names the machine that
 built the tarball, which is a defect in a signed artifact just as much as in a blind one. Recorded
 because a venue can change: it was a transform over the packager's tarball,
-`$GPAP_RESULTS/artifact/anonymize.sh`, kept outside the repository because it spells the author's
+a script kept outside the repository because it spells the author's
 name — delete the brand kit and the development files, rewrite the identity lines (each
 substitution must hit, or the script refuses as stale), the gate with the denylist, the host suite
 inside the result, the manifest rewritten, repacked as `<name>-anon`. `GPAP_ARTIFACT_TREE=<tree-ish>`

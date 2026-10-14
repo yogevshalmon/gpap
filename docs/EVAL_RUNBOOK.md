@@ -1,11 +1,13 @@
 # Full-evaluation runbook
 
+> **Reader:** people reproducing the TACAS 2027 evaluation, or running a campaign of their own — the frozen protocol and how to run it.
+
 How to reproduce every experiment behind the paper on any CUDA machine.
 
 ## 0. The protocol — v1.0, FROZEN 2026-09-06
 
 Final; it does not change. Converged over four adversarial review rounds
-(findings/RIVAL_FAIRNESS_FINDINGS.md §14–§17), frozen by the user on 2026-09-06. A review may fix a
+(findings/RIVAL_FAIRNESS_FINDINGS.md §14–§17), frozen on 2026-09-06. A review may fix a
 bug in a number (fix, regenerate, say so) and fix prose; it may not change a metric definition, a
 tool configuration, a screen, a budget or the cell set — such a proposal is logged under
 "considered, not adopted" in §17 and not acted on. Three steps, one stage
@@ -69,7 +71,7 @@ proved-UNSAT, and a tie for any cell whose sign lies inside GPAP's own seed band
 column sums to the cell count, and every headline is quoted with its structure (median, seed band,
 top cells, the geomean without them), which `paper_tables` prints.
 
-**Presentation revision v1.1** (2026-09-07, the user's direction; §17b) changes what a table
+**Presentation revision v1.1** (2026-09-07; §17b) changes what a table
 prints, not the protocol: the two one-sided zero columns and `rival failed` stay, every other
 reason a cell carries no ratio goes into ONE `excluded` column itemised by name under it; no
 `paper set` column; no thin-denominator floor — a tool that scored anything is scored, as the rival

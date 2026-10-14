@@ -1,5 +1,7 @@
 # Entailed-clause mining — measured results
 
+> **Reader:** contributors and researchers — the evidence behind entailed-clause mining. A dated research log, not a user guide.
+>
 > **Status:** settled — shipped 2026-08-19/21.
 > **Measured:** 2026-08-19 to 2026-08-21, RTX 4080 Laptop unless a section says otherwise (one
 > L4 validation run).
@@ -219,7 +221,7 @@ never costs more than 0.02 s extra and sometimes less, and buys the `exhausted` 
 1,000,000 (exhaustive to |sup| ≈ 700); past that `MINE_SECONDS` is the bound.
 
 Validated on an L4 (seq family, T=25, rare, tseitin, 19 instances, new vs `GPAP_CLEAN=0` + the
-80k ceiling on the same VM; `$GPAP_RESULTS/clean_mode_l4_20260821/`): 16/19 bit-identical model
+80k ceiling on the same VM; campaign `clean_mode_l4_20260821`): 16/19 bit-identical model
 counts, the three that differ being exactly those whose mined set changed; family geomean
 1.064x. s832-c25 is the instructive one: exhausting width 2 proved a few good binaries and left
 less budget for width 3, where the old arm had kept 4,457 ternaries; the smaller formula bought
@@ -236,4 +238,4 @@ a 15% larger batch and 1.75x throughput. A bigger ceiling does not mean a bigger
 | Closure-based ELS (1.11-1.32x more vars) | a sampler behaviour change; needs its own uniformity gate |
 | `hyper_binary` size guard (~1000x the formula) | analysis product only; documented |
 | `--sample random` for truncated sweeps | measure on an instance where mining finds something first |
-| Line-by-line review of the Python mining path since the C++ port | noted by the user, not done |
+| Line-by-line review of the Python mining path since the C++ port | noted, not done |

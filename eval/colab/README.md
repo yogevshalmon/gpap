@@ -1,5 +1,7 @@
 # Running a campaign on a rented Colab GPU
 
+> **Reader:** people running a campaign on a rented Colab GPU — how the drivers work, and the platform rules that keep a run alive.
+
 The drivers in this directory push a GPAP checkout to a Colab VM, run a campaign stage there, and
 mirror the results back. The platform rules below are operational — they say nothing about GPAP
 and nothing about a GPU's speed — which is why they live beside the drivers rather than in

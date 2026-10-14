@@ -1,5 +1,7 @@
 # CLEAN mode — the fixpoint launch that restores its own state
 
+> **Reader:** contributors and researchers — the design, proofs and measurements behind CLEAN mode. A dated research log, not a user guide.
+>
 > **Status:** settled — shipped and gated 2026-08-21, contract enforced 2026-08-22. Supersedes
 > the reset-restore plan (deleted; git history keeps it).
 > **Measured:** 2026-08-21, RTX 4080 Laptop (12 GB, WSL2); confirmed same day on a Colab L4.
@@ -90,7 +92,7 @@ end-to-end**, interleaved best-of-3, identical conflicts. b12 end-to-end showed 
 at large M regresses (b12 apply 126 → 166 ms) — irrelevant to dispatched runs, which pick scalar
 only below M = 2048. Colab L4, same day, full seq family T=25/rare/tseitin: 19/19 rows both
 arms, 0 unsound, 16/19 bit-identical model counts (the 3 differ by the mining-ceiling tune).
-Data: `$GPAP_RESULTS/clean_mode_l4_20260821/`.
+Data: campaign `clean_mode_l4_20260821`.
 
 ## The gate
 
