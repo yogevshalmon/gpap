@@ -25,7 +25,7 @@ FINDINGS = REPO / "docs" / "findings"
 #: Trees whose files may cite a doc, `docs/` included.
 SOURCE_TREES = ("cpp", "gpap", "eval", "scripts", "tests", "examples", "docs")
 #: ...plus the front doors, which are not in any tree.
-ROOT_DOCS = ("README.md", "ARTIFACT.md", "CLAUDE.md")
+ROOT_DOCS = ("README.md", "ARTIFACT.md", "CLAUDE.md", "CONTRIBUTING.md", "CHANGELOG.md", "THIRD_PARTY.md")
 SOURCE_SUFFIXES = (".py", ".c", ".h", ".cpp", ".hpp", ".sh", ".md", ".tex", ".toml", ".cff")
 
 #: A path that must exist. Narrow on purpose: a dead `docs/...` or front-door path is always our
