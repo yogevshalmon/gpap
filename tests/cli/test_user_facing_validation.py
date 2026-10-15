@@ -1,7 +1,12 @@
 """Input validation on the public surface: cycle counts, truncated AIGER, `--k-cap`, 0-based
 `support`, the row count on the CUDA apply path, probe sizes, the strict DIMACS parser and
-`--seconds 0`. Each invalid input gets a clear error instead of a crash or a wrong result.
+`--seconds 0`. Each invalid input gets a clear error instead of a crash or a wrong result; so does
+`gpap info` on a machine without torch.
 """
+import os
+import subprocess
+import sys
+
 import pytest
 import torch
 
@@ -10,6 +15,7 @@ from gpap.circuits.aiger import read_aiger
 from gpap.circuits.bench import build_cnf, parse_bench
 from gpap.cli import _k_cap_arg
 from gpap.engine import BCPEngine, CnfFormula, LiteralProbe
+from tests.conftest import REPO_ROOT
 
 
 TINY_BENCH = """\
@@ -166,3 +172,15 @@ def test_mine_entailed_seconds_none_is_unbounded():
                         widths=(1,), seconds=None)
     assert res.probed.get(1, 0) > 0
     assert not res.skipped
+
+
+def test_info_without_torch_says_so_instead_of_a_traceback(tmp_path):
+    """`gpap info` on a machine without torch (the artifact VM, which only regenerates the
+    tables) says the engine cannot run, prints no traceback, and exits 0. A `sitecustomize`
+    makes `import torch` fail in the child."""
+    (tmp_path / "sitecustomize.py").write_text("import sys\nsys.modules['torch'] = None\n")
+    env = {**os.environ, "PYTHONPATH": os.pathsep.join([str(tmp_path), str(REPO_ROOT)])}
+    r = subprocess.run([sys.executable, "-m", "gpap.cli", "info"], env=env,
+                       capture_output=True, text=True)
+    assert r.returncode == 0 and "Traceback" not in r.stdout + r.stderr, r.stdout + r.stderr
+    assert "torch: not installed" in r.stdout

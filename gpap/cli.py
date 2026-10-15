@@ -626,7 +626,14 @@ def _print_abc_status():
 
 
 def _cmd_info(args):
-    import torch
+    # Report a missing torch as a finding, not a traceback: `reproduce.sh check` runs this first
+    # on machines (the artifact VM) that only regenerate the tables and never install it.
+    try:
+        import torch
+    except ImportError:
+        print("torch: not installed — the engine CANNOT run (it needs torch and an NVIDIA GPU)")
+        _print_abc_status()
+        return
     print(f"torch {torch.__version__}  (CUDA {torch.version.cuda})")
     if not torch.cuda.is_available():
         print("device: CPU (no CUDA) — the engine CANNOT run (packed-kernel-only, no CPU path);"
