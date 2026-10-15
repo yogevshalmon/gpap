@@ -141,10 +141,16 @@ printf '%-34s %s\n' "----------------------------------" "----------------------
 py="${PYTHON:-$REPO_ROOT/.venv/bin/python}"
 [ -x "$py" ] || py="$(command -v python3)"
 "$py" - <<'PY'
-import importlib, shutil, torch
-ok = torch.cuda.is_available()
-name = torch.cuda.get_device_properties(0).name if ok else "-"
-print(f'{"torch / CUDA":<34} {torch.__version__} cuda={torch.version.cuda} avail={ok} {name}')
+import importlib, shutil
+# A missing torch is a row of the table, not a traceback: `check` runs on machines that only
+# regenerate the tables.
+try:
+    import torch
+    ok = torch.cuda.is_available()
+    name = torch.cuda.get_device_properties(0).name if ok else "-"
+    print(f'{"torch / CUDA":<34} {torch.__version__} cuda={torch.version.cuda} avail={ok} {name}')
+except ImportError as e:
+    print(f'{"torch / CUDA":<34} MISSING ({e}) -- the GPU tiers need it')
 # Probe the library, not the triton JIT: `kernel_available()` stays True with no core built, so
 # a green table would promise a run that cannot happen.
 try:
