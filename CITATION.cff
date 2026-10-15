@@ -4,8 +4,7 @@ title: "GPAP: GPU-Parallel (partial) Assignment Propagation and CircuitSAT Sampl
 authors:
   - family-names: Shalmon
     given-names: Yogev
-version: 0.1.0
-date-released: 2026-07-08
+version: 0.3.0
 repository-code: "https://github.com/yogevshalmon/gpap"
 license: MIT
 keywords:
@@ -14,6 +13,6 @@ keywords:
   - GPU
   - sampling
   - CircuitSAT
-# TODO before publication: add the archive DOI (Zenodo, written by
-# eval/artifact/make_artifact.sh) and the paper reference; bump `version` to the release
-# tag. The same DOI goes in the paper's Data Availability Statement and in ARTIFACT.md.
+# TODO at the release: `date-released` (the day v0.3.0 is tagged) and the archive DOI (Zenodo,
+# written by eval/artifact/make_artifact.sh); the same DOI goes in the paper's Data
+# Availability Statement and in ARTIFACT.md. The paper reference once it is accepted.

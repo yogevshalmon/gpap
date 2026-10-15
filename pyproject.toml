@@ -1,17 +1,29 @@
 [build-system]
-requires = ["setuptools>=64"]
+requires = ["setuptools>=77"]   # 77: the SPDX `license` string below (PEP 639)
 build-backend = "setuptools.build_meta"
 
 [project]
 name = "gpap"
-version = "0.1.0"
+version = "0.3.0"
 description = "GPU-parallel (partial) assignment propagation: BCP over hundreds of thousands of independent partial assignments in one kernel launch, and the GPU solution sampler built on it"
 readme = "README.md"
 requires-python = ">=3.10"
+license = "MIT"
+license-files = ["LICENSE"]
 authors = [{ name = "Yogev Shalmon" }]
 keywords = ["SAT", "sampling", "GPU", "BCP", "CircuitSAT", "triton", "pytorch", "cuda"]
+# The Python versions listed are the ones CI tests (.github/workflows/ci.yml).
 classifiers = [
+    "Development Status :: 4 - Beta",
+    "Intended Audience :: Science/Research",
+    "Operating System :: POSIX :: Linux",
+    "Programming Language :: C++",
     "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3 :: Only",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
     "Topic :: Scientific/Engineering",
     "Environment :: GPU :: NVIDIA CUDA",
 ]
