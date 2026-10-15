@@ -6,7 +6,16 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). The
 follows the rule in [CONTRIBUTING.md](CONTRIBUTING.md): an ABI break moves its soname, an additive
 change does not.
 
-## Unreleased — the first public release
+## 0.3.0 — the first public release (unreleased)
+
+The Python package starts at 0.3.0, the version of `libgpap` it ships with; earlier versions were
+never published.
+
+### Installation and the artifact
+- `gpap info`, and `eval/artifact/reproduce.sh check`, report a missing torch in one line
+  instead of a traceback, on machines that only regenerate the paper's tables.
+- Package metadata: the MIT licence as an SPDX expression, and the supported Python versions
+  (3.10 to 3.13, all tested in CI).
 
 ### The engine
 - `libgpap`, one C++ library: Boolean constraint propagation over thousands of independent

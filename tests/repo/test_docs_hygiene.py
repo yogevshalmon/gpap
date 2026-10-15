@@ -208,6 +208,18 @@ def test_the_python_package_version_is_the_same_number_in_all_three_places():
     assert len(set(found.values())) == 1, f"the package version disagrees with itself: {found}"
 
 
+def test_the_readme_images_are_pinned_to_the_release_tag():
+    """README.md's absolute image links (the fallback outside GitHub) name the tag `v<version>`
+    of the package version, so a version bump cannot leave them on an older tag.
+    """
+    version = re.search(r"^version = \"([^\"]+)\"", (REPO / "pyproject.toml").read_text(),
+                        re.M).group(1)
+    tags = re.findall(r"raw\.githubusercontent\.com/[^/]+/[^/]+/([^/]+)/",
+                      (REPO / "README.md").read_text())
+    assert tags, "README.md has no pinned image links — this check would assert nothing"
+    assert set(tags) == {f"v{version}"}, f"README image links name {sorted(set(tags))}"
+
+
 def _export_ignored():
     """Paths `.gitattributes` keeps out of every `git archive` (the artifact packager and
     GitHub's zip download)."""

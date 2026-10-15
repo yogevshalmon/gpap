@@ -3,7 +3,7 @@
 <picture>
   <source media="(prefers-color-scheme: dark)"  srcset="docs/assets/wordmark/gpap_wordmark_dark.png">
   <source media="(prefers-color-scheme: light)" srcset="docs/assets/wordmark/gpap_wordmark_light.png">
-  <img src="https://raw.githubusercontent.com/yogevshalmon/gpap/v0.1.0/docs/assets/wordmark/gpap_wordmark_light.png" width="590"
+  <img src="https://raw.githubusercontent.com/yogevshalmon/gpap/v0.3.0/docs/assets/wordmark/gpap_wordmark_light.png" width="590"
        alt="GPAP — the wordmark beside the logo, a 3x3 grid of purple cells inside a chip die with gold pins">
 </picture>
 
@@ -68,7 +68,7 @@ More applications are planned for future work — stay tuned!
 <picture>
   <source media="(prefers-color-scheme: dark)"  srcset="docs/assets/animation/gpap_propagate_dark.gif">
   <source media="(prefers-color-scheme: light)" srcset="docs/assets/animation/gpap_propagate_light.gif">
-  <img src="https://raw.githubusercontent.com/yogevshalmon/gpap/v0.1.0/docs/assets/animation/gpap_propagate_light.gif" width="675"
+  <img src="https://raw.githubusercontent.com/yogevshalmon/gpap/v0.3.0/docs/assets/animation/gpap_propagate_light.gif" width="675"
        alt="Animation of the engine's core idea, in three acts. Throughout, the assignment sits on the left as a green vine with a node per variable: a gold leaf marks a variable decided at random, a green leaf one forced by propagation, a bare node one never touched. The vine runs level over its own nodes, steps down once the assignment ends, and carries on at that lower level to the bunch, which hangs from it by its own stem — so the two are one plant rather than two objects near each other, with the plant's one leaf sitting on the vine just before it. On the right is the formula, a bunch of grapes in which every row is a clause and every berry a literal. In the first act a real propagation trace runs, and the vine moves with it: a decision lights a berry gold and grows a gold leaf in the same frame, the literals that decision falsifies shrink and darken wherever they occur, and a clause left with one survivor forces it — a white flash and a green leaf — which falsifies more. It halts at a fixpoint with four clauses satisfied, one still open with two live literals, and most of the formula never touched. In the second act each clause row collapses onto a single cell, because under one assignment a clause's whole state is one packed word; the five stack into an even column, and that column unfolds into a row beside the vine. In the third act rows multiply downwards until the die holds five, each a vine with its own decisions and its own row of clause states, now plugged into the die's pins, all propagating in the same launch and each stopping at its own fixpoint while the row just watched holds the one it already reached, so no vine fills and no row ever lights up completely.">
 </picture>
 </div>
@@ -188,7 +188,7 @@ combinational circuits.
 <div align="center">
 <picture>
   <source srcset="docs/assets/demo/gpap_demo.gif">
-  <img src="https://raw.githubusercontent.com/yogevshalmon/gpap/v0.1.0/docs/assets/demo/gpap_demo.gif" width="812"
+  <img src="https://raw.githubusercontent.com/yogevshalmon/gpap/v0.3.0/docs/assets/demo/gpap_demo.gif" width="812"
        alt="Terminal recording: gpap sample runs on b10.bench unrolled 25 cycles, encodes it to 7,851 variables and 19,682 clauses, mines 86 units that pay their way, and writes 50,000 input stimuli in under seven seconds at about 20,000 samples per second">
 </picture>
 </div>
@@ -301,7 +301,7 @@ upstream code keep their own licences: see [`THIRD_PARTY.md`](THIRD_PARTY.md).
 <picture>
   <source media="(prefers-color-scheme: dark)"  srcset="docs/assets/animation/gpap_idle_wake_dark.gif">
   <source media="(prefers-color-scheme: light)" srcset="docs/assets/animation/gpap_idle_wake_light.gif">
-  <img src="https://raw.githubusercontent.com/yogevshalmon/gpap/v0.1.0/docs/assets/icon_wake/gpap_icon_wake_256.png" width="96"
+  <img src="https://raw.githubusercontent.com/yogevshalmon/gpap/v0.3.0/docs/assets/icon_wake/gpap_icon_wake_256.png" width="96"
        alt="The GPAP chip mark, its nine cells blinking">
 </picture>
 </div>
