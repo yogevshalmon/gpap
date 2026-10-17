@@ -97,9 +97,10 @@ own delivery is deducted. Left in, it would lower the rival's rate and flatter u
 ### 4c. Grant a rival the same share of the machine you take
 
 A GPU rival's batch is the knob K is for us, and its unique/s is near-proportional to it (HTS
-295× from batch 100 to 100,000; DEMOTIC 564× from 1k to 1M). The rule: the largest batch that
-fits 0.80 of free VRAM — the share GPAP takes — sized from measured peak memory, stepping down a
-rung if the driver refuses (`eval/rivals/rival_common.fit_batch`). Their argparse defaults
+295× from batch 100 to 100,000; DEMOTIC 564× from 1k to 1M). The rule: the largest batch it runs
+to completion, found by walking down a ladder of batch sizes from 30,000,000
+(`eval/rivals/rival_common.run_at_batch`); a size is rejected only when the tool cannot finish on
+it, never because it was slow. Their argparse defaults
 (`--batch_size 10`) would hand a rival 1/300–1/500 of what it reaches. `num_steps` is taken from
 the rival's own artifacts (`RIVAL_STEPS`: DEMOTIC 1, Recurrent 1, HTS 10), tie-broken in the
 rival's favour and never swept. RIVAL_FAIRNESS_FINDINGS.md §2, §6.

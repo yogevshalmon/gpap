@@ -593,7 +593,7 @@ pointed here, not a re-run.
 | run the rivals' PAPER configurations as configuration | decided 2026-09-05 (§16d); measured beside the script setting and printed (0.16x / 0.26x of it) |
 | the raw circuit variant, or raw+abc best-for-rival | decided 2026-09-05 (§16d): one variant everywhere; the axis stays implemented, not run |
 | more rival seeds | decided 2026-09-04 (§16b): one run at its own default, the asymmetry stated |
-| HTS | its paper evaluates no circuit (§0 of the runbook) |
+| HTS | its paper evaluates no circuit (§6 of the runbook) |
 | a TV / exact-oracle uniformity number in the paper tables | uniformity is Barbarik CM_test with both controls, only (our rule since 2026-09-01) |
 | widening the free / tiny / vacuous screens | mechanical, per row, applied before the ledger in every table; a threshold moved after seeing the rows is a fitted screen (the THIN floor was removed by the presentation revision, §17b — its disclosure kept) |
 | a taller ladder still, or a per-rung optimum for the rival | the 30M top is above the card's reach on every scored cell and the generator checks it; the grant is a share-of-the-machine rule, not a search for the rival's fastest rung (§16d) |
