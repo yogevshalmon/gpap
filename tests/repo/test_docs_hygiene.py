@@ -25,12 +25,12 @@ FINDINGS = REPO / "docs" / "findings"
 #: Trees whose files may cite a doc, `docs/` included.
 SOURCE_TREES = ("cpp", "gpap", "eval", "scripts", "tests", "examples", "docs")
 #: ...plus the front doors, which are not in any tree.
-ROOT_DOCS = ("README.md", "ARTIFACT.md", "CLAUDE.md", "CONTRIBUTING.md", "CHANGELOG.md", "THIRD_PARTY.md")
+ROOT_DOCS = ("README.md", "CLAUDE.md", "CONTRIBUTING.md", "CHANGELOG.md", "THIRD_PARTY.md")
 SOURCE_SUFFIXES = (".py", ".c", ".h", ".cpp", ".hpp", ".sh", ".md", ".tex", ".toml", ".cff")
 
 #: A path that must exist. Narrow on purpose: a dead `docs/...` or front-door path is always our
 #: bug, while matching any source path in prose would give false positives.
-DOC_PATH = re.compile(r"(?<![\w/.])(docs/[\w./*-]*[\w/*]|ARTIFACT\.md|cpp/README\.md)")
+DOC_PATH = re.compile(r"(?<![\w/.])(docs/[\w./*-]*[\w/*]|cpp/README\.md)")
 #: `*` is in the class so an interpolated segment stays inside the match, where the wildcard
 #: test below skips it.
 #: The citation form, e.g. `UNIFORMITY_FINDINGS.md §4b`.

@@ -12,6 +12,7 @@
 | start from working code | [../examples/](../examples/) and [../cpp/examples/](../cpp/examples/) |
 | understand how the engine works and what it guarantees | [ENGINE.md](ENGINE.md) |
 | measure GPAP, or compare it with another sampler, without fooling yourself | [BENCHMARKING.md](BENCHMARKING.md) |
+| run an evaluation campaign of your own: GPAP against CMSGen and the GPU samplers | [EVAL_RUNBOOK.md](EVAL_RUNBOOK.md) |
 
 Rates depend on the GPU and on its power state, so only ratios measured in one session on one
 machine are comparable ([BENCHMARKING.md](BENCHMARKING.md) §1).
@@ -23,16 +24,10 @@ machine are comparable ([BENCHMARKING.md](BENCHMARKING.md) §1).
 | build, test, follow the conventions, know where a fact belongs | [../CONTRIBUTING.md](../CONTRIBUTING.md) |
 | know why the engine is built the way it is | [findings/INSIGHTS.md](findings/INSIGHTS.md) |
 
-## The TACAS 2027 paper
+## Papers
 
-| you want to… | read |
-|---|---|
-| reproduce the paper's tables and figures | [../ARTIFACT.md](../ARTIFACT.md) |
-| know what the evaluation measures, and the rules behind its tables | [papers/tacas-27/README.md](papers/tacas-27/README.md) |
-| read the evaluation protocol, or run a campaign of your own | [EVAL_RUNBOOK.md](EVAL_RUNBOOK.md) |
-
-The paper's text lives outside this repository. No generated table is committed here: the
-artifact regenerates every table from the campaign data it ships.
+Each paper that uses GPAP has its own folder under [papers/](papers/README.md): its evaluation
+explained, its protocol, and its artifact.
 
 ## The research log: `findings/`
 

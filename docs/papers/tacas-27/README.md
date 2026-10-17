@@ -12,9 +12,9 @@ paper's own argument — why any of it matters — is the paper's job.
 | | |
 |---|---|
 | the rows, tables, figures | shipped with the artifact as `artifact-data/paper/`; `eval/artifact/reproduce.sh tables` regenerates them |
-| the protocol, in full | [`docs/EVAL_RUNBOOK.md`](../../EVAL_RUNBOOK.md) §0 |
+| the protocol, in full | [`PROTOCOL.md`](PROTOCOL.md) |
 | the evidence behind every settled number | [`docs/findings/`](../../findings/) |
-| the artifact's tiers and costs | [`ARTIFACT.md`](../../../ARTIFACT.md) |
+| the artifact's tiers and costs | [`ARTIFACT.md`](ARTIFACT.md) |
 | what the PDF prints | [`published_numbers.json`](published_numbers.json) |
 
 The protocol is **frozen** (v1.0, 2026-09-06): a review after the freeze fixes bugs and prose,

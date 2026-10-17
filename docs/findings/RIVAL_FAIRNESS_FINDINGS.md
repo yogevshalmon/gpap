@@ -2,7 +2,7 @@
 
 > **Reader:** contributors and researchers — how the comparison with other samplers was made fair, and the record of the paper's evaluation protocol. A dated research log, not a user guide.
 >
-> **Status:** settled record. §17 is protocol v1.0, FROZEN 2026-09-06 (`docs/EVAL_RUNBOOK.md` §0
+> **Status:** settled record. §17 is protocol v1.0, FROZEN 2026-09-06 (`docs/papers/tacas-27/PROTOCOL.md`
 > is the frozen text); §17b is the presentation revision v1.1 of 2026-09-07. Campaign headlines
 > in §15–§16e are superseded by §17 and §17b.
 > **Measured:** 2026-08-24/25 through 2026-09-07 — RTX 4080 Laptop for local calibration, NVIDIA
@@ -536,7 +536,7 @@ Principle: publish only quantities each tool defines for itself, under one state
 hand it; remove the columns that are our invention across tools; every tool at the configuration
 its authors ship, and the batch by one rule.
 
-Decided 2026-09-06; `docs/EVAL_RUNBOOK.md` §0 is the frozen text:
+Decided 2026-09-06; `docs/papers/tacas-27/PROTOCOL.md` is the frozen text:
 1. The headline is the full set (30 sequential circuits; 11 ISCAS-85): "We don't want to present
    a partial result as the headline." The rival paper's 16 were printed beside it until §17b
    dropped that column.

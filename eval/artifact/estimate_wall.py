@@ -7,7 +7,7 @@
 
 The artifact tells a reviewer what each tier costs, and a number in a README rots. This derives
 it from the frozen rows, so `reproduce.sh` prints an estimate the data can be held to, and
-ARTIFACT.md quotes this script rather than a memory of a run.
+docs/papers/tacas-27/ARTIFACT.md quotes this script rather than a memory of a run.
 
 WHAT THE ESTIMATE IS. A reproduction pinned by `--grants` pays, per cell:
   * the rival's ONE run at its recorded rung        -> the row's own `wall_s`

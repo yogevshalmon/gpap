@@ -12,8 +12,8 @@
 #   benchmarks .../b1[789],b2[012]  the six ITC'99 circuits too large to commit, which every
 #                            sequential stage needs and which the repository fetches at run time
 #                            from an unpinned URL. A self-contained artifact carries them.
-#   README-ARTIFACT.md       a copy of ARTIFACT.md, so the entry point is the first file a
-#                            reviewer sees in the archive listing.
+#   README-ARTIFACT.md       a pointer to the guide, docs/papers/tacas-27/ARTIFACT.md, so the
+#                            entry point is the first file a reviewer sees in the archive listing.
 #
 # What deliberately stays out: the rival checkouts (DEMOTIC, Recurrent-CircuitSAT, HTS ship no
 # licence, so they are fetched at their pinned commits by rivals_setup.sh, and every result row
@@ -119,7 +119,17 @@ done
 echo "benchmarks : $n_extra/6 large ITC'99 circuits bundled"
 
 # --- the entry point is the first file a reviewer sees --------------------------------------------
-cp "$STAGE/ARTIFACT.md" "$STAGE/README-ARTIFACT.md"
+# A pointer, not a copy: the guide lives with its paper, and its relative links resolve only from
+# there. A copy at the root would carry every one of them broken.
+[ -f "$STAGE/docs/papers/tacas-27/ARTIFACT.md" ] || {
+    echo "[FATAL] docs/papers/tacas-27/ARTIFACT.md is not in the staged tree" >&2; exit 1; }
+cat > "$STAGE/README-ARTIFACT.md" <<'POINTER'
+# GPAP — artifact for the TACAS 2027 tool paper
+
+Start with [docs/papers/tacas-27/ARTIFACT.md](docs/papers/tacas-27/ARTIFACT.md): what to run in
+the TACAS VM, what it prints, and how to re-measure on a GPU. Run every command from this
+directory.
+POINTER
 
 # --- Tier 1, run INSIDE the staged tree ----------------------------------------------------------
 # Every command below runs from $STAGE, so it is the staged copy of the generator and of the gate
@@ -258,7 +268,7 @@ NFILES=$((NFILES + 1))                                   # MANIFEST.md itself, w
   echo
   echo "    $VERDICT"
   echo
-  echo "Start with **README-ARTIFACT.md** (the same file as \`ARTIFACT.md\`)."
+  echo "Start with **docs/papers/tacas-27/ARTIFACT.md** (\`README-ARTIFACT.md\` points to it)."
   echo
   echo "| path | what it is |"
   echo "|---|---|"
