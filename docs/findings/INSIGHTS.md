@@ -445,7 +445,7 @@ soundness replay are unrecorded, and on the cheapest cells they are four times t
 wall. `estimate_wall.py` models overhead as constant + per-gate + fraction, because a
 percentage-only model underestimates precisely the tiers made of many cheap cells.
 
-**Protocol v1.0 frozen (2026-09-06; [EVAL_RUNBOOK.md](../EVAL_RUNBOOK.md) §0,
+**Protocol v1.0 frozen (2026-09-06; [PROTOCOL.md](../papers/tacas-27/PROTOCOL.md),
 RIVAL_FAIRNESS_FINDINGS.md §17).** Publish only quantities each tool defines for itself, every tool
 at its shipped default; a review may fix a bug or prose, never a metric, configuration, screen,
 budget or cell set. Table 2's e2e column is removed by rule.

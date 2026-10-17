@@ -217,7 +217,8 @@ stage_rivals() {
     # of re-deriving it, which costs the full init budget each (9.3 h of a 19 h campaign). OFF
     # by default: the frozen protocol measures a failure on the card in front of it. Turning it
     # on is a stated choice, never a silent one: every row that took it says `not_remeasured`
-    # and verify_artifact names them. The artifact's reproduce.sh turns it on (ARTIFACT.md), and
+    # and verify_artifact names them. The artifact's reproduce.sh turns it on
+    # (docs/papers/tacas-27/ARTIFACT.md), and
     # so did the paper's own re-run (RIVAL_FAIRNESS_FINDINGS.md §17e).
     [ "${RIVAL_HONOUR_FAILURES:-0}" = "1" ] && [ ${#GRANT_ARGS[@]} -gt 0 ] \
         && GRANT_ARGS+=(--honour-recorded-failures)

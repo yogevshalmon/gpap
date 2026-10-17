@@ -21,7 +21,7 @@ launch**. A foundation for SAT on the GPU, and a library to build on.
 
 [**Docs**](docs/) · [**Sampling guide**](docs/SAMPLING.md) · [**Engine internals**](docs/ENGINE.md) ·
 [**Python API**](docs/PYTHON_API.md) · [**C++ API**](cpp/README.md) · [**Examples**](examples/) ·
-[**Contributing**](CONTRIBUTING.md) · [**TACAS 2027 artifact**](ARTIFACT.md)
+[**Contributing**](CONTRIBUTING.md) · [**Papers**](docs/papers/README.md)
 
 </div>
 
@@ -293,12 +293,14 @@ Building from source, the conventions and how to propose a change: [`CONTRIBUTIN
 
 ## Evaluation
 
-The experiments for the paper live outside the library:
+The experiments live outside the library:
 
 - [`eval/`](eval/): campaign drivers, rival harnesses and uniformity tests. Nothing in `gpap/`
-  imports it.
-- [`ARTIFACT.md`](ARTIFACT.md): reproducing the paper's tables and figures.
-- [`docs/BENCHMARKING.md`](docs/BENCHMARKING.md): the measurement protocol.
+  imports it. [`docs/EVAL_RUNBOOK.md`](docs/EVAL_RUNBOOK.md) runs a campaign of your own.
+- [`docs/BENCHMARKING.md`](docs/BENCHMARKING.md): how to measure GPAP, and compare it with another
+  sampler, fairly.
+- [`docs/papers/`](docs/papers/README.md): the papers that use GPAP, each with its evaluation,
+  protocol and artifact.
 - `gpap bench`: benchmark a glob of instances, optionally against CMSGen
   (`scripts/build_cmsgen.sh`).
 

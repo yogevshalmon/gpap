@@ -37,4 +37,4 @@ never published.
 ### Evaluation
 - `eval/`: the experiments behind the TACAS 2027 paper, and
   [`eval/artifact/reproduce.sh`](eval/artifact/reproduce.sh) to reproduce them
-  ([ARTIFACT.md](ARTIFACT.md)).
+  ([docs/papers/tacas-27/ARTIFACT.md](docs/papers/tacas-27/ARTIFACT.md)).

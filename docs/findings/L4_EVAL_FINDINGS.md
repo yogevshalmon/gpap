@@ -3,7 +3,7 @@
 > **Reader:** contributors and researchers — a historical record of running the evaluation on a Colab L4. A dated research log, not a user guide.
 >
 > **Status:** SUPERSEDED as a campaign — it predates protocol v1.0
-> ([../EVAL_RUNBOOK.md](../EVAL_RUNBOOK.md) §0, frozen 2026-09-06). The paper's campaign is described in
+> ([../papers/tacas-27/PROTOCOL.md](../papers/tacas-27/PROTOCOL.md), frozen 2026-09-06). The paper's campaign is described in
 > [../papers/tacas-27/README.md](../papers/tacas-27/README.md). **Quote no number from this file.**
 > **Measured:** 2026-08-03/04, Colab NVIDIA L4 (24 GB, 58 SM, sm_89).
 > **Rule lives in:** the screens and the zero ledger are `eval/artifact/paper_tables.py`

@@ -45,7 +45,8 @@ eval/                    the evaluation layer: campaign drivers, rival harnesses
                          tests, the paper's table generator and artifact tooling
 scripts/                 build and fetch scripts
 benchmarks/              small committed instances
-docs/                    guides, design, measurement protocol, findings
+docs/                    guides, design, measurement protocol, findings; papers/ holds one
+                         folder per paper
 tests/                   pytest; tests/experiments covers eval/, tests/reference holds the
                          pure-Python oracles the kernels are checked against
 ```
@@ -66,6 +67,7 @@ Each kind of fact has one home; everything else links to it.
 | why we decided it, with the measurement | `docs/findings/` (dated) |
 | how to use it | the guides and references in `docs/`, `cpp/README.md` |
 | a paper's claims and numbers | the paper and the files generated from the data; never retyped |
+| a paper's evaluation, protocol and artifact guide | its folder, `docs/papers/<venue-yy>/` |
 | how to work in the repo | this file |
 | open questions and planned work | GitHub issues |
 
@@ -130,8 +132,9 @@ Sampling and measurement:
   one without new evidence.
 
 The evaluation:
-- The paper's evaluation protocol is frozen ([EVAL_RUNBOOK.md](docs/EVAL_RUNBOOK.md) §0). A change
-  may fix a bug or the prose, never a metric, configuration, screen, budget or set of cells.
+- The TACAS 2027 paper's evaluation protocol is frozen
+  ([PROTOCOL.md](docs/papers/tacas-27/PROTOCOL.md)). A change may fix a bug or the prose, never a
+  metric, configuration, screen, budget or set of cells.
   Proposals are logged in [RIVAL_FAIRNESS_FINDINGS.md](docs/findings/RIVAL_FAIRNESS_FINDINGS.md)
   §17.
 - The rules that decide which cells a table counts live once, in

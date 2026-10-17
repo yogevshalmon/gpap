@@ -9,12 +9,12 @@ tool's source, every per-instance measurement behind the paper's evaluation, and
 `eval/artifact/reproduce.sh`, that regenerates the paper's tables from those measurements and
 re-measures them on a GPU. The measurements are those of the paper's campaign,
 `l4_protocol_20261012`, run on two Colab NVIDIA L4 sessions on 2026-10-12/13
-([docs/papers/tacas-27/README.md](docs/papers/tacas-27/README.md) describes it).
+([the paper's evaluation notes](README.md) describe it).
 
 - **Archive:** **TODO** the Zenodo DOI, and the release `v0.3.0` (commit `<sha>`) it was built from.
 - **Badges applied for:** Available, Functional and Reusable.
-- **Licence:** MIT ([LICENSE](LICENSE)). Benchmarks and tools by others keep their own licences
-  ([THIRD_PARTY.md](THIRD_PARTY.md)).
+- **Licence:** MIT ([LICENSE](../../../LICENSE)). Benchmarks and tools by others keep their own licences
+  ([THIRD_PARTY.md](../../../THIRD_PARTY.md)).
 
 ## In short
 
@@ -39,6 +39,8 @@ is a solution, needs a machine with an NVIDIA GPU
 **TODO** the AE chairs' answer on the special-hardware exemption.
 
 ## Early light review (about 5 minutes, in the VM)
+
+Run every command from the root of the unpacked archive.
 
 **1. Unpack and verify the archive** (the `.tar.gz` file at the DOI above).
 
@@ -144,7 +146,8 @@ are not generated, and why.
 
 The rules deciding which cells a table counts are in one file, `eval/artifact/paper_tables.py`,
 which the tables, the figures and the gate all import.
-[docs/papers/tacas-27/README.md](docs/papers/tacas-27/README.md) explains each rule.
+[The paper's evaluation notes](README.md) explain each rule, and [PROTOCOL.md](PROTOCOL.md)
+states the protocol in full.
 
 ### Re-measuring on a GPU
 
@@ -209,7 +212,7 @@ an existing directory.
 
 **What is compared.** A sampling rate is a property of the card: the same engine runs 1.82× as
 fast on an A100 and 0.84× on an L4 as on an RTX 4080
-([CROSS_GPU_FINDINGS.md](docs/findings/CROSS_GPU_FINDINGS.md)). Asking for our rates back would
+([CROSS_GPU_FINDINGS.md](../../findings/CROSS_GPU_FINDINGS.md)). Asking for our rates back would
 test the hardware. So the comparison checks what must hold on any machine, and reports the
 rest:
 
@@ -262,19 +265,20 @@ a CNF formula.
 
 | to | read |
 |---|---|
-| install and use GPAP | [README.md](README.md) |
-| every option of `gpap sample` | [docs/SAMPLING.md](docs/SAMPLING.md) |
-| call it from Python | [docs/PYTHON_API.md](docs/PYTHON_API.md) |
-| call it from C or C++ | [cpp/README.md](cpp/README.md) |
-| understand the engine | [docs/ENGINE.md](docs/ENGINE.md) |
-| run your own comparison fairly | [docs/BENCHMARKING.md](docs/BENCHMARKING.md), [docs/EVAL_RUNBOOK.md](docs/EVAL_RUNBOOK.md) |
-| change it | [CONTRIBUTING.md](CONTRIBUTING.md) |
+| install and use GPAP | [the project README](../../../README.md) |
+| every option of `gpap sample` | [docs/SAMPLING.md](../../SAMPLING.md) |
+| call it from Python | [docs/PYTHON_API.md](../../PYTHON_API.md) |
+| call it from C or C++ | [cpp/README.md](../../../cpp/README.md) |
+| understand the engine | [docs/ENGINE.md](../../ENGINE.md) |
+| run your own comparison fairly | [docs/BENCHMARKING.md](../../BENCHMARKING.md), [docs/EVAL_RUNBOOK.md](../../EVAL_RUNBOOK.md) |
+| change it | [CONTRIBUTING.md](../../../CONTRIBUTING.md) |
 
 ## What is in the archive
 
 | path | what it is |
 |---|---|
-| `README-ARTIFACT.md` | this file (a copy of `ARTIFACT.md`) |
+| `README-ARTIFACT.md` | points to this guide, `docs/papers/tacas-27/ARTIFACT.md` |
+| `docs/papers/tacas-27/` | this guide, the paper's evaluation notes and protocol, and the numbers the PDF prints |
 | `MANIFEST.md`, `MANIFEST.sha256` | how the archive was built, and a hash of every file |
 | `eval/artifact/reproduce.sh` | the one entry point: `check`, `tables`, `setup`, `smoke`, `subset`, `full`, `compare` |
 | `artifact-data/paper/data/` | the per-instance measurements of the paper's campaign, with their own hashes |
@@ -282,7 +286,7 @@ a CNF formula.
 | `benchmarks/` | every benchmark the evaluation uses, including six ITC'99 circuits the repository fetches |
 | `gpap/`, `cpp/` | the tool: the Python package and the C++ engine |
 | `eval/` | the evaluation: campaign drivers, the harnesses for the compared tools, the table generator |
-| `docs/` | the documentation; [docs/README.md](docs/README.md) is its map |
+| `docs/` | the documentation; [docs/README.md](../../README.md) is its map |
 | `tests/` | the test suite; it needs the GPU steps' environment |
 
 The GPU samplers GPAP is compared with, DEMOTIC and Recurrent-CircuitSAT, state no licence, so
@@ -302,7 +306,7 @@ ran. ABC and CMSGen are built from pinned sources.
   bit-identical with and without it on Python 3.12.
 
 Barbarik and SPUR, which test uniformity, are not part of `setup`.
-[THIRD_PARTY.md](THIRD_PARTY.md) says where each component comes from, and its licence.
+[THIRD_PARTY.md](../../../THIRD_PARTY.md) says where each component comes from, and its licence.
 
 ## Details
 
@@ -348,7 +352,7 @@ only be unfair to the rival, since a faster card might initialize where the L4 c
   the verdict counts from the shipped rows; running Barbarik again needs Barbarik and SPUR,
   installed by hand as `eval/uniformity/barbarik_gpap.py` describes.
 - Rented cloud machines such as Colab reclaim the VM after about an hour. Every tier resumes
-  where it stopped; [eval/colab/README.md](eval/colab/README.md) describes how we ran the tiers
+  where it stopped; [eval/colab/README.md](../../../eval/colab/README.md) describes how we ran the tiers
   on Colab.
 
 ### What has been run end to end
@@ -361,7 +365,7 @@ only be unfair to the rival, since a faster card might initialize where the L4 c
   `requirements-artifact.txt`, on an RTX 4080 Laptop GPU (12 GB): every tool built from its
   pinned source; 4 of 4 cells with the same formula, sound samples and the same verdicts.
   DEMOTIC stepped down on `c432` on this smaller card, as described above (2026-10-13).
-- `subset`, from the archive, on a rented L4 ([ARTIFACT_FINDINGS.md](docs/findings/ARTIFACT_FINDINGS.md)
+- `subset`, from the archive, on a rented L4 ([ARTIFACT_FINDINGS.md](../../findings/ARTIFACT_FINDINGS.md)
   §5b): all 66 cells reach the same verdict against CMSGen, and all 58 cells whose rival side was
   measured rather than carried over reach the same verdict against the rival. Every count in
   Tables 1–3 equals the published one for the same cells, and every ratio is within 5.5%

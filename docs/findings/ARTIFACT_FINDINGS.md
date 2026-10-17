@@ -12,8 +12,8 @@
 > **Gated by:** `tests/engine/test_k_cap.py`, `tests/experiments/test_rival_budget.py`.
 > **Record only:** §8, the review post-mortem on gates that could not fail.
 
-The evidence behind `ARTIFACT.md` and `eval/artifact/reproduce.sh` (protocol v1.0,
-`docs/EVAL_RUNBOOK.md` §0). Nothing here changes the protocol; the artifact layer only chooses
+The evidence behind `docs/papers/tacas-27/ARTIFACT.md` and `eval/artifact/reproduce.sh`
+(protocol v1.0, `docs/papers/tacas-27/PROTOCOL.md`). Nothing here changes the protocol; the artifact layer only chooses
 which cells a reviewer runs and under which two documented shortcuts.
 
 ## 1. 24 GB is a hard requirement, and the grants file proves it
