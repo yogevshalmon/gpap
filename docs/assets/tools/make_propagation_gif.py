@@ -20,17 +20,25 @@ TWO OBJECTS ON SCREEN AT A TIME, in two materials:
   before the bunch hangs off it — on the vine, not beside it, which is what makes it read. From act 2 on, that same space holds THE CLAUSE STATES on a die instead, which is what
   the bunch turns into; the label above it says which it currently is.
 
-  1. THE FORMULA. A real BCP trace, and the vine moves WITH it: a DECISION lights a berry gold and
-     grows a gold leaf in the same frame. Its negation KNOCKS OUT that literal wherever it occurs
-     (the berry shrinks and darkens, `sat_count -= 1`). A clause down to one survivor FORCES it —
-     white flash, green leaf. It halts at a FIXPOINT with one clause still open and most of the
-     formula never touched, which is what "partial assignment" means.
-  2. THE FOLD. Under one assignment a clause's whole state is ONE PACKED WORD, so each clause row
+  1. THE FORMULA. A real CNF and its real BCP trace, and the vine moves WITH it: a DECISION
+     lights a berry gold and grows a gold leaf in the same frame. Its negation KNOCKS OUT that
+     literal wherever it occurs (the berry shrinks and darkens, `sat_count -= 1`). A clause down
+     to one survivor FORCES it — white flash, green leaf. It halts at a FIXPOINT with one clause
+     still open and two variables never touched, which is what "partial assignment" means.
+  2. THE FOLD. Under one assignment a clause's whole state is ONE PACKED WORD, so each clause
      collapses onto one berry, the five stack into an even column, and that column unfolds into
      the row beside the vine — symmetric about the middle word, which barely moves.
   3. THE BATCH. A row is a vine and its clause states. Rows multiply DOWNWARD from the one just
      watched — which never moves — and all propagate in the same launch, each to its own fixpoint,
      so no vine ever fills and no row ever lights up completely.
+
+THE VINE IS LABELLED; THE BUNCH IS NOT. A variable's name sits above its node, and one line under
+the vine says what its three kinds of node mean (decided, forced, untouched), for as long as the
+vine is the only one on screen. The berries keep their faces: the caption names the KIND of event
+— a decision, a forced literal, the fixpoint — and the bunch shows it happen. Two versions were
+tried and thrown away: one that named every berry and counted every clause, which buried the
+picture under text, and one that named a berry only while it acted, which still put text on the
+bunch, where the eye is.
 
 One scale throughout, 5x the 8px cell (a knocked-out literal sits at 4x; kit rules 1 and 2).
 """
@@ -54,13 +62,23 @@ STEM_HI, STEM_LO = (0x62, 0x74, 0x34), (0x42, 0x4E, 0x22)
 LEAF_HI, LEAF_LO = (0x8A, 0xB0, 0x92), (0x5E, 0x82, 0x66)
 
 CELL = 8
-# The bunch: widest just under the stem, down to a binary clause at the tip. This is a PICTURE of
-# the idea, not a diagram of the state layout — it trades exactness for something a reader takes
-# in at a glance, so do not "correct" it into the engine's real shape.
-CLAUSES = [4, 5, 4, 3, 2]
+# Act 1's formula: a real CNF in DIMACS literals, one row of the bunch per clause, one berry per
+# literal. The bunch is widest just under the stem, down to a binary clause at the tip. This is a
+# PICTURE of the idea, not a diagram of the state layout — it trades exactness for something a
+# reader takes in at a glance, so do not "correct" it into the engine's real shape.
+FORMULA = [
+    [1, -2, 3, 5],
+    [-1, -2, -3, -4, 5],
+    [-1, 2, -5, 6],
+    [-1, 3, 4],
+    [-4, -6],
+]
+DECISIONS = [1, -3]             # x1 := 1, then x3 := 0: one decision of each polarity
+CLAUSES = [len(c) for c in FORMULA]
 M = len(CLAUSES)                # M clauses = M cells of a row
 K = 5                           # partial assignments = rows
-NV = 6                          # variables = nodes on a vine
+NV = 6                          # variables = nodes on a vine: x_v is node v-1
+assert CLAUSES == [4, 5, 4, 3, 2] and max(abs(lit) for c in FORMULA for lit in c) == NV
 ROW0 = 0                        # act 1's row is the TOP one, level with the bunch's first
                                 # clause; the die then grows DOWNWARD past the bunch
 
@@ -70,33 +88,70 @@ PITCH = SIZE + GAP                          # cell + the die's own one-pixel gap
 GROW = 38                                   # the bunch's rows nest, so a shorter row pitch
 OUT_SIZE = CELL * (U - 1)                   # a knocked-out literal, one step smaller
 
-# Act 1's script — a real unit-propagation trace over clauses A..E = 0..4. Occurrence lists are
-# what a decision touches: `out` is the negated literal falsified in another clause.
-TRACE = [
-    ("decide", 0, 0),     # A0 := T                          A satisfied
-    ("out", 2, 3),        #   ~A0 occurs in C: C3 is out
-    ("out", 3, 0),        #   ~A0 occurs in D: D0 is out     no clause is unit yet: FIXPOINT
-    ("decide", 1, 3),     # B3 := T                          B satisfied
-    ("out", 3, 2),        #   ~B3 occurs in D: D2 is out     D is down to one survivor...
-    ("force", 3, 1),      #   ...so D1 := T                  D satisfied
-    ("out", 4, 0),        #   ~D1 occurs in E: E0 is out     ...which leaves E with one...
-    ("force", 4, 1),      #   ...so E1 := T                  E satisfied
-    ("out", 2, 1),        #   ~E1 occurs in C: C1 is out     FIXPOINT — nothing else is forced
-]
-# ...and it stops there. Four clauses are satisfied, C still has C0 and C2 live with no reason to
-# pick between them, and nine literals were never touched. That is what PARTIAL means, and it is
-# why no vine ever fills and no row ever lights up completely. The middle of the trace is one
-# implication CHAIN — B3 falsifies D2, which forces D1, which falsifies E0, which forces E1,
-# which falsifies C1 — because a chain is what propagation actually is.
 
-# Which node on the vine each set variable lands on, in the order act 1 sets them: two decided,
-# two forced, and nodes left bare between them.
-VINE_SLOTS = [0, 2, 3, 5]
+def propagate(formula, decisions):
+    """Act 1's script, DERIVED rather than typed: unit propagation over `formula` from
+    `decisions`, one event per thing the picture shows. ("decide" | "force", lit, k, j) sets a
+    literal, lighting clause k's slot j (for a force, k is the clause that was down to one);
+    ("out", lit, k, j) falsifies one; ("fixpoint",) is propagation running dry. The trail is FIFO
+    and a literal is assigned when it is pushed, which is when the engine's bitmap `atomic_or`
+    lands — so a force follows the knock-out that caused it on the very next event."""
+    value, events = {}, []
 
-READ = 1500         # a caption gets its own still beat, long enough to read before anything moves
-READ_FIRST = 1900   # ...and the opening line, which defines the whole picture, a little longer
+    def where(lit):
+        return [(k, c.index(lit)) for k, c in enumerate(formula) if lit in c]
 
-MONO  = "/usr/share/fonts/truetype/dejavu/DejaVuSansMono.ttf"
+    def assign(kind, lit, k=None):
+        # Every literal the script sets occurs exactly once, so setting it lights one berry and
+        # the berry and the leaf stay one event.
+        assert len(where(lit)) == 1 and abs(lit) not in value
+        (at, j), = where(lit)
+        assert k in (None, at)
+        k = at
+        value[abs(lit)] = lit > 0
+        events.append((kind, lit, k, j))
+
+    for dec in decisions:
+        assign("decide", dec)
+        trail = [dec]
+        while trail:
+            lit = trail.pop(0)
+            for k, j in where(-lit):
+                events.append(("out", -lit, k, j))
+                if any(value.get(abs(x)) == (x > 0) for x in formula[k]):
+                    continue                              # already satisfied: nothing to force
+                live = [x for x in formula[k] if abs(x) not in value]
+                assert live, "the script must never conflict"
+                if len(live) == 1:
+                    assign("force", live[0], k)
+                    trail.append(live[0])
+        events.append(("fixpoint",))
+    return value, events
+
+
+# x1 := 1 knocks ~x1 out of three clauses and forces nothing: a FIXPOINT after one decision. x3 :=
+# 0 then starts one implication CHAIN — it leaves (~x1 v x3 v x4) with x4 alone, x4 := 1 leaves
+# (~x4 v ~x6) with ~x6 alone, x6 := 0 knocks x6 out of the third clause — because a chain is what
+# propagation actually is. And it stops there: (~x1 v x2 v ~x5 v x6) still has x2 and ~x5 live
+# with no reason to pick between them, and x2 and x5 were never touched. That is what PARTIAL
+# means, and it is why no vine ever fills and no row ever lights up completely.
+VALUE, TRACE = propagate(FORMULA, DECISIONS)
+
+READ = 1500         # a new caption's still beat, before anything moves
+# ...and NO CAPTION IS REPLACED BEFORE IT CAN BE READ: subtitle pace, 14 characters a second, with a
+# floor. The reader is also watching the picture, so this is a minimum, not a target.
+READ_CPS, READ_MIN = 14, 2500
+
+
+def read_ms(caption):
+    return max(READ_MIN, round(len(caption) * 1000 / READ_CPS))
+
+
+def var(v):
+    return f"x{v}"
+
+
+MONO= "/usr/share/fonts/truetype/dejavu/DejaVuSansMono.ttf"
 MONOB = "/usr/share/fonts/truetype/dejavu/DejaVuSansMono-Bold.ttf"
 
 # The bunch's stem, in cell pixels relative to the top centre of the bunch: it hangs from the
@@ -145,6 +200,11 @@ DECIDED   = berry(GOLD, GOLD_HI, GOLD_LO, "open")                 # chosen at ra
 DEC_FLASH = berry(GOLD_HI, (0xFF, 0xF6, 0xD8), GOLD, "open")      # the frame it is chosen
 OUT_FLASH = berry(RAMP[6], RAMP[5], OUTLINE, "closed")            # the frame it is knocked out
 OUT       = berry(RAMP[6], RAMP[5], OUTLINE, "closed", OUT_SIZE)  # falsified: smaller, darker
+# On the dark ground RAMP[6] all but disappears, so the dark theme's knocked-out berry is a step
+# lighter: still the darkest berry on screen, no longer a hole in it.
+OUT_DARK = (0x56, 0x32, 0x9C)
+OUT_FLASH_D = berry(OUT_DARK, RAMP[5], RAMP[6], "closed")
+OUT_D       = berry(OUT_DARK, RAMP[5], RAMP[6], "closed", OUT_SIZE)
 
 
 def halo_for(tile):
@@ -188,6 +248,18 @@ GREEN_LEAF, GREEN_POP = (LEAF_HI, LEAF_LO), (LEAF_BRIGHT, LEAF_HI)
 GOLD_LEAF, GOLD_POP = (GOLD, GOLD_LO), (GOLD_HI, GOLD)
 
 
+def leaf(d, x, y, colours, u=U):
+    """The blade with its top-left at (x, y): the body colour, shadowed along the bottom row and
+    the right column."""
+    body, edge = colours
+    for r, blade in enumerate(LEAF_BLADE):
+        for c, bit in enumerate(blade):
+            if bit == "#":
+                px, py = x + c * u, y + r * u
+                shade = r == len(LEAF_BLADE) - 1 or c == len(blade) - 1
+                d.rectangle([px, py, px + u - 1, py + u - 1], fill=edge if shade else body)
+
+
 def row_trace(rng, steps):
     """Another row's propagation: a decision, implications behind it, clause states reacting a
     step later. Never all variables and never all clauses — a row at its fixpoint is partial.
@@ -229,6 +301,7 @@ def build(dark: bool):
     head   = ImageFont.truetype(MONOB, 16)
     sub    = ImageFont.truetype(MONO, 14)
     tag    = ImageFont.truetype(MONO, 13)
+    out_tile, out_flash = (OUT_D, OUT_FLASH_D) if dark else (OUT, OUT_FLASH)
 
     # --- layout: the vine on the left; the bunch, and later the die, on the right --------------
     board_w, board_h = M * PITCH - GAP, K * PITCH - GAP
@@ -263,7 +336,7 @@ def build(dark: bool):
 
     frames, delays = [], []
 
-    def frame(caption, lead="", right="the formula"):
+    def frame(caption, lead="", right="the formula", left="the assignment"):
         im = Image.new("RGB", (W, H), ground)
         d = ImageDraw.Draw(im)
         if lead:
@@ -275,8 +348,9 @@ def build(dark: bool):
         else:
             d.text((W / 2, 18), caption, font=sub, fill=faint, anchor="ma")
         # The left object never changes what it is; the right one does, so its label says which.
-        d.text((vx0 + vine_w / 2, cap_h + 2), "the assignment", font=tag, fill=faint, anchor="ma")
+        d.text((vx0 + vine_w / 2, cap_h + 2), left, font=tag, fill=faint, anchor="ma")
         d.text((gcx, cap_h + 2), right, font=tag, fill=faint, anchor="ma")
+        legend(d)
         return im, d
 
     def bunch_stem(d):
@@ -324,7 +398,7 @@ def build(dark: bool):
             d.rectangle([dx0 + board_w + 2 * GAP, y, dx0 + board_w + 2 * GAP + PIN - 1,
                          y + 2 * U - 1], fill=GOLD)
 
-    def vine(d, y, tile_of, connect="pin"):
+    def vine(d, y, tile_of, connect="pin", named=False):
         """One assignment: a green stem with a node per variable, which runs level over those
         nodes and then STEPS DOWN once the assignment ends —
 
@@ -333,7 +407,10 @@ def build(dark: bool):
         — and carries on at the lower level to whatever it feeds. ONE shape, two lengths: it stops
         at the die's pin for this row, or carries on to the bunch's own stem, which hangs from it.
         Because only the length differs, the swap at the fold is all but invisible; running level
-        the whole way instead put the vine along the top of the bunch rather than into it."""
+        the whole way instead put the vine along the top of the bunch rather than into it.
+
+        `named` puts each variable's name above its node. Act 1's vine carries them throughout,
+        and in act 3 it is the top row, so its names head the columns for every vine below."""
         sy, py = y - 2 * U, y + SIZE // 2 - U
         bend = stem_x1 - 3 * U                       # the step down, just past the last node
         x_end = stem_x1 if connect == "pin" else gcx + U - 1
@@ -346,36 +423,58 @@ def build(dark: bool):
         for j in range(NV):
             x, colours = vx0 + j * PITCH, tile_of(j)
             d.rectangle([x + 3 * U, y, x + 4 * U - 1, y + 2 * U - 1], fill=STEM_LO)   # the stalk
+            if named:
+                d.text((x + 3.5 * U, sy - 4), var(j + 1), font=tag, fill=faint, anchor="ms")
             if colours is None:
                 continue                                   # a bare node: nothing has grown here
-            body, edge = colours
-            for r, blade in enumerate(LEAF_BLADE):
-                for c, bit in enumerate(blade):
-                    if bit == "#":
-                        px, py2 = x + (c + 1) * U, y + (r + 2) * U
-                        dark_px = r == len(LEAF_BLADE) - 1 or c == len(blade) - 1
-                        d.rectangle([px, py2, px + U - 1, py2 + U - 1],
-                                    fill=edge if dark_px else body)
+            leaf(d, x + U, y + 2 * U, colours)
+
+    def legend(d):
+        """One line in the bottom-left corner saying what a vine's nodes mean, at the key's own
+        smaller scale. The corner is below the last row's leaves and left of the die, so the key
+        is on every frame of all three acts."""
+        u, x, y = 4, vx0, H - 8 * 4 - 10
+        for mark, text in ((GOLD_LEAF, "decided"), (GREEN_LEAF, "forced"), (None, "untouched")):
+            d.rectangle([x, y, x + 7 * u - 1, y + u - 1], fill=STEM_HI)
+            d.rectangle([x, y + u, x + 7 * u - 1, y + 2 * u - 1], fill=STEM_LO)
+            d.rectangle([x + 3 * u, y + 2 * u, x + 4 * u - 1, y + 4 * u - 1], fill=STEM_LO)
+            if mark is not None:
+                leaf(d, x + u, y + 4 * u, mark, u)
+            d.text((x + 7 * u + 6, y + 4 * u), text, font=tag, fill=faint, anchor="lm")
+            x += 7 * u + 6 + d.textlength(text, font=tag) + 12
+
+    shown = [None, 0]                           # the caption on screen, and how long it has been
+
+    def push(im, ms, caption):
+        """Every frame goes through here, so no caption is replaced before `read_ms` says it can
+        be read. A caption whose frames run short is held on its LAST frame, which is a settled
+        one, so the wait lands on stillness rather than mid-motion."""
+        if caption != shown[0]:
+            if shown[0] is not None and shown[1] < read_ms(shown[0][0]):
+                delays[-1] += read_ms(shown[0][0]) - shown[1]
+            shown[:] = [caption, 0]
+        frames.append(im)
+        delays.append(ms)
+        shown[1] += ms
 
     # --- act 1: the formula, and the vine that is causing it to change -------------------------
     lit, out, gold, lit_order = set(), set(), set(), []
-    vine_state = {}
+    vine_state = {}                             # node -> decided? (else forced)
 
     def vine0(d, pop=None, connect="bunch"):
         vine(d, y0, lambda j: None if j not in vine_state else (
             (GOLD_POP if vine_state[j] else GREEN_POP) if j == pop else
-            (GOLD_LEAF if vine_state[j] else GREEN_LEAF)), connect=connect)
+            (GOLD_LEAF if vine_state[j] else GREEN_LEAF)), connect=connect, named=True)
+
+    def state(i):
+        return (DECIDED if i in gold else AWAKE) if i in lit else (out_tile if i in out else ASLEEP)
 
     def grape(im, d, flash=None, k=None, k_from=None, t=1.0):
         bunch_stem(d)
         if k is not None:
             bracket(d, k, k_from, t)
         for i, (x, y) in enumerate(gpos):
-            if flash and flash[0] == i:
-                tile = flash[1]
-            else:
-                tile = (DECIDED if i in gold else AWAKE) if i in lit else (
-                    OUT if i in out else ASLEEP)
+            tile = flash[1] if flash and flash[0] == i else state(i)
             blit(im, x, y, tile, halo=True)
 
     def act1(caption, lead, flash=None, k=None, k_from=None, t=1.0, pop=None):
@@ -384,34 +483,48 @@ def build(dark: bool):
         grape(im, d, flash=flash, k=k, k_from=k_from, t=t)
         return im
 
-    cap1a = ("each row of the bunch is a clause, each cell a literal", "CPU")
-    cap1 = ("a variable is decided, then the implications it forces", "CPU")
-    for cap, hold in ((cap1a, READ_FIRST), (cap1, READ)):   # name the parts, then show them move
-        frames.append(act1(*cap))
-        delays.append(hold)
+    # FOUR CAPTIONS, each naming a KIND of event rather than a variable: the picture shows which
+    # one. The caption changes only when the kind does, so the second decision and the second
+    # force reuse theirs, and the knock-outs and the fixpoint between the decisions get none.
+    # "tier" and "berry", not "row" and "cell": from act 2 on a ROW is an assignment and a CELL is
+    # a clause, and a word that meant something else a moment earlier would fight the fold.
+    cap1 = ("each tier is a clause, each berry a literal", "CPU")
+    says = {"decide": ("decide a variable at random: its negation turns false", "CPU"),
+            "force": ("a clause left with one literal forces it", "CPU")}
+    free = [var(v) for v in range(1, NV + 1) if v not in VALUE]
+    cap_fix = (f"fixpoint: {' and '.join(free)} untouched, a partial assignment", "CPU")
+    push(act1(*cap1), read_ms(cap1[0]), cap1)
 
-    idx_gold, k_prev = None, None
-    for kind, k, j in TRACE:
+    idx_gold, k_prev, cap = None, None, cap1
+    for event in TRACE:
+        if event[0] == "fixpoint":              # propagation ran dry: the next decision picks up
+            continue                            # where the bracket already is
+        kind, x, k, j = event
         i = first[k] + j
+        if kind != "out":
+            # The caption turns over the moment its event starts to move, with no still beat of
+            # its own: a beat before each decision, with the bracket switched off for it, stalled
+            # the trace and read as a hiccup. push() still holds every caption long enough to
+            # read. A force is caused by the knock-out just before it, in the same clause.
+            assert kind == "decide" or k_prev == k
+            cap = says[kind]
         if k != k_prev:                          # the bracket eases over to the clause touched
             for f in range(1, 7):
-                frames.append(act1(*cap1, k=k, k_from=k_prev, t=ease(f / 6)))
-                delays.append(45)
+                push(act1(*cap, k=k, k_from=k_prev, t=ease(f / 6)), 45, cap)
             k_prev = k
         # A decision or an implication SETS A VARIABLE, so the berry and the leaf are one event
         # and land in the same frame. What follows on later frames is what that set literal
         # falsifies elsewhere — the causal order is already in the trace.
         pop = None
         if kind == "out":
-            tile, hold = OUT_FLASH, 130
+            tile, hold = out_flash, 130
         else:
-            pop = VINE_SLOTS[len(vine_state)]
+            pop = abs(x) - 1
             vine_state[pop] = kind == "decide"
             tile, hold = (DEC_FLASH, 330) if kind == "decide" else (FLASH, 260)
-        frames.append(act1(*cap1, flash=(i, tile), k=k, pop=pop))
+        push(act1(*cap, flash=(i, tile), k=k, pop=pop), hold, cap)
         if kind == "decide" and idx_gold is None:
             idx_gold = len(frames) - 1
-        delays.append(hold)
         if kind == "out":
             out.add(i)
         else:
@@ -419,9 +532,9 @@ def build(dark: bool):
             lit_order.append(i)
             if kind == "decide":
                 gold.add(i)
-        frames.append(act1(*cap1, k=k))          # settle
-        delays.append(290 if kind == "decide" else 200)
-    delays[-1] = 1500
+        push(act1(*cap, k=k), 290 if kind == "decide" else 200, cap)      # settle
+    push(act1(*cap_fix), read_ms(cap_fix[0]), cap_fix)
+    idx_fix = len(frames) - 1
 
     # The fixpoint: a satisfied clause has exactly one lit literal, the one open clause has none
     # and at least two literals still live, and the vine still has bare nodes. Nothing here may
@@ -433,7 +546,8 @@ def build(dark: bool):
         if k not in sat_clause:
             assert sum(1 for i in cells if i not in lit and i not in out) >= 2
     assert len(sat_clause) == M - 1
-    assert len(lit_order) == len(vine_state) == len(VINE_SLOTS) < NV
+    assert len(lit_order) == len(vine_state) < NV
+    assert set(vine_state) == {v - 1 for v in VALUE}             # the vine shows what BCP set
 
     def word(k):
         """The packed word clause k folds into: satisfied, or still open."""
@@ -466,14 +580,11 @@ def build(dark: bool):
         for i in draw_order:
             x, y = gpos[i]
             cx, cy = centre[clause_of[i]]
-            tile = (DECIDED if i in gold else AWAKE) if i in lit else (
-                OUT if i in out else ASLEEP)
+            tile = state(i)
             if f == n_a:
                 tile = FLASH if clause_of[i] in sat_clause else ASLEEP
             blit(im, x + (cx - x) * t, y + (cy - y) * t, tile, halo=True)
-        frames.append(im)
-        delays.append(READ if f == 0 else 40)
-    delays[-1] = 600
+        push(im, READ if f == 0 else 600 if f == n_a else 40, cap2a)
 
     n_b = 18
     for f in range(0, n_b + 1):
@@ -485,13 +596,12 @@ def build(dark: bool):
         for k, (cx, cy) in enumerate(centre):
             tx, ty = dx0 + k * PITCH, y0
             blit(im, cx + (tx - cx) * t, cy + (ty - cy) * t, word(k), halo=f < n_b)
-        frames.append(im)
-        delays.append(READ if f == 0 else 40)
-    delays[-1] = 900
+        push(im, READ if f == 0 else 900 if f == n_b else 40, cap2b)
 
     # --- act 3: the batch — a row is a vine and its clause states ------------------------------
-    cap3 = ("thousands of rows: the same formula, different decisions", "GPU")
-    cap4 = ("every row propagating in the same launch", "GPU")
+    # ONE caption for the whole act: the batch growing and the batch propagating are one claim,
+    # and a second line arriving mid-act was one more thing to read while the picture moved.
+    cap3 = ("thousands of rows, each with its own decisions, in one launch", "GPU")
 
     rng = random.Random(11)
     # A row here fires on BOTH objects — leaves on the vine and cells on the die — so it carries
@@ -528,7 +638,7 @@ def build(dark: bool):
                 return GOLD_POP if vgold.get(j) else GREEN_POP
             return GOLD_LEAF if vgold.get(j) else GREEN_LEAF
 
-        vine(d, y, node)
+        vine(d, y, node, named=r == ROW0)
         for c in range(M):
             s = cstep.get(c)
             landing = step == s and not rest
@@ -537,11 +647,11 @@ def build(dark: bool):
             elif ckind[c] == "sat":
                 tile = FLASH if landing else AWAKE
             else:
-                tile = OUT_FLASH if landing else OUT
+                tile = out_flash if landing else out_tile
             blit(im, dx0 + c * PITCH, y, tile)
 
     def batch(caption, lead, r0, rows, step, rest=False):
-        im, d = frame(caption, lead, right="the clause states")
+        im, d = frame(caption, lead, right="the clause states", left="the assignments")
         die(d, r0, rows)
         for r in range(r0, r0 + rows):
             band(im, d, r, step, rest)
@@ -551,19 +661,15 @@ def build(dark: bool):
     # holding on to never moves and the empty frame below act 1 fills steadily. Growing it in a
     # few big chunks instead is the same build in three jumps, and it reads as stiff.
     for n in range(1, K + 1):                # n = 1 is the caption's beat, then a row a frame
-        frames.append(batch(*cap3, ROW0, n, 0))
-        delays.append(READ if n == 1 else 190)
-    delays[-1] = 900
+        push(batch(*cap3, ROW0, n, 0), READ if n == 1 else 900 if n == K else 190, cap3)
 
     idx_mid = None
     for step in range(steps + 2):
-        frames.append(batch(*cap4, 0, K, step))               # what lands on this step...
+        push(batch(*cap3, 0, K, step), 110, cap3)                 # what lands on this step...
         if step == steps // 2:
             idx_mid = len(frames) - 1
-        delays.append(READ if step == 0 else 110)
-        frames.append(batch(*cap4, 0, K, step, rest=True))    # ...and a beat of calm after it
-        delays.append(150)
-    delays[-1] = 2400
+        last = step == steps + 1
+        push(batch(*cap3, 0, K, step, rest=True), 2400 if last else 150, cap3)   # ...then calm
 
     # THE PALETTE IS PINNED, NOT SAMPLED. Median cut splits by pixel population, and the colours
     # that matter most here are the rarest: a leaf's bright green exists on the single frame it
@@ -572,11 +678,12 @@ def build(dark: bool):
     # greys inside the caption text.
     brand = list(dict.fromkeys(
         [ground, ink, faint, DIE, OUTLINE, CREAM, EYE, GOLD, GOLD_HI, GOLD_LO,
-         STEM_HI, STEM_LO, LEAF_HI, LEAF_LO, LEAF_BRIGHT, (0xFF, 0xF6, 0xD8)] + RAMP))
-    text = Image.new("RGB", (W, H * 3), ground)
-    text.paste(frames[0], (0, 0))
-    text.paste(frames[idx_gold], (0, H))
-    text.paste(frames[idx_mid], (0, 2 * H))
+         STEM_HI, STEM_LO, LEAF_HI, LEAF_LO, LEAF_BRIGHT, (0xFF, 0xF6, 0xD8)] + RAMP
+        + ([OUT_DARK] if dark else [])))
+    samples = (0, idx_gold, idx_fix, idx_mid)
+    text = Image.new("RGB", (W, H * len(samples)), ground)
+    for n, idx in enumerate(samples):
+        text.paste(frames[idx], (0, n * H))
     spare = 64 - len(brand)
     entries = [c for rgb in brand for c in rgb]
     entries += text.quantize(colors=spare, method=Image.MEDIANCUT).getpalette()[:3 * spare]

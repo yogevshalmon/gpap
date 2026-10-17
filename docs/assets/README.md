@@ -74,6 +74,13 @@ the left: a node per variable, a gold leaf where it was decided at random, a gre
 propagation forced it, a bare node where nothing touched it. A decision lights a berry gold and
 grows its leaf *in the same frame*, because setting a variable is one event; what follows on later
 frames is what that literal falsifies elsewhere, which is the causal order already in the trace.
+**The vine is labelled; the bunch is not.** Each variable's name sits above its node (in act 3 the
+top row's names head the columns for every vine below), and one line in the bottom-left corner,
+on every frame, says what the three kinds of node mean.
+The berries keep their faces: each caption names a kind of event (a decision, a forced literal, the
+fixpoint) and the bunch shows it happen. Two versions were tried and thrown away: one that named
+every berry and counted every clause buried the picture under text, and one that named a berry only
+while it acted still put text on the bunch, where the eye is.
 Act 2 folds each clause row onto one cell — the engine's actual compression, one packed word per
 clause. The five stack into a **centred column opened out to the die's own pitch** (the bunch's
 rows nest tighter than a cell is tall, so without that they would overlap), and that column then
@@ -97,8 +104,8 @@ and running it level with the first clause row drove a straight line into the si
 
 Two invariants are asserted at build time rather than trusted: no row ever ends with every clause
 satisfied and no vine with every variable set, because propagation stops at a fixpoint and that is
-what makes the assignment partial. Each caption holds still for `READ` ms before anything moves, so
-it can be read. Every size drawn is a whole multiple of the 8px cell, and **the GIF palette is
+what makes the assignment partial. No caption is replaced before it can be read (`read_ms`: subtitle
+pace, with a floor). Every size drawn is a whole multiple of the 8px cell, and **the GIF palette is
 pinned, not sampled**: median cut splits by pixel population, so the colours that matter most here
 are the rarest (a leaf's bright green exists only on the frame it grows on) and every swatch-based
 palette quantized them to plum.
