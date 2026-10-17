@@ -21,7 +21,7 @@ launch**. A foundation for SAT on the GPU, and a library to build on.
 
 [**Docs**](docs/) · [**Sampling guide**](docs/SAMPLING.md) · [**Engine internals**](docs/ENGINE.md) ·
 [**Python API**](docs/PYTHON_API.md) · [**C++ API**](cpp/README.md) · [**Examples**](examples/) ·
-[**Contributing**](CONTRIBUTING.md)
+[**Contributing**](CONTRIBUTING.md) · [**TACAS 2027 artifact**](ARTIFACT.md)
 
 </div>
 
