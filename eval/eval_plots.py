@@ -614,7 +614,7 @@ def fig_vs_cmsgen_rival(plt, path, out_dir):
 
 
 # The paper's figures are drawn at the LNCS text width (12.2 cm), so the point sizes set here are
-# the printed ones scaled only by the paper's own \includegraphics width (Figure 1 is placed at
+# the printed ones scaled only by the paper's own \includegraphics width (Figure 3 is placed at
 # 0.8 of it). The height is the page budget.
 PRINT_W, PRINT_H = 4.8, 2.8
 
