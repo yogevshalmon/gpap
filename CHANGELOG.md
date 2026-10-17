@@ -6,14 +6,14 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). The
 follows the rule in [CONTRIBUTING.md](CONTRIBUTING.md): an ABI break moves its soname, an additive
 change does not.
 
-## 0.3.0 — the first public release (unreleased)
+## 0.3.0 — 2026-10-17, the first public release
 
 The Python package starts at 0.3.0, the version of `libgpap` it ships with; earlier versions were
 never published.
 
-### Installation and the artifact
+### Installation
 - `gpap info`, and `eval/artifact/reproduce.sh check`, report a missing torch in one line
-  instead of a traceback, on machines that only regenerate the paper's tables.
+  instead of a traceback.
 - Package metadata: the MIT licence as an SPDX expression, and the supported Python versions
   (3.10 to 3.13, all tested in CI).
 
@@ -35,6 +35,7 @@ never published.
 - `gpap bench`: a benchmark driver, with an optional CMSGen comparison.
 
 ### Evaluation
-- `eval/`: the experiments behind the TACAS 2027 paper, and
-  [`eval/artifact/reproduce.sh`](eval/artifact/reproduce.sh) to reproduce them
-  ([docs/papers/tacas-27/ARTIFACT.md](docs/papers/tacas-27/ARTIFACT.md)).
+- `eval/`: campaign drivers, and harnesses that run CMSGen and the GPU samplers on the same
+  constraints as GPAP ([docs/EVAL_RUNBOOK.md](docs/EVAL_RUNBOOK.md)).
+- The TACAS 2027 paper's evaluation and artifact, in
+  [docs/papers/tacas-27/](docs/papers/tacas-27/README.md).
