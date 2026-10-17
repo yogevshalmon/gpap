@@ -200,7 +200,8 @@ so every tier was run again from the package that goes to Zenodo
 (`gpap-artifact-20261013-d1e274d`), against the rows it bundles:
 
 * **`tables`**, offline Ubuntu 24.04 container, stock `python3` only: manifest verified, 163/163
-  published values, gate 27 ok / 8 warnings / 0 failures, Figure 1 byte-identical to the paper's.
+  published values, gate 27 ok / 8 warnings / 0 failures, the paper's Figure 3
+  (`sps_scatter_cmsgen.pdf`) byte-identical to the paper's.
   Again on 2026-10-15, from a package built at `85e9ffb` (after the `check` fix for a machine
   without torch), in an offline Ubuntu 22.04 container with stock `python3` 3.10, the base of the
   TACAS'23 VM: `check` printed no traceback; `tables` gave the same counts, and its `RESULTS.md`

@@ -40,8 +40,6 @@ is a solution, needs a machine with an NVIDIA GPU
 
 ## Early light review (about 5 minutes, in the VM)
 
-Run every command from the root of the unpacked archive.
-
 **1. Unpack and verify the archive** (the `.tar.gz` file at the DOI above).
 
 ```bash
@@ -49,6 +47,8 @@ tar xzf gpap-artifact-*.tar.gz
 cd gpap-artifact-*/
 sha256sum -c --quiet MANIFEST.sha256 && echo "archive intact"
 ```
+
+From here on, run every command from the root of the unpacked archive.
 
 **2. Ask what this machine can run.**
 
@@ -90,7 +90,7 @@ If you see them, the artifact works. What they mean:
   paper's text has to say about it.
 
 Two more things in this output are expected in the VM:
-- *figures skipped*: drawing Figure 1 needs `matplotlib`, which the VM lacks. The published
+- *figures skipped*: drawing Figure 3 needs `matplotlib`, which the VM lacks. The published
   figure is in `artifact-data/paper/plots/sps_scatter_cmsgen.pdf`. With network access,
   `pip install matplotlib` and a second `tables` run draws it again. With matplotlib 3.10.8 and
   numpy 2.4.4, on Python 3.11 or later, the file is byte-identical to the paper's; another
@@ -115,7 +115,7 @@ Two more things in this output are expected in the VM:
 | `PAPER_NUMBERS.txt` | those numbers compared with what the submitted PDF prints |
 | `VERIFICATION.txt` | the publishability gate: soundness, and every caveat the text must state |
 | `emission_audit.txt` | checks that no tool was timed while writing its samples out |
-| `plots/` | Figure 1 and the other scatter plots, when `matplotlib` is installed |
+| `plots/` | the paper's Figure 3 and the other scatter plots, when `matplotlib` is installed |
 
 The same files, as generated when the archive was built, are in `artifact-data/paper/`.
 Comparing the two shows what the VM reproduced:
@@ -335,8 +335,8 @@ neither. The file is named after the earlier campaign that measured it; the pape
 reproduced it exactly. `--grants none` repeats the whole search.
 
 **Recorded rival failures are carried over, as in the paper's own campaign.** 28 cells are
-recorded as "the rival did not initialize within its 1,200 s budget", measured on the L4 on
-2026-09-04. Re-measuring them costs that budget each, 10 of the 22 hours of a full
+recorded as "the rival did not initialize within its 1,200 s budget", measured on the L4 in
+September 2026. Re-measuring them costs that budget each, 10 of the 22 hours of a full
 re-measurement, to produce rows that say "no measurement". The campaign the paper reports
 carried them over, and so does this artifact: such a row is marked `not_remeasured`,
 `VERIFICATION.txt` names it, and the comparison counts it as evidence for neither side. This can
