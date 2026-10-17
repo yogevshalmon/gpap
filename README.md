@@ -100,7 +100,12 @@ details are in [`docs/ENGINE.md`](docs/ENGINE.md), and the kernels are in
 
 ## Install
 
+You need Linux (WSL2 works), an NVIDIA GPU of compute capability 8.0 or newer (Ampere or later)
+with its driver, cmake, a C++17 compiler and Python 3.10 or later.
+
 ```bash
+git clone https://github.com/yogevshalmon/gpap.git && cd gpap
+python3 -m venv .venv && . .venv/bin/activate
 pip install -e ".[build]"    # python side + triton (triton ships with torch on Linux/Colab)
 scripts/build_core.sh        # the engine core, libgpap.so (cmake + a C++17 compiler; no CUDA toolkit)
 pip install -e ".[dev]"      # + pytest, ruff, python-sat
@@ -112,9 +117,15 @@ needs cmake, a C++17 compiler and the NVIDIA driver, plus triton at build time o
 kernels target one GPU architecture, so rebuild when you move to a different card generation. If
 you forget, the loader names the mismatch.
 
+A first run, on a circuit that ships with the repository (the demo below):
+
+```bash
+gpap sample benchmarks/circuits/bench/seq/b10.bench --cycles 25 -n 50000 --out stim.out
+```
+
 > [!IMPORTANT]
-> A CUDA GPU is required. There is no CPU path. This is a design decision, not a gap: the whole
-> point is the batch.
+> An NVIDIA GPU is required. There is no CPU path. This is a design decision, not a gap: the
+> whole point is the batch.
 
 ## Quickstart: Python
 
@@ -291,10 +302,11 @@ The experiments for the paper live outside the library:
 - `gpap bench`: benchmark a glob of instances, optionally against CMSGen
   (`scripts/build_cmsgen.sh`).
 
-## Citation and license
+## Citation and licence
 
-[`CITATION.cff`](CITATION.cff). GPAP is MIT — see [`LICENSE`](LICENSE). Benchmark files and quoted
-upstream code keep their own licences: see [`THIRD_PARTY.md`](THIRD_PARTY.md).
+To cite GPAP, use [`CITATION.cff`](CITATION.cff); GitHub's "Cite this repository" button reads
+it. GPAP is under the MIT licence ([`LICENSE`](LICENSE)). Benchmark files and quoted upstream code
+keep their own licences: see [`THIRD_PARTY.md`](THIRD_PARTY.md).
 
 <div align="center">
 <br>
