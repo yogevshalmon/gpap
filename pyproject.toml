@@ -10,7 +10,7 @@ readme = "README.md"
 requires-python = ">=3.10"
 license = "MIT"
 license-files = ["LICENSE"]
-authors = [{ name = "Yogev Shalmon" }]
+authors = [{ name = "Yogev Shalmon Barzel" }]
 keywords = ["SAT", "sampling", "GPU", "BCP", "CircuitSAT", "triton", "pytorch", "cuda"]
 # The Python versions listed are the ones CI tests (.github/workflows/ci.yml).
 classifiers = [
