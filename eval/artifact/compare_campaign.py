@@ -346,6 +346,14 @@ def main():
               + "\n         Every tier gives a cell the same 60 s, so a much slower card can "
                 "reach zero\n         on a marginal instance — but so does a broken build. "
                 "Check `gpap info` first.")
+    # The cells whose verdict changed, here too: a tier's SUMMARY.txt is this closing block alone,
+    # and the headline below counts them and points at them.
+    for stem in sorted(report["structure"]):
+        for label, v in sorted(report["structure"][stem].items()):
+            for d in v["differ"][:6]:
+                print(f"DIFFERS: {stem} {label} {d}")
+            if len(v["differ"]) > 6:
+                print(f"DIFFERS: {stem} {label} and {len(v['differ']) - 6} more (--json)")
     for note in report["notes"]:
         print(f"NOTE: {note}")
     for h in report["hard"]:
