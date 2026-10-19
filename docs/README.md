@@ -8,6 +8,7 @@
 |---|---|
 | sample solutions of a CNF formula or a circuit | [SAMPLING.md](SAMPLING.md) |
 | call GPAP from Python | [PYTHON_API.md](PYTHON_API.md) |
+| run GPAP in Docker, with nothing else to install | [DOCKER.md](DOCKER.md) |
 | call GPAP from C or C++ | [../cpp/README.md](../cpp/README.md) |
 | start from working code | [../examples/](../examples/) and [../cpp/examples/](../cpp/examples/) |
 | understand how the engine works and what it guarantees | [ENGINE.md](ENGINE.md) |

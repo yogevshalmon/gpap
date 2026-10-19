@@ -1,0 +1,26 @@
+# The tool image's build context (Dockerfile). It leaves out what belongs to one machine, and
+# every paper's data, so the image is the same whether it is built from a clone or from an
+# artifact archive, and knows no paper.
+
+# Local state, which no archive carries:
+.git
+.venv
+.gpap
+.experiments
+build
+cpp/build
+cpp/src/generated
+gpap/lib
+**/__pycache__
+.pytest_cache
+.ruff_cache
+*.egg-info
+.vscode
+.claude
+.superpowers
+
+# The paper's files, which an artifact archive adds. The artifact layer (eval/artifact/Dockerfile)
+# copies back exactly these, so inside it /opt/gpap is the archive:
+artifact-data
+MANIFEST.*
+README-ARTIFACT.md
