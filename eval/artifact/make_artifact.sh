@@ -32,6 +32,7 @@ set -uo pipefail
 export PYTHONDONTWRITEBYTECODE=1
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
+INVOKED_FROM="$PWD"            # a relative OUT_DIR is the caller's, not the checkout's
 cd "$REPO_ROOT"
 PY="${PYTHON:-$REPO_ROOT/.venv/bin/python}"
 [ -x "$PY" ] || PY="$(command -v python3)"
@@ -42,6 +43,8 @@ RESULTS="$(PYTHONPATH="$REPO_ROOT" "${PYTHON:-python3}" -m eval.paths results)"
 OUT="${1:-$RESULTS}"
 # Absolute, because the gates below run after `cd "$STAGE"`: a relative OUT left the Barbarik
 # arguments pointing nowhere, and the packager refused over 4 uniformity numbers it had not read.
+# Resolved where it was typed: against the checkout, the archive landed in the repository.
+case "$OUT" in /*) ;; *) OUT="$INVOKED_FROM/$OUT" ;; esac
 mkdir -p "$OUT" && OUT="$(cd "$OUT" && pwd)" || { echo "[FATAL] cannot create $OUT" >&2; exit 1; }
 SRC_DATA="${GPAP_PAPER_DIR:-$RESULTS/paper}"
 # What is archived: HEAD, unless GPAP_ARTIFACT_TREE names another tree-ish — the dry-run knob for
@@ -87,10 +90,13 @@ git archive "$TREE" | tar -x -C "$STAGE"
 # --- the rows the tables are generated from -----------------------------------------------------
 mkdir -p "$STAGE/artifact-data/paper"
 cp -r "$SRC_DATA/data" "$STAGE/artifact-data/paper/data"
-for f in README.md RESULTS.md VERIFICATION.txt emission_audit.txt; do
-    [ -f "$SRC_DATA/$f" ] && cp "$SRC_DATA/$f" "$STAGE/artifact-data/paper/$f"
+# `reproduce.sh tables`, which the folder's regenerate.sh runs, writes these into details/; a
+# folder generated before that layout has them at its top. The newer layout wins.
+for f in README.md RESULTS.md VERIFICATION.txt emission_audit.txt plots; do
+    for src in "$SRC_DATA/details/$f" "$SRC_DATA/$f"; do
+        [ -e "$src" ] && { cp -r "$src" "$STAGE/artifact-data/paper/$f"; break; }
+    done
 done
-[ -d "$SRC_DATA/plots" ] && cp -r "$SRC_DATA/plots" "$STAGE/artifact-data/paper/plots"
 
 # THE ROWS MUST BE THE FROZEN ROWS. `data/MANIFEST.sha256` pins them, and a row edited without
 # updating it is the one way the shipped tables silently stop describing the published campaign —
@@ -215,8 +221,8 @@ fi
 # So what is checked here instead is that it EXISTS, and that the rows it describes are the frozen
 # ones — see the manifest check above, which is the real staleness signal.
 [ -f "$STAGE/artifact-data/paper/emission_audit.txt" ] || {
-    echo "[FATAL] no emission_audit.txt in $SRC_DATA — it is evidence the paper cites, and it" >&2
-    echo "        cannot be produced here (no rival checkouts in a staged tree). Run" >&2
+    echo "[FATAL] no emission_audit.txt in $SRC_DATA or its details/ — it is evidence the paper" >&2
+    echo "        cites, and it cannot be produced here (no rival checkouts in a staged tree). Run" >&2
     echo "        \$GPAP_RESULTS/paper/regenerate.sh on a machine that has them." >&2
     exit 1
 }
