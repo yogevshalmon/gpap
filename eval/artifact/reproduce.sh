@@ -9,8 +9,9 @@
 #   eval/artifact/reproduce.sh full       # the whole campaign, T=25 and T=50 (~12 h)
 #   eval/artifact/reproduce.sh compare    # re-run the comparison over an existing --out
 #
-# Each step writes SUMMARY.txt, the lines a reader checks, at the top of its --out directory, and
-# everything else (rows, tables, gate, comparison, figures, logs) under details/.
+# `tables` and each GPU tier write SUMMARY.txt, the lines a reader checks, at the top of their
+# --out directory when they end, and everything else (rows, tables, gate, comparison, figures,
+# logs) under details/.
 #
 # Options, on either side of the step: --vram-cap l4|none|MiB   --out DIR   --reference DIR
 #                                      --grants FILE|none    --remeasure-failures  --seeds "5 6 7"
@@ -376,7 +377,7 @@ step_full() {
 # Tables over the FRESH rows, then the cell-by-cell comparison against the published ones.
 step_after_run() {
     step_tables "$DETAILS" "$DETAILS" fresh
-    step_compare
+    step_compare "$SUMMARY"
     # The last line a supervisor greps for. A rented GPU is reclaimed mid-run, so the driver has
     # to say "finished" rather than "stopped": every step above is resumable, and only this line
     # distinguishes a completed tier from a VM that died between two cells.
@@ -393,12 +394,15 @@ step_after_run() {
           printf '  - %s\n' "${FAILED[@]}"; } | tee -a "$SUMMARY"
         rc=1
     fi
-    printf '\nThe rows, the comparison cell by cell, the tables of this run and the logs are in details/.\n' \
+    printf '\nThe comparison cell by cell is details/COMPARISON.txt; the rows, the tables of this run\nand the logs are in details/ too.\n' \
         >>"$SUMMARY"
     return "$rc"
 }
 
+# $1: the tier's SUMMARY.txt, which gets the report's verdict. Without it (a bare `compare`), the
+# whole report is printed and no summary is touched: SUMMARY.txt belongs to the tier that ran.
 step_compare() {
+    local summary="${1:-}"
     [ -n "$(ls "$REFERENCE"/rivals_*.json 2>/dev/null)" ] || {
         fail "no reference rows at $REFERENCE — cannot compare"; return 1; }
     # A bare `compare` asserts nothing about coverage unless it is told which tier wrote the
@@ -410,15 +414,18 @@ step_compare() {
     [ -n "$(ls "$fresh"/rivals_*.json 2>/dev/null)" ] || fresh="$OUT"
     say "comparison against the published campaign"
     # --expect-cells is what turns "every cell I have agrees" into "the tier ran". The report goes
-    # to details/; the console and SUMMARY.txt get its verdict, the block after its last rule.
+    # to details/; a tier's console and SUMMARY.txt get its verdict, the block after its last rule.
     mkdir -p "$OUT"
     $PY eval/artifact/compare_campaign.py "$REFERENCE" "$fresh" --json "$fresh/comparison.json" \
         ${EXPECT_CELLS:+--expect-cells "$EXPECT_CELLS"} >"$fresh/COMPARISON.txt" 2>&1 \
         || fail "the comparison against the published campaign FAILED"
-    # A tier that never runs T=50 (smoke, subset) gets no note that it did not: the report keeps it.
-    local skip='^$^'; [ "$TIER" = full ] || skip='not in the fresh run — stage not attempted'
+    [ -n "$summary" ] || { cat "$fresh/COMPARISON.txt"; return; }
+    # Smoke and subset never run T=50 by design, so their summary drops the note that they did
+    # not; the report keeps it.
+    local skip='^$^'
+    case "$TIER" in smoke|subset) skip='not in the fresh run — stage not attempted' ;; esac
     awk '/^=+$/ {block = ""; next} !/^report:/ {block = block $0 "\n"} END {printf "%s", block}' \
-        "$fresh/COMPARISON.txt" | grep -v -e "$skip" | tee "$SUMMARY"
+        "$fresh/COMPARISON.txt" | grep -v -e "$skip" | tee "$summary"
 }
 
 # `tables` over the published rows: SUMMARY.txt holds the lines the guide quotes.
@@ -430,6 +437,10 @@ step_published_tables() {
         >>"$SUMMARY"
     echo "summary: $SUMMARY"
 }
+
+# A tier writes SUMMARY.txt when it ends, so one left by an earlier run into the same --out must
+# not stand for this run if it stops first.
+case "$STEP" in smoke|subset|full) rm -f "$SUMMARY" ;; esac
 
 case "$STEP" in
     check)   step_check ;;
