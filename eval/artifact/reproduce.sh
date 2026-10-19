@@ -9,6 +9,9 @@
 #   eval/artifact/reproduce.sh full       # the whole campaign, T=25 and T=50 (~12 h)
 #   eval/artifact/reproduce.sh compare    # re-run the comparison over an existing --out
 #
+# Each step writes SUMMARY.txt, the lines a reader checks, at the top of its --out directory, and
+# everything else (rows, tables, gate, comparison, figures, logs) under details/.
+#
 # Options, on either side of the step: --vram-cap l4|none|MiB   --out DIR   --reference DIR
 #                                      --grants FILE|none    --remeasure-failures  --seeds "5 6 7"
 #                                      --tier smoke|subset|full  (for `compare`: how many cells
@@ -118,6 +121,8 @@ SUBSET_JSON="$REPO_ROOT/eval/artifact/subset.json"
 # quietly write inside the checkout. Resolve them against the directory the reviewer typed in.
 case "$OUT" in       /*) ;; *) OUT="$INVOKED_FROM/$OUT" ;; esac
 case "$REFERENCE" in /*) ;; *) REFERENCE="$INVOKED_FROM/$REFERENCE" ;; esac
+DETAILS="$OUT/details"
+SUMMARY="$OUT/SUMMARY.txt"
 
 say() { echo; echo "=== $* ==="; }
 
@@ -127,6 +132,16 @@ say() { echo; echo "=== $* ==="; }
 # supervisor greps for that marker to decide the run is finished.
 FAILED=()
 fail() { FAILED+=("$1"); echo "[FAIL] $1" >&2; }
+
+# Prints the lines a step shows, and copies them into the summary named by NOTE_TO, when one is
+# being written, without the blank lines, rules and `wrote` lines. Always succeeds, so under
+# `pipefail` a pipeline ending in `| note` still fails exactly when its producer does.
+note() {
+    local text; text="$(cat)"; echo "$text"
+    if [ -n "${NOTE_TO:-}" ]; then
+        printf '%s\n' "$text" | grep -v -E '^[[:space:]]*$|^=+$|^wrote ' >>"$NOTE_TO" || true
+    fi
+}
 
 # ---------------------------------------------------------------------------- readiness
 step_check() {
@@ -249,7 +264,7 @@ step_tables() {
     local bar=("$data"/barbarik/circ_abc_*.jsonl)
     local barargs=(); [ -e "${bar[0]}" ] && barargs=(--barbarik "${bar[@]}")
     $PY eval/artifact/paper_tables.py --rivals "$data" ${barargs[@]+"${barargs[@]}"} \
-        --out-md "$out/RESULTS.md" --out-json "$out/paper_numbers.json" | tail -3 \
+        --out-md "$out/RESULTS.md" --out-json "$out/paper_numbers.json" | tail -3 | note \
         || fail "the table generator failed over $data"
     # Does the PAPER still say what these rows say? The paper's tables are typeset by hand, so
     # nothing else compares them: without this step a campaign can move a number under a
@@ -257,12 +272,12 @@ step_tables() {
     if [ -z "$fresh" ]; then
         say "the paper's own numbers, against these rows"
         $PY eval/artifact/check_paper_numbers.py --generated "$out/paper_numbers.json" \
-            2>&1 | tee "$out/PAPER_NUMBERS.txt" | tail -3 \
+            2>&1 | tee "$out/PAPER_NUMBERS.txt" | tail -3 | note \
             || fail "the paper prints numbers these rows do not produce — see $out/PAPER_NUMBERS.txt"
     fi
     say "the publishability gate"
     $PY eval/artifact/verify_artifact.py --rivals "$data" ${barargs[@]+"${barargs[@]}"} \
-        2>&1 | tee "$out/VERIFICATION.txt" | tail -4 \
+        2>&1 | tee "$out/VERIFICATION.txt" | tail -4 | note \
         || fail "the publishability gate REFUSED these rows — see $out/VERIFICATION.txt"
     say "emission-symmetry audit (no tool timed while delivering samples)"
     $PY eval/rivals/check_emission_symmetry.py --results "$data" --cycles 25 \
@@ -285,7 +300,7 @@ step_tables() {
 # failures), so a tier here cannot drift from the protocol.
 run_rivals() {
     local seq_insts="$1" depths="$2" comb="${3:-paper}"
-    mkdir -p "$OUT"
+    mkdir -p "$DETAILS"
     echo "output        : $OUT"
     echo "grants        : $GRANTS"
     echo "recorded fails: $([ "$HONOUR_FAILURES" = 1 ] && echo 'PINNED (--remeasure-failures re-derives them)' || echo 're-measured')"
@@ -304,7 +319,7 @@ if torch.cuda.is_available():
 EOF
     echo "seeds         : $SEEDS"
     echo "instances     : $(echo "$seq_insts" | wc -w) sequential, $(echo "$comb" | wc -w) combinational entry, depths $depths"
-    OUT="$OUT" RIVAL_SEQ="$seq_insts" RIVAL_COMB="$comb" RIVAL_SEEDS="$SEEDS" \
+    OUT="$DETAILS" RIVAL_SEQ="$seq_insts" RIVAL_COMB="$comb" RIVAL_SEEDS="$SEEDS" \
         RIVAL_T=25 RIVAL_T2="$depths" RIVAL_GRANTS="$GRANTS" \
         RIVAL_HONOUR_FAILURES="$HONOUR_FAILURES" VERIFY_SOUND=1 \
         bash eval/run_full_eval.sh rivals \
@@ -360,7 +375,7 @@ step_full() {
 
 # Tables over the FRESH rows, then the cell-by-cell comparison against the published ones.
 step_after_run() {
-    step_tables "$OUT" "$OUT" fresh
+    step_tables "$DETAILS" "$DETAILS" fresh
     step_compare
     # The last line a supervisor greps for. A rented GPU is reclaimed mid-run, so the driver has
     # to say "finished" rather than "stopped": every step above is resumable, and only this line
@@ -370,13 +385,17 @@ step_after_run() {
     # "done" after a driver that died at cell 3, and the reviewer was handed a comparison over
     # whatever had been written so far.
     echo
+    local rc=0
     if [ ${#FAILED[@]} -eq 0 ]; then
-        echo "ARTIFACT_TIER_COMPLETE"
-        return 0
+        echo "ARTIFACT_TIER_COMPLETE" | tee -a "$SUMMARY"
+    else
+        { echo "ARTIFACT_TIER_FAILED: ${#FAILED[@]} step(s) did not succeed"
+          printf '  - %s\n' "${FAILED[@]}"; } | tee -a "$SUMMARY"
+        rc=1
     fi
-    echo "ARTIFACT_TIER_FAILED: ${#FAILED[@]} step(s) did not succeed"
-    printf '  - %s\n' "${FAILED[@]}"
-    return 1
+    printf '\nThe rows, the comparison cell by cell, the tables of this run and the logs are in details/.\n' \
+        >>"$SUMMARY"
+    return "$rc"
 }
 
 step_compare() {
@@ -386,18 +405,36 @@ step_compare() {
     # directory; the GPU tiers set TIER themselves before they get here.
     [ -z "$TIER" ] || EXPECT_CELLS="$($PY eval/artifact/estimate_wall.py "$REFERENCE" \
                                       --tier "$TIER" --cells-only 2>/dev/null || echo 0)"
+    # A tier keeps its rows under details/; a directory written before that layout, at its top.
+    local fresh="$DETAILS"
+    [ -n "$(ls "$fresh"/rivals_*.json 2>/dev/null)" ] || fresh="$OUT"
     say "comparison against the published campaign"
-    # --expect-cells is what turns "every cell I have agrees" into "the tier ran". `pipefail` is
-    # on, so the gate's own exit status survives the tee.
-    $PY eval/artifact/compare_campaign.py "$REFERENCE" "$OUT" --json "$OUT/comparison.json" \
-        ${EXPECT_CELLS:+--expect-cells "$EXPECT_CELLS"} | tee "$OUT/COMPARISON.txt" \
+    # --expect-cells is what turns "every cell I have agrees" into "the tier ran". The report goes
+    # to details/; the console and SUMMARY.txt get its verdict, the block after its last rule.
+    mkdir -p "$OUT"
+    $PY eval/artifact/compare_campaign.py "$REFERENCE" "$fresh" --json "$fresh/comparison.json" \
+        ${EXPECT_CELLS:+--expect-cells "$EXPECT_CELLS"} >"$fresh/COMPARISON.txt" 2>&1 \
         || fail "the comparison against the published campaign FAILED"
+    # A tier that never runs T=50 (smoke, subset) gets no note that it did not: the report keeps it.
+    local skip='^$^'; [ "$TIER" = full ] || skip='not in the fresh run — stage not attempted'
+    awk '/^=+$/ {block = ""; next} !/^report:/ {block = block $0 "\n"} END {printf "%s", block}' \
+        "$fresh/COMPARISON.txt" | grep -v -e "$skip" | tee "$SUMMARY"
+}
+
+# `tables` over the published rows: SUMMARY.txt holds the lines the guide quotes.
+step_published_tables() {
+    mkdir -p "$OUT" && : >"$SUMMARY"
+    NOTE_TO="$SUMMARY" step_tables "$REFERENCE" "$DETAILS"
+    [ ${#FAILED[@]} -eq 0 ] || printf 'FAILED: %s\n' "${FAILED[@]}" >>"$SUMMARY"
+    printf '\nThe tables, the gate with its caveats, the figures and the audit are in details/.\n' \
+        >>"$SUMMARY"
+    echo "summary: $SUMMARY"
 }
 
 case "$STEP" in
     check)   step_check ;;
     setup)   step_setup ;;
-    tables)  step_tables ;;
+    tables)  step_published_tables ;;
     smoke)   step_smoke ;;
     subset)  step_subset ;;
     full)    step_full ;;
