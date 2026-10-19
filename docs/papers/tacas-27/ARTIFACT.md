@@ -39,13 +39,15 @@ TACAS VM ([Without Docker](#without-docker)).
 ```bash
 sha256sum -c gpap-image-*.tar.gz.sha256
 docker load -i gpap-image-*.tar.gz
+mkdir -p out
 docker run --rm --gpus all gpap-artifact:tacas-27 check
 docker run --rm -v "$PWD/out:/out" gpap-artifact:tacas-27 tables --out /out/tables
 docker run --rm --gpus all -v "$PWD/out:/out" gpap-artifact:tacas-27 smoke --out /out/smoke
 ```
 
-Each step writes the one file to read, `SUMMARY.txt`, and everything else into `details/` beside
-it.
+`tables` and `smoke` each write the one file to read, `SUMMARY.txt`, and everything else into
+`details/` beside it. The results belong to the owner of `out/`, which is why it is created
+first.
 
 - `check` lists the GPU and what each step costs on the reference card.
 - `tables` regenerates every table from the recorded measurements and checks the 163 numbers
@@ -64,8 +66,9 @@ it.
   the paper too. The 8 warnings are the rival failures the paper reports
   ([Two shortcuts](#two-shortcuts-both-recorded-in-every-row)).
 - `smoke` runs the whole pipeline on 4 cells, compiling the engine for this GPU first.
-  `out/smoke/SUMMARY.txt` ends with:
+  `out/smoke/SUMMARY.txt` must hold:
 
+  <!-- check_image.sh: the lines out/smoke/SUMMARY.txt must hold -->
   ```
   PASS — 4 cells compared: same formulas, sound samples, same verdicts.
   ARTIFACT_TIER_COMPLETE
@@ -119,8 +122,9 @@ docker run -d --name gpap-subset --gpus all -v "$PWD/out:/out" gpap-artifact:tac
 docker logs -f gpap-subset
 ```
 
-`out/subset/SUMMARY.txt` holds the verdict, as for `smoke`. An interrupted tier resumes: remove
-the container (`docker rm gpap-subset`) and run the same command again.
+`out/subset/SUMMARY.txt` holds the verdict, as for `smoke`, once the tier ends. `docker stop
+gpap-subset` stops it, and a stopped tier resumes: remove the container (`docker rm
+gpap-subset`) and run the same command again.
 
 **What is compared.** A sampling rate is a property of the card: the same engine runs 1.82× as
 fast on an A100 and 0.84× on an L4 as on an RTX 4080
@@ -133,11 +137,12 @@ rest:
 | **the same formula in each cell** | `n_vars`, `n_clauses`, `support`, the encoder and `pin_check_ok` match exactly | the two runs did not measure the same thing, usually because of a different `abc` build |
 | **soundness** | no emitted model falsifies a clause, and every kept sample replays through the original circuit | a real bug, against the paper's central claim |
 | **the same verdicts** | which tool won each cell, and how each cell was classified | the conclusion did not survive the change of hardware |
-| *rates* | printed as this card's speed relative to ours | nothing: it describes the machine |
+| *rates* | this card's speed relative to ours, per stage, in `details/COMPARISON.txt` | nothing: it describes the machine |
 
 The tier fails if a formula differs, if a sample is unsound, if fewer cells ran than the tier
 sets out to run, or if any step fails. A changed verdict does not fail it; the `PASS` line then
-says how many verdicts differ, and the report names them.
+says how many verdicts differ, and `SUMMARY.txt` names them. `details/COMPARISON.txt` is the
+comparison cell by cell.
 
 **What each tier costs.** These are estimates for the reference L4 session, built from the
 recorded time of every cell plus a measured overhead the rows do not carry (start-up, the ABC
@@ -167,7 +172,7 @@ numbers for the same cells, not the paper's averages over all 142.
 The image runs GPAP itself, too:
 
 ```bash
-docker run --rm --gpus all -v "$PWD/out:/out" gpap-artifact:tacas-27 gpap sample benchmarks/circuits/bench/seq/b10.bench --cycles 25 -n 10000 --out /out/b10.txt --sim-check
+docker run --rm --gpus all --user "$(id -u):$(id -g)" -v "$PWD/out:/out" gpap-artifact:tacas-27 gpap sample benchmarks/circuits/bench/seq/b10.bench --cycles 25 -n 10000 --out /out/b10.txt --sim-check
 docker run --rm -it --gpus all gpap-artifact:tacas-27 bash
 ```
 
@@ -316,6 +321,10 @@ only be unfair to the rival, since a faster card might initialize where the L4 c
   `check` and `tables` with no GPU and no network, all 163 values reproduced and `RESULTS.md` and
   every figure identical to the shipped ones; `smoke` in 3 minutes, `setup` included, and again
   with the network cut after `setup`; the tool's whole test suite on the GPU (2026-10-19).
+- The same images on native Ubuntu 20.04, Docker 26.1 with the NVIDIA Container Toolkit, on a
+  GeForce MX150, a GPU too old for GPAP ([ARTIFACT_FINDINGS.md](../../findings/ARTIFACT_FINDINGS.md)
+  §11): the smoke test above as written,
+  where `check` and `tables` ran and `smoke` stopped at once, saying why (2026-10-19).
 - `check` and `tables`, from an archive built like this one, in an offline Ubuntu 22.04
   container with only the stock `python3` 3.10 (no GPU, no numpy, no network): the archive
   verified, all 163 published values reproduced, the gate passed (2026-10-15). The same in

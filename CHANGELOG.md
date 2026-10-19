@@ -16,10 +16,12 @@ change does not.
 - The artifact is a Docker image, a layer over the tool image (`eval/artifact/Dockerfile`).
   `eval/artifact/make_image.sh` builds both from the artifact archive, and
   `eval/artifact/check_image.sh` gates them. The guide leads with it.
-- Each step of `reproduce.sh` writes one `SUMMARY.txt`, the lines to check, and everything else
-  under `details/`.
-- `make_artifact.sh` accepts a relative output directory. It used to lose the uniformity rows and
-  refuse to package.
+- `reproduce.sh tables` and each GPU tier write one `SUMMARY.txt`, the lines to check, when they
+  end, and everything else under `details/`. A bare `compare` prints the whole comparison.
+- `compare_campaign.py` names the cells whose verdict changed in its closing block, the part a
+  tier's summary shows.
+- `make_artifact.sh` accepts a relative output directory, taken from where it is typed. It used
+  to lose the uniformity rows and refuse to package.
 
 ## 0.3.0 — 2026-10-17, the first public release
 

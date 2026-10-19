@@ -27,18 +27,20 @@ GPAP runs only on NVIDIA GPUs; the AE chairs granted the special-hardware exempt
 docker run --rm --gpus all ubuntu:24.04 nvidia-smi
 sha256sum -c gpap-image-*.tar.gz.sha256
 docker load -i gpap-image-*.tar.gz
+mkdir -p out
 docker run --rm --gpus all gpap-artifact:tacas-27 check
 docker run --rm -v "$PWD/out:/out" gpap-artifact:tacas-27 tables --out /out/tables
 docker run --rm --gpus all -v "$PWD/out:/out" gpap-artifact:tacas-27 smoke --out /out/smoke
 ```
 
-Each step writes one file to read, `SUMMARY.txt`. `out/tables/SUMMARY.txt` includes
+`tables` and `smoke` each write one file to read, `SUMMARY.txt`. `out/tables/SUMMARY.txt`
+includes
 
 ```
 163 published values, all reproduced by the generator.
 ```
 
-and `out/smoke/SUMMARY.txt` ends with
+and `out/smoke/SUMMARY.txt` includes
 
 ```
 PASS — 4 cells compared: same formulas, sound samples, same verdicts.
@@ -59,8 +61,12 @@ ARTIFACT.md maps each claim of the paper to the file that checks it.
 
 ## Platforms tested
 
-- The Docker image, every step: x86-64, WSL2 with Ubuntu 24.04, Docker 29.1.3 with the NVIDIA
-  Container Toolkit 1.20.1, an RTX 4080 Laptop GPU (12 GB) with driver 596.58 (2026-10-19).
+- The Docker image, on x86-64 Windows (WSL2) with an RTX 4080 Laptop GPU: `check` and `tables`
+  with no GPU and no network, and `setup` and `smoke` on the GPU (2026-10-19). On native Ubuntu
+  20.04, with a GPU too old for GPAP: the image loads, `check` and `tables` run, and the GPU
+  steps stop with a message that says why (2026-10-19). `subset` and `full` have not been run
+  in the image.
 - The source archive without Docker: `tables` in offline Ubuntu 22.04 and 24.04 with the stock
-  `python3`, and `subset` on an NVIDIA L4 (Colab), all 66 cells with the paper's verdicts
-  (2026-10-13 to 10-15).
+  `python3`; `subset` on an NVIDIA L4 (Colab), where all 66 cells reach the paper's verdict
+  against CMSGen, and all 58 whose rival side was measured, against the rival (2026-10-13 to
+  10-15).

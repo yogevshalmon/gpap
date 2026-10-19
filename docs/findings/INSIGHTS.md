@@ -384,6 +384,19 @@ headline.
 
 ## Measurement methodology (the traps that actually bit)
 
+**A container's PID 1 drops the signals it has no handler for, and `grep -q` under `pipefail`
+can fail its own pipeline (2026-10-19; [ARTIFACT_FINDINGS.md](ARTIFACT_FINDINGS.md) §11).**
+`docker stop` killed a step after its grace period, with its results left root-owned, until the
+entry point passed the signal to the step's process group. A note keyed on `check | grep -q`
+printed in 0 of 300 runs, because grep's early exit hands its producer SIGPIPE. Native Linux runs
+the image's plumbing; the engine on a GPU other than Ada is still to be shown.
+
+**The artifact is a Docker image that compiles the engine on first use (2026-10-19;
+[ARTIFACT_FINDINGS.md](ARTIFACT_FINDINGS.md) §10).** An engine compiled without a GPU links
+against CI's stub `libcuda`, which has no SONAME, so it would load the stub at run time; the image
+compiles for the GPU it finds instead, in 14 s on the 4080. All 15 image gates passed under WSL2,
+`smoke` in 3 minutes. *(Native Linux: §11.)*
+
 **The paper's numbers come from the 2026-10-12 re-run, and a fair clock cost us 13–17% against
 Recurrent (2026-10-13; RIVAL_FAIRNESS_FINDINGS.md §17e).** Deducting Recurrent's in-loop host
 copy raised its rate by a median 8.3% and up to 51% (s208.1), so Table 2 fell 21.5→18.7×,
@@ -399,12 +412,6 @@ them down and hands the rival less parallelism than the paper did; and 63 of 141
 VRAM-bound below the batch cap, so a larger card grows OUR K while the rival stays pinned.
 `GPAP_VRAM_BUDGET_MIB` (clamped once, in `gpap_mem_available`) holds the engine to the recorded
 card's budget, and `compare_campaign.py` counts every walked-down grant.
-
-**The artifact is a Docker image that compiles the engine on first use (2026-10-19;
-[ARTIFACT_FINDINGS.md](ARTIFACT_FINDINGS.md) §10).** An engine compiled without a GPU links
-against CI's stub `libcuda`, which has no SONAME, so it would load the stub at run time; the image
-compiles for the GPU it finds instead, in 14 s on the 4080. All 15 image gates passed under WSL2,
-`smoke` in 3 minutes; native Linux and a card other than Ada are still to be shown.
 
 **A gate that knows one shape of a leak is a gate for that shape (2026-09-13).** The third
 absolute path to ship had no `/home/` in it: an agent's scratch directory with the home path
