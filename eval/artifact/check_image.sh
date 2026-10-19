@@ -6,14 +6,15 @@
 #   eval/artifact/check_image.sh TOOL_IMAGE ARTIFACT_IMAGE [--gpu]
 #
 # One [ok] or [FAIL] line per gate, a log of each in a kept directory, and exit 1 if any gate
-# failed. What `tables` must write into its SUMMARY.txt is read from the guide inside the image
-# (docs/papers/<tag>/ARTIFACT.md, <tag> being the artifact image's: the block after the comment
-# naming this script), so the gate and the guide cannot disagree. GPAP_ARTIFACT_DENYLIST, a file kept outside the repository (check_leaks.sh says
+# failed. What `tables` and `smoke` must write into their SUMMARY.txt is read from the guide
+# inside the image (docs/papers/<tag>/ARTIFACT.md, <tag> being the artifact image's: the block
+# after the comment naming this script and that file), so the gate and the guide cannot
+# disagree. GPAP_ARTIFACT_DENYLIST, a file kept outside the repository (check_leaks.sh says
 # why), adds the operator's names to the leak gate.
 set -uo pipefail
 
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-usage() { sed -n '2,12p' "$0" | sed 's/^# \?//'; exit 2; }
+usage() { sed -n '2,/^set /{/^set /q;p;}' "$0" | sed 's/^# \?//'; exit 2; }
 [ $# -ge 2 ] || usage
 TOOL="$1"; ART="$2"; GPU=0
 [ "${3:-}" = "--gpu" ] && GPU=1
@@ -33,6 +34,18 @@ gate() {
     else echo "[FAIL] $name   (log: $LOGS/$name.log)"; FAILED+=("$name"); fi
 }
 has() { grep -qF -- "$2" "$LOGS/$1.log"; }     # has GATE TEXT: the gate's log contains TEXT
+# holds STEP: out/STEP/SUMMARY.txt holds, as whole lines, every line the guide says it must.
+holds() {
+    local line expected summary="$WORK/out/$1/SUMMARY.txt"
+    expected="$(docker run --rm --entrypoint awk "$ART" -v want="out/$1/SUMMARY.txt" '
+        index($0, "check_image.sh: the lines " want " must hold") {f=1; next}
+        f && /^[ \t]*```/ {n++; if (n == 2) exit; next}
+        f && n == 1 {sub(/^[ \t]+/, ""); print}' "$GUIDE")"
+    [ -n "$expected" ] || { echo "no lines for out/$1/SUMMARY.txt in $GUIDE"; return 1; }
+    while IFS= read -r line; do
+        grep -qxF -- "$line" "$summary" || { echo "MISSING from $summary: $line"; return 1; }
+    done <<<"$expected"
+}
 
 # --------------------------------------------------------------------- no GPU, no network
 tool_starts() {
@@ -54,16 +67,14 @@ leaks() {
 gate no-leaks leaks
 check_step() { docker run --rm --network none "$ART" check && has check-without-gpu "only the \`tables\` step can run here"; }
 gate check-without-gpu check_step
+# A GPU step without --gpus says so in one line, before `setup` can fail on it with a traceback.
+tier_needs_gpu() {
+    ! docker run --rm --network none -v "$WORK/out:/out" "$ART" smoke --out /out/no-gpu \
+        && has tier-without-gpu-says-why "need --gpus all" && ! has tier-without-gpu-says-why "Traceback"
+}
+gate tier-without-gpu-says-why tier_needs_gpu
 tables() {
-    local expected line summary="$WORK/out/tables/SUMMARY.txt"
-    docker run --rm --network none -v "$WORK/out:/out" "$ART" tables --out /out/tables || return 1
-    expected="$(docker run --rm --entrypoint awk "$ART" '/check_image.sh: the lines/ {f=1; next}
-        f && /^[ \t]*```/ {n++; if (n == 2) exit; next}
-        f && n == 1 {sub(/^[ \t]+/, ""); print}' "$GUIDE")"
-    [ -n "$expected" ] || { echo "no expected lines found in $GUIDE"; return 1; }
-    while IFS= read -r line; do
-        grep -qxF -- "$line" "$summary" || { echo "MISSING from $summary: $line"; return 1; }
-    done <<<"$expected"
+    docker run --rm --network none -v "$WORK/out:/out" "$ART" tables --out /out/tables && holds tables
 }
 gate tables tables
 # The shipped tables were generated from the same rows when the archive was built: only a date
@@ -101,16 +112,32 @@ if [ "$GPU" = 1 ]; then
         }
         gate tool-samples-as-a-user as_user
         gate tool-gpu-test-suite docker run --rm --gpus all -v "$VOL:/cache" "$TOOL" pytest -q -p no:cacheprovider
+        check_gpu() { docker run --rm --gpus all "$ART" check && ! has check-with-gpu "NOT BUILT"; }
+        gate check-with-gpu check_gpu
         smoke() {
-            docker run --rm --gpus all -v "$WORK/out:/out" "$ART" smoke --out /out/smoke || return 1
-            grep -qF "PASS — 4 cells compared" "$WORK/out/smoke/SUMMARY.txt" \
-                && grep -qxF "ARTIFACT_TIER_COMPLETE" "$WORK/out/smoke/SUMMARY.txt" \
-                && [ -z "$(find "$WORK/out" ! -user "$(id -u)")" ]
+            docker run --rm --gpus all -v "$WORK/out:/out" "$ART" smoke --out /out/smoke \
+                && holds smoke && [ -z "$(find "$WORK/out" ! -user "$(id -u)")" ]
         }
         gate smoke smoke
+        # `docker stop` ends a step at once (PID 1 passes the signal on), not after the grace
+        # period with SIGKILL (137), and what it wrote is still given back.
+        stops() {
+            local c="$VOL-stop" code i
+            mkdir -p "$WORK/stop"
+            docker run -d --gpus all --name "$c" -v "$WORK/stop:/out" "$ART" smoke --out /out/smoke \
+                || return 1
+            for i in $(seq 60); do [ -s "$WORK/stop/setup.log" ] && break; sleep 1; done
+            docker stop -t 30 "$c"
+            code="$(docker inspect -f '{{.State.ExitCode}}' "$c")"
+            docker logs "$c"; docker rm -f "$c" >/dev/null
+            echo "exit code $code"
+            [ "$code" != 137 ] && [ -z "$(find "$WORK/stop" ! -user "$(id -u)")" ]
+        }
+        gate stop-ends-a-step stops
         offline() {
             local c="$VOL-offline"
-            docker run -d --gpus all --name "$c" "$ART" sleep infinity || return 1
+            # No first-use compile in the background: `setup` below compiles, into the same tree.
+            docker run -d --gpus all -e GPAP_SKIP_BUILD=1 --name "$c" "$ART" sleep infinity || return 1
             docker exec "$c" bash eval/artifact/reproduce.sh setup \
                 && docker network disconnect bridge "$c" \
                 && docker exec "$c" bash eval/artifact/reproduce.sh smoke --out /out/offline \
