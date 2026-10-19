@@ -4,127 +4,87 @@
 > GPU-based Boolean Constraint Propagation* — what to run, what it should print, and how long
 > it takes. No knowledge of the code is assumed.
 
-GPAP samples solutions of SAT formulas and circuits on an NVIDIA GPU. This artifact contains the
-tool's source, every per-instance measurement behind the paper's evaluation, and one script,
-`eval/artifact/reproduce.sh`, that regenerates the paper's tables from those measurements and
-re-measures them on a GPU. The measurements are those of the paper's campaign,
-`l4_protocol_20261012`, run on two Colab NVIDIA L4 sessions on 2026-10-12/13
-([the paper's evaluation notes](README.md) describe it).
+The artifact is GPAP's source, every measurement behind the paper's evaluation (the campaign
+`l4_protocol_20261012`, two Colab NVIDIA L4 sessions, 2026-10-12/13; [README.md](README.md)), and
+a Docker image with all of it installed. One script, `eval/artifact/reproduce.sh`, regenerates
+the paper's tables from the measurements and re-measures them on a GPU.
 
-- **Archive:** **TODO** the Zenodo DOI, and the release `v0.3.0` (commit `<sha>`) it was built from.
+- **Archive:** [10.5281/zenodo.23241912](https://doi.org/10.5281/zenodo.23241912), built from the
+  release `v0.3.1` of [the repository](https://github.com/yogevshalmon/gpap).
 - **Badges applied for:** Available, Functional and Reusable.
 - **Licence:** MIT ([LICENSE](../../../LICENSE)). Benchmarks and tools by others keep their own licences
   ([THIRD_PARTY.md](../../../THIRD_PARTY.md)).
 
-## In short
+GPAP runs only on NVIDIA GPUs, so the artifact is a Docker image; the AE chairs granted the
+special-hardware exemption. Without a GPU, `check` and `tables` still run, in Docker or in the
+TACAS VM ([Without Docker](#without-docker)).
 
-| step | where it runs | what it needs | time | what it shows |
-|---|---|---|---|---|
-| `check` | the TACAS VM | nothing | seconds | what this machine can run |
-| `tables` | the TACAS VM | nothing: offline, the stock `python3` | seconds | every table regenerated from the recorded measurements, and the paper's numbers checked against them |
-| `setup`, then `smoke` | a Linux machine with an NVIDIA GPU | network access, about 10 GB of disk | 10 to 30 min, with the installation | the whole pipeline end to end on 4 cells, compared with the published ones |
-| `subset` | the same | the same | about 2.9 h on the reference L4 | 66 of the 142 cells re-measured |
-| `full` | the same | the same | about 13 h on the reference L4 | all 142 cells re-measured |
+## What you need
 
-Each step prints what it is about to do, and what it will cost, before it starts.
+- Linux on x86-64, or Windows with WSL2.
+- An NVIDIA GPU of compute capability 8.0 or newer (Ampere or later), with a driver for CUDA 12.8
+  or later.
+- Docker with the [NVIDIA Container Toolkit](https://docs.nvidia.com/datacenter/cloud-native/container-toolkit/latest/install-guide.html).
+  This must list the GPU:
 
-**GPAP needs an NVIDIA GPU, and the TACAS VM has none.** The tool has no CPU fallback: running
-propagation on the GPU is what the paper is about. In the VM, the artifact does everything that
-needs no GPU. It regenerates every table from the measurements of the paper's campaign, checks
-the 163 numbers the paper prints from them, and re-checks the soundness verdict recorded in
-every row. Running the tool, and with it re-measuring the rates and re-checking that every sample
-is a solution, needs a machine with an NVIDIA GPU
-([Re-measuring on a GPU](#re-measuring-on-a-gpu)).
+  ```bash
+  docker run --rm --gpus all ubuntu:24.04 nvidia-smi
+  ```
+- About 15 GB of disk.
+- For the GPU steps, network access to github.com: the two GPU samplers the paper compares with
+  state no licence, so the artifact does not include them, and each GPU step clones them first.
 
-**TODO** the AE chairs' answer on the special-hardware exemption.
-
-## Early light review (about 5 minutes, in the VM)
-
-**1. Unpack and verify the archive** (the `.tar.gz` file at the DOI above).
+## Smoke test (about 10 minutes)
 
 ```bash
-tar xzf gpap-artifact-*.tar.gz
-cd gpap-artifact-*/
-sha256sum -c --quiet MANIFEST.sha256 && echo "archive intact"
+sha256sum -c gpap-image-*.tar.gz.sha256
+docker load -i gpap-image-*.tar.gz
+docker run --rm --gpus all gpap-artifact:tacas-27 check
+docker run --rm -v "$PWD/out:/out" gpap-artifact:tacas-27 tables --out /out/tables
+docker run --rm --gpus all -v "$PWD/out:/out" gpap-artifact:tacas-27 smoke --out /out/smoke
 ```
 
-From here on, run every command from the root of the unpacked archive.
+Each step writes the one file to read, `SUMMARY.txt`, and everything else into `details/` beside
+it.
 
-**2. Ask what this machine can run.**
+- `check` lists the GPU and what each step costs on the reference card.
+- `tables` regenerates every table from the recorded measurements and checks the 163 numbers
+  the paper prints against them. `out/tables/SUMMARY.txt` must read:
 
-```bash
-eval/artifact/reproduce.sh check
-```
+  <!-- check_image.sh: the lines out/tables/SUMMARY.txt must hold -->
+  ```
+  141 cells | 0 skipped | 1 errors | 0 unsound
+  163 published values, all reproduced by the generator.
+  The paper's tables and the campaign agree.
+  27 ok | 8 warnings | 0 failures
+  Publishable, PROVIDED every warning above is stated in the text.
+  ```
 
-In the VM, it reports torch and the GPU tools as missing; that is expected. The line that matters:
+  The one error is the cell where GPAP's encoder fails because ABC crashes on `b19`, a failure in
+  the paper too. The 8 warnings are the rival failures the paper reports
+  ([Two shortcuts](#two-shortcuts-both-recorded-in-every-row)).
+- `smoke` runs the whole pipeline on 4 cells, compiling the engine for this GPU first.
+  `out/smoke/SUMMARY.txt` ends with:
 
-```
-torch is not installed — only the `tables` step can run here
-```
-
-It also prints how long each GPU tier would take on the reference card.
-
-**3. Regenerate the tables.**
-
-```bash
-eval/artifact/reproduce.sh tables --out vm-tables
-```
-
-Among its output are these lines:
-
-```
-141 cells | 0 skipped | 1 errors | 0 unsound
-163 published values, all reproduced by the generator.
-The paper's tables and the campaign agree.
-27 ok | 8 warnings | 0 failures
-Publishable, PROVIDED every warning above is stated in the text.
-```
-
-If you see them, the artifact works. What they mean:
-- *1 errors*: of the 142 cells, one is a refusal, not a measurement. GPAP's optional encoder,
-  ABC, crashes on `b19` ([Known deviations](#known-deviations)); the paper reports it as a
-  failure.
-- *8 warnings*: the rival failures the paper reports, and the failures carried over from an
-  earlier measurement instead of re-measured
-  ([Two shortcuts](#two-shortcuts-both-recorded-in-every-row)). Each warning names what the
-  paper's text has to say about it.
-
-Two more things in this output are expected in the VM:
-- *figures skipped*: drawing Figure 3 needs `matplotlib`, which the VM lacks. The published
-  figure is in `artifact-data/paper/plots/sps_scatter_cmsgen.pdf`. With network access,
-  `pip install matplotlib` and a second `tables` run draws it again. With matplotlib 3.10.8 and
-  numpy 2.4.4, on Python 3.11 or later, the file is byte-identical to the paper's; another
-  version draws the same points with different pixels.
-- *Section 1 did NOT run* in the emission audit: that section reads the rival samplers' source
-  code, which only `setup` fetches. The full audit, from a machine that had it, ships as
-  `artifact-data/paper/emission_audit.txt`.
-
-**4. If you have a machine with an NVIDIA GPU**, the `setup` and `smoke` steps of
-[Re-measuring on a GPU](#re-measuring-on-a-gpu) run the tool itself, in 10 to 30 minutes.
+  ```
+  PASS — 4 cells compared: same formulas, sound samples, same verdicts.
+  ARTIFACT_TIER_COMPLETE
+  ```
 
 ## Full review
 
-### The paper's claims, from the recorded measurements (in the VM)
+### The paper's claims, from the recorded measurements
 
-`tables` writes these files:
-
-| file | what it is |
-|---|---|
-| `RESULTS.md` | every table, with the list of excluded cells and the caveats behind each table |
-| `paper_numbers.json` | the numbers the paper prints, computed from the rows |
-| `PAPER_NUMBERS.txt` | those numbers compared with what the submitted PDF prints |
-| `VERIFICATION.txt` | the publishability gate: soundness, and every caveat the text must state |
-| `emission_audit.txt` | checks that no tool was timed while writing its samples out |
-| `plots/` | the paper's Figure 3 and the other scatter plots, when `matplotlib` is installed |
-
-The same files, as generated when the archive was built, are in `artifact-data/paper/`.
-Comparing the two shows what the VM reproduced:
+`out/tables/details/` holds the tables (`RESULTS.md`), the paper's printed numbers checked one by
+one (`PAPER_NUMBERS.txt`), the publishability gate (`VERIFICATION.txt`) and the figures
+(`plots/`). The archive's own copies, generated when it was built, are in `artifact-data/paper/`,
+and only the date differs:
 
 ```bash
-diff vm-tables/RESULTS.md artifact-data/paper/RESULTS.md
+docker run --rm -v "$PWD/out:/out" gpap-artifact:tacas-27 diff /out/tables/details/RESULTS.md artifact-data/paper/RESULTS.md
 ```
 
-At most the date in the header differs.
+Figure 3, `plots/sps_scatter_cmsgen.pdf`, comes out byte-identical to the paper's.
 
 Each claim of the paper, and where to check it:
 
@@ -151,64 +111,16 @@ states the protocol in full.
 
 ### Re-measuring on a GPU
 
-**What you need:**
-- Linux on x86-64, with an NVIDIA GPU of compute capability 8.0 or newer (Ampere or later) and
-  its driver. GPAP has run on an RTX 4080, an L4 and an A100.
-- A driver for CUDA 12.8 or later: `nvidia-smi` shows `CUDA Version: 12.8` or higher. With an
-  older driver that supports CUDA 12.6, install the same torch built for 12.6 instead (below).
-- cmake, a C++17 compiler, git, and Python 3.10 or later with `venv`. No CUDA toolkit: the
-  kernels are compiled by Triton, and the library links only against the driver. (torch's
-  wheels bring CUDA runtime libraries as Python packages, one of them named `cuda-toolkit`;
-  GPAP's build uses none of them.)
-- Network access, to install the Python packages and fetch the tools GPAP is compared with.
-- About 10 GB of disk, most of it PyTorch. The reference host had 12 vCPUs (Intel Xeon @
-  2.20 GHz) and about 55 GB of free memory; `smoke` also ran on a laptop with 47 GB.
-- 24 GB of GPU memory runs every cell at the batch size the paper recorded. A smaller card
-  works, with a difference the run reports ([Hardware](#hardware)).
-
-**Steps.** From the unpacked archive:
+`subset` re-measures 66 of the 142 cells, in about 3 hours on the reference L4, and `full` all of
+them, in about 13 hours. Start one detached and follow it:
 
 ```bash
-python3 -m venv .venv && . .venv/bin/activate
-pip install -r eval/artifact/requirements-artifact.txt && pip install -e .
-eval/artifact/reproduce.sh setup     # builds the engine, ABC and CMSGen; fetches the GPU rivals
-eval/artifact/reproduce.sh smoke     # 4 cells, a few minutes
-eval/artifact/reproduce.sh subset    # 66 cells, about 2.9 h on the reference L4
-eval/artifact/reproduce.sh full      # all 142 cells, about 13 h on the reference L4
+docker run -d --name gpap-subset --gpus all -v "$PWD/out:/out" gpap-artifact:tacas-27 subset --out /out/subset
+docker logs -f gpap-subset
 ```
 
-On our RTX 4080 machine the installation took 3 minutes, `setup` 2 and `smoke` 3; on a slower
-machine or network, allow 30 minutes for the first four lines.
-
-For a driver that supports only CUDA 12.6, replace the `pip install` line with:
-
-```bash
-pip install torch==2.11.0 --index-url https://download.pytorch.org/whl/cu126
-grep -v '^torch==' eval/artifact/requirements-artifact.txt > /tmp/req.txt
-pip install -r /tmp/req.txt && pip install -e .
-```
-
-`requirements-artifact.txt` pins the three packages that can move a number: torch, the Triton
-that compiles the kernels, and the SAT solver that decides the `unsat` screen. If you would
-rather not activate the environment, pass `PYTHON=/path/to/python` to each step. In the same
-environment, `pytest tests -m "not gpu and not slow"` runs the tool's own test suite in seconds.
-
-**What a GPU tier prints.** Each tier writes to `.experiments/artifact/<gpu>-<tier>/`
-(`--out DIR` chooses another), regenerates the tables from its own fresh measurements, and
-compares them with the published ones, in `COMPARISON.txt` and `comparison.json`. Its last line
-is `ARTIFACT_TIER_COMPLETE`, or `ARTIFACT_TIER_FAILED` followed by the steps that failed.
-`smoke` also prints:
-
-```
-PASS — 4 cells compared: same formulas, sound samples, same verdicts.
-```
-
-`smoke` runs one cell of each of the four T=25 stages, so its two lines
-`NOTE: rivals_..._t50: not in the fresh run` are expected.
-
-A tier that is interrupted can be resumed: running the same step again skips finished cells.
-`eval/artifact/reproduce.sh compare --out DIR --tier subset` repeats only the comparison over
-an existing directory.
+`out/subset/SUMMARY.txt` holds the verdict, as for `smoke`. An interrupted tier resumes: remove
+the container (`docker rm gpap-subset`) and run the same command again.
 
 **What is compared.** A sampling rate is a property of the card: the same engine runs 1.82× as
 fast on an A100 and 0.84× on an L4 as on an RTX 4080
@@ -239,6 +151,7 @@ pass and its equivalence check, the soundness replay):
 | `full` | 142 | about 12.9 h | every cell, at T=25 and T=50 |
 | `full --remeasure-failures` | 142 | about 23.2 h | the same, re-measuring every recorded rival failure |
 
+Each GPU step also spends about a minute compiling the engine and cloning the compared samplers.
 For another machine, `eval/artifact/estimate_wall.py artifact-data/paper/data` prints the same
 table: `--scale` multiplies the GPU's part (below 1 for a card faster than the L4) and
 `--cpu-scale` the overhead, which depends on the host CPU (1.9 for the reference host, 1 for the
@@ -251,21 +164,22 @@ numbers for the same cells, not the paper's averages over all 142.
 
 ### Reusing GPAP
 
-GPAP is a library with a command-line tool on top; the paper's evaluation is one use of it. After
-`setup`, on a GPU machine, in the activated environment:
+The image runs GPAP itself, too:
 
 ```bash
-gpap sample benchmarks/circuits/bench/seq/b10.bench --cycles 25 -n 10000 --out samples.txt --sim-check
-gpap sample benchmarks/sampling/27.sk_3_32.cnf -n 10000 --out samples.txt
+docker run --rm --gpus all -v "$PWD/out:/out" gpap-artifact:tacas-27 gpap sample benchmarks/circuits/bench/seq/b10.bench --cycles 25 -n 10000 --out /out/b10.txt --sim-check
+docker run --rm -it --gpus all gpap-artifact:tacas-27 bash
 ```
 
-The first unrolls the circuit `b10` for 25 cycles, writes 10,000 input sequences that reach a
-fixed output pattern, and replays each one through the circuit to confirm it. The second samples
-a CNF formula.
+The first writes 10,000 input sequences of the circuit `b10`, unrolled for 25 cycles, that reach
+a fixed output pattern, and replays each through the circuit. The second opens a shell with
+everything installed. The tool alone, without the paper, is the image `gpap:<version>` in the same
+file ([docs/DOCKER.md](../../DOCKER.md)).
 
 | to | read |
 |---|---|
 | install and use GPAP | [the project README](../../../README.md) |
+| run it in Docker | [docs/DOCKER.md](../../DOCKER.md) |
 | every option of `gpap sample` | [docs/SAMPLING.md](../../SAMPLING.md) |
 | call it from Python | [docs/PYTHON_API.md](../../PYTHON_API.md) |
 | call it from C or C++ | [cpp/README.md](../../../cpp/README.md) |
@@ -273,7 +187,46 @@ a CNF formula.
 | run your own comparison fairly | [docs/BENCHMARKING.md](../../BENCHMARKING.md), [docs/EVAL_RUNBOOK.md](../../EVAL_RUNBOOK.md) |
 | change it | [CONTRIBUTING.md](../../../CONTRIBUTING.md) |
 
-## What is in the archive
+## Without Docker
+
+In the TACAS VM, or on any machine without a GPU, `tables` runs from the source archive with the
+stock `python3` and no network:
+
+```bash
+tar xzf gpap-artifact-*.tar.gz && cd gpap-artifact-*/
+eval/artifact/reproduce.sh tables --out vm-tables
+```
+
+The figures need `matplotlib`, which the VM lacks; the published ones are in
+`artifact-data/paper/plots/`.
+
+On a machine with a GPU, cmake, a C++17 compiler, git and Python 3.10 or later, the GPU steps run
+in a virtual environment:
+
+```bash
+python3 -m venv .venv && . .venv/bin/activate
+pip install -r eval/artifact/requirements-artifact.txt && pip install -e .
+eval/artifact/reproduce.sh setup     # builds the engine, ABC and CMSGen; fetches the GPU rivals
+eval/artifact/reproduce.sh smoke     # 4 cells, a few minutes
+```
+
+For a driver that supports only CUDA 12.6, install
+`pip install torch==2.11.0 --index-url https://download.pytorch.org/whl/cu126` first, then the
+requirements without their `torch==` line.
+
+`requirements-artifact.txt` pins the three packages that can move a number: torch, the Triton
+that compiles the kernels, and the SAT solver that decides the `unsat` screen. The image installs
+the same three. In the same environment, `pytest tests -m "not gpu and not slow"` runs the
+tool's own test suite in seconds.
+
+## What you receive
+
+| file at the DOI | what it is |
+|---|---|
+| `gpap-image-<date>-<commit>.tar.gz` | the Docker images: `gpap-artifact:tacas-27`, and the tool alone, `gpap:<version>` |
+| `gpap-artifact-<date>-<commit>.tar.gz` | the source archive: the same files as `/opt/gpap` in the image |
+
+The source archive holds:
 
 | path | what it is |
 |---|---|
@@ -285,14 +238,15 @@ a CNF formula.
 | `artifact-data/paper/` | the tables, gate, audit and figures generated from them when the archive was built |
 | `benchmarks/` | every benchmark the evaluation uses, including six ITC'99 circuits the repository fetches |
 | `gpap/`, `cpp/` | the tool: the Python package and the C++ engine |
-| `eval/` | the evaluation: campaign drivers, the harnesses for the compared tools, the table generator |
+| `eval/` | the evaluation: campaign drivers, the harnesses for the compared tools, the table generator, and the artifact image's Dockerfile |
+| `Dockerfile` | the tool image |
 | `docs/` | the documentation; [docs/README.md](../../README.md) is its map |
-| `tests/` | the test suite; it needs the GPU steps' environment |
+| `tests/` | the test suite |
 
 The GPU samplers GPAP is compared with, DEMOTIC and Recurrent-CircuitSAT, state no licence, so
-the archive does not include them; nor HTS, which `setup` also fetches but the paper's tables do
-not use. `setup` fetches each at a pinned commit, and every result row records the commit that
-ran. ABC and CMSGen are built from pinned sources.
+neither the image nor the archive includes them; nor HTS, which `setup` also fetches but the
+paper's tables do not use. `setup` fetches each at a pinned commit, and every result row records
+the commit that ran.
 
 `setup` changes the compared tools in three ways, none of which changes what they compute:
 - CMSGen (`scripts/cmsgen_gpap_eval.patch`) gets `--nowrite`, which generates samples without
@@ -341,7 +295,7 @@ re-measurement, to produce rows that say "no measurement". The campaign the pape
 carried them over, and so does this artifact: such a row is marked `not_remeasured`,
 `VERIFICATION.txt` names it, and the comparison counts it as evidence for neither side. This can
 only be unfair to the rival, since a faster card might initialize where the L4 could not.
-`reproduce.sh full --remeasure-failures` re-measures them.
+`full --remeasure-failures` re-measures them.
 
 ### Known deviations
 
@@ -357,6 +311,11 @@ only be unfair to the rival, since a faster card might initialize where the L4 c
 
 ### What has been run end to end
 
+- The Docker images, built by `make_image.sh` from an archive built like this one, on an RTX 4080
+  Laptop GPU under WSL2 ([ARTIFACT_FINDINGS.md](../../findings/ARTIFACT_FINDINGS.md) §10):
+  `check` and `tables` with no GPU and no network, all 163 values reproduced and `RESULTS.md` and
+  every figure identical to the shipped ones; `smoke` in 3 minutes, `setup` included, and again
+  with the network cut after `setup`; the tool's whole test suite on the GPU (2026-10-19).
 - `check` and `tables`, from an archive built like this one, in an offline Ubuntu 22.04
   container with only the stock `python3` 3.10 (no GPU, no numpy, no network): the archive
   verified, all 163 published values reproduced, the gate passed (2026-10-15). The same in

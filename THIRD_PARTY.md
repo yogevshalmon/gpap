@@ -56,7 +56,22 @@ repository does not redistribute them.
 
 The reproduction archive published with the paper contains this repository, the paper's campaign
 data and ITC'99 `b17` to `b22`, unmodified and beside the EUPL text. It contains no third-party
-tools.
+tools; its Docker image does, as the next section says.
+
+## In the Docker images
+
+The images built by `Dockerfile` and `eval/artifact/Dockerfile`, including the one published with
+the paper's artifact, redistribute what they install. Each component keeps its own licence.
+
+| component | in | licence |
+|---|---|---|
+| Ubuntu 24.04 and its packages, among them Python 3.12, g++, cmake and git | both images | each package's own, in its `copyright` file under `/usr/share/doc/` in the image |
+| PyTorch, Triton and the other Python packages, with the NVIDIA CUDA libraries that PyTorch's wheels bring | both images | their own: PyTorch BSD-3-Clause, Triton MIT, and the CUDA libraries under NVIDIA's licence, which ships in each package. `/opt/gpap-image/pip-freeze.txt` lists every package and version. |
+| ABC, built from the commit above | both images | as above |
+| CMSGen, built from the commit above with `scripts/cmsgen_gpap_eval.patch` | the artifact image | MIT |
+
+No image contains the GPU samplers GPAP is compared with. They state no licence, so the artifact's
+`setup` step clones them when it runs.
 
 ## Dependencies
 

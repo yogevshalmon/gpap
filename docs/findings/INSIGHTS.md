@@ -400,6 +400,12 @@ VRAM-bound below the batch cap, so a larger card grows OUR K while the rival sta
 `GPAP_VRAM_BUDGET_MIB` (clamped once, in `gpap_mem_available`) holds the engine to the recorded
 card's budget, and `compare_campaign.py` counts every walked-down grant.
 
+**The artifact is a Docker image that compiles the engine on first use (2026-10-19;
+[ARTIFACT_FINDINGS.md](ARTIFACT_FINDINGS.md) §10).** An engine compiled without a GPU links
+against CI's stub `libcuda`, which has no SONAME, so it would load the stub at run time; the image
+compiles for the GPU it finds instead, in 14 s on the 4080. All 15 image gates passed under WSL2,
+`smoke` in 3 minutes; native Linux and a card other than Ada are still to be shown.
+
 **A gate that knows one shape of a leak is a gate for that shape (2026-09-13).** The third
 absolute path to ship had no `/home/` in it: an agent's scratch directory with the home path
 flattened into its NAME, inside three Barbarik error rows, and the packager's inline `/home/` check

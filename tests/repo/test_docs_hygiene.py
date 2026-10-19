@@ -249,3 +249,27 @@ def test_no_shipped_file_names_a_path_no_archive_carries():
     assert not named, (
         "these SHIPPED files name a path that `.gitattributes` keeps out of every archive, so "
         "the reference dangles for everyone who unpacks one:\n  " + "\n  ".join(named))
+
+
+def _fenced_lines(text):
+    """Every non-blank line inside a fenced code block, the commands and quoted outputs, with the
+    indentation of a block nested in a list item removed."""
+    lines, inside = set(), False
+    for line in text.splitlines():
+        if line.strip().startswith("```"):
+            inside = not inside
+        elif inside and line.strip():
+            lines.add(line.strip())
+    return lines
+
+
+@pytest.mark.parametrize("folder", sorted(p.parent for p in (REPO / "docs" / "papers").glob("*/AE_README.md")),
+                         ids=lambda p: p.name)
+def test_an_ae_readme_quotes_only_what_its_artifact_guide_says(folder):
+    """A venue's AE README is an excerpt of the paper's ARTIFACT.md, the guide the archive carries
+    and the image gate reads. Every command and quoted output in the excerpt appears in the
+    guide, so the two cannot drift apart the way a copy does."""
+    excerpt = _fenced_lines((folder / "AE_README.md").read_text())
+    guide = _fenced_lines((folder / "ARTIFACT.md").read_text())
+    assert excerpt, "the AE README quotes no command"
+    assert not excerpt - guide, f"quoted in AE_README.md but not in ARTIFACT.md: {sorted(excerpt - guide)}"

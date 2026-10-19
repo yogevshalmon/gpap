@@ -16,6 +16,7 @@ about the paper lives in it. A folder holds:
 | `PROTOCOL.md` | the rules the evaluation ran under, frozen before its campaign |
 | `ARTIFACT.md` | how to regenerate the paper's tables, and to re-measure them |
 | `published_numbers.json` | the numbers the paper prints from its measurements, checked against the data whenever the tables are regenerated |
+| `AE_README.md` | optional: the README a venue's artifact submission asks for, an excerpt of `ARTIFACT.md` that a test keeps faithful |
 
 The paper's own text lives outside this repository, and no generated table is committed: each
 paper's artifact regenerates them from the campaign data it ships. The tool itself, in `gpap/`
