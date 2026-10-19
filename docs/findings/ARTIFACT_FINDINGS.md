@@ -5,11 +5,14 @@
 > **Status:** settled.
 > **Measured:** 2026-09-09/10 against the frozen campaign `l4_protocol_20260904`, and again
 > 2026-10-13/14 against its re-run `l4_protocol_20261012`, the rows the paper prints (§5b) —
-> NVIDIA L4 (24 GB, Colab) for the reference rows, RTX 4080 Laptop (12 GB) for the smoke tier.
+> NVIDIA L4 (24 GB, Colab) for the reference rows, RTX 4080 Laptop (12 GB) for the smoke tier;
+> the Docker images 2026-10-19 on the same laptop under WSL2 (§10).
 > **Rule lives in:** `GPAP_VRAM_BUDGET_MIB`, clamped once inside `gpap_mem_available`
 > (`cpp/src/calibrate.cpp`); `eval/artifact/reproduce.sh --vram-cap`;
-> `eval/artifact/compare_campaign.py`; `eval/artifact/subset.json`.
-> **Gated by:** `tests/engine/test_k_cap.py`, `tests/experiments/test_rival_budget.py`.
+> `eval/artifact/compare_campaign.py`; `eval/artifact/subset.json`; the images: `Dockerfile`,
+> `scripts/docker_entrypoint.sh`, `eval/artifact/Dockerfile`, `eval/artifact/check_image.sh`.
+> **Gated by:** `tests/engine/test_k_cap.py`, `tests/experiments/test_rival_budget.py`,
+> `tests/repo/test_docker.py`, `tests/experiments/test_artifact_image.py`.
 > **Record only:** §8, the review post-mortem on gates that could not fail.
 
 The evidence behind `docs/papers/tacas-27/ARTIFACT.md` and `eval/artifact/reproduce.sh`
@@ -351,3 +354,45 @@ substitution must hit, or the script refuses as stale), the gate with the denyli
 inside the result, the manifest rewritten, repacked as `<name>-anon`. `GPAP_ARTIFACT_TREE=<tree-ish>`
 lets the packager dry-run uncommitted work (`git write-tree` on a temporary index); the name and
 the manifest then carry that object's id, so a dry run cannot pass as a release.
+
+## 10. The artifact as a Docker image (2026-10-19)
+
+The AE chairs granted the special-hardware exemption and asked for a Docker image. There are two:
+the tool (`Dockerfile`) and the artifact, a layer over it (`eval/artifact/Dockerfile`), both built
+from the artifact archive by `eval/artifact/make_image.sh` and gated by
+`eval/artifact/check_image.sh`. Measured on an RTX 4080 Laptop GPU (12 GB), driver 596.58
+(CUDA 13.2), under WSL2 with Ubuntu 24.04, Docker 29.1.3 (the legacy builder: no buildx) and the
+NVIDIA Container Toolkit 1.20.1, from a dry-run archive of the branch (tree `79ea6a1`):
+
+| | |
+|---|---|
+| the tool image | 8.47 GB |
+| the artifact image | 8.80 GB loaded, sharing the tool's layers; both saved with `docker save \| gzip`: 4.57 GB |
+| the engine's first-use compile, sm_89 | 14 s, then reused from the cache volume |
+| `smoke`, `setup` included | 3 min 6 s: PASS, 4 cells, `ARTIFACT_TIER_COMPLETE` |
+| all 15 gates | 9 min |
+
+Every gate passed. With no GPU and no network: the images start; the archive verifies against its
+`MANIFEST.sha256` inside the image; no operator identity in `/opt/gpap`, the image history or its
+metadata; `check` says only `tables` can run; `tables` prints the five lines ARTIFACT.md quotes;
+`RESULTS.md` differs from the shipped one only in its date, and every figure is byte-identical; the
+host suites pass. With the GPU: the engine compiles on first use and is reused; a non-root user
+samples a circuit (`--sim-check`) and a CNF; the full test suite passes (623); `smoke` passes, and
+passes again with the network cut after `setup`; with no network at all it fails within 20 s,
+saying why. The suites' one failure was the citation of this section before it existed.
+
+**What building it taught.**
+- **No engine compiled without a GPU can ship.** CI links the library against a stub `libcuda`
+  that has no SONAME, and the linker then records the stub's absolute path, so the library would
+  load the stub at run time (a two-file link test). The image compiles for the GPU it finds.
+- **In a container, tests run as root**, which writes through permission bits:
+  `test_tmp_dir_falls_back_when_the_root_is_unusable` could not pass there, and now skips as root.
+- **`make_artifact.sh` given a relative output directory dropped the uniformity rows.** Their
+  paths were resolved before it changed into the staging tree, so the generator found none and
+  the packager refused, 4 of 163 numbers unproduced. The refusal was right; the directory is now
+  made absolute first.
+- **The leak gate's denylist is the operator's**, a username and a hostname kept outside the
+  repository. The retired double-blind list names the authors, who ship on purpose.
+
+**Not yet shown:** native Linux, where the toolkit mounts the driver as `libcuda.so.1` alone (the
+image carries the `libcuda.so` link the compile needs), and a GPU other than Ada.
