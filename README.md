@@ -112,6 +112,8 @@ pip install -e ".[dev]"      # + pytest, ruff, python-sat
 gpap info                    # device, kernels, encoder, power-limit warning
 ```
 
+To skip the toolchain, run GPAP in Docker instead: [docs/DOCKER.md](docs/DOCKER.md).
+
 `scripts/build_core.sh` compiles the Triton kernels ahead of time and builds the library. It
 needs cmake, a C++17 compiler and the NVIDIA driver, plus triton at build time only. The compiled
 kernels target one GPU architecture, so rebuild when you move to a different card generation. If
