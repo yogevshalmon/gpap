@@ -6,13 +6,15 @@
 > **Measured:** 2026-09-09/10 against the frozen campaign `l4_protocol_20260904`, and again
 > 2026-10-13/14 against its re-run `l4_protocol_20261012`, the rows the paper prints (§5b) —
 > NVIDIA L4 (24 GB, Colab) for the reference rows, RTX 4080 Laptop (12 GB) for the smoke tier;
-> the Docker images 2026-10-19 on the same laptop under WSL2 (§10).
+> the Docker images 2026-10-19 on the same laptop under WSL2 (§10, §11), and on native Ubuntu
+> 20.04 with a GeForce MX150 (§11).
 > **Rule lives in:** `GPAP_VRAM_BUDGET_MIB`, clamped once inside `gpap_mem_available`
 > (`cpp/src/calibrate.cpp`); `eval/artifact/reproduce.sh --vram-cap`;
 > `eval/artifact/compare_campaign.py`; `eval/artifact/subset.json`; the images: `Dockerfile`,
 > `scripts/docker_entrypoint.sh`, `eval/artifact/Dockerfile`, `eval/artifact/check_image.sh`.
 > **Gated by:** `tests/engine/test_k_cap.py`, `tests/experiments/test_rival_budget.py`,
-> `tests/repo/test_docker.py`, `tests/experiments/test_artifact_image.py`.
+> `tests/repo/test_docker.py`, `tests/experiments/test_artifact_image.py`,
+> `tests/experiments/test_artifact_steps.py`.
 > **Record only:** §8, the review post-mortem on gates that could not fail.
 
 The evidence behind `docs/papers/tacas-27/ARTIFACT.md` and `eval/artifact/reproduce.sh`
@@ -395,4 +397,54 @@ saying why. The suites' one failure was the citation of this section before it e
   repository. The retired double-blind list names the authors, who ship on purpose.
 
 **Not yet shown:** native Linux, where the toolkit mounts the driver as `libcuda.so.1` alone (the
-image carries the `libcuda.so` link the compile needs), and a GPU other than Ada.
+image carries the `libcuda.so` link the compile needs), and a GPU other than Ada. *(Native Linux,
+the same day: §11. The toolkit there also mounts `libcuda.so`.)*
+
+## 11. A review of the images, and native Linux (2026-10-19)
+
+A review of the branch before its pull request found nine faults on the reviewer's path and in
+the packager. Each was reproduced, fixed, and given a test or a gate that failed on the previous
+code first. What they teach:
+
+- **PID 1 ignores a signal it has no handler for.** The entry point ran each step as a child
+  with no trap, so `docker stop` waited out its grace period and killed it (exit 137), Ctrl-C did
+  nothing, and the closing chown never ran: 19 of 19 files stayed root-owned. Each step now runs
+  in its own process group (`setsid`), which a trap signals: `docker stop` returns at once, exit
+  143 (the gate `stop-ends-a-step`).
+- **`producer | grep -q` under `pipefail` fails when grep wins.** grep exits at its first match,
+  the producer's next write gets SIGPIPE, and the pipeline returns 141: the "needs network
+  access" note printed in 0 of 300 runs when the missing sampler was listed before a present one.
+  It now reads `setup.log`'s `clone failed` line, so it also no longer blames the network for
+  every other setup failure.
+- **Docker creates a missing bind source as root**, so giving the results to the owner of `/out`
+  changed nothing in a fresh directory, the documented flow: `rm -rf out` needed sudo. The guide
+  now creates `out/` first, and only files the container created are given back.
+- **The steps bypassed the tool's entry point.** Without `--gpus`, a tier printed a Triton
+  traceback and then blamed the network; with a GPU, `check` said "engine core: NOT BUILT". The
+  GPU steps now ask the tool's entry point first (`usable_cc`), and `check` gets its first-use
+  compile.
+- **Moving outputs moves every reader.** `tables` now writes into `details/`, but
+  `make_artifact.sh` still copied the audit and the figures from the top of the paper folder, so
+  a regeneration would have shipped the previous audit; it reads `details/` first. §10's
+  relative-path fix resolved the path after changing into the checkout, so the archive was
+  written into the repository; it now resolves where the path was typed.
+- A tier removes its `SUMMARY.txt` when it starts, so a re-run that stops cannot show the last
+  run's PASS; a bare `compare` prints the whole report and leaves the tier's summary alone; the
+  comparator names a changed verdict in its closing block, which is what a tier's summary shows.
+
+All 18 gates passed on the 4080 under WSL2 (tree `7f28258`): the 15 of §10 and three new ones
+(`tier-without-gpu-says-why`, `check-with-gpu`, `stop-ends-a-step`), each first seen to fail on
+the previous image.
+
+**Native Linux:** Ubuntu 20.04 (kernel 5.15), Docker 26.1.3, the NVIDIA Container Toolkit 1.20.1
+and driver 570.133.07, on a GeForce MX150 (sm_61, 2 GB), which GPAP cannot run on. It shows the
+plumbing:
+- the toolkit mounts `libcuda.so.1` and also creates `libcuda.so` when the container starts, so
+  the image's own link (§10) resolves and is redundant here;
+- a compile forced to sm_80 links against the mounted driver (`NEEDED libcuda.so.1`);
+- the entry point says the card is sm_61 and GPAP needs 8.0 or newer;
+- the guide's smoke test as written, from the saved image (loaded in 1 min 46 s): `check` runs,
+  `tables` writes its five lines in 18 s, `smoke` stops in 4 s with that one line, and every
+  file in `out/` belongs to the user; the nine gates that need no GPU pass.
+
+**Still not shown:** the engine running in the image on a GPU other than Ada.
