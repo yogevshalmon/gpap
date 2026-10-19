@@ -40,6 +40,9 @@ PY="${PYTHON:-$REPO_ROOT/.venv/bin/python}"
 RESULTS="$(PYTHONPATH="$REPO_ROOT" "${PYTHON:-python3}" -m eval.paths results)"
 : "${RESULTS:?cannot resolve — python3 must be able to import the repo (gpap/paths.py, eval/paths.py)}"
 OUT="${1:-$RESULTS}"
+# Absolute, because the gates below run after `cd "$STAGE"`: a relative OUT left the Barbarik
+# arguments pointing nowhere, and the packager refused over 4 uniformity numbers it had not read.
+mkdir -p "$OUT" && OUT="$(cd "$OUT" && pwd)" || { echo "[FATAL] cannot create $OUT" >&2; exit 1; }
 SRC_DATA="${GPAP_PAPER_DIR:-$RESULTS/paper}"
 # What is archived: HEAD, unless GPAP_ARTIFACT_TREE names another tree-ish — the dry-run knob for
 # packaging UNCOMMITTED work (`git write-tree` on a temporary index gives the working tree as a
@@ -126,9 +129,8 @@ echo "benchmarks : $n_extra/6 large ITC'99 circuits bundled"
 cat > "$STAGE/README-ARTIFACT.md" <<'POINTER'
 # GPAP — artifact for the TACAS 2027 tool paper
 
-Start with [docs/papers/tacas-27/ARTIFACT.md](docs/papers/tacas-27/ARTIFACT.md): what to run in
-the TACAS VM, what it prints, and how to re-measure on a GPU. Run every command from this
-directory.
+Start with [docs/papers/tacas-27/ARTIFACT.md](docs/papers/tacas-27/ARTIFACT.md): what to run, in
+the artifact's Docker image or without it, what it prints, and how to re-measure on a GPU.
 POINTER
 
 # --- Tier 1, run INSIDE the staged tree ----------------------------------------------------------
