@@ -8,7 +8,7 @@
 #
 # The steps that run on the GPU first ask the tool image's entry point whether there is one GPAP
 # can use, so a missing --gpus is one line, not a traceback; `check` also gets its first-use
-# compile, so it reports the engine the tiers run. A GPU tier runs `setup` first, in the same
+# compile, so it shows the engine builds for this GPU. A GPU tier runs `setup` first, in the same
 # container, as the guide's path without Docker does: it compiles libgpap for this GPU and clones
 # the compared samplers at their pinned commits (they state no licence, so no image carries
 # them). Anything that is not a step (`gpap sample ...`, `bash`) goes to the tool image's entry
@@ -34,10 +34,12 @@ esac
 # (setsid), which the trap signals as a whole; a signal that arrives between steps keeps the next
 # one from starting. The results are still given back below.
 child="" stopped=0
-trap 'stopped=1; [ -z "$child" ] || kill -TERM -- "-$child" 2>/dev/null' TERM INT
+stop_child() { kill -TERM -- "-$child" 2>/dev/null || kill -TERM "$child" 2>/dev/null; }
+trap 'stopped=1; [ -z "$child" ] || stop_child' TERM INT
 run() {
     [ "$stopped" = 0 ] || return 143
     setsid "$@" & child=$!
+    [ "$stopped" = 0 ] || stop_child         # a signal that came before $child was known
     local rc=0
     wait "$child" || rc=$?
     while kill -0 "$child" 2>/dev/null; do wait "$child"; rc=$?; done   # a trap ended the wait
@@ -47,7 +49,9 @@ run() {
 
 case "$STEP" in
     check)
-        [ "${GPAP_SKIP_BUILD:-0}" = 1 ] || ensure_core || exit 1 ;;
+        # In the foreground, so a stop waits for the compile (under a minute) to end.
+        [ "${GPAP_SKIP_BUILD:-0}" = 1 ] || ensure_core || exit 1
+        [ "$stopped" = 0 ] || exit 143 ;;
     setup|smoke|subset|full)
         usable_cc >/dev/null || { echo "[FAIL] $STEP runs on the GPU; see the line above." >&2; exit 1; } ;;
 esac
@@ -66,7 +70,7 @@ case "$STEP" in
         run bash "$REPRODUCE" setup >"$OUT_ROOT/setup.log" 2>&1 || rc=$?
         if [ "$rc" = 0 ]; then
             echo "setup: done"
-        elif [ "$rc" -lt 128 ]; then                # not stopped by a signal: it failed
+        elif [ "$stopped" = 0 ]; then               # failed, rather than stopped
             tail -25 "$OUT_ROOT/setup.log" >&2
         fi
         # The compared samplers come from GitHub, once per container. Said here, not left to
@@ -78,13 +82,13 @@ case "$STEP" in
 esac
 if [ "$rc" = 0 ]; then
     run bash "$REPRODUCE" "$STEP" "$@" || rc=$?
-elif [ "$rc" -lt 128 ]; then
+elif [ "$stopped" = 0 ]; then
     echo "[FAIL] setup failed, so $STEP did not run; see above." >&2
 fi
 # Only what this container created, which is root's: Docker creates a missing bind source as
 # root, and then there is no owner to give it to (the guide's `mkdir -p out` comes first).
-owner="$(stat -c %u:%g "$OUT_ROOT")"
-if [ "$(id -u)" = 0 ] && mountpoint -q "$OUT_ROOT" && [ "$owner" != 0:0 ]; then
+if [ "$(id -u)" = 0 ] && mountpoint -q "$OUT_ROOT" \
+        && owner="$(stat -c %u:%g "$OUT_ROOT")" && [ "$owner" != 0:0 ]; then
     find "$OUT_ROOT" -uid 0 -exec chown -h "$owner" {} + 2>/dev/null || true
 fi
 exit "$rc"

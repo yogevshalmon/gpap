@@ -119,19 +119,21 @@ if [ "$GPU" = 1 ]; then
                 && holds smoke && [ -z "$(find "$WORK/out" ! -user "$(id -u)")" ]
         }
         gate smoke smoke
-        # `docker stop` ends a step at once (PID 1 passes the signal on), not after the grace
-        # period with SIGKILL (137), and what it wrote is still given back.
+        # `docker stop` ends a step at once, exit 143 (PID 1 passes the signal on), not after the
+        # grace period with SIGKILL (137), and what it wrote is still given back.
         stops() {
             local c="$VOL-stop" code i
             mkdir -p "$WORK/stop"
             docker run -d --gpus all --name "$c" -v "$WORK/stop:/out" "$ART" smoke --out /out/smoke \
                 || return 1
             for i in $(seq 60); do [ -s "$WORK/stop/setup.log" ] && break; sleep 1; done
+            # Still running, or a step that ended by itself would pass for one that was stopped.
+            [ "$(docker inspect -f '{{.State.Running}}' "$c")" = true ] || { docker logs "$c"; return 1; }
             docker stop -t 30 "$c"
             code="$(docker inspect -f '{{.State.ExitCode}}' "$c")"
             docker logs "$c"; docker rm -f "$c" >/dev/null
             echo "exit code $code"
-            [ "$code" != 137 ] && [ -z "$(find "$WORK/stop" ! -user "$(id -u)")" ]
+            [ "$code" = 143 ] && [ -z "$(find "$WORK/stop" ! -user "$(id -u)")" ]
         }
         gate stop-ends-a-step stops
         offline() {

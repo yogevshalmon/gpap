@@ -422,7 +422,7 @@ code first. What they teach:
 - **The steps bypassed the tool's entry point.** Without `--gpus`, a tier printed a Triton
   traceback and then blamed the network; with a GPU, `check` said "engine core: NOT BUILT". The
   GPU steps now ask the tool's entry point first (`usable_cc`), and `check` gets its first-use
-  compile.
+  compile, so it shows the engine builds for this GPU (the tiers' own build is `setup`'s).
 - **Moving outputs moves every reader.** `tables` now writes into `details/`, but
   `make_artifact.sh` still copied the audit and the figures from the top of the paper folder, so
   a regeneration would have shipped the previous audit; it reads `details/` first. §10's
