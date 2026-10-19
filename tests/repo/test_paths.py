@@ -51,6 +51,8 @@ def test_scratch_lands_in_the_one_root_and_is_named_for_its_contents(monkeypatch
         os.rmdir(d)
 
 
+@pytest.mark.skipif(os.geteuid() == 0, reason="root writes through permission bits, so it can "
+                    "make no directory unwritable to itself (a container runs tests as root)")
 def test_tmp_dir_falls_back_when_the_root_is_unusable(monkeypatch, tmp_path):
     """An unwritable root (e.g. a read-only shared install) falls back to a writable scratch
     directory."""
