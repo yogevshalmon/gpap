@@ -63,7 +63,9 @@ first.
   ```
 
   The one error is the cell where GPAP's encoder fails because ABC crashes on `b19`, a failure in
-  the paper too. The 8 warnings are the rival failures the paper reports
+  the paper too. The 8 warnings, two for each of Recurrent's four stages, are about its 28
+  recorded failures: one asks that the paper report them, which its Fail column does; the other
+  says they were carried over from an earlier run on the same setup instead of re-measured
   ([Two shortcuts](#two-shortcuts-both-recorded-in-every-row)).
 - `smoke` runs the whole pipeline on 4 cells, compiling the engine for this GPU first.
   `out/smoke/SUMMARY.txt` must hold:
@@ -114,8 +116,8 @@ states the protocol in full.
 
 ### Re-measuring on a GPU
 
-`subset` re-measures 66 of the 142 cells, in about 3 hours on the reference L4, and `full` all of
-them, in about 13 hours. Start one detached and follow it:
+`subset` re-measures 66 of the 142 cells, in about 2.5 hours, and `full` all of them, in about 12
+hours. Start one detached and follow it:
 
 ```bash
 docker run -d --name gpap-subset --gpus all -v "$PWD/out:/out" gpap-artifact:tacas-27 subset --out /out/subset
@@ -136,7 +138,7 @@ rest:
 |---|---|---|
 | **the same formula in each cell** | `n_vars`, `n_clauses`, `support`, the encoder and `pin_check_ok` match exactly | the two runs did not measure the same thing, usually because of a different `abc` build |
 | **soundness** | no emitted model falsifies a clause, and every kept sample replays through the original circuit | a real bug, against the paper's central claim |
-| **the same verdicts** | which tool won each cell, and how each cell was classified | the conclusion did not survive the change of hardware |
+| **the same verdicts** | which tool won each cell, and how each cell was classified | the conclusion did not survive the change of hardware, unless the GPU sampler stepped down to a smaller batch on that cell ([Hardware](#hardware)) |
 | *rates* | this card's speed relative to ours, per stage, in `details/COMPARISON.txt` | nothing: it describes the machine |
 
 The tier fails if a formula differs, if a sample is unsound, if fewer cells ran than the tier
@@ -144,17 +146,17 @@ sets out to run, or if any step fails. A changed verdict does not fail it; the `
 says how many verdicts differ, and `SUMMARY.txt` names them. `details/COMPARISON.txt` is the
 comparison cell by cell.
 
-**What each tier costs.** These are estimates for the reference L4 session, built from the
-recorded time of every cell plus a measured overhead the rows do not carry (start-up, the ABC
-pass and its equivalence check, the soundness replay):
+**What each tier costs.** These are estimates, built from the recorded time of every cell plus a
+measured overhead the rows do not carry (start-up, the ABC pass and its equivalence check, the
+soundness replay). The real time depends on the GPU and the host CPU:
 
-| tier | cells | on the reference L4 | what it covers |
+| tier | cells | time | what it covers |
 |---|---|---|---|
 | `tables` | — | seconds, no GPU | every published table and figure |
 | `smoke` | 4 | about 4 min | one cell of each T=25 stage, run exactly as the real tiers run it |
-| `subset` | 66 | about 2.9 h (2 h 50 min measured) | all 22 ISCAS-85 cells, and 22 of the 30 sequential instances at T=25 |
-| `full` | 142 | about 12.9 h | every cell, at T=25 and T=50 |
-| `full --remeasure-failures` | 142 | about 23.2 h | the same, re-measuring every recorded rival failure |
+| `subset` | 66 | about 2.5 h | all 22 ISCAS-85 cells, and 22 of the 30 sequential instances at T=25 |
+| `full` | 142 | about 12 h | every cell, at T=25 and T=50 |
+| `full --remeasure-failures` | 142 | about 23 h | the same, re-measuring every recorded rival failure |
 
 Each GPU step also spends about a minute compiling the engine and cloning the compared samplers.
 For another machine, `eval/artifact/estimate_wall.py artifact-data/paper/data` prints the same
@@ -271,12 +273,15 @@ Barbarik and SPUR, which test uniformity, are not part of `setup`.
 
 ### Hardware
 
-**24 GB of GPU memory runs every cell at the batch size the paper recorded.** Each rival's batch
-size is the largest that ran on the reference L4; for nearly all of them, the next step up ran
-out of memory. On a card with less memory, a cell may not run at its recorded batch. It then
-steps down to the next smaller batch, which the row records (`grant_source`) and the comparison
-counts and warns about, because a rival given a smaller batch than the paper gave it makes our
-ratio look better. On our 12 GB card, DEMOTIC stepped down on `c432`. The run still completes.
+**The paper's measurements ran on an NVIDIA L4 with 24 GB of GPU memory, which runs every cell
+at the batch size the paper recorded.** Each rival's batch size is the largest that ran on the
+L4; for nearly all of them, the next step up ran out of memory. A GPU with less memory runs every
+step, but its results can differ. Where a rival's recorded batch does not fit, the harness steps
+it down to the next smaller batch that does, and the row records it (`grant_source`). A smaller
+batch slows the rival, so on that cell our ratio looks better and a verdict against the rival
+can change in GPAP's favour. The comparison counts these cells, warns about them and names
+each one, and a verdict that changed there is evidence for neither side. On a 12 GB card, most
+of Recurrent's cells step down. The run still completes.
 
 The other direction is handled by `--vram-cap`, on by default. GPAP's own batch is limited by
 memory on 63 of the campaign's 141 rows, so a larger card would give GPAP more parallelism while
@@ -294,13 +299,16 @@ neither. The file is named after the earlier campaign that measured it; the pape
 reproduced it exactly. `--grants none` repeats the whole search.
 
 **Recorded rival failures are carried over, as in the paper's own campaign.** 28 cells are
-recorded as "the rival did not initialize within its 1,200 s budget", measured on the L4 in
-September 2026. Re-measuring them costs that budget each, 10 of the 22 hours of a full
-re-measurement, to produce rows that say "no measurement". The campaign the paper reports
-carried them over, and so does this artifact: such a row is marked `not_remeasured`,
-`VERIFICATION.txt` names it, and the comparison counts it as evidence for neither side. This can
-only be unfair to the rival, since a faster card might initialize where the L4 could not.
-`full --remeasure-failures` re-measures them.
+recorded as "the rival did not initialize within its 1,200 s budget". They were measured in
+September 2026, in the campaign before the paper's, on the same setup: an NVIDIA L4, with
+Recurrent at the same commit, configuration and budget. The only change to Recurrent since, the
+timer on its copy to the host, does not change what it computes
+([What you receive](#what-you-receive)). These rows are the paper's Fail column. Re-measuring
+them costs that budget each, 10 of the 22 hours of a full re-measurement, to produce rows that
+say "no measurement". The campaign the paper reports carried them over, and so does this
+artifact: such a row is marked `not_remeasured`, `VERIFICATION.txt` names it, and the comparison
+counts it as evidence for neither side. This can only be unfair to the rival, since a faster card
+might initialize where the L4 could not. `full --remeasure-failures` re-measures them.
 
 ### Known deviations
 
@@ -321,6 +329,7 @@ only be unfair to the rival, since a faster card might initialize where the L4 c
   `check` and `tables` with no GPU and no network, all 163 values reproduced and `RESULTS.md` and
   every figure identical to the shipped ones; `smoke` in 3 minutes, `setup` included, and again
   with the network cut after `setup`; the tool's whole test suite on the GPU (2026-10-19).
+  `subset`, in an image built the same way, on the same card (2026-10-21).
 - The same images on native Ubuntu 20.04, Docker 26.1 with the NVIDIA Container Toolkit, on a
   GeForce MX150, a GPU too old for GPAP ([ARTIFACT_FINDINGS.md](../../findings/ARTIFACT_FINDINGS.md)
   §11): the smoke test above as written,
@@ -328,7 +337,8 @@ only be unfair to the rival, since a faster card might initialize where the L4 c
 - `check` and `tables`, from an archive built like this one, in an offline Ubuntu 22.04
   container with only the stock `python3` 3.10 (no GPU, no numpy, no network): the archive
   verified, all 163 published values reproduced, the gate passed (2026-10-15). The same in
-  Ubuntu 24.04 with Python 3.12 (2026-10-13).
+  Ubuntu 24.04 with Python 3.12 (2026-10-13), and in Ubuntu 26.04, the 2027 TACAS VM's base,
+  with Python 3.14 (2026-10-21).
 - `setup`, then `smoke`, from the archive, in a fresh virtual environment built from
   `requirements-artifact.txt`, on an RTX 4080 Laptop GPU (12 GB): every tool built from its
   pinned source; 4 of 4 cells with the same formula, sound samples and the same verdicts.
