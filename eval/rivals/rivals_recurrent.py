@@ -491,7 +491,7 @@ def pick_batch(bench_file, T, budget_bytes=None):
 # GPAP's sampling portfolio for our arm. `circuit` is the ADAPTIVE bandit, the shipped default for
 # circuit inputs and what every recorded campaign used, so it stays the default. It is an open
 # ASYMMETRY: every rival and CMSGen run one fixed configuration while the bandit reports its
-# winner's rate (RIVAL_FAIRNESS_FINDINGS.md §10, §12); `--portfolio b8` pins a single config.
+# winner's rate (RIVAL_FAIRNESS_FINDINGS.md §12); `--portfolio b8` pins a single config.
 GPAP_PORTFOLIO = "circuit"
 
 

@@ -57,7 +57,7 @@ RETRY_ARGS=()
 T="${T:-25}"
 
 # The circuit each side is handed (rival_common.py): `abc` for every tool and stage is the
-# protocol (RIVAL_FAIRNESS_FINDINGS.md §16c); "raw abc" still runs but is not the protocol.
+# protocol (RIVAL_FAIRNESS_FINDINGS.md §16d); "raw abc" still runs but is not the protocol.
 VARIANTS_DEM="${VARIANTS_DEM:-abc}"
 VARIANTS_RCS="${VARIANTS_RCS:-abc}"
 HTS_ENCS="${HTS_ENCS:-tseitin abc}"

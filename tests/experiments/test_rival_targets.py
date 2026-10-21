@@ -380,7 +380,7 @@ def test_the_gpap_arm_cache_key_covers_the_python_sampling_layer(tmp_path, monke
 def test_the_row_says_WHICH_sampler_produced_it():
     """`--portfolio` selects GPAP's arm, so the row records which one ran. The default is the
     adaptive bandit while the rivals and CMSGen run one fixed config; the row discloses this via
-    `portfolio` + `adaptive` (RIVAL_FAIRNESS_FINDINGS.md §10, §12)."""
+    `portfolio` + `adaptive` (RIVAL_FAIRNESS_FINDINGS.md §12)."""
     from gpap.sampling.pipeline import portfolio
     from eval.rivals.rivals_recurrent import GPAP_PORTFOLIO
 
