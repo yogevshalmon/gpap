@@ -57,7 +57,7 @@ about which instances count.
 - A gradient sampler gets 1,200 s for its whole run, model building included, because building
   its model over a deep unrolling can take minutes. Recurrent-CircuitSAT also gets a separate
   1,200 s to find its starting point. A sampler that does not initialize or finish within its
-  budget is counted as a failure (the `rival failed` column), never as a zero.
+  budget is counted as a failure (the `Fail` column), never as a zero.
 - A gradient sampler runs once, at its own default seed, with the settings of its authors'
   shipped script. These are also the better of the settings its paper reports, on this GPU: the
   paper's settings were measured beside them
@@ -110,20 +110,21 @@ import, so a table and a figure cannot disagree about which cells count.
 | **proved UNSAT** | the cell has no solution at this depth, so neither tool can produce one |
 | **encoder refusal** | GPAP could not encode the cell; a limit of ours, never counted as a zero |
 
-`RESULTS.md`, which the artifact generates, names every screened cell under its table.
-
 **The columns add up.** Screening happens before anything is counted, so a screened cell cannot
-also count as a win. Every cell lands in exactly one column:
+also count as a win. Every cell lands in exactly one place:
 
 ```
-Table 1:   instances = n + CMSGen=0 + GPAP=0 + excluded
-Table 2:   cells     = n + rival=0  + GPAP=0 + rival failed + excluded
+Table 1:   instances = n + C=0 + G=0 + not counted
+Table 2:   cells     = n + C=0 + G=0 + Fail + not counted
 ```
 
-`n` is the number of cells the geometric mean is taken over. `excluded` holds the screened cells
-and every other cell without a ratio, each named under its table. Wins are counted over the `n`
-cells and the two zero columns. Both identities are checked by
-`tests/experiments/test_paper_tables.py`.
+`n` is the number of cells the geometric mean is taken over. `C=0` counts the cells where the
+compared tool (CMSGen in Table 1, the GPU sampler in Table 2) produced nothing and GPAP did, `G=0`
+the reverse, and `Fail` the GPU-sampler runs with no measurement inside the budget. `not counted`
+holds the screened cells and every other cell without a ratio. Wins are counted over `n` and the
+two zero columns. `RESULTS.md`, which the artifact generates, prints both identities row by row
+under each table, naming every cell not counted, and `tests/experiments/test_paper_tables.py`
+checks them.
 
 Further rules:
 
