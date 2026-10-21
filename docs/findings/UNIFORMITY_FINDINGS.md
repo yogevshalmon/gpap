@@ -100,7 +100,7 @@ uniformity term, so wherever `soft` won it the run emitted a distribution the st
 rejects. Since 2026-07-30 it is in no default portfolio and opt-in via `--allow-soft` (gated by
 `test_soft_is_not_in_any_default_portfolio`), and by policy the paper has no `soft` table.
 
-The price, parked by the user on 2026-07-30: on the 19 sequential circuits (`abc:fast`, T=25,
+The price, measured and parked on 2026-07-30: on the 19 sequential circuits (`abc:fast`, T=25,
 rare) leaving `soft` out costs a geomean 0.410 (2.44× slower) over 13 comparable instances, with
 two capability losses (`b11` 11,269 models → 0, `b12` 50,434 → 789). Re-measure with
 `eval/profiling/profile_soft_portfolio.py` before revisiting. Sketched, not built: a bandit that

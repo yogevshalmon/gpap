@@ -80,7 +80,9 @@ winner's rate. Pinning `b8` would cost 4.5–8.7%. Kept (§17, item 4) and discl
 
 As in Table 1, so Table 2 does not run GPAP on a slower Tseitin CNF (it had, 1.04–4.8× slower).
 Each tool compiles the same circuit into its own representation, and every row records
-`gpap.encoder`.
+`gpap.encoder`. The arm runs no separate coverage pass (its host reconstruction ran out of
+memory): its distinct fraction comes from the timed run's own rows, with the projection wall
+(`out_project_s`) subtracted.
 
 ## 14. Three tools on one constraint
 
