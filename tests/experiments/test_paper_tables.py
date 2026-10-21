@@ -1304,8 +1304,8 @@ def test_the_documented_protocol_describes_the_harness_that_exists():
 
 def test_the_rival_calibration_evidence_is_printed_not_just_pointed_at(tmp_path):
     """The generator prints the rival step calibration (every arm, its ratio to the pinned arm,
-    the verdict), so the results show whether the pinned setting was the better one for the
-    rival."""
+    the verdict) into the authors' notes, so the notes show whether the pinned setting was the
+    better one for the rival."""
     import inspect
     import json as _json
 
