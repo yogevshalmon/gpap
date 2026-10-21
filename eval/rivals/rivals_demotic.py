@@ -301,7 +301,7 @@ def main():
           f"steps={steps} ({steps_src}) | GPAP median of seeds {args.seeds} | CMSGen arm: "
           f"{'on (same CNF, --nowrite --maxtime)' if args.cmsgen else 'OFF'}")
     hdr = (f"{'instance':<10}{'circ':>6}{'pin':>14}{'p_acc':>10}{'DEM uniq':>10}{'t':>8}"
-           f"{'DEM u/s':>10}{'GPAP u/s~':>11}{'GPAP/s':>11}{'succ%':>7}{'ratio':>10}"
+           f"{'DEM u/s':>10}{'GPAP u/s~':>12}{'GPAP/s':>12}{'succ%':>7}{'ratio':>10}"
            f"{'CMS/s':>10}{'G/C':>9}")
     print(hdr)
     print("-" * len(hdr))
@@ -489,7 +489,7 @@ def main():
               (f"{ratio:,.1f}x" if ratio != float("inf") else "GPAP"))
         print(f"{name:<10}{variant:>6}{pin_desc:>14}{pa_s:>10}{dem['unique']:>10,}"
               f"{dem['runtime_s']:>7.1f}s{dem['unique_per_s']:>10,.0f}"
-              f"{uq_s:>11}{g['sps']:>11,.0f}"
+              f"{uq_s:>12}{g['sps']:>12,.0f}"
               f"{100 * g['success']:>6.0f}%{rt:>10}{_cms_cols(g, cms)}", flush=True)
     if len(args.circuit_variants) > 1:
         print("\ncircuit variants (both sides get the SAME circuit; abc = sequential-AIG "
