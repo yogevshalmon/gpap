@@ -173,8 +173,8 @@ def cmsgen_run(path, cmsgen_bin, n, scratch, *, keep=None, timeout=60.0, write=T
 
 
 def cmsgen_sample(path, cmsgen_bin, n, scratch, keep=None, timeout=60.0):
-    """Back-compat wrapper (eval/colab/colab_sampling_benchmark.py imports it): stock write-mode
-    run, returning (samples_per_s, models)."""
+    """Back-compat wrapper over `cmsgen_run`: a stock write-mode run, returning
+    (samples_per_s, models)."""
     r = cmsgen_run(path, cmsgen_bin, n, scratch, keep=keep, timeout=timeout, write=True)
     return r["samples_per_s"], r["models"]
 
