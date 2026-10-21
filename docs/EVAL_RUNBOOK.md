@@ -146,18 +146,12 @@ see the same set and no hand-written list can drift. HTS is off because its pape
 2502.08673) evaluates 60 instances and not one is a circuit netlist, so it is the only GPU sampler
 with no published benchmarks of the kind the other two define.
 
-What keeps the comparison fair is in
-[findings/RIVAL_FAIRNESS_FINDINGS.md](findings/RIVAL_FAIRNESS_FINDINGS.md); each rule there fixed
-a wrong number once: emission symmetry (§1, checked by `check_emission_symmetry.py`), the batch
-grant (§2: the largest batch the sampler completes, walking down a ladder from 30,000,000 in
-`rival_common.run_at_batch`), the step count
-from `RIVAL_STEPS` (§6), Recurrent's single configuration and initialization budget (§11), the
-`abc:fast` GPAP arm with a per-row `unique_per_s_est` instead of a coverage pass (§13), and the
-CMSGen arm on every rival row (§14). Two rules hold per row: seed 5 everywhere, since a different
-seed pins a different rare pattern; and constraint alignment (`pin_check_ok`), whose failure puts
-the row in the `misaligned` bucket and fails `verify_artifact`. Kept GPAP rows are also simulated
-through the original circuit (`sim_check`), and the GPAP arm and its probes are cached under
-`<output>/.gpap_cache`.
+The rules that keep the comparison fair, each of which once fixed a wrong number, are in
+[findings/RIVAL_FAIRNESS_FINDINGS.md](findings/RIVAL_FAIRNESS_FINDINGS.md). Every row uses seed 5
+(a different seed pins a different rare pattern), checks that the constraint matches
+(`pin_check_ok`; a failure puts the row in the `misaligned` bucket and fails `verify_artifact`),
+and replays GPAP's samples through the original circuit (`sim_check`). The GPAP arm and its
+probes are cached under `<output>/.gpap_cache`.
 
 Quirks handled: DEMOTIC `exec`s generated Python, so wire names are sanitized and `BUFF` becomes
 `BUF` in its copy; Recurrent's `backward()` needs a `start_point` at least the register distance
@@ -170,7 +164,8 @@ A run writes under `.experiments/`; copy a finished campaign to `$GPAP_RESULTS` 
 `eval/artifact/paper_tables.py` generates the tables and is the one place the exclusion rules
 live; `verify_artifact.py` checks a campaign before its numbers are published; and
 `make_artifact.sh` packages a campaign's rows with the code for archiving. The first two print
-their usage with `--help`; `make_artifact.sh` describes its own in its header. These scripts were written for the TACAS 2027 submission: its artifact guide,
+their usage with `--help`; `make_artifact.sh` describes its own in its header. These scripts were
+written for the TACAS 2027 submission: its artifact guide,
 [papers/tacas-27/ARTIFACT.md](papers/tacas-27/ARTIFACT.md), runs them through one entry point,
 `eval/artifact/reproduce.sh`, which calls this driver for every measurement. The evidence behind
 that layer is in [findings/ARTIFACT_FINDINGS.md](findings/ARTIFACT_FINDINGS.md).
