@@ -26,9 +26,10 @@ change does not.
 - `reproduce.sh tables` prints one line per check. `RESULTS.md` is now the paper's tables as the
   paper prints them, with the ratios its text quotes and every cell not counted named under each
   table; the analysis behind the paper's wording moved to `paper_tables.py --out-notes`, which
-  the artifact does not run. `paper_tables.py` lost the tables the paper does not use (the
-  exact-oracle uniformity, the soft-portfolio price, the re-check and the `gpap bench` family
-  matrix).
+  the artifact does not run. The archive no longer carries the emission audit, which the paper
+  does not cite; `eval/rivals/check_emission_symmetry.py` still runs it. `paper_tables.py` lost
+  the tables the paper does not use (the exact-oracle uniformity, the soft-portfolio price, the
+  re-check and the `gpap bench` family matrix).
 
 ## 0.3.0 — 2026-10-17, the first public release
 

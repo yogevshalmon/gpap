@@ -80,14 +80,13 @@ mkdir -p "$STAGE/artifact-data/paper"
 cp -r "$SRC_DATA/data" "$STAGE/artifact-data/paper/data"
 # `reproduce.sh tables` (the folder's regenerate.sh) writes these into details/; an older folder
 # has them at its top.
-for f in README.md RESULTS.md VERIFICATION.txt emission_audit.txt plots; do
+for f in README.md RESULTS.md VERIFICATION.txt plots; do
     for src in "$SRC_DATA/details/$f" "$SRC_DATA/$f"; do
         [ -e "$src" ] && { cp -r "$src" "$STAGE/artifact-data/paper/$f"; break; }
     done
 done
 
-# The rows must be the frozen rows. The manifest also says whether the copied emission_audit.txt
-# below still applies, since nothing here can re-derive it.
+# The rows must be the frozen rows.
 [ -f "$STAGE/artifact-data/paper/data/MANIFEST.sha256" ] || {
     echo "[FATAL] no data/MANIFEST.sha256 beside the rows in $SRC_DATA/data — without it" >&2
     echo "        nothing here can tell the frozen campaign from a working copy." >&2
@@ -96,7 +95,7 @@ done
 ( cd "$STAGE/artifact-data/paper/data" && sha256sum --quiet -c MANIFEST.sha256 ) || {
     echo "[FATAL] the rows do not match data/MANIFEST.sha256 — these are not the frozen rows." >&2
     echo "        If a row was edited deliberately, re-run the paper folder's regenerate.sh" >&2
-    echo "        (tables, gate and emission audit) and update the manifest, then re-package." >&2
+    echo "        (tables and checks) and update the manifest, then re-package." >&2
     exit 1
 }
 echo "manifest   : the rows match data/MANIFEST.sha256"
@@ -186,17 +185,6 @@ if [ "$NUMBERS_OK" != 1 ]; then
     echo "        a number no campaign produced." >&2
     exit 1
 fi
-
-# --- the emission audit is COPIED, deliberately, and must be there --------------------------------
-# The audit reads the rivals' own source, and the stage has no rival checkouts: regenerated here it
-# skipped all three and still said PASS. It comes from `$GPAP_RESULTS/paper/regenerate.sh`; this
-# checks it exists, and the manifest check above that its rows are the frozen ones.
-[ -f "$STAGE/artifact-data/paper/emission_audit.txt" ] || {
-    echo "[FATAL] no emission_audit.txt in $SRC_DATA or its details/ — it is evidence the paper" >&2
-    echo "        cites, and it cannot be produced here (no rival checkouts in a staged tree). Run" >&2
-    echo "        \$GPAP_RESULTS/paper/regenerate.sh on a machine that has them." >&2
-    exit 1
-}
 
 # --- nothing the staging steps themselves wrote may ship ------------------------------------------
 # Before the gate and the manifest, so both see exactly the bytes that ship.
