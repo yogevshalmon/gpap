@@ -10,9 +10,8 @@ from pathlib import Path
 
 import pytest
 
-from eval.artifact.paper_tables import (cms_family, encoders_in, prop_rates,
-                                        rival_family, tiny_space, vacuous_pin,
-                                        zero_search)
+from eval.artifact.paper_tables import (cms_family, encoders_in, rival_family, tiny_space,
+                                        vacuous_pin, zero_search)
 from tests.conftest import REPO_ROOT as _REPO_ROOT
 
 
@@ -183,9 +182,8 @@ def test_the_circuit_variant_sentence_is_read_off_the_rows(tmp_path):
     def render(rows):
         (tmp_path / "rivals_demotic_native.json").write_text(_json.dumps(rows))
         out = tmp_path / "r.md"
-        args = types.SimpleNamespace(cmsgen=None, cmsgen_ref=None, rivals=str(tmp_path),
-                                     uniformity=[], barbarik=[], recheck=None, soft=None,
-                                     out_md=str(out), out_json=None)
+        args = types.SimpleNamespace(rivals=str(tmp_path), barbarik=[], out_md=str(out),
+                                     out_json=None)
         paper_tables.build(args)
         return out.read_text()
 
@@ -208,10 +206,9 @@ def test_a_rival_failure_is_described_as_a_budget_statement(tmp_path):
     r["rcs"] = {"error": "did not initialize: a 1-step start_point probe (sp=1) did not "
                          "complete within the 300s initialization budget"}
     (tmp_path / "rivals_recurrent_table.json").write_text(_json.dumps([r]))
-    out = tmp_path / "r.md"
-    args = types.SimpleNamespace(cmsgen=None, cmsgen_ref=None, rivals=str(tmp_path),
-                                 uniformity=[], barbarik=[], recheck=None, soft=None,
-                                 out_md=str(out), out_json=None)
+    out = tmp_path / "notes.md"
+    args = types.SimpleNamespace(rivals=str(tmp_path), barbarik=[], out_md=None, out_json=None,
+                                 out_notes=str(out))
     paper_tables.build(args)
     md = out.read_text()
     assert "cannot process" not in md
@@ -313,41 +310,6 @@ def test_vacuous_pin_is_detected_per_row_not_by_a_name_list(tmp_path):
     v = cms_family(d, "seq-c25-rare", "tseitin")
     assert v["vac"] == 1 and v["n_gm"] == 3, "the tautological pin entered the geomean"
     assert v["gm"] == pytest.approx(100.0)
-
-
-def test_table_3_screens_the_same_rows_as_table_1(tmp_path):
-    """Table 3 applies Table 1's screens; its identity only holds over the rows the ratio is
-    computed on."""
-    rows = [row(f"i{i}.bench") for i in range(3)]
-    rows.append(row("b19.bench", sps=1e8, sim_baseline={"p_accept": 1.0}))
-    rows.append(row("tiny.bench", support=5))
-    d = stage(tmp_path, "seq-c25-rare", rows)
-    v = cms_family(d, "seq-c25-rare", "tseitin")
-    pr = prop_rates(d, "seq-c25-rare", "tseitin")
-    assert pr["n"] == v["n_gm"] == 3, \
-        f"Table 3 scored {pr['n']} rows where Table 1 scored {v['n_gm']}"
-
-
-# --------------------------------------------------------------------- the propagation identity
-
-def test_propagation_identity_closes(tmp_path):
-    """samples/s ratio == (impl/s ratio) / (impl-per-sample ratio). This is algebra, so it fails
-    only if the columns are aggregated over different rows."""
-    rows = [row(f"i{i}.bench", sps=10.0 ** (5 + i), impl=1e9, cms_impl=2e6 * (i + 1))
-            for i in range(4)]
-    d = stage(tmp_path, "s", rows)
-    p, v = prop_rates(d, "s", "tseitin"), cms_family(d, "s", "tseitin")
-    assert abs((p["ratio"] / p["work"]) / v["gm"] - 1.0) < 0.01
-
-
-def test_propagation_columns_share_one_row_set(tmp_path):
-    """An instance that propagates but emits nothing (like EPFL `bar`) must not enter the
-    implications ratio while missing from work-per-sample."""
-    d = stage(tmp_path, "s", [row(f"i{i}.bench") for i in range(3)]
-              + [row("bar.aig", models=0, sps=0, impl=1e9)])
-    p, v = prop_rates(d, "s", "tseitin"), cms_family(d, "s", "tseitin")
-    assert p["n"] == 3, "the zero-emitting instance has no work-per-sample and must be excluded"
-    assert abs((p["ratio"] / p["work"]) / v["gm"] - 1.0) < 0.01
 
 
 # --------------------------------------------------------------------- rivals, same rules
@@ -683,30 +645,13 @@ def test_verify_artifact_names_a_stage_that_never_wrote_its_json(tmp_path):
     assert "seq-c25-rare" in r.stdout
 
 
-def test_uniformity_screens_subcube_instances(tmp_path):
-    """Table 4 excludes full-subcube instances, as the uniformity campaign's own summary does:
-    there the don't-care filler, not the config under test, draws the bits."""
-    from eval.artifact.paper_tables import uniformity
-    rows = [
-        {"kind": "circuit", "meta": {"subcube": False},
-         "samplers": {"gpap:b8": {"tv_median": 0.10, "verdict": "ok", "unsound": 0}}},
-        {"kind": "circuit", "meta": {"subcube": True},         # filler-only: not evidence
-         "samplers": {"gpap:b8": {"tv_median": 0.00, "verdict": "ok", "unsound": 0}}},
-    ]
-    p = tmp_path / "u.json"
-    p.write_text(json.dumps({"rows": rows, "args": {"alpha": 1e-3}}))
-    uni, args = uniformity([str(p)])
-    a = uni[("gpap:b8", "circuit")]
-    assert a["n"] == 1 and a["tv"] == pytest.approx(0.10), \
-        "the subcube instance diluted the aggregate"
-    assert args["_subcube_excluded"] == 1
-
-
-def test_prop_rates_has_no_row_when_every_cell_is_degenerate(tmp_path):
-    """When the screens remove every cell of a family, Table 3 has no row for it rather than
+def test_table_3_has_no_row_when_every_cell_is_degenerate(tmp_path):
+    """When the screens remove every cell of a stage, Table 3 has no row for it rather than
     falling back to the screened cells."""
-    d = stage(tmp_path, "s", [row("b02.bench"), row("b05.bench")])       # all vacuous pins
-    assert prop_rates(d, "s", "tseitin") is None
+    from eval.artifact.paper_tables import rival_prop_rates
+    rows = [rrow("b02", p_acc=1.0), rrow("b05", p_acc=1.0)]              # all vacuous pins
+    (tmp_path / "rivals_recurrent_rare.json").write_text(json.dumps(rows))
+    assert rival_prop_rates(str(tmp_path), "recurrent_rare", "rcs") is None
 
 
 # --------------------------------------------------------------------- vacuous pins
@@ -919,7 +864,7 @@ def test_a_timeout_steps_down_but_the_probe_is_bounded():
 #: The rules that decide which cells a published number covers. They are defined once, in
 #: `eval/artifact/paper_tables.py`, and imported everywhere else: a re-derived copy drifts
 #: silently, and two tables then disagree about what was excluded.
-SCREENS = ["zero_search", "select_cells", "cms_family", "prop_rates", "rival_family",
+SCREENS = ["zero_search", "select_cells", "cms_family", "rival_prop_rates", "rival_family",
            "encoders_in", "unique_unmeasured", "sound_failed"]
 
 
@@ -1090,7 +1035,7 @@ def test_verify_artifact_gates_the_cmsgen_arm_on_rival_rows(tmp_path):
 
 def test_the_generator_survives_a_stage_whose_every_cell_is_degenerate(tmp_path):
     """A stage whose only cell is screened as no-search has no geomean. The generator must still
-    write both files, with that stage's Table 1 row present and its no-search count stated."""
+    write both files, with that stage's Table 1 row present and its no-search cell named."""
     import subprocess
 
     riv = tmp_path / "riv"
@@ -1105,17 +1050,18 @@ def test_the_generator_survives_a_stage_whose_every_cell_is_degenerate(tmp_path)
     md = (tmp_path / "R.md").read_text()
     table1 = md.split("## Table 1")[1].split("## Table 2")[0]
     t1 = [ln for ln in table1.splitlines()
-          if ln.startswith("| ITC'99") or ln.startswith("| ISCAS-85")]
+          if ln.startswith("| Sequential") or ln.startswith("| ISCAS-85")]
     assert len(t1) == 2, table1
     rare = next(ln for ln in t1 if "| rare |" in ln)
-    assert "| — |" in rare and "CMSGen=0" not in rare, rare   # no geomean, and not blamed on CMSGen
-    assert "no **search at all**" in md or "no search at all" in md
+    assert "| — |" in rare and "C=0" not in rare, rare        # no geomean, and not blamed on CMSGen
+    assert "free support after propagation (no search) `b13`" in table1
 
 
 def test_table_2_has_one_clock_the_rivals_own_and_no_end_to_end_column(tmp_path):
     """Table 2 has one clock: GPAP's steady-state unique/s over the rival's own metric, both
     excluding model build (RIVAL_FAIRNESS_FINDINGS.md §17). The rows carry every wall field an
-    e2e column would read, and nothing may read them; Table 1 keeps its e2e column."""
+    e2e column would read, and nothing may read them; Table 1 keeps its e2e column. Why the
+    column is absent is standing policy, so the protocol doc says it."""
     import os
     import subprocess
     import sys
@@ -1137,13 +1083,15 @@ def test_table_2_has_one_clock_the_rivals_own_and_no_end_to_end_column(tmp_path)
                     "--rivals", str(tmp_path), "--out-md", str(md)],
                    check=True, capture_output=True, cwd=REPO_ROOT)
     t2 = md.read_text().split("## Table 2")[1].split("## Table 3")[0].split("\n## ")[0]
-    header = next(ln for ln in t2.splitlines() if ln.startswith("| rival | task"))
-    assert "| e2e |" not in header and "| GPAP/rival | wins |" in header
+    header = next(ln for ln in t2.splitlines() if ln.startswith("| Baseline | Target"))
+    assert "e2e" not in header and header.rstrip().endswith("| GPAP/rival |")
     assert "paper set" not in header, "one population per row (2026-09-07)"
-    assert "no end-to-end column here by rule" in t2, \
-        "the table must say the column is absent on purpose, not by omission"
+    readme = (Path(REPO_ROOT) / "docs" / "papers" / "tacas-27" / "README.md").read_text()
+    assert "Table 2\nhas no end-to-end column on purpose" in readme \
+        or "Table 2 has no end-to-end column on purpose" in " ".join(readme.split()), \
+        "the protocol must say the column is absent on purpose, not by omission"
     t1 = md.read_text().split("## Table 1")[1].split("## Table 2")[0]
-    assert "| e2e |" in next(ln for ln in t1.splitlines() if ln.startswith("| instance set")), \
+    assert "| GPAP e2e |" in next(ln for ln in t1.splitlines() if ln.startswith("| Set")), \
         "Table 1 keeps its end-to-end column: both of ITS walls are the same kind of thing"
 
 
@@ -1267,9 +1215,9 @@ def test_a_nearly_free_cell_is_screened_like_a_free_one():
 
 
 def test_the_emitted_ledger_sums_to_the_cell_count(tmp_path):
-    """Every ledger row of the emitted tables sums to its cell count. This parses the FILE rather
-    than the dicts behind it: the dicts are tested elsewhere, and what this catches is a renderer
-    printing the wrong column into the right place."""
+    """Every accounting line under the emitted tables sums to its cell count. This parses the
+    FILE rather than the dicts behind it: the dicts are tested elsewhere, and what this catches is
+    a renderer printing the wrong count into the right place."""
     import json
     import re
     import subprocess
@@ -1291,39 +1239,16 @@ def test_the_emitted_ledger_sums_to_the_cell_count(tmp_path):
                     "--rivals", str(tmp_path), "--out-md", str(md)],
                    check=True, capture_output=True, cwd=REPO_ROOT)
 
-    # The two ledger identities, by COLUMN NAME: `total` must equal the sum of `parts`.
-    LEDGERS = (("inst", ("n", "CMSGen=0", "GPAP=0", "excluded")),
-               ("cells", ("n", "rival=0", "GPAP=0", "rival failed", "excluded")))
-
-    def cells_of(line):
-        return [c.strip() for c in line.strip().strip("|").split("|")]
-
-    checked, hdr = 0, None
+    # Under each table, one line per row: `* <row>: total = n + ... + not counted[; names]`.
+    checked = 0
     for line in md.read_text().splitlines():
-        # A column map is only valid inside its own section. Without this reset the rows of
-        # every LATER table were read against Table 1's header, which on the real campaign's
-        # output parsed a ratio cell as a count -- green on a fixture with no table after it.
-        if line.startswith("#"):
-            hdr = None
-        if not line.startswith("| "):
+        m = re.match(r"\* [^:]+: (\d+) = ([\d + ]+?)(?:;|\.$)", line)
+        if not m:
             continue
-        col = cells_of(line)
-        if any(c in col for c, _ in LEDGERS):          # a header row: index it by name
-            hdr = {name: i for i, name in enumerate(col)}
-            continue
-        if hdr is None or line.startswith("|---") or len(col) != len(hdr):
-            continue
-        for total_col, part_cols in LEDGERS:
-            if total_col not in hdr or not all(p in hdr for p in part_cols):
-                continue
-            want = col[hdr[total_col]]
-            if not re.fullmatch(r"\d+", want):
-                continue
-            parts = [int(col[hdr[p]]) for p in part_cols if re.fullmatch(r"\d+", col[hdr[p]])]
-            assert len(parts) == len(part_cols), f"a ledger column is not a count: {col}"
-            assert sum(parts) == int(want), \
-                f"ledger does not close on {col[0]}: {parts} vs {want}"
-            checked += 1
+        parts = [int(x) for x in m.group(2).split("+")]
+        assert sum(parts) == int(m.group(1)), f"ledger does not close: {line}"
+        assert len(parts) in (4, 5), f"Table 1 has four parts and Table 2 five: {line}"
+        checked += 1
     assert checked >= 2, "no ledger rows were emitted to check"
 
 

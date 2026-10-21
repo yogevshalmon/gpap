@@ -82,7 +82,7 @@ def main(argv=None):
     b_name = args.arm_b or args.portfolio
     legacy = (a_name, b_name) == (f"{args.portfolio}+soft", args.portfolio)
     # Legacy key names are kept for the soft pair so recorded JSONs and eval/artifact readers
-    # (soft_price_tables.py, paper_tables.py) keep working; any other pair uses the arm names.
+    # (soft_price_tables.py) keep working; any other pair uses the arm names.
     A = "baseline(+soft)" if legacy else a_name
     B = "new(no soft)" if legacy else b_name
     arms = {A: _pf(a_name), B: _pf(b_name)}

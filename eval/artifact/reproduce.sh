@@ -208,8 +208,9 @@ step_setup() {
 }
 
 # ---------------------------------------------------------------------------- tier 1: tables
-# Every published table and figure from the rows, on any machine (no GPU). verify_artifact.py is
-# the publishability gate and prints the caveats the paper must carry.
+# The paper's tables and figures from the rows, on any machine (no GPU): RESULTS.md, the check of
+# every number the PDF prints, and verify_artifact.py's checks on the measurements. The console
+# and SUMMARY.txt get one line from each; the rest goes to tables.log beside the files.
 step_tables() {
     # $3 = "fresh": a re-measurement's own rows, held to the published rows by step_compare, never
     # to the PDF (their rates differ, and smoke and subset have no T=50 rows).
@@ -217,48 +218,43 @@ step_tables() {
     # Rows, not a directory: over an empty one every generator used to pass.
     [ -n "$(ls "$data"/rivals_*.json 2>/dev/null)" ] || {
         fail "no rivals_*.json in $data — the tables need the campaign's rows"; return 1; }
-    # The rows must be the frozen rows, or an edited row regenerates tables the gate still calls
-    # publishable. No manifest is fine: a fresh campaign's rows have none.
-    if [ -f "$data/MANIFEST.sha256" ]; then
-        ( cd "$data" && sha256sum --quiet -c MANIFEST.sha256 ) \
-            || { fail "$data does not match its MANIFEST.sha256 — these are not the frozen rows,
-       so every table below would describe something else. Restore them, or regenerate
-       the manifest deliberately if you meant to change a row."; return 1; }
-        say "the rows match $data/MANIFEST.sha256"
-    else
-        say "no MANIFEST.sha256 in $data — nothing pins these rows (fine for your own campaign)"
-    fi
     mkdir -p "$out"
-    say "tables 1/2/3 (+4b where the Barbarik rows are present) -> $out"
+    local log="$out/tables.log"
+    : >"$log"
+    # The rows must be the frozen rows, or an edited row regenerates tables that still pass. No
+    # manifest is fine: a fresh campaign's rows have none.
+    if [ -f "$data/MANIFEST.sha256" ]; then
+        ( cd "$data" && sha256sum --quiet -c MANIFEST.sha256 ) >>"$log" 2>&1 \
+            || { fail "$data does not match its MANIFEST.sha256 — these are not the frozen rows,
+       so every table would describe something else. Restore them, or regenerate the
+       manifest deliberately if you meant to change a row."; return 1; }
+        echo "the rows match $data/MANIFEST.sha256" >>"$log"
+    else
+        echo "no MANIFEST.sha256 in $data — nothing pins these rows (fine for your own campaign)" \
+            >>"$log"
+    fi
     local bar=("$data"/barbarik/circ_abc_*.jsonl)
     local barargs=(); [ -e "${bar[0]}" ] && barargs=(--barbarik "${bar[@]}")
     $PY eval/artifact/paper_tables.py --rivals "$data" ${barargs[@]+"${barargs[@]}"} \
-        --out-md "$out/RESULTS.md" --out-json "$out/paper_numbers.json" | tail -3 | note \
-        || fail "the table generator failed over $data"
+        --out-md "$out/RESULTS.md" --out-json "$out/paper_numbers.json" >>"$log" 2>&1 \
+        || { fail "the table generator failed over $data — see $log"; return 1; }
+    tail -1 "$log" | note                     # the cell count, the generator's last line
     # Does the paper still print what these rows give? Its tables are typeset by hand, so nothing
     # else checks. Fatal.
     if [ -z "$fresh" ]; then
-        say "the paper's own numbers, against these rows"
         $PY eval/artifact/check_paper_numbers.py --generated "$out/paper_numbers.json" \
-            2>&1 | tee "$out/PAPER_NUMBERS.txt" | tail -3 | note \
+            >"$out/PAPER_NUMBERS.txt" 2>&1 \
             || fail "the paper prints numbers these rows do not produce — see $out/PAPER_NUMBERS.txt"
+        grep 'published values' "$out/PAPER_NUMBERS.txt" | tail -1 | note
     fi
-    say "the publishability gate"
     $PY eval/artifact/verify_artifact.py --rivals "$data" ${barargs[@]+"${barargs[@]}"} \
-        2>&1 | tee "$out/VERIFICATION.txt" | tail -4 | note \
-        || fail "the publishability gate REFUSED these rows — see $out/VERIFICATION.txt"
-    say "emission-symmetry audit (no tool timed while delivering samples)"
-    $PY eval/rivals/check_emission_symmetry.py --results "$data" --cycles 25 \
-        2>&1 | tee "$out/emission_audit.txt" | tail -2 \
-        || fail "the emission-symmetry audit failed — see $out/emission_audit.txt"
+        >"$out/VERIFICATION.txt" 2>&1 \
+        || fail "the checks on the measurements FAILED — see $out/VERIFICATION.txt"
+    grep -E '^[0-9]+ ok \|' "$out/VERIFICATION.txt" | sed 's/^/checks on the measurements: /' | note
     # Figures are not fatal: they need matplotlib, and no claim rests on a PNG.
-    say "figures"
-    $PY eval/eval_plots.py "$data" --out-dir "$out/plots" 2>&1 | tail -4 \
-        || echo "(figures skipped — eval_plots.py needs matplotlib; the tables above do not)"
-    echo
-    local pn="PAPER_NUMBERS.txt,"; [ -z "$fresh" ] || pn=""
-    echo "wrote $out/{RESULTS.md,paper_numbers.json,VERIFICATION.txt,emission_audit.txt,"
-    echo "              ${pn}plots/}"
+    $PY eval/eval_plots.py "$data" --out-dir "$out/plots" >>"$log" 2>&1
+    [ -n "$(ls "$out/plots" 2>/dev/null)" ] \
+        || echo "figures: not drawn (they need matplotlib; the tables do not)" | note
 }
 
 # ---------------------------------------------------------------------------- GPU tiers
@@ -382,14 +378,26 @@ step_compare() {
         "$fresh/COMPARISON.txt" | grep -v -e "$skip" | tee "$summary"
 }
 
-# `tables` over the published rows: SUMMARY.txt holds the lines the guide quotes.
+# `tables` over the published rows: SUMMARY.txt holds the lines the guide quotes, then what each
+# file is.
 step_published_tables() {
     mkdir -p "$OUT" && : >"$SUMMARY"
+    echo "tables: the paper's tables and figures, regenerated from the recorded measurements"
     NOTE_TO="$SUMMARY" step_tables "$REFERENCE" "$DETAILS"
     [ ${#FAILED[@]} -eq 0 ] || printf 'FAILED: %s\n' "${FAILED[@]}" >>"$SUMMARY"
-    printf '\nThe tables, the gate with its caveats, the figures and the audit are in details/.\n' \
-        >>"$SUMMARY"
-    echo "summary: $SUMMARY"
+    cat >>"$SUMMARY" <<'GUIDE'
+
+In details/:
+  RESULTS.md          the paper's Tables 1-3, its uniformity counts and the numbers its text
+                      quotes, regenerated from the recorded measurements: read it beside the PDF
+  PAPER_NUMBERS.txt   every number the PDF prints, checked against the regenerated one
+  VERIFICATION.txt    the checks on the measurements: every sample sound, every count exact,
+                      every rival failure reported
+  plots/              the figures; the paper's Figure 3 is sps_scatter_cmsgen.pdf
+  paper_numbers.json  the regenerated numbers, machine-readable
+  tables.log          everything else this step printed
+GUIDE
+    echo "Read $SUMMARY"
 }
 
 # A tier writes SUMMARY.txt when it ends, so one left by an earlier run into the same --out must

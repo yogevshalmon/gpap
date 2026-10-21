@@ -434,7 +434,7 @@ def main():
             for n in uns:
                 fail.append(f"UNSOUND cell {stem}/{n}")
             # AN UN-RUN CHECK IS NOT A PASSING ONE: gating only on "UNSOUND" lets a run without
-            # --verify-sound produce a byte-identical "Publishable" verdict.
+            # --verify-sound produce a byte-identical passing verdict.
             emitted = [r for r in meas if ((r.get("gpap") or {}).get("n_models") or 0) > 0]
             nok = sum(1 for r in emitted if sound_verdict(r.get("gpap") or {}) == "ok")
             missing = [r.get("name", "?") for r in emitted
@@ -590,10 +590,6 @@ def main():
     print(f"{len(ok)} ok | {len(warn)} warnings | {len(fail)} failures")
     if fail:
         print("\nNOT publishable until the failures above are resolved.")
-    elif warn:
-        print("\nPublishable, PROVIDED every warning above is stated in the text.")
-    else:
-        print("\nPublishable.")
     return 1 if fail else 0
 
 

@@ -60,8 +60,8 @@ about which instances count.
   budget is counted as a failure (the `rival failed` column), never as a zero.
 - A gradient sampler runs once, at its own default seed, with the settings of its authors'
   shipped script. These are also the better of the settings its paper reports, on this GPU: the
-  paper's settings were measured beside them, and `RESULTS.md` prints that measurement under
-  Table 2.
+  paper's settings were measured beside them
+  ([RIVAL_FAIRNESS_FINDINGS.md](../../findings/RIVAL_FAIRNESS_FINDINGS.md) §16d).
 - A gradient sampler runs with the largest batch it completes: the largest rung of a ladder walked
   down from 30,000,000 (30,000,000, 10,000,000, 3,000,000, 1,000,000, and so on), a rung rejected
   only on feasibility, never on how fast the tool ran on it.
@@ -81,7 +81,9 @@ reading the file to the last sample.
 
 **What is counted.** Against CMSGen, every sample, for both tools. Against the gradient samplers,
 unique samples only, for both tools, because that is the rate their papers report. Duplicates are
-removed after the timed run.
+removed after the timed run. Recurrent-CircuitSAT's own count pools the solutions it finds at
+every unrolling depth up to T, a superset of the fixed-depth task, and it is scored on that count
+(each row also records `unique_at_T`).
 
 **What is not timed.** No tool is timed while writing its samples out;
 `eval/rivals/check_emission_symmetry.py` checks this against each tool's source.
@@ -127,9 +129,9 @@ Further rules:
 
 - **Absent is not zero.** A cell where a tool never ran, or crashed, is named and kept out of the
   ratio, not scored as a zero.
-- **A tool that scored anything is scored.** Cells resting on fewer than 30 events on one side are
-  named in the caveats with their count, and a geometric mean over fewer than three cells is
-  flagged: quote its win count, not its ratio.
+- **A tool that scored anything is scored**, even on a cell where it found fewer than 30
+  samples. A geometric mean over fewer than three cells is flagged `⚠n` in `RESULTS.md`: quote
+  its win count, not its ratio.
 - **A tie is neither a win nor a loss.** In Table 2, a cell whose ratio would cross 1 within the
   spread of GPAP's three seeds keeps its ratio but counts as a tie.
 - **No best-of-encoders selection.** Each row uses one GPAP encoding; reporting the better of two
@@ -189,7 +191,7 @@ tables are regenerated (`eval/artifact/reproduce.sh tables`; see [ARTIFACT.md](A
 | data | campaign | where it ran | code |
 |---|---|---|---|
 | Tables 1 to 3, and Figure 3 | `l4_protocol_20261012`, 2026-10-12/13 | two Colab NVIDIA L4 sessions, Intel Xeon @ 2.20 GHz | tag `paper_campaign_v2_run` |
-| the uniformity results (Sect. 5.4; Table 4b of `RESULTS.md`) | `uniformity_20261013`, 68 instances | an RTX 4080 Laptop GPU | tag `paper_campaign_v2_run` |
+| the uniformity results (Sect. 5.4; the uniformity table of `RESULTS.md`) | `uniformity_20261013`, 68 instances | an RTX 4080 Laptop GPU | tag `paper_campaign_v2_run` |
 
 The campaign follows [PROTOCOL.md](PROTOCOL.md), with two bug fixes and one change of metric
 made after the freeze:

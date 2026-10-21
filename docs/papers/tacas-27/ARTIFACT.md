@@ -41,34 +41,15 @@ sha256sum -c gpap-image-*.tar.gz.sha256
 docker load -i gpap-image-*.tar.gz
 mkdir -p out
 docker run --rm --gpus all gpap-artifact:tacas-27 check
-docker run --rm -v "$PWD/out:/out" gpap-artifact:tacas-27 tables --out /out/tables
 docker run --rm --gpus all -v "$PWD/out:/out" gpap-artifact:tacas-27 smoke --out /out/smoke
 ```
 
-`tables` and `smoke` each write the one file to read, `SUMMARY.txt`, and everything else into
-`details/` beside it. The results belong to the owner of `out/`, which is why it is created
-first.
+The results belong to the owner of `out/`, which is why it is created first.
 
 - `check` lists the GPU and what each step costs on the reference card.
-- `tables` regenerates every table from the recorded measurements and checks the 163 numbers
-  the paper prints against them. `out/tables/SUMMARY.txt` must read:
-
-  <!-- check_image.sh: the lines out/tables/SUMMARY.txt must hold -->
-  ```
-  141 cells | 0 skipped | 1 errors | 0 unsound
-  163 published values, all reproduced by the generator.
-  The paper's tables and the campaign agree.
-  27 ok | 8 warnings | 0 failures
-  Publishable, PROVIDED every warning above is stated in the text.
-  ```
-
-  The one error is the cell where GPAP's encoder fails because ABC crashes on `b19`, a failure in
-  the paper too. The 8 warnings, two for each of Recurrent's four stages, are about its 28
-  recorded failures: one asks that the paper report them, which its Fail column does; the other
-  says they were carried over from an earlier run on the same setup instead of re-measured
-  ([Two shortcuts](#two-shortcuts-both-recorded-in-every-row)).
-- `smoke` runs the whole pipeline on 4 cells, compiling the engine for this GPU first.
-  `out/smoke/SUMMARY.txt` must hold:
+- `smoke` runs the whole pipeline on 4 cells, compiling the engine for this GPU first. It writes
+  the one file to read, `out/smoke/SUMMARY.txt`, and everything else into `details/` beside it.
+  `SUMMARY.txt` must hold:
 
   <!-- check_image.sh: the lines out/smoke/SUMMARY.txt must hold -->
   ```
@@ -78,18 +59,49 @@ first.
 
 ## Full review
 
-### The paper's claims, from the recorded measurements
+### The paper's tables, from the recorded measurements (seconds, no GPU)
 
-`out/tables/details/` holds the tables (`RESULTS.md`), the paper's printed numbers checked one by
-one (`PAPER_NUMBERS.txt`), the publishability gate (`VERIFICATION.txt`) and the figures
-(`plots/`). The archive's own copies, generated when it was built, are in `artifact-data/paper/`,
-and only the date differs:
+```bash
+docker run --rm -v "$PWD/out:/out" gpap-artifact:tacas-27 tables --out /out/tables
+```
+
+`tables` regenerates the paper's tables and figures from the measurements the artifact ships, one
+row per cell of the paper's campaign (`artifact-data/paper/data/`). It checks each number the PDF
+prints against the regenerated one, and re-runs the checks on the measurements themselves.
+Nothing is measured again: this step shows that the paper's numbers follow from the recorded
+data, and [Re-measuring on a GPU](#re-measuring-on-a-gpu) shows that the data can be produced
+again. `out/tables/SUMMARY.txt` must read:
+
+<!-- check_image.sh: the lines out/tables/SUMMARY.txt must hold -->
+```
+142 cells: 141 measured, 1 GPAP could not encode (b19), 0 unsound
+163 published values, all reproduced by the generator.
+checks on the measurements: 27 ok | 8 warnings | 0 failures
+```
+
+- `b19` is the cell where ABC crashes while GPAP encodes the circuit, a failure in the paper too.
+- The 8 warnings, two for each of Recurrent's four stages, are about its 28 recorded failures:
+  one asks that the paper report them, which its Fail column does; the other says they were
+  carried over from an earlier run on the same setup instead of re-measured
+  ([Two shortcuts](#two-shortcuts-both-recorded-in-every-row)).
+
+The files, in `out/tables/details/`:
+
+| file | what it is |
+|---|---|
+| `RESULTS.md` | the paper's Tables 1–3, its uniformity counts and the numbers its text quotes, laid out as the paper prints them, plus the ratios the text quotes. Under each table, every cell not counted, by name and reason. Read it beside the PDF. |
+| `PAPER_NUMBERS.txt` | every number the PDF prints, checked against the regenerated one at the precision printed |
+| `VERIFICATION.txt` | the checks on the measurements: every emitted sample sound, every CMSGen count exact, every rival failure reported |
+| `plots/` | the figures; the paper's Figure 3 is `sps_scatter_cmsgen.pdf`, byte-identical to the paper's |
+| `paper_numbers.json` | the regenerated numbers, machine-readable |
+| `tables.log` | everything else the step printed |
+
+The archive's own copies, generated when it was built, are in `artifact-data/paper/`, and only the
+date differs:
 
 ```bash
 docker run --rm -v "$PWD/out:/out" gpap-artifact:tacas-27 diff /out/tables/details/RESULTS.md artifact-data/paper/RESULTS.md
 ```
-
-Figure 3, `plots/sps_scatter_cmsgen.pdf`, comes out byte-identical to the paper's.
 
 Each claim of the paper, and where to check it:
 
@@ -98,34 +110,43 @@ Each claim of the paper, and where to check it:
 | GPAP reaches 83.4–1,571× CMSGen's throughput | Table 1 | `RESULTS.md`, Table 1 | `paper_tables.py --rivals` | `artifact-data/paper/data/rivals_*.json` |
 | 2.2–18.7× the GPU samplers at their own targets; far more at ours | Table 2 | `RESULTS.md`, Table 2 | the same | the same rows |
 | the speedup is the cost of rejection, not engine speed | Table 3 | `RESULTS.md`, Table 3 | the same | the same rows as Table 1 |
-| Barbarik accepts GPAP on all 65 eligible instances, as it does CMSGen | Sect. Sample Uniformity | `RESULTS.md`, Table 4b | `paper_tables.py --barbarik` | `artifact-data/paper/data/barbarik/*.jsonl` |
-| 93 of 110 instances delivered all 50,000 samples, CMSGen 44 | the evaluation's text | `RESULTS.md`, "Numbers the paper's text quotes" | `paper_tables.py --out-json` | the same rows as Table 1 |
+| Barbarik accepts GPAP on all 65 eligible instances, as it does CMSGen | Sect. Sample Uniformity | `RESULTS.md`, Uniformity | `paper_tables.py --barbarik` | `artifact-data/paper/data/barbarik/*.jsonl` |
+| 93 of 110 instances delivered all 50,000 samples, CMSGen 44 | the evaluation's text | `RESULTS.md`, "Numbers the paper's text quotes" | `paper_tables.py` | the same rows as Table 1 |
 | every emitted sample is a solution | the evaluation's text | `VERIFICATION.txt` | `verify_artifact.py`, over the check each row recorded | each row's soundness check and circuit replay |
 | the numbers above are what the PDF prints | — | `PAPER_NUMBERS.txt` | `check_paper_numbers.py` | `paper_numbers.json` and `docs/papers/tacas-27/published_numbers.json` |
 
-The scripts are in `eval/artifact/`. The paper typesets its own tables, so their layout differs
-from `RESULTS.md`; their numbers may not. `docs/papers/tacas-27/published_numbers.json` records
-the 163 numbers the PDF prints from the data, each with the generated value it must equal at the
+The scripts are in `eval/artifact/`. `docs/papers/tacas-27/published_numbers.json` records the 163
+numbers the PDF prints from the data, each with the generated value it must equal at the
 precision printed, and `tables` fails if any differs. It also lists the few printed numbers that
 are not generated, and why.
 
 The rules deciding which cells a table counts are in one file, `eval/artifact/paper_tables.py`,
-which the tables, the figures and the gate all import.
+which the tables, the figures and the checks all import.
 [The paper's evaluation notes](README.md) explain each rule, and [PROTOCOL.md](PROTOCOL.md)
 states the protocol in full.
 
 ### Re-measuring on a GPU
 
-`subset` re-measures 66 of the 142 cells, in about 2.5 hours, and `full` all of them, in about 12
-hours. Start one detached and follow it:
+`subset` re-measures 66 of the 142 cells (none at T=50) in about 2.5 hours, and `full` all 142
+in about 12 hours. Start one detached and follow it:
 
 ```bash
 docker run -d --name gpap-subset --gpus all -v "$PWD/out:/out" gpap-artifact:tacas-27 subset --out /out/subset
 docker logs -f gpap-subset
 ```
 
-`out/subset/SUMMARY.txt` holds the verdict, as for `smoke`, once the tier ends. `docker stop
-gpap-subset` stops it, and a stopped tier resumes: remove the container (`docker rm
+or, for every cell:
+
+```bash
+docker run -d --name gpap-full --gpus all -v "$PWD/out:/out" gpap-artifact:tacas-27 full --out /out/full
+docker logs -f gpap-full
+```
+
+When the tier ends, `out/subset/SUMMARY.txt` (or `out/full/`) holds the verdict: a line that
+begins `PASS — 66 cells compared: same formulas, sound samples` (142 for `full`), then
+`ARTIFACT_TIER_COMPLETE`. Beside it, `details/COMPARISON.txt` compares every cell, and
+`details/` also holds this run's own rows, its `RESULTS.md` and the logs. `docker stop
+gpap-subset` stops a tier, and a stopped tier resumes: remove the container (`docker rm
 gpap-subset`) and run the same command again.
 
 **What is compared.** A sampling rate is a property of the card: the same engine runs 1.82× as

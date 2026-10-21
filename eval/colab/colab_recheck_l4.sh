@@ -6,9 +6,8 @@
 # a silent protocol drift between the code that produced the old rows and today's tree.
 #
 # It writes to its own directory, never the sweep's, so a re-check can never be mistaken for or
-# resumed as the original measurement; `verify_artifact.py --recheck` does the diff, and
-# `paper_tables.py --recheck` turns it into the reproducibility table. Everything is
-# pinned to the original sweep — seed, budgets, encoders, portfolio — except the GPU itself.
+# resumed as the original measurement; `verify_artifact.py --recheck` does the diff. Everything
+# is pinned to the original sweep — seed, budgets, encoders, portfolio — except the GPU itself.
 set -uo pipefail
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"   # this file lives in eval/colab/

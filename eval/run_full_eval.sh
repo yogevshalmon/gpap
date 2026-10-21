@@ -20,7 +20,7 @@
 #            run per instance, GPAP + CMSGen arms on the same CNF (HTS is off: no circuit in it)
 #   plots    figures + summary tables from whatever JSONs exist
 #   --- supplementary family sweeps (`gpap bench` on instances pinned OUR way, not the paper's
-#       instance set; paper_tables prints them only when present) ---
+#       instance set; `plots` summarises them, the paper's tables do not use them) ---
 #   seq      ITC'99 b* + ISCAS-89 s* sequential unrolls
 #   comb     ISCAS-85 c* combinational (T=1, single pinned output)
 #   sk       benchmarks/sampling/*.cnf — projected CNF sampling vs CMSGen (no encoder axis)
