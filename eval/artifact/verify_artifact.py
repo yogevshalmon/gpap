@@ -64,7 +64,7 @@ def main():
                          "deterministic fields must match the original sweep on every shared "
                          "cell, or the artifact fails")
     ap.add_argument("--barbarik", nargs="*", default=[],
-                    help="the CM_test campaign's jsonl files (Table 4b) — one parameter "
+                    help="the CM_test campaign's jsonl files (the uniformity table) — one parameter "
                          "setting, a negative control that Accepts, every arm over the "
                          "eligible set")
     args = ap.parse_args()
@@ -250,7 +250,7 @@ def main():
                         f"{', '.join(missing)} — Table 1 will silently have no row for them; "
                         f"confirm those families were deliberately not run")
 
-    # Table 6's deterministic-field claim, RE-DERIVED from the raw rows through the generator's
+    # The re-check's deterministic-field claim, RE-DERIVED from the raw rows through the generator's
     # own cell reader, so this gate and the table it gates read the same cells.
     if args.recheck:
         det_bad, n_shared = [], 0
@@ -516,7 +516,7 @@ def main():
         else:
             ok.append("rivals: every implication counter inside its physical band")
 
-    # ---------------------------------------------------------------- Barbarik (Table 4b)
+    # ---------------------------------------------------------------- Barbarik (the uniformity table)
     bpaths = []
     for g in args.barbarik:
         bpaths += sorted(globmod.glob(g))
