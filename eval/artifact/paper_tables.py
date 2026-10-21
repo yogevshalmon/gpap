@@ -281,14 +281,6 @@ def filled_request(r, gpap_models=None):
     return ((g or 0) >= req, (r.get("cms_n_samples") or 0) >= req)
 
 
-def sig3(x):
-    """Three significant figures, scientific at or above 1,000 -- the paper's own rate format,
-    so a generated number and a printed one are compared as the same string."""
-    if x is None:
-        return "—"
-    return f"{x:.3g}" if x < 1000 else f"{x:.2e}"
-
-
 # ------------------------------------------------------------------ GPAP vs CMSGen
 
 def _enc(r):
@@ -944,10 +936,9 @@ def recheck_cells(path):
     """One re-check stage's scored cells, keyed `(instance, encoder)`.
 
     THE single reader of a re-check JSON: `verify_artifact.py` gates the deterministic fields over
-    it and `recheck()` below builds the reproducibility row from it. There were three copies of
-    this key, one of them in an `eval/recheck_compare.py` whose whole CLI restated what these two
-    callers already assert -- and three readers of a row shape is how two of them come to disagree
-    about which cells were compared."""
+    it. There were three copies of this key, one of them in an `eval/recheck_compare.py` whose
+    whole CLI restated what its callers already assert -- and three readers of a row shape is how
+    two of them come to disagree about which cells were compared."""
     d = load(path) or {}
     return {(r["name"].split(".")[0], r.get("enc_key") or r.get("encoder")): r
             for r in d.get("results", []) if not r.get("skipped") and not r.get("error")}
@@ -955,8 +946,8 @@ def recheck_cells(path):
 
 # ------------------------------------------------------------------ rendering
 
-# The reasons a cell sits in the one `excluded` column, in print order; the names are itemised
-# under the table from the aggregate's own per-bucket lists.
+# The reasons a cell is not counted, in print order; the names are itemised under each table from
+# the aggregate's own per-bucket lists.
 EXCL_REASONS_T1 = (("vac", "vacuous pin (constant outputs, p_accept 1.0)"),
                    ("unsat", "proved UNSAT at this depth"),
                    ("free", "free support after propagation (no search)"),

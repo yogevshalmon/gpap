@@ -27,7 +27,7 @@ import sys
 CONTROL = "spur(control)"
 
 #: WHAT EACH CERTIFIED SETTING COSTS, and what a round of it accepts. One home, because these
-#: numbers travel: the paper quotes `under_test`, Table 4b prints both totals, this file's own
+#: numbers travel: the paper quotes `under_test`, the uniformity table prints it, this file's own
 #: header prints the band, and `barbarik_screen.py` sizes the reference budget from the round
 #: count. They were spelled out in four places and the first of them to move would have been
 #: right while the other three stayed plausible.

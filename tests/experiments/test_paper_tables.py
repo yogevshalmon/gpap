@@ -1314,7 +1314,7 @@ def test_the_rival_calibration_evidence_is_printed_not_just_pointed_at(tmp_path)
                    "**FLIP**: 10 measured faster than the pinned 1",  # demotic's, printed not acted on
                    "EVIDENCE, not configuration"]:
         assert needle in md, f"calibration section lacks {needle!r}:\n{md}"
-    # build() emits it under --rivals (checked in the source: build returns nothing)
+    # build() emits it into the authors' notes (checked in the source: build returns nothing)
     assert "rival_calibration(args.rivals)" in inspect.getsource(paper_tables.build)
 
 
