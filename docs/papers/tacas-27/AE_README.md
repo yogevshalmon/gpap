@@ -1,4 +1,4 @@
-# GPAP — artifact for the TACAS 2027 tool paper
+# GPAP — artifact for a tool paper submitted to TACAS 2027
 
 > **Reader:** TACAS 2027 artifact evaluators: where the artifact is, what it needs, and the smoke
 > test. The full guide is ARTIFACT.md, inside the artifact.

@@ -1,8 +1,8 @@
-# TACAS 2027 — *SAT Sampling at Scale via GPU-based Boolean Constraint Propagation*
+# TACAS 2027 submission — *SAT Sampling at Scale via GPU-based Boolean Constraint Propagation*
 
-> **Reader:** readers and reviewers of the TACAS 2027 paper — the details of its evaluation that
-> did not fit in the paper, the rules its tables follow, and how its numbers are checked against
-> the measurements.
+> **Reader:** readers and reviewers of the paper submitted to TACAS 2027 — the details of its
+> evaluation that did not fit in the paper, the rules its tables follow, and how its numbers are
+> checked against the measurements.
 
 This page accompanies the paper's evaluation. It describes what was compared and how, which
 cells each table counts and why, and how the numbers the paper prints are checked against the

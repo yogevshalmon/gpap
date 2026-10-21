@@ -1,8 +1,8 @@
-# GPAP — artifact for the TACAS 2027 tool paper
+# GPAP — artifact for a tool paper submitted to TACAS 2027
 
-> **Reader:** artifact evaluators of the TACAS 2027 tool paper *SAT Sampling at Scale via
-> GPU-based Boolean Constraint Propagation* — what to run, what it should print, and how long
-> it takes. No knowledge of the code is assumed.
+> **Reader:** artifact evaluators of the tool paper submitted to TACAS 2027, *SAT Sampling at
+> Scale via GPU-based Boolean Constraint Propagation* — what to run, what it should print, and
+> how long it takes. No knowledge of the code is assumed.
 
 The artifact is GPAP's source, every measurement behind the paper's evaluation (the campaign
 `l4_protocol_20261012`, two Colab NVIDIA L4 sessions, 2026-10-12/13; [README.md](README.md)), and

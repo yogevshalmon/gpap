@@ -8,9 +8,9 @@ benchmark family and writes one row per cell. This guide is for running campaign
 reproduce a paper's numbers, use that paper's artifact instead ([papers/](papers/README.md)); to
 measure without fooling yourself, read [BENCHMARKING.md](BENCHMARKING.md) first.
 
-## 0. The TACAS 2027 paper's protocol
+## 0. The TACAS 2027 submission's protocol
 
-The `campaign` stage runs the protocol of the TACAS 2027 paper, frozen on 2026-09-06: its
+The `campaign` stage runs the protocol of the TACAS 2027 submission, frozen on 2026-09-06: its
 benchmarks, targets, tool settings, batch sizes and budgets, and what its tables publish. The
 protocol lives with the paper, in [papers/tacas-27/PROTOCOL.md](papers/tacas-27/PROTOCOL.md). A
 campaign of your own can change most of it through the `campaign` stage's settings (§2); the
@@ -170,7 +170,7 @@ A run writes under `.experiments/`; copy a finished campaign to `$GPAP_RESULTS` 
 `eval/artifact/paper_tables.py` generates the tables and is the one place the exclusion rules
 live; `verify_artifact.py` checks a campaign before its numbers are published; and
 `make_artifact.sh` packages a campaign's rows with the code for archiving. The first two print
-their usage with `--help`; `make_artifact.sh` describes its own in its header. These scripts were written for the TACAS 2027 paper: its artifact guide,
+their usage with `--help`; `make_artifact.sh` describes its own in its header. These scripts were written for the TACAS 2027 submission: its artifact guide,
 [papers/tacas-27/ARTIFACT.md](papers/tacas-27/ARTIFACT.md), runs them through one entry point,
 `eval/artifact/reproduce.sh`, which calls this driver for every measurement. The evidence behind
 that layer is in [findings/ARTIFACT_FINDINGS.md](findings/ARTIFACT_FINDINGS.md).

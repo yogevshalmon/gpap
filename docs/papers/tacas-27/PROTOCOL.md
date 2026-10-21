@@ -1,6 +1,6 @@
-# The evaluation protocol of the TACAS 2027 paper (v1.0, frozen)
+# The evaluation protocol of the TACAS 2027 submission (v1.0, frozen)
 
-> **Reader:** readers and reviewers of the TACAS 2027 paper who want the exact rules its
+> **Reader:** readers and reviewers of the TACAS 2027 submission who want the exact rules its
 > evaluation was run under. [README.md](README.md) explains them in plainer terms.
 
 This is the frozen text, moved here on 2026-10-17 from the general evaluation guide

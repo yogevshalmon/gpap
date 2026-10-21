@@ -252,8 +252,8 @@ The experiments live outside the library:
   imports it. [`docs/EVAL_RUNBOOK.md`](docs/EVAL_RUNBOOK.md) runs a campaign of your own.
 - [`docs/BENCHMARKING.md`](docs/BENCHMARKING.md): how to measure GPAP, and compare it with another
   sampler, fairly.
-- [`docs/papers/`](docs/papers/README.md): the papers that use GPAP, each with its evaluation,
-  protocol and artifact.
+- [`docs/papers/`](docs/papers/README.md): papers about GPAP, each with its evaluation, protocol
+  and artifact. The first is submitted to TACAS 2027 and under review.
 - `gpap bench`: benchmark a glob of instances, optionally against CMSGen
   (`scripts/build_cmsgen.sh`).
 
