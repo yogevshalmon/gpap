@@ -182,3 +182,11 @@ carried over (`not_remeasured`). Every measured rival count matched the 2026-09-
 Recurrent's rate rose by its copy share, so its Table 2 ratios fell (21.5→18.7× on its own table
 at T=25), and GPAP now loses four small circuits there. The rows ship as
 `artifact-data/paper/data/`.
+
+### 17f. Presentation revision v1.2 (2026-10-21)
+
+The tables only; nothing was re-run, and `paper_numbers.json` is unchanged but for its date.
+`RESULTS.md` prints the paper's own columns and, under each table, every row's identity
+(`n + C=0 + G=0 + Fail + not counted`) with each cell not counted named; §17b's `excluded` is
+`not counted`. The caveats, the rival calibration and the top-rung check moved to the authors'
+notes, `paper_tables.py --out-notes`, which the artifact does not run.

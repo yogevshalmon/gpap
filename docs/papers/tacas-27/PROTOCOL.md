@@ -84,8 +84,8 @@ prints, not the protocol: the two one-sided zero columns and `rival failed` stay
 reason a cell carries no ratio goes into ONE `excluded` column itemised by name under it; no
 `paper set` column; no thin-denominator floor — a tool that scored anything is scored, as the rival
 papers print 0.1 u/s rows, and cells under 30 events are named in the caveats. (Since
-2026-10-21 `RESULTS.md` prints the paper's own columns, with the not-counted cells named in a line
-under each table, and the caveats are the authors' notes.)
+2026-10-21, §17f, `RESULTS.md` prints the paper's own columns, with the not-counted cells named in
+a line under each table, and the caveats are the authors' notes.)
 
 **Reproducing a campaign pays no search.** Each rival's grant — its batch rung and, for Recurrent,
 its `start_point` — is part of the record: `eval/rivals/extract_grants.py` writes

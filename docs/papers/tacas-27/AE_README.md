@@ -49,7 +49,7 @@ ARTIFACT_TIER_COMPLETE
 ### The paper's tables (seconds, no GPU)
 
 `tables` regenerates the paper's tables and figures from the per-cell measurements the artifact
-ships, and checks every number the PDF prints against them. Nothing is measured again.
+ships, and checks every number the PDF prints from them. Nothing is measured again.
 
 ```bash
 docker run --rm -v "$PWD/out:/out" gpap-artifact:tacas-27 tables --out /out/tables
@@ -69,8 +69,8 @@ The files to look at are in `out/tables/details/`:
 - `RESULTS.md`: the paper's Tables 1–3, its uniformity counts and the numbers its text quotes,
   laid out as the paper prints them, plus the ratios the text quotes. Under each table, every
   cell not counted, by name and reason. Read it beside the PDF.
-- `PAPER_NUMBERS.txt`: the check of every number the PDF prints against the regenerated one:
-  the count, and any number that differs.
+- `PAPER_NUMBERS.txt`: the check of every number the PDF prints from the measurements against
+  the regenerated one: the count, and any number that differs.
 - `VERIFICATION.txt`: the checks on the measurements: every emitted sample is a solution, every
   CMSGen count is exact, every failure of a compared tool is reported.
 - `plots/`: the figures; the paper's Figure 3 is `sps_scatter_cmsgen.pdf`.
