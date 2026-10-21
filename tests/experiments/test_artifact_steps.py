@@ -3,7 +3,9 @@
   * the comparator names a changed verdict in its closing block, which a tier's SUMMARY.txt is;
   * a bare `reproduce.sh compare` shows every missing stage and leaves SUMMARY.txt to the tier;
   * the packager reads the tables where `reproduce.sh tables` writes them;
-  * the packager resolves a relative output directory where it was typed, not in the checkout.
+  * the packager resolves a relative output directory and a relative PYTHON where they were
+    typed, not in the checkout;
+  * the packager writes the venue's zip from the archive's own README and licence.
 """
 import json
 import os
@@ -83,3 +85,26 @@ def test_the_packager_resolves_a_relative_output_where_it_was_typed(tmp_path):
         assert not (REPO / name).exists(), "the relative output was resolved in the checkout"
     finally:
         shutil.rmtree(REPO / name, ignore_errors=True)
+
+
+def test_the_packager_resolves_a_relative_python_where_it_was_typed(tmp_path):
+    """make_artifact.sh changes into the checkout, then into its stage, so a relative PYTHON used
+    to name no file there and the table gate failed after the tree was staged. With no published
+    rows the packager stops right after printing the interpreter it resolved."""
+    (tmp_path / "py").symlink_to(sys.executable)
+    r = subprocess.run(["bash", str(ARTIFACT / "make_artifact.sh"), str(tmp_path / "out")],
+                       cwd=tmp_path, capture_output=True, text=True,
+                       env={**os.environ, "PYTHON": "./py",
+                            "GPAP_PAPER_DIR": str(tmp_path / "no-paper")})
+    assert r.returncode != 0 and "no published rows" in r.stderr, r.stdout + r.stderr
+    assert f"python     : {tmp_path}/./py" in r.stdout, r.stdout
+
+
+def test_the_packager_zips_the_archives_own_readme_and_licence():
+    """The venue's form takes one zip holding a README and a LICENSE. It is written from the
+    archive (\$FINAL), so it cannot drift from the files the archive ships, and the packager
+    refuses before staging anything if the paper folder has no AE_README.md."""
+    packager = (ARTIFACT / "make_artifact.sh").read_text()
+    assert '"$FINAL/docs/papers/tacas-27/AE_README.md" "$FINAL/LICENSE"' in packager
+    assert 'z.write(readme, "README.md")' in packager and 'z.write(licence, "LICENSE")' in packager
+    assert "for f in ARTIFACT.md AE_README.md" in packager
