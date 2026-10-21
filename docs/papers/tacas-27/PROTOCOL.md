@@ -39,11 +39,12 @@ a pair of rows only the task changes. Then:
 
 - *Configuration is theirs*: its run script's `num_steps` (1 for both) and `lr` (15 for both). The
   papers' values (DEMOTIC 10 iterations, Recurrent 5 at `lr` 50) are measured beside it by
-  `steps_calibration.py` and printed under Table 2 as evidence, never run as configuration.
+  `steps_calibration.py` and printed in the authors' notes (`paper_tables.py --out-notes`) as
+  evidence, never run as configuration.
 - *Batch*: the largest rung it runs to completion, walking the decade-and-triple ladder down from
   30,000,000. A rung is rejected only when the tool cannot finish on it (OOM, driver refusal, past
-  the wall), never on how fast it was, and `paper_tables` names any cell whose top rung completed
-  first try, so a larger card cannot silently re-open the hole.
+  the wall), never on how fast it was, and the authors' notes name any cell whose top rung
+  completed first try, so a larger card cannot silently re-open the hole.
 - *One measured run*, at the tool's own default seed (`RIVAL_SEED = 0`, passed explicitly and
   recorded), the asymmetry against our median-of-3 stated; each process discards its first run
   (cold CUDA context, ~3.3x).
@@ -71,18 +72,20 @@ its `model_runtime`, its model build excluded as our construction is, and Recurr
 of its candidates to the host excluded as our delivery is (on rows from 2026-10-12;
 RIVAL_FAIRNESS_FINDINGS.md §17c) — and
 no end-to-end column, by rule (§17). Table 3: the implication rate and the identity splitting engine from rejection cost,
-over Table 1's rows. Table 4b: Barbarik CM_test with the `spur` control, the only uniformity claim (the `soft`
+over Table 1's rows. The uniformity table: Barbarik CM_test with the `spur` control, the only uniformity claim (the `soft`
 positive control is not re-run; it is UNIFORMITY_FINDINGS.md §4b's).
 Screens, applied before any ledger and in every table: vacuous pin, free cell, tiny space,
 proved-UNSAT, and a tie for any cell whose sign lies inside GPAP's own seed band. Every ledger
 column sums to the cell count, and every headline is quoted with its structure (median, seed band,
-top cells, the geomean without them), which `paper_tables` prints.
+top cells, the geomean without them), which the authors' notes print.
 
 **Presentation revision v1.1** (2026-09-07; §17b) changes what a table
 prints, not the protocol: the two one-sided zero columns and `rival failed` stay, every other
 reason a cell carries no ratio goes into ONE `excluded` column itemised by name under it; no
 `paper set` column; no thin-denominator floor — a tool that scored anything is scored, as the rival
-papers print 0.1 u/s rows, and cells under 30 events are named in the caveats.
+papers print 0.1 u/s rows, and cells under 30 events are named in the caveats. (Since
+2026-10-21 `RESULTS.md` prints the paper's own columns, with the not-counted cells named in a line
+under each table, and the caveats are the authors' notes.)
 
 **Reproducing a campaign pays no search.** Each rival's grant — its batch rung and, for Recurrent,
 its `start_point` — is part of the record: `eval/rivals/extract_grants.py` writes
