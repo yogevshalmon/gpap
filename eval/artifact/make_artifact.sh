@@ -28,7 +28,7 @@ INVOKED_FROM="$PWD"            # a relative OUT_DIR or PYTHON is the caller's, n
 cd "$REPO_ROOT"
 PY="${PYTHON:-$REPO_ROOT/.venv/bin/python}"
 # Absolute, since the gates run after `cd "$STAGE"`; a bare name is looked up on PATH.
-case "$PY" in /*) ;; */*) PY="$INVOKED_FROM/$PY" ;; esac
+case "$PY" in /*) ;; */*) PY="$INVOKED_FROM/$PY" ;; *) PY="$(command -v "$PY")" ;; esac
 [ -x "$PY" ] || PY="$(command -v python3)"
 
 # Ask, never recompute: eval/paths.py is the one definition (physical, `$GPAP_RESULTS`-aware).
