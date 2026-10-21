@@ -175,8 +175,11 @@ def main():
 
     print(f"paper     : {pub.get('paper')} ({pub.get('venue')})")
     print(f"PDF       : {pub.get('pdf')}")
-    print(f"generated : {gen.get('generated')} at {gen.get('commit')}, "
-          f"GPU {gen.get('gpu')}, engine {', '.join(gen.get('engine') or []) or '—'}")
+    commit = gen.get("commit")
+    print(f"tables    : regenerated {gen.get('generated')}"
+          + (f" at commit {commit}" if commit and commit != "not a git checkout" else ""))
+    print(f"rows      : measured on {gen.get('gpu')}, engine "
+          f"{', '.join(gen.get('engine') or []) or '—'}")
     print()
 
     bad = list(check(pub, gen))

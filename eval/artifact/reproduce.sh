@@ -390,7 +390,8 @@ step_published_tables() {
 In details/:
   RESULTS.md          the paper's Tables 1-3, its uniformity counts and the numbers its text
                       quotes, regenerated from the recorded measurements: read it beside the PDF
-  PAPER_NUMBERS.txt   every number the PDF prints, checked against the regenerated one
+  PAPER_NUMBERS.txt   the check of every number the PDF prints against the regenerated one:
+                      the count, and any number that differs (the numbers are in RESULTS.md)
   VERIFICATION.txt    the checks on the measurements: every sample sound, every count exact,
                       every rival failure reported
   plots/              the figures; the paper's Figure 3 is sps_scatter_cmsgen.pdf
