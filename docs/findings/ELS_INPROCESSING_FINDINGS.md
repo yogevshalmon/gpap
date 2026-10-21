@@ -2,19 +2,24 @@
 
 > **Reader:** contributors and researchers — a historical record of GPU equivalent-literal substitution and vivification. A dated research log, not a user guide.
 >
-> **Status:** HISTORICAL — a RETIRED direction. GPU inprocessing for a CDCL solver was measured
-> out on both legs: discovery is 7–15× slower than CaDiCaL's incremental probe, and the reduction
-> helps CaDiCaL but not kissat.
-> **Measured:** 2026-06/07. The 7–15× gap is a structural asymmetry (a CPU prober propagates
-> each probe's delta; GPAP re-propagates the whole formula), not a property of any card.
+> **Status:** HISTORICAL, and OUT OF DATE — a retired direction to RE-EVALUATE. GPU inprocessing
+> for a CDCL solver was measured out on both legs: discovery 7–15× slower than CaDiCaL's
+> incremental probe, and a reduction that helps CaDiCaL but not kissat. That was the pure-PyTorch
+> engine, before the fused Triton kernels and every engine gain since (packed clause words, WAVE
+> propagation, the assignment bitmap, binary clauses as edges, CLEAN-mode probe launches, the C++
+> core). The engine is many times faster now and ships batched literal probing (`LiteralProbe`,
+> which mining uses), the operation discovery needs, so the 7–15× is not today's gap.
+> **Measured:** 2026-06-29, RTX 4080, on the pure-PyTorch `BCPEngine`. The structural asymmetry
+> still holds (a CPU prober propagates each probe's delta; GPAP re-propagates the whole formula,
+> in parallel); its size has to be measured again.
 > **Rule lives in:** nothing here ships. The code (`gpap/solver/inprocess.py`,
 > `scripts/preprocess_solve.py`, …) exists only in git history, on branch
 > `pysat_cadical_inprocess_intg`. What survived is ELS as a *sampling* preprocess
 > (`gpap/sampling/preprocess.py`, ~1.4–1.5× there, on by default); the full-BCP-closure
 > implication sweep shipped for a while as `gpap.implications` and was removed 2026-09-01, unused.
-> **Record only:** this file is the sole record of a deleted subsystem, and the reason the
-> direction is not re-tried. Summary in [INSIGHTS.md](INSIGHTS.md), "Retired application
-> directions".
+> **Record only:** this file is the sole record of a deleted subsystem, and of why it was
+> retired. Re-measure it on the current engine before treating the direction as closed. Summary
+> in [INSIGHTS.md](INSIGHTS.md), "Retired application directions".
 
 ## What was built (all sound; 44 tests, 2 randomized soundness gates)
 
@@ -86,5 +91,6 @@ reach was neutral-to-harmful (hoons 472 → 0.70) — so it has no value for sol
   sign flip.
 - A per-instance predictor instead of a portfolio: wins and losses live on structurally
   near-identical instances and reach anti-predicts, so it would have to run the solve.
-- A100 / fused-kernel discovery: would narrow but not close a 7–15× gap against a 15–193 ms
-  target.
+- A100 / fused-kernel discovery: judged then to narrow but not close a 7–15× gap against a
+  15–193 ms target. The fused kernels and CLEAN-mode probing have since shipped; this is the
+  first thing to re-measure.

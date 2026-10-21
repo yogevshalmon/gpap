@@ -11,7 +11,9 @@
 > **Rule lives in:** the surviving decisions are in `gpap/sampling/pipeline.py` (the portfolio
 > definitions and the per-instance config rule, which cites this file).
 > **Record only:** the seven retired configurations and their verdicts — that code is deleted,
-> and this table is the sole reason not to rebuild them.
+> and this table is the sole reason not to rebuild them. They were judged on throughput on an
+> engine many times slower than today's, so a verdict here is a candidate to re-evaluate, not a
+> permanent loss.
 
 Code: [`gpap/sampling/sampler.py`](../../gpap/sampling/sampler.py), harness
 [`gpap/benchmark.py`](../../gpap/benchmark.py), tests

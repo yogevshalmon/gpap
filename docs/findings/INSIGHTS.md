@@ -7,6 +7,11 @@ direction that was measured and lost is listed so it is not re-tried without new
 code may be deleted, the entry stays. A new measurement adds an entry here. Each findings file's
 status block says when and on which card it was measured; read it before quoting a number.
 
+**↻ re-evaluate:** measured on an engine many times slower than today's (the pure-PyTorch engine
+of June, or the kernels before the 2026-08 gains: binary clauses as edges, the shuffle schedule,
+CLEAN mode), where speed decided the outcome. The current engine is reason enough to measure it
+again before relying on it, or before calling the direction closed.
+
 **Current evidence** — the rule is live and the numbers are the engine's:
 
 | topic | file |
@@ -28,8 +33,8 @@ status block says when and on which card it was measured; read it before quoting
 |---|---|---|
 | WAVE vs scalar by formula size (2026-08-23) | [KERNEL_AB_FINDINGS.md](KERNEL_AB_FINDINGS.md) | the `M ≥ 2048` rule is current; its numbers predate the shuffle schedule |
 | the 2026-08 L4 campaign | [L4_EVAL_FINDINGS.md](L4_EVAL_FINDINGS.md) | superseded by protocol v1.0; its screens survive in `paper_tables.py` |
-| the sampler's development log | [GPU_SAMPLING_FINDINGS.md](GPU_SAMPLING_FINDINGS.md) | the only record of seven retired configurations |
-| GPU inprocessing for CDCL, retired | [ELS_INPROCESSING_FINDINGS.md](ELS_INPROCESSING_FINDINGS.md) | the only record of a deleted subsystem |
+| the sampler's development log | [GPU_SAMPLING_FINDINGS.md](GPU_SAMPLING_FINDINGS.md) | the only record of seven retired configurations, judged on the June engine ↻ |
+| GPU inprocessing for CDCL, retired | [ELS_INPROCESSING_FINDINGS.md](ELS_INPROCESSING_FINDINGS.md) | the only record of a deleted subsystem, measured on the pure-PyTorch engine ↻ |
 | porting to AMD / Intel / Apple | [PORTABILITY.md](PORTABILITY.md) | an analysis; nothing in it is implemented |
 
 ## Engine & memory model
@@ -58,8 +63,8 @@ status block says when and on which card it was measured; read it before quoting
   every chunk: 4.4× per chunk on `b12-c50`. [CLEAN_MODE](CLEAN_MODE_FINDINGS.md)
 - **A default belongs at the ABI, not in a wrapper (2026-08-19).** `GPAP_MODE_AUTO` resolves
   inside `gpap_engine_reset`.
-- **The wave/scalar dispatch keys off M, not the batch (2026-08-18).** Wave when `M >= 2048` or
-  the batch is under the resident warps; the crossover is to be re-measured on the shuffle
+- **The wave/scalar dispatch keys off M, not the batch (2026-08-18).** ↻ Wave when `M >= 2048`
+  or the batch is under the resident warps; the crossover is to be re-measured on the shuffle
   engine. [KERNEL_AB](KERNEL_AB_FINDINGS.md)
 - **Wave and scalar may differ on the counters of conflicted rows, never on models
   (2026-08-18).** Gate on models.
@@ -104,15 +109,16 @@ status block says when and on which card it was measured; read it before quoting
 - **Mining (2026-08-19/21):** entailed clauses are kept only if they pay (models per chunk =
   K × success); `subsumed` is the default redundancy, and backbone units are the top lever.
   [MINING](MINING_FINDINGS.md)
-- **Simplification:** unit propagation is model-preserving and the big lever (about 4.5× over
-  plain); ELS adds 1.48×, sound when reconstruction is class-consistent.
+- **Simplification (2026-06/07):** ↻ unit propagation is model-preserving and the big lever
+  (about 4.5× over plain); ELS adds 1.48×, sound when reconstruction is class-consistent. On a
+  faster engine preprocessing is a larger share of the wall, so re-measure what ELS buys.
 
 ## Circuit encoding and benchmarks
 
-- **The ABC encoder (2026-07-10)** shrinks unrolled CNFs about 5×, but helps CMSGen almost as
-  much; `fast` optimizes before the unroll. Mining helps more on ABC CNFs than on Tseitin ones
+- **The ABC encoder (2026-07-10)** ↻ shrinks unrolled CNFs about 5×, but helps CMSGen almost
+  as much; `fast` optimizes before the unroll. Mining helps more on ABC CNFs than on Tseitin ones
   (2026-08-19).
-- **Rare targets (2026-07-11):** at random pins plain simulate-and-filter beats every CNF
+- **Rare targets (2026-07-11):** ↻ at random pins plain simulate-and-filter beat every CNF
   sampler, so comparisons use `--target rare`. `--sim-check` is the encoder-independent
   soundness gate.
 - **Degenerate cells leave the geomean:** a vacuous pin (`p_accept` 1, decided by the row,
@@ -141,8 +147,8 @@ status block says when and on which card it was measured; read it before quoting
 
 - **The batch is not part of the seed:** pin the batch and one config before comparing counts
   across runs; same-seed repeats measure timing noise only.
-- **A 30 s run cannot rank two builds (2026-08-18):** the bandit is a coin flip there; pin
-  `--portfolio` or compare `implications_per_s`.
+- **A 30 s run cannot rank two builds (2026-08-18):** ↻ the bandit is a coin flip there;
+  pin `--portfolio` or compare `implications_per_s`.
 - **The SM clock moves within a run (2026-07-29):** cross-run rates cannot resolve a few
   percent; use interleaved A/Bs in one session ([BENCHMARKING.md §1b](../BENCHMARKING.md)).
 - **Power state (2026-07-07):** the laptop 4080 can sit at a 40 W cap; check
@@ -154,7 +160,7 @@ status block says when and on which card it was measured; read it before quoting
   which inflated a speedup 50–100×.
 - **`--n-time` is a delivery target:** quote the delivered count.
 - **A missing instance is a bug, not a gap (2026-09-03):** a refusal is a row with its reason.
-- **A bigger GPU is worth ~1.8×, tracking SM count; 4× the batch buys +2.8% (2026-08-03).**
+- **A bigger GPU is worth ~1.8×, tracking SM count; 4× the batch buys +2.8% (2026-08-03).** ↻
   [CROSS_GPU](CROSS_GPU_FINDINGS.md)
 
 ## The artifact
@@ -175,28 +181,34 @@ status block says when and on which card it was measured; read it before quoting
 
 ## Measured and lost — do not retry without new evidence
 
+A ↻ entry lost on a much slower engine; today's engine is the new evidence to measure it again.
+
 - Pure-PyTorch BCP: latency-bound by a launch and a sync per round; the fused kernel replaced it
   (2026-07-02).
 - The XOR-packed clause word: the SUM word's single `atomic_add` beat its `atomic_cas` loop
   everywhere (2026-07-13).
-- A 1-byte (MONO) clause state: 0.93× of WIDE (2026-07-08). Duplicate-literal padding: unsound.
-- In-kernel retry on conflict: success ×3, wall ×3 (2026-07-03).
+- A 1-byte (MONO) clause state: 0.93× of WIDE (2026-07-08). ↻ Duplicate-literal padding:
+  unsound.
+- In-kernel retry on conflict: success ×3, wall ×3 (2026-07-03). ↻
 - W = 64 as instruction-level parallelism: 0.918× (2026-08-27).
 - Clause renumbering for occ locality: topological emission is already near-optimal
-  (2026-07-13).
-- Shared-memory staging of the row state (2026-07-13).
+  (2026-07-13). ↻
+- Shared-memory staging of the row state (2026-07-13). ↻
 - A runtime memory probe to size K (2026-07-01).
-- Full-propagation lookahead: more success, less throughput (~3× propagations, half the K).
-- The `orac` config: 0 of 64 wins (2026-07-06).
-- UCB-style bandit bonuses: 0.52× on small budgets.
+- Full-propagation lookahead: more success, less throughput (~3× propagations, half the K). ↻
+- The `orac` config: 0 of 64 wins (2026-07-06). ↻
+- UCB-style bandit bonuses: 0.52× on small budgets (2026-07). ↻
 - `soft` in a default portfolio: Barbarik-Rejected (2026-07-30).
 - Pinning GPAP to `b8` for the comparison: measured, not adopted
   (RIVAL_FAIRNESS_FINDINGS.md §12).
 
 ## Retired application directions
 
-- **Preprocessing and inprocessing for solving:** a CPU incremental prober is 7–15× faster.
-  [ELS_INPROCESSING](ELS_INPROCESSING_FINDINGS.md)
-- **Where GPAP wins:** sampling, cube-and-conquer cubing, and one-shot UNSAT proving on high-k
-  random near-threshold instances. The novelty is many independent assumption sets propagated
-  incrementally in one fused kernel.
+- **Preprocessing and inprocessing for solving (2026-06-29):** ↻ a CPU incremental prober was
+  7–15× faster than GPU discovery, and the reduction helped CaDiCaL but not kissat. That was the
+  pure-PyTorch engine, before the fused kernels and CLEAN-mode probing: the first retired
+  direction to re-measure. [ELS_INPROCESSING](ELS_INPROCESSING_FINDINGS.md)
+- **Where GPAP wins (2026-06/07):** ↻ sampling, cube-and-conquer cubing, and one-shot UNSAT
+  proving on high-k random near-threshold instances. The novelty is many independent assumption
+  sets propagated incrementally in one fused kernel. Only sampling has been measured on the
+  current engine.
