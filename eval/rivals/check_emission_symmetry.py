@@ -311,8 +311,7 @@ def main():
     if root is None:
         from gpap import paths
         root = str(paths.src_dir())
-    # Portable, because this header is SHIPPED: eval/artifact/make_artifact.sh puts this file in
-    # the artifact as artifact-data/paper/emission_audit.txt, and that goes to Zenodo.
+    # Portable: this header lands in files people keep, which must not carry a home directory.
     print(f"emission symmetry check | rivals={display_path(root)}"
           + (f" | results={display_path(args.results)}" if args.results else ""))
     ok, skipped = scan_rivals(root)
@@ -335,8 +334,8 @@ def main():
         ran = ("GPAP's timed region, CMSGen's mode and Recurrent's copy (sections 2-4)"
                if args.results else "GPAP's timed region (section 2)")
         print(f"\nPASS on what this machine can check — {ran}{caveat}. Section 1 did NOT run: "
-              f"no checkout of {', '.join(skipped)}. The full audit, with their source read, "
-              f"ships as artifact-data/paper/emission_audit.txt")
+              f"no checkout of {', '.join(skipped)}; `eval/artifact/reproduce.sh setup` "
+              f"fetches them, and the audit then reads their source too")
     else:
         print(f"\nPASS — every tool is timed on generation alone{caveat}")
     return 0 if ok else 1
