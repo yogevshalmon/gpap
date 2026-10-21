@@ -209,7 +209,7 @@ step_setup() {
 
 # ---------------------------------------------------------------------------- tier 1: tables
 # The paper's tables and figures from the rows, on any machine (no GPU): RESULTS.md, the check of
-# every number the PDF prints, and verify_artifact.py's checks on the measurements. The console
+# every number the PDF prints from the measurements, and verify_artifact.py's checks on them. The console
 # and SUMMARY.txt get one line from each; the rest goes to tables.log beside the files.
 step_tables() {
     # $3 = "fresh": a re-measurement's own rows, held to the published rows by step_compare, never
@@ -390,8 +390,9 @@ step_published_tables() {
 In details/:
   RESULTS.md          the paper's Tables 1-3, its uniformity counts and the numbers its text
                       quotes, regenerated from the recorded measurements: read it beside the PDF
-  PAPER_NUMBERS.txt   the check of every number the PDF prints against the regenerated one:
-                      the count, and any number that differs (the numbers are in RESULTS.md)
+  PAPER_NUMBERS.txt   the check of every number the PDF prints from the measurements against
+                      the regenerated one: the count, and any number that differs (the
+                      numbers are in RESULTS.md)
   VERIFICATION.txt    the checks on the measurements: every sample sound, every count exact,
                       every rival failure reported
   plots/              the figures; the paper's Figure 3 is sps_scatter_cmsgen.pdf

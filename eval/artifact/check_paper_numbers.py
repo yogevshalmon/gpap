@@ -4,8 +4,9 @@
     eval/artifact/check_paper_numbers.py --generated OUT/paper_numbers.json
     eval/artifact/check_paper_numbers.py --generated … --published docs/papers/…/x.json
 
-Exit 0: every number the PDF prints is reproduced by the generator. Exit 1: at least one is not,
-each named with both values. Exit 2: usage, or a file that cannot be read.
+Exit 0: every number the PDF prints from the measurements is reproduced by the generator.
+Exit 1: at least one is not, each named with both values. Exit 2: usage, or a file that cannot be
+read.
 
 WHY THIS EXISTS. The paper's tables are typeset by hand — they drop columns, rename rows and
 reorder them to fit a two-column LNCS page — so no byte comparison against a generated `.tex`

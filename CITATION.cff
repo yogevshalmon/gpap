@@ -15,5 +15,5 @@ keywords:
   - sampling
   - CircuitSAT
 # TODO: the archive DOI (Zenodo, written by eval/artifact/make_artifact.sh); the same DOI goes in
-# the paper's Data Availability Statement and in docs/papers/tacas-27/ARTIFACT.md. The paper
+# the paper's Data Availability Statement and in docs/papers/tacas-27/AE_README.md. The paper
 # reference once it is accepted.
