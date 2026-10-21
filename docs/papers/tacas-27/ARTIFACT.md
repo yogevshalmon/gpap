@@ -1,14 +1,15 @@
 # GPAP — the artifact in detail, for a tool paper submitted to TACAS 2027
 
 > **Reader:** artifact evaluators of the tool paper submitted to TACAS 2027, *SAT Sampling at
-> Scale via GPU-based Boolean Constraint Propagation*, who want the detail behind the AE README.
-> No knowledge of the code is assumed.
+> Scale via GPU-based Boolean Constraint Propagation*, who want the detail behind the artifact
+> README. No knowledge of the code is assumed.
 
-[AE_README.md](AE_README.md) is the evaluation guide, and the README of the artifact form's zip:
-what the artifact needs, what to run, what it prints and how to read it. This file holds the rest:
+The artifact README is the evaluation guide: [AE_README.md](AE_README.md) beside this file, and
+`README.md` in the zip submitted for evaluation. It says what the artifact needs, what to run,
+what it prints and how to read it. This file holds the rest:
 how each claim of the paper maps to the script and data behind it, what a re-measurement
 compares and what each tier costs, reusing GPAP, running without Docker, what the archive holds,
-and the evidence behind each point of the AE README's "Reading the results".
+and the evidence behind each point of the artifact README's "Reading the results".
 
 The artifact is GPAP's source, every measurement behind the paper's evaluation (the campaign
 `l4_protocol_20261012`, two Colab NVIDIA L4 sessions, 2026-10-12/13; [README.md](README.md)), and
@@ -23,9 +24,10 @@ PDF prints against the regenerated one, and re-runs the checks on the measuremen
 It shows that the paper's numbers follow from the recorded data; re-measuring shows that the data
 can be produced again.
 
-Beside the four files the AE README describes, `out/tables/details/` holds `paper_numbers.json`,
-the regenerated numbers in machine-readable form, and `tables.log`, everything else the step
-printed. Figure 3, `plots/sps_scatter_cmsgen.pdf`, comes out byte-identical to the paper's.
+Beside the four files the artifact README describes, `out/tables/details/` holds
+`paper_numbers.json`, the regenerated numbers in machine-readable form, and `tables.log`,
+everything else the step printed. Figure 3, `plots/sps_scatter_cmsgen.pdf`, comes out
+byte-identical to the paper's.
 
 The archive's own copies, generated when it was built, are in `artifact-data/paper/`; only the
 generation date can differ:
@@ -60,7 +62,7 @@ states the protocol in full.
 
 ## Re-measuring on a GPU
 
-`subset` and `full` (the AE README gives the commands) write `SUMMARY.txt`, the verdict, and
+`subset` and `full` (the artifact README gives the commands) write `SUMMARY.txt`, the verdict, and
 beside it `details/`: `COMPARISON.txt`, the comparison cell by cell, and this run's own rows, its
 `RESULTS.md` and the logs. `docker stop gpap-subset` stops a tier, and a stopped tier resumes:
 remove the container (`docker rm gpap-subset`) and run the same command again.
@@ -107,8 +109,8 @@ numbers for the same cells, not the paper's averages over all 142.
 
 ## Reusing GPAP
 
-The image runs GPAP itself, too: the AE README samples the circuit `b10`, and this opens a shell
-with everything installed:
+The image runs GPAP itself, too: the artifact README samples the circuit `b10`, and this opens a
+shell with everything installed:
 
 ```bash
 docker run --rm -it --gpus all gpap-artifact:tacas-27 bash
@@ -165,14 +167,15 @@ tool's own test suite in seconds.
 | file at the DOI | what it is |
 |---|---|
 | `gpap-image-<date>-<commit>.tar.gz` | the Docker images: `gpap-artifact:tacas-27`, and the tool alone, `gpap:<version>` |
+| `gpap-image-<date>-<commit>.tar.gz.sha256` | its checksum |
 | `gpap-artifact-<date>-<commit>.tar.gz` | the source archive: the same files as `/opt/gpap` in the image |
 
 The source archive holds:
 
 | path | what it is |
 |---|---|
-| `README-ARTIFACT.md` | points to the guide, `docs/papers/tacas-27/AE_README.md`, and to this file |
-| `docs/papers/tacas-27/` | the AE README, this file, the paper's evaluation notes and protocol, and the numbers the PDF prints |
+| `README-ARTIFACT.md` | points to the artifact README, `docs/papers/tacas-27/AE_README.md`, and to this file |
+| `docs/papers/tacas-27/` | the artifact README, this file, the paper's evaluation notes and protocol, and the numbers the PDF prints |
 | `MANIFEST.md`, `MANIFEST.sha256` | how the archive was built, and a hash of every file |
 | `eval/artifact/reproduce.sh` | the one entry point: `check`, `tables`, `setup`, `smoke`, `subset`, `full`, `compare` |
 | `artifact-data/paper/data/` | the per-instance measurements of the paper's campaign, with their own hashes |

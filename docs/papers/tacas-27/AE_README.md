@@ -1,12 +1,14 @@
 # GPAP — artifact for a tool paper submitted to TACAS 2027
 
 > **Reader:** TACAS 2027 artifact evaluators: what the artifact needs, what to run, and how to
-> read what it prints. ARTIFACT.md, in the source archive, holds the detail behind each step.
+> read what it prints.
 
 Paper: *SAT Sampling at Scale via GPU-based Boolean Constraint Propagation*, a regular tool paper.
 
-- **Artifact:** [doi.org/10.5281/zenodo.23241912](https://doi.org/10.5281/zenodo.23241912): a
-  Docker image (`gpap-image-*.tar.gz`) and the source archive (`gpap-artifact-*.tar.gz`).
+- **Artifact:** [doi.org/10.5281/zenodo.23241912](https://doi.org/10.5281/zenodo.23241912).
+  Download the Docker image `gpap-image-*.tar.gz` and its `.sha256` into one folder, and run
+  every command below from it. The third file, the source archive `gpap-artifact-*.tar.gz`, is
+  optional ([Where else to look](#where-else-to-look)).
 - **Badges applied for:** Available, Functional and Reusable.
 - **Licence:** MIT. Benchmarks and tools by others keep their own (`THIRD_PARTY.md`).
 
@@ -121,7 +123,7 @@ docker run --rm --gpus all --user "$(id -u):$(id -g)" -v "$PWD/out:/out" gpap-ar
 ```
 
 This writes 10,000 input sequences of the circuit `b10`, unrolled for 25 cycles, that reach a
-fixed output pattern, and replays each through the circuit. ARTIFACT.md lists the guides for
+fixed output pattern, and replays each through the circuit. `docs/README.md` maps the guides for
 running GPAP on your own circuits and formulas, from the command line, Python or C++.
 
 ## Platforms tested
@@ -136,8 +138,12 @@ All on x86-64 (amd64); the image is built for it alone.
 - No GPU, from the source archive: `tables` in offline Ubuntu 22.04, 24.04 and 26.04 with the
   stock `python3`.
 
-## More detail
+## Where else to look
 
-`docs/papers/tacas-27/ARTIFACT.md` in the source archive: how each claim of the paper maps to the
-script and data behind it, what a re-measurement compares and what each tier costs, running
-without Docker, what the archive holds, and the evidence behind each point above.
+Everything above runs from the image. The source archive (`tar xzf gpap-artifact-*.tar.gz`) holds
+the same files as `/opt/gpap` in the image, among them:
+
+- `docs/papers/tacas-27/ARTIFACT.md`: each claim of the paper with the script and data behind
+  it, what a re-measurement compares and what each step costs, running `tables` in the TACAS VM
+  without Docker, and the evidence behind [Reading the results](#reading-the-results).
+- `docs/README.md`: GPAP's documentation.
