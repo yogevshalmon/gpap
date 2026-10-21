@@ -163,7 +163,7 @@ def unique_unmeasured(g):
     """True when GPAP's unique/s figure could not be MEASURED on a rival cell.
 
     Not "GPAP produced nothing" — bucketing it as one publishes a win as a loss. ONE definition,
-    imported by every consumer (`rival_family` here, `eval/eval_plots.py`, `rivals_summary.py`)."""
+    applied by `rival_cells`, which the tables and `eval/eval_plots.py` both import."""
     if g.get("unique_per_s_est"):
         return False
     n = g.get("n_models")
