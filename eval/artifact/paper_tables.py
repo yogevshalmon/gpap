@@ -1,9 +1,16 @@
 #!/usr/bin/env python3
-"""Build the paper's experiment section — every table, straight from the experiment JSONs.
+"""The paper's tables, regenerated from a campaign's per-cell rows.
 
-Nothing is typed by hand: every published number is derived from the data with the exclusions
-applied in ONE place. Raw data lives outside the repo in $GPAP_RESULTS (default
-../gpap-results); docs/papers/tacas-27/README.md has the regeneration recipe and every rule below.
+    paper_tables.py --rivals DATA [--barbarik FILE ...] --out-md RESULTS.md --out-json NUMBERS.json
+                    [--out-notes NOTES.md]
+
+`RESULTS.md` is Tables 1-3, the uniformity counts and the numbers the paper's text quotes, laid
+out as the paper prints them so a reader can match it row by row; under each table, every cell
+not counted, by name and reason. `NUMBERS.json` is every published number, machine-readable: the
+contract `check_paper_numbers.py` holds the PDF to. `--out-notes` writes the per-campaign analysis
+behind the paper's wording (caveats, what each geomean stands on, the rivals' configuration
+evidence), for the authors; the artifact does not produce it. What the columns mean and why a
+cell is screened is standing policy and lives in docs/papers/tacas-27/README.md.
 
 THE table rules, applied everywhere so they cannot diverge between tables:
   * Vacuous pins (p_accept 1.0: pinning is a tautology) are screened before any bucket.
@@ -12,10 +19,12 @@ THE table rules, applied everywhere so they cannot diverge between tables:
   * Either side emitting nothing has no finite ratio: its own column, CMSGen=0 (a win) or
     GPAP=0 (a loss), so the columns sum to the instance count.
   * Rival rows that errored are counted, never folded in as zeros.
-  * Every other reason a cell carries no ratio is the ONE printed `excluded` column, itemised
-    by name in the text under the table.
+  * Every other reason a cell carries no ratio is named under its table.
   * A tool that scored anything is scored: no thin floor, thin cells disclosed by name.
-  * A stage with fewer instances than its family's maximum is marked incomplete.
+
+The cell rules are defined here once and imported by every other table, figure and gate,
+including the `gpap bench` family readers (`CMS_FAMILIES`, `cms_family`) that the soft-price
+tables and the verifier use.
 """
 import argparse
 import json
@@ -453,34 +462,9 @@ def cms_family(d, stem, encoder):
 
 # ------------------------------------------------------------------ propagation throughput
 
-def prop_rates(d, stem, encoder):
-    """Engine-level throughput: implications and decisions per second, both samplers.
-
-    Isolates the ENGINE from the sampler wrapped around it, and factors the headline exactly:
-
-        samples/s ratio  =  (implications/s ratio)  /  (implications-per-sample ratio)
-
-    The first factor is what the GPU propagator buys, the second what our algorithm SPENDS —
-    GPAP discards a conflicted trajectory outright where CMSGen backtracks and keeps the partial
-    work. CMSGen's counters come from `--statsevery` in scripts/cmsgen_gpap_eval.patch."""
-    payload = load(os.path.join(d, f"{stem}.json")) if d else None
-    if not payload:
-        return None
-    _, cells = select_cells(payload, encoder)
-        # Same exclusions as the headline: Tables 1 and 3 must describe the same runs.
-    rows = [r for k, r in cells.items()
-            if not vacuous_pin(r, k) and not zero_search(r) and not tiny_space(r)]
-    # EVERY column is computed over the SAME rows, the ones where all four quantities are
-    # positive: filtering per column breaks the identity.
-    return _prop_stats([(r.get("implications_per_s"), r.get("cms_implications_per_s"),
-                         r.get("gpap_sps"), r.get("cms_sps"),
-                         r.get("decisions_per_s"), r.get("cms_decisions_per_s"))
-                        for r in rows], encoder)
-
-
 def _prop_stats(quads, encoder):
     """The Table 3 aggregation over (impl_g, impl_c, sps_g, sps_c, dec_g, dec_c) tuples —
-    shared by the bench-stage and the rival-stage readers so the identity is one computation."""
+    one computation, so the identity closes over one row set."""
     gi, ci, ri, rd, work, gper, cper = [], [], [], [], [], [], []
     for a, b, s, t, dg, dc in quads:
         if not all(x and x > 0 for x in (a, b, s, t)):
@@ -924,60 +908,6 @@ def rival_prop_rates(d, stem, key):
     return _prop_stats(quads, "+".join(sorted(encs)) if encs else None)
 
 
-# ------------------------------------------------------------------ uniformity
-
-# Reading order for the uniformity table: controls first (without a negative control that is NOT
-# flagged and a positive control that IS, "0/36 flagged" means nothing), then the B ladder.
-UNI_ORDER = ["ctl:uniform", "ctl:tv0.05", "ctl:tv0.1",
-             "gpap:b1", "gpap:b8", "gpap:b16", "gpap:b32", "gpap:b64",
-             "pipe:default", "pipe:circuit", "pipe:circuit+soft", "gpap:soft", "cmsgen"]
-
-
-def uni_sort_key(item):
-    (name, kind) = item
-    idx = UNI_ORDER.index(name) if name in UNI_ORDER else len(UNI_ORDER)
-    return (idx, name, kind)
-
-
-def uniformity(paths):
-    """Aggregate the exact-oracle fuzzing campaign per sampler, split by instance kind.
-
-    Screen first, then aggregate: an instance whose solution set is a full SUBCUBE is sampled by
-    the don't-care FILLER, not by the config under test. fuzz_uniformity.py stamps
-    `meta.subcube`; the excluded count is reported in `args["_subcube_excluded"]`."""
-    rows = []
-    args = {}
-    for p in paths or []:
-        d = load(p)
-        if d:
-            rows += d.get("rows", [])
-            args = d.get("args", args)
-    if not rows:
-        return None, {}
-    n_sub = sum(1 for r in rows if (r.get("meta") or {}).get("subcube"))
-    rows = [r for r in rows if not (r.get("meta") or {}).get("subcube")]
-    args = dict(args)
-    args["_subcube_excluded"] = n_sub
-    if not rows:
-        return None, args
-    agg = {}
-    for r in rows:
-        kind = r.get("kind", "?")
-        for name, s in (r.get("samplers") or {}).items():
-            k = (name, kind)
-            a = agg.setdefault(k, {"tv": [], "reject": 0, "n": 0, "unsound": 0})
-            a["tv"].append(s.get("tv_median"))
-            a["n"] += 1
-            a["unsound"] += s.get("unsound") or 0
-            if s.get("verdict") == "SKEW":
-                a["reject"] += 1
-    out = {}
-    for (name, kind), a in agg.items():
-        out[(name, kind)] = {"tv": med(a["tv"]), "reject": a["reject"], "n": a["n"],
-                             "unsound": a["unsound"]}
-    return out, args
-
-
 # ------------------------------------------------------------------ barbarik
 
 def barbarik(paths):
@@ -1007,12 +937,7 @@ def barbarik(paths):
             "source": sorted(os.path.abspath(p) for p in (paths or []) if os.path.exists(p))}
 
 
-# ------------------------------------------------------------------ reproducibility
-
-#: Absolute tolerance on the success rate between two runs of the same cell. Same seed and same
-#: config give the same trajectories, so anything near this means the sampler saw a different
-#: formula or a different config -- it is not clock noise.
-RECHECK_SUCC_TOL = 0.05
+# ------------------------------------------------------------------ the re-check reader
 
 
 def recheck_cells(path):
@@ -1026,32 +951,6 @@ def recheck_cells(path):
     d = load(path) or {}
     return {(r["name"].split(".")[0], r.get("enc_key") or r.get("encoder")): r
             for r in d.get("results", []) if not r.get("skipped") and not r.get("error")}
-
-
-def recheck(orig, rec, stages=("seq-c25-rare", "comb-rare", "epfl-rare", "sk")):
-    if not (orig and rec):
-        return None
-    exact = mismatch = succ_ok = succ_bad = 0
-    rates = []
-    for stage in stages:
-        ca = recheck_cells(os.path.join(orig, f"{stage}.json"))
-        cb = recheck_cells(os.path.join(rec, f"{stage}.json"))
-        for k in set(ca) & set(cb):
-            ra, rb = ca[k], cb[k]
-            ea, eb = ra.get("engine") or {}, rb.get("engine") or {}
-            same = (ra.get("M") == rb.get("M") and ra.get("support") == rb.get("support")
-                    and ea.get("split") == eb.get("split") and ea.get("mode") == eb.get("mode"))
-            exact += same
-            mismatch += (not same)
-            if abs((ra.get("succ") or 0) - (rb.get("succ") or 0)) <= RECHECK_SUCC_TOL:
-                succ_ok += 1
-            else:
-                succ_bad += 1
-            if ra.get("gpap_sps") and rb.get("gpap_sps"):
-                rates.append(rb["gpap_sps"] / ra["gpap_sps"])
-    return {"exact": exact, "mismatch": mismatch, "succ_ok": succ_ok, "succ_bad": succ_bad,
-            "gm": gm(rates), "lo": min(rates) if rates else None,
-            "hi": max(rates) if rates else None, "n": len(rates)}
 
 
 # ------------------------------------------------------------------ rendering
@@ -1081,12 +980,6 @@ def excl_items(names, reasons):
     """The itemised content of one row's `excluded` column, or '' when it holds nothing."""
     return "; ".join(f"{label} " + ", ".join(f"`{n}`" for n in names[b])
                      for b, label in reasons if names.get(b))
-
-
-def stage_encoders(d, stem):
-    """Which encoders a stage's JSON contains. One table row is emitted per (family, encoder)."""
-    payload = load(os.path.join(d, f"{stem}.json")) if d else None
-    return encoders_in(payload) if payload else []
 
 
 # The rival-configuration EVIDENCE files (eval/rivals/steps_calibration.py): each rival's shipped
@@ -1146,7 +1039,7 @@ def rival_calibration(rivals_dir):
             out.append("")
             out.append(f"* {verdict}.")
     if out:
-        out = ["### Rival configuration — what their other values measured on this card", "",
+        out = ["## Rival configuration — what their other values measured on this card", "",
                "EVIDENCE, not configuration: every campaign row runs the rival at its shipped "
                "script setting (the **pinned** arm). The other arms are the values the tool's own "
                "artifacts also give the knob — its argparse default and its PAPER — each measured "
@@ -1156,19 +1049,39 @@ def rival_calibration(rivals_dir):
     return out
 
 
+# The paper's names for a row. The JSON keeps the generator's labels, which the published-numbers
+# file matches on; the tables print the paper's, so a reader can put them side by side.
+_PAPER_SET = {"demotic": "ISCAS-85", "rcs": "Sequential"}
+# The two Barbarik arms that are GPAP, said in words: the arm names are the harness's.
+_ARM_NOTE = {"pipe:circuit": " (GPAP as shipped)", "gpap:b8": " (GPAP, one configuration)"}
+
+
+def _paper_target(stem):
+    return "rare" if "rare" in stem else "original"
+
+
+def _paper_depth(stem, key, recorded=None):
+    """The unrolling depth: the one the rows record, else the one the stage is named for."""
+    if recorded and str(recorded).startswith("T="):
+        return str(recorded)[2:]
+    return "1" if key == "demotic" else ("50" if stem.endswith("_t50") else "25")
+
+
+def pfmt(x):
+    """A rate as the paper prints it: three significant figures, `1.78e3` from a thousand up."""
+    if x is None:
+        return "—"
+    if abs(x) < 999.5:
+        return f"{x:.3g}"
+    mant, exp = f"{x:.2e}".split("e")
+    return f"{mant}e{int(exp)}"
+
+
 def build(args):
-    # KEY = (family stem, encoder): both encoders are reported, nothing selects between them.
-    fam_encs = [(stem, e) for stem, _, _, _ in CMS_FAMILIES
-                for e in stage_encoders(args.cmsgen, stem)]
-    cms = {(s, e): cms_family(args.cmsgen, s, e) for s, e in fam_encs}
-    ref = {(s, e): cms_family(args.cmsgen_ref, s, e)
-           for s, e in [(st, en) for st, _, _, _ in CMS_FAMILIES
-                        for en in stage_encoders(args.cmsgen_ref, st)]} if args.cmsgen_ref else {}
+    # THE ROWS OF TABLES 1 AND 3, in print order. One list, so both tables and the notes describe
+    # one set of rows: Table 1 is read off the rival rows, Table 2's own cells.
     riv = {s: rival_family(args.rivals, s, k) for s, k, _, _ in RIVALS}
-    prop = {(s, e): prop_rates(args.cmsgen, s, e) for s, e in fam_encs}
-    # THE ROWS OF TABLES 1 AND 3, in print order: the protocol's cells, then any supplementary
-    # family stage. One list, so both tables and the caveats describe one set of rows.
-    t1 = []
+    cms, prop, t1 = {}, {}, []
     for stem, label, tgt in RIVAL_CMS_SETS:
         v = rival_cms_family(args.rivals, stem, _RIVAL_KEY[stem])
         if not v:
@@ -1177,20 +1090,7 @@ def build(args):
         cms[k] = v
         prop[k] = rival_prop_rates(args.rivals, stem, _RIVAL_KEY[stem])
         t1.append((k, label, v.get("depth") or "—", tgt))
-    for stem, label, depth, tgt in CMS_FAMILIES:
-        for enc in stage_encoders(args.cmsgen, stem):
-            if cms.get((stem, enc)):
-                t1.append(((stem, enc), label, depth, tgt))
-    uni, uni_args = uniformity(args.uniformity)
     barb = barbarik(args.barbarik)
-    rc = recheck(args.cmsgen, args.recheck) if args.cmsgen else None
-    soft = load(args.soft) if args.soft else None
-
-    expected = {}
-    for (stem, _enc), v in cms.items():
-        if v:
-            fam = stem.split("-")[0]
-            expected[fam] = max(expected.get(fam, 0), v["inst"])
 
     prov = next((v for v in cms.values() if v), {}) or {}
     # The commit below is when the TABLES were generated, not what measured the data — that is
@@ -1198,8 +1098,8 @@ def build(args):
     cores = sorted({c for v in cms.values() if v for c in v.get("cores", [])})
     # A FAILED git call does not raise here — `subprocess.run` without check=True just returns a
     # non-zero code and empty stdout — so the except below never fired in the one place it was
-    # meant to: the packaged artifact, which carries no .git and rendered this field as an empty
-    # pair of backticks. Say "not a git checkout" instead; a blank reads as a value.
+    # meant to: the packaged artifact, which carries no .git. Say "not a git checkout" instead; a
+    # blank reads as a value.
     try:
         r = subprocess.run(["git", "rev-parse", "--short", "HEAD"], capture_output=True,
                            text=True, timeout=10)
@@ -1207,8 +1107,8 @@ def build(args):
     except Exception:                                   # noqa: BLE001
         commit = "not a git checkout"
 
-    # Totals: `cells`/`unsound` are per-encoder and sum over every key, while `inst`/`skipped`/
-    # `errors` describe the whole STAGE and are taken once per family.
+    # Totals: `cells`/`unsound` sum over every stage, `inst`/`skipped`/`errors` are taken once per
+    # stage.
     one_per_stem = {}
     for (stem, _enc), v in cms.items():
         if v and stem not in one_per_stem:
@@ -1217,81 +1117,16 @@ def build(args):
     tot["refused"] = sum(v.get("errors", 0) for v in cms.values() if v)
     tot.update({kk: sum(v[kk] for v in one_per_stem.values())
                 for kk in ("inst", "skipped", "errors")})
+    refused = sorted({n for v in cms.values() if v
+                      for n in (v.get("excl_names") or {}).get("refused", [])})
+    other = tot["errors"] - tot["refused"]
+    cell_line = (f"{tot['cells'] + tot['refused']} cells: {tot['cells']} measured, "
+                 f"{tot['refused']} GPAP could not encode"
+                 + (f" ({', '.join(refused)})" if refused else "")
+                 + (f", {other} other error(s)" if other > 0 else "")
+                 + (f", {tot['skipped']} skipped" if tot["skipped"] else "")
+                 + f", {tot['unsound']} unsound")
 
-    # The encoder column is printed only when the rows disagree on it.
-    encs_t1 = sorted({(enc or "—") for (_s, enc), *_ in t1})
-    show_enc = len(encs_t1) > 1
-    enc_note = ("" if show_enc or not encs_t1 else
-                f" GPAP samples the `{encs_t1[0]}` CNF on every row.")
-    # ============================================================ markdown
-    M = [f"# GPAP — experiment section data  ({time.strftime('%Y-%m-%d')})", "",
-         f"* GPU **{prov.get('gpu')}**, CPU **{prov.get('cpu') or 'not recorded'}**",
-         f"* engine {', '.join(f'`{c}`' for c in cores) or '`not recorded`'} (per-row build id)"
-         f"  |  tables generated at `{commit}`"
-         f"  |  CMSGen patched (`--nowrite`): **{prov.get('patched')}**",
-         f"* **{tot['cells'] + tot['refused']} rows: {tot['cells']} measured cells + "
-         f"{tot['refused']} refused (GPAP's encoder or envelope), {tot['inst']} instance-slots, "
-         f"{tot['skipped']} skipped, {tot['errors']} errors, {tot['unsound']} unsound**", "",
-         "Generated by `eval/artifact/paper_tables.py` over the rows in that directory. What is "
-         "measured, which cells are screened and why, and every column rule below: "
-         "`docs/papers/tacas-27/README.md`.", "",
-         "## Table 1 — GPAP vs CMSGen", "",
-         "**The same cells as Table 2.**" + enc_note + " Any `seq-*`/`comb-*`/… rows below are "
-         "the older `gpap bench` family matrix, supplementary and printed only when present.",
-         "",
-         "`inst` = `n` + CMSGen=0 + GPAP=0 + excluded. Rates are each side's own geomean over "
-         "the `n` cells, so their quotient is the ratio beside them. `filled` counts the cells "
-         f"where each tool delivered the whole request. Cells under {THIN_DENOMINATOR} samples "
-         "on a side are named in the caveats, not screened.", "",
-         "| instance set | depth | pins |" + (" enc |" if show_enc else "")
-         + " inst | n | CMSGen s/s | GPAP s/s | GPAP e2e | GPAP/CMSGen | e2e | pre% "
-           "| wins | filled G/C | CMSGen=0 | GPAP=0 | excluded |"
-         + (" ref GPU |" if ref else ""),
-         "|---|---|---|" + ("---|" if show_enc else "")
-         + "---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|"
-         + ("---:|" if ref else "")]
-    for (stem, enc), label, depth, tgt in t1:
-        v = cms[(stem, enc)]
-        exp = expected.get(stem.split("-")[0], v["inst"])
-        mark = "" if v["inst"] >= exp else f" (partial {v['inst']}/{exp})"
-        # The reference-GPU column exists only with a second sweep (--cmsgen-ref).
-        rv = ref.get((stem, enc))
-        refs = (f" {rv['gm']:,.1f}x |" if rv and rv["gm"] else " — |") if ref else ""
-        # No finite ratio: say WHY when the reason is CMSGen zeros, "—" when a screen took them.
-        gms = (f"{v['gm']:,.1f}x" if v["gm"] else
-               ("— (all CMSGen=0)" if v["inf"] else "—"))
-        if v["gm"] and v["n_gm"] < 3:
-            gms += f" ⚠n={v['n_gm']}"
-        e2e = f"{v['gm_e2e']:,.1f}x" if v.get("gm_e2e") else "—"
-        unk = f" ⚠{v['full_unknown']} no request" if v.get("full_unknown") else ""
-        M.append(f"| {label}{mark} | {depth} | {tgt} |" + (f" {enc or '—'} |" if show_enc else "")
-                 + f" {v['inst']} | {v['n_gm']} | {sig3(v.get('gm_cms_sps'))} "
-                 f"| {sig3(v.get('gm_gpap_sps'))} | {sig3(v.get('gm_gpap_e2e'))} "
-                 f"| {gms} | {e2e} "
-                 f"| {100 * v.get('pre_frac', 0):.0f}% | {v['wins']}/{v['n']} "
-                 f"| {v.get('full_gpap', 0)}/{v.get('full_cms', 0)}{unk} | {v['inf']} "
-                 f"| {v['gpap0']} | {v.get('excl', 0)} |{refs}")
-    # THE EXCLUDED COLUMN, ITEMISED: prose under the table, from the lists the count sums over.
-    excl_lines = []
-    for (stem, enc), label, depth, tgt in t1:
-        v = cms[(stem, enc)]
-        items = excl_items(v.get("excl_names") or {}, EXCL_REASONS_T1)
-        if items:
-            excl_lines.append(f"* {label}, {depth}, {tgt}: {items}.")
-    M += ["",
-          "**What `excluded` holds, per row.** A cell that measures the instance (a vacuous pin, a "
-          "free support, a tiny space, a proved-UNSAT cell) is evidence about neither sampler; "
-          "a cell neither sampler reached bounds the comparison, not a tool; a cell GPAP's "
-          "encoder refused is a reach limit, not a zero.", ""] + (excl_lines or ["* none"])
-    g0 = sorted({n for v in cms.values() if v for n in v["gpap0_names"]})
-    b0 = sorted({n for v in cms.values() if v for n in v["both0_names"]})
-    M += ["",
-          "**Instances GPAP could not sample** (CMSGen could): "
-          + (", ".join(f"`{n}`" for n in g0) if g0 else "none") + ".",
-          "",
-          "**Instances neither sampler could touch**: "
-          + (", ".join(f"`{n}`" for n in b0) if b0 else "none")
-          + " — these bound the reach of the whole comparison, not of either tool."]
     # THE CIRCUIT HANDED TO THE RIVAL, stated from the rows: a fairness procedure must name what
     # actually ran.
     variants = sorted({v for stem, _k, _r, _p in RIVALS
@@ -1300,215 +1135,127 @@ def build(args):
         variant_sentence = ("Each rival is handed both the ABC-simplified and the raw circuit and "
                             "is scored on whichever suits it.")
     elif variants == ["abc"]:
-        variant_sentence = ("Every rival is handed the SAME circuit file GPAP encodes from — the "
-                            "sequential-ABC-simplified netlist (`variant: abc` on every row).")
+        variant_sentence = ("Every rival ran on the circuit file GPAP encodes from, the "
+                            "ABC-simplified netlist (`variant: abc` on every row).")
     elif variants == ["raw"]:
         variant_sentence = ("Every rival is handed the raw netlist (`variant: raw` on every row) "
                             "while GPAP encodes an ABC-optimized CNF of it.")
     else:
         variant_sentence = "Circuit variant per row: " + (", ".join(variants) or "none") + "."
-    # THE ACCEPTANCE PROBABILITIES, read off the rows: a fixed string belongs to one campaign.
-    pa_their = _pa_range([_rival_rows(args.rivals, st) or {}
-                          for st, _k, _r, pr in RIVALS if "rare" not in st])
-    pa_rare = _pa_range([_rival_rows(args.rivals, st) or {}
-                         for st, _k, _r, pr in RIVALS if "rare" in st])
-    M += ["", "## Table 2 — GPAP vs the GPU gradient samplers", "",
-          "The two rate columns are each side's own geomean over the `n` cells, so "
-          "`GPAP uniq/s` / `rival uniq/s` IS `GPAP/rival` — the same identity as Table 1's.",
-          "",
-          "| rival | task | cells | n | rival uniq/s | GPAP uniq/s | GPAP/rival | wins | ties "
-          "| rival=0 | GPAP=0 | rival failed | excluded |",
-          "|---|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|"]
-    for stem, _, rival, proto in RIVALS:
+
+    # ============================================================ RESULTS.md: the paper's tables
+    M = ["# The paper's tables, regenerated", "",
+         f"Regenerated {time.strftime('%Y-%m-%d')} by `eval/artifact/paper_tables.py` from the "
+         "campaign's per-cell rows. What each column means, and why a cell is not counted: "
+         "`docs/papers/tacas-27/README.md`.", "",
+         f"* GPU **{prov.get('gpu')}**, CPU **{prov.get('cpu') or 'not recorded'}**, engine "
+         + (", ".join(f"`{c}`" for c in cores) or "`not recorded`")
+         + f", CMSGen patched (`--nowrite`): **{prov.get('patched')}**",
+         f"* **{cell_line}**",
+         f"* {variant_sentence}"]
+
+    depth_of = {}
+    M += ["", "## Table 1 — GPAP vs CMSGen", "",
+          "Samples per second. The last two columns are the ratios the paper's text quotes.", "",
+          "| Set | Target | T | n | CMSGen | GPAP ss | GPAP e2e | Wins | C=0 "
+          "| GPAP/CMSGen ss | GPAP/CMSGen e2e |",
+          "|---|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|"]
+    went = []
+    for k, label, depth, tgt in t1:
+        v = cms[k]
+        stem = k[0].split(":", 1)[1]
+        key = _RIVAL_KEY[stem]
+        T = depth_of[stem] = _paper_depth(stem, key, depth)
+        row = f"{_PAPER_SET.get(key, label)} | {_paper_target(stem)} | {T}"
+        gms = f"{v['gm']:,.1f}x" if v["gm"] else ("— (all C=0)" if v["inf"] else "—")
+        if v["gm"] and v["n_gm"] < 3:
+            gms += f" ⚠n={v['n_gm']}"
+        e2e = f"{v['gm_e2e']:,.1f}x" if v.get("gm_e2e") else "—"
+        M.append(f"| {row} | {v['n_gm']} | {pfmt(v.get('gm_cms_sps'))} "
+                 f"| {pfmt(v.get('gm_gpap_sps'))} | {pfmt(v.get('gm_gpap_e2e'))} "
+                 f"| {v['wins']}/{v['n']} | {v['inf']} | {gms} | {e2e} |")
+        items = excl_items(v.get("excl_names") or {}, EXCL_REASONS_T1)
+        went.append(f"* {_PAPER_SET.get(key, label)}, {_paper_target(stem)}, T={T}: "
+                    f"{v['inst']} = {v['n_gm']} + {v['inf']} + "
+                    f"{v['gpap0']} + {v.get('excl', 0)}"
+                    + (f"; not counted: {items}" if items else "") + ".")
+    M += ["", "Where every instance went, `instances = n + C=0 + G=0 + not counted` (G=0: GPAP "
+              "emitted nothing):", ""] + went
+
+    M += ["", "## Table 2 — GPAP vs the GPU samplers", "",
+          "Unique samples per second, the rate the GPU samplers' papers report. The last column "
+          "is the ratio the paper's text quotes.", "",
+          "| Baseline | Target | T | n | Baseline | GPAP | Wins | Ties | C=0 | Fail | GPAP/rival |",
+          "|---|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|"]
+    went = []
+    for stem, key, rival, _proto in RIVALS:
         v = riv.get(stem)
+        T = depth_of.get(stem) or _paper_depth(stem, key)
+        row = f"{rival} | {_paper_target(stem)} | {T}"
         if not v:
-            M.append(f"| {rival} | {proto} | — | — | — | — | not run "
-                     f"| — | — | — | — | — | — |")
+            M.append(f"| {row} | — | — | — | not run | — | — | — | — |")
             continue
-        gs = f"{v['gm']:,.1f}x" if v["gm"] else "—"
-        # `n` in Table 1 is the geomean's instance count and EXCLUDES the zero buckets; here
-        # `v["n"]` is the WIN denominator and includes them. Print both.
+        # `n` is the geomean's cell count, as in Table 1; the win denominator also counts the two
+        # zero columns.
         n_gm_ok = v["n"] - v["zero"] - v["gpap0"]
+        gs = f"{v['gm']:,.1f}x" if v["gm"] else "—"
         if v["gm"] and n_gm_ok < 3:
             gs += f" ⚠n={n_gm_ok}"
-        M.append(f"| {rival} | {proto} | {v['cells']} | {n_gm_ok} "
-                 f"| {sig3(v.get('gm_rival'))} | {sig3(v.get('gm_gpap'))} | {gs} | "
-                 f"{v['wins']}/{v['n']} | {v.get('ties', 0)} | {v['zero']} | {v['gpap0']} "
-                 f"| {v['errors']} | {v.get('excl', 0)} |")
-    excl_lines = []
-    for stem, _, rival, proto in RIVALS:
-        v = riv.get(stem)
-        if not v:
-            continue
+        M.append(f"| {row} | {n_gm_ok} | {pfmt(v.get('gm_rival'))} | {pfmt(v.get('gm_gpap'))} "
+                 f"| {v['wins']}/{v['n']} | {v.get('ties', 0)} | {v['zero']} | {v['errors']} "
+                 f"| {gs} |")
         parts = []
         if v.get("error_names"):
-            parts.append("rival failed (no measurement inside the budget; the reason is per "
-                         "row) " + ", ".join(f"`{n}`" for n in v["error_names"]))
+            parts.append("Fail (no measurement inside the budget; the reason is per row) "
+                         + ", ".join(f"`{n}`" for n in v["error_names"]))
         items = excl_items(v.get("excl_names") or {}, EXCL_REASONS_T2)
         if items:
-            parts.append(items)
-        if parts:
-            excl_lines.append(f"* {rival}, {proto}: " + "; ".join(parts) + ".")
-    M += ["",
-          "`cells` = `n` + rival=0 + GPAP=0 + rival failed + excluded. `rival failed` counts "
-          "runs that produced no measurement inside the budget — counted, never folded in as "
-          f"zeros. Ratios resting on fewer than {THIN_DENOMINATOR} rival solutions are named in "
-          "the caveats, not screened.", "",
-          "**What `rival failed` and `excluded` hold, per row:**", ""] + (excl_lines or ["* none"])
-    M += ["",
-          "**The two protocols are DIFFERENT TASKS and are never pooled.** `their pins` rows pin "
-          "the 1–5 outputs the rival's own table names (rejection-easy by construction — measured "
-          f"p_accept {pa_their}, printed per row); rare rows pin ALL outputs to a rare reachable "
-          f"pattern (p_accept {pa_rare}). " + variant_sentence
-          + " Recurrent-CircuitSAT is scored on its own depth-POOLED unique count, a superset of "
-          "the fixed-depth task (`unique_at_T` per row). The batch each rival was granted, its "
-          "`num_steps`/`lr` and their sources are recorded per row; the policy behind all of it "
-          "is `docs/papers/tacas-27/README.md` and "
-          "docs/findings/RIVAL_FAIRNESS_FINDINGS.md §16–§17."]
-    M += ["",
-          "**One clock**: the rivals' own metric, unique solutions per second of their "
-          "`model_runtime` (Recurrent's less its in-loop copy to the host on rows that record it, "
-          "`egress_s`), and GPAP's steady state excludes construction the same way. There is "
-          "no end-to-end column here by rule; Table 1 is where both walls are the same kind of "
-          "thing. `ties` counts cells whose win/loss sign lies inside GPAP's own seed band, and "
-          "`wins` excludes them, so wins + ties + losses = the win denominator."]
-    cal = rival_calibration(args.rivals) if args.rivals else []
-    if cal:
-        M += [""] + cal
-    soli = []
+            parts.append("not counted: " + items)
+        went.append(f"* {rival}, {_paper_target(stem)}, T={T}: "
+                    f"{v['cells']} = {n_gm_ok} + {v['zero']} + "
+                    f"{v['gpap0']} + {v['errors']} + {v.get('excl', 0)}"
+                    + ("; " + "; ".join(parts) if parts else "") + ".")
+    M += ["", "Where every cell went, `cells = n + C=0 + G=0 + Fail + not counted` (C=0: the GPU "
+              "sampler found nothing; G=0: GPAP found nothing):", ""] + went
+
     if any(prop.values()):
-        M += ["", "## Table 3 — propagation throughput (the engine, not the sampler)", "",
-              "`impl/s` is Boolean implications per second: GPAP's from the packed-word "
-              "kernel, CMSGen's from its own `--statsevery` counters. The last three columns "
-              "factor the sample-rate result exactly — engine advantage / work per sample = "
-              "samples/s ratio — an ALGEBRAIC identity over one row set, not a validation: it "
-              "can only fail if an aggregation mixes row sets, which is what it is here to "
-              "catch. The rows are Table 1's, under every one of its screens.", "",
-              "| family | depth | targets | enc | n | GPAP impl/s | CMSGen impl/s "
-              "| impl/s ratio | dec/s ratio | GPAP impl/sample | CMSGen impl/sample "
-              "| work penalty |",
-              "|---|---|---|---|---:|---:|---:|---:|---:|---:|---:|---:|"]
-        for (stem, enc), label, depth, tgt in t1:
-            v = prop.get((stem, enc))
-            if not v:
+        M += ["", "## Table 3 — propagation throughput", "",
+              "Implications per second, and per sample, over Table 1's cells. The work ratio is "
+              "GPAP's implications per sample over CMSGen's; the last column is the rate ratio "
+              "the paper's text quotes.", "",
+              "| Set | Target | T | n | CMSGen impl/s | GPAP impl/s | CMSGen impl/sample "
+              "| GPAP impl/sample | Work ratio | GPAP/CMSGen impl/s |",
+              "|---|---|---:|---:|---:|---:|---:|---:|---:|---:|"]
+        for k, label, _depth, _tgt in t1:
+            p = prop.get(k)
+            if not p:
                 continue
-            dec = f"{v['dec']:,.0f}x" if v["dec"] else "—"
-            M.append(f"| {label} | {depth} | {tgt} | {enc or '—'} | {v['n']} | "
-                     f"{v['gpap']:,.3g} | {v['cms']:,.3g} | {v['ratio']:,.0f}x | {dec} | "
-                     # 3 significant figures, not 1 decimal: this table's caption is the identity
-                     # `impl ratio / work penalty = samples/s ratio`, and it has to hand-check.
-                     f"{v['gper']:,.0f} | {v['cper']:,.0f} | {v['work']:,.3g}x |")
-        # The flatness claim covers the families with at least three instances — the same set
-        # `propagation_summary.png` plots, so figure and table print one number.
-        soli = [v for v in prop.values() if v and v["n"] >= 3]
-        allr = gm([v["ratio"] for v in soli]) if soli else None
-        lo, hi = ((min(v["gpap"] for v in soli), max(v["gpap"] for v in soli))
-                  if soli else (None, None))
-    if soli:
-        M += ["", f"Across every family-encoder row with at least three instances (n={len(soli)}, the set "
-              f"plotted in `propagation_summary.png`) GPAP holds **{gm([v['gpap'] for v in soli]):,.3g} "
-              f"implications/s** with a spread of only {hi / lo:.2f}x between the fastest and "
-              f"slowest, against CMSGen's {gm([v['cms'] for v in soli]):,.3g} — a "
-              f"**{allr:,.0f}x** engine advantage that is essentially independent of the "
-              "benchmark. The sample-rate ratios in Table 1 vary over nearly two orders of "
-              "magnitude *on top of* this flat engine number, so that variation is a property of "
-              "how much propagation each instance wastes on conflicted trajectories, not of the "
-              "propagator."]
-    if uni:
-        sub = uni_args.get("_subcube_excluded") or 0
-        M += ["", "## Table 4 — uniformity vs an exact oracle", "",
-              f"`alpha={uni_args.get('alpha')}`, {uni_args.get('seeds')} seeds/instance, "
-              f"n = {uni_args.get('n_mult')}x|S| samples."
-              + (f" {sub} full-subcube instance(s) excluded — every sampler is uniform there "
-                 f"by construction (the don't-care filler, not the config, draws the bits)."
-                 if sub else ""), "",
-              "| sampler | kind | instances | median TV | flagged SKEW | unsound |",
-              "|---|---|---:|---:|---:|---:|"]
-        for (name, kind), a in sorted(uni.items(), key=lambda kv: uni_sort_key(kv[0])):
-            M.append(f"| `{name}` | {kind} | {a['n']} | "
-                     f"{a['tv']:.4f} | {a['reject']}/{a['n']} | {a['unsound']} |")
+            stem = k[0].split(":", 1)[1]
+            key = _RIVAL_KEY[stem]
+            M.append(f"| {_PAPER_SET.get(key, label)} | {_paper_target(stem)} | {depth_of[stem]} "
+                     f"| {p['n']} | {pfmt(p['cms'])} | {pfmt(p['gpap'])} | {p['cper']:,.0f} "
+                     f"| {p['gper']:,.0f} | {p['work']:.2f}x | {p['ratio']:,.0f}x |")
+
     if barb:
-        p = barb["params"]
-        n_el = len(barb["eligible"])
-        # Composed from barbarik_table.SETTINGS, not restated: the sentence a reader checks
-        # against the paper and the numbers the paper quotes come from one record.
-        c = BARBARIK_SETTINGS.get((p["epsilon"], p["eta"], p["delta"]))
-        setting = ("a non-standard setting" if not c else
-                   f"{c['source']}: {c['rounds']} rounds"
-                   + (f" x ({c['per_round']})" if c.get("per_round") else "")
-                   + f" = **{c['samples']:,} samples** drawn in all for an Accept"
-                   + (f", **{c['under_test']:,}** of them from the sampler under test (the one "
-                      f"reference draw per round is the difference, and the paper quotes the "
-                      f"{c['under_test']:,})" if c["under_test"] else "")
-                   + f", per-round accept band **{c['band']}**")
-        M += ["", "## Table 4b — Barbarik CM_test (the standard certificate)", "",
-              f"`eps={p['epsilon']} eta={p['eta']} delta={p['delta']}` — {setting}. "
-              f"An Accept means *not caught being eta-far* (L1 >= {p['eta']}, i.e. TV >= "
-              f"{p['eta'] / 2:.2f}) and holds only under Barbarik's non-adversality assumption; "
-              f"a Reject is unconditional. It is not a proof of uniformity — the exact-oracle "
-              f"fuzzing campaign (docs/findings/UNIFORMITY_FINDINGS.md) is the sensitive "
-              f"instrument.", "",
-              f"{n_el} eligible instances "
-              f"({len(barb['control_rejected'])} dropped because the trusted reference is itself "
-              f"Rejected on them — a non-independent sampling set, or a delta-level false "
-              f"rejection of an exactly uniform sampler; either way the test cannot speak about "
-              f"the instance; {len(barb['control_errored'])} dropped on a reference error).", "",
-              "**A separate campaign.** Source: "
-              + ", ".join(f"`{os.path.relpath(p)}`" for p in barb.get("source") or [])
-              + " — its own run, on its own host and its own instances (our pins on the "
-                "circuit families), not the cells of Tables 1–3 above; see that campaign's "
-                "README for the host. A CM_test verdict is a property of the sampler's "
-                "distribution, not of the card, so the header's GPU line does not apply here.",
-              "",
-              "| sampler under test | Accept | Reject | no verdict | mean bias | max bias |",
-              "|---|---:|---:|---:|---:|---:|"]
+        bp = barb["params"]
+        c = BARBARIK_SETTINGS.get((bp["epsilon"], bp["eta"], bp["delta"])) or {}
+        n_el, rej, err = (len(barb["eligible"]), barb["control_rejected"],
+                          barb["control_errored"])
+        src = sorted({os.path.relpath(os.path.dirname(s)) for s in barb.get("source") or []})
+        M += ["", "## Uniformity — Barbarik", "",
+              f"`eps={bp['epsilon']}, eta={bp['eta']}, delta={bp['delta']}`"
+              + (f", {c['under_test']:,} samples per instance from the sampler under test"
+                 if c.get("under_test") else "")
+              + f". {n_el} of {n_el + len(rej) + len(err)} instances are eligible: on "
+              f"{len(rej)} the uniform control is itself rejected"
+              + (f", and on {len(err)} it errored" if err else "")
+              + ", so the test cannot speak about them. A separate run, on its own host and "
+                "instances" + (f" (`{'`, `'.join(src)}`)" if src else "") + ".", "",
+              "| sampler under test | Accept | Reject | no verdict |", "|---|---:|---:|---:|"]
         for arm, a in barb["summary"].items():
-            bm = "-" if a["bias_mean"] is None else f"{a['bias_mean']:.3f}"
-            bx = "-" if a["bias_max"] is None else f"{a['bias_max']:.3f}"
-            M.append(f"| `{arm}` | {a['accept']}/{a['n']} | {a['reject']} | {a['error']} | "
-                     f"{bm} | {bx} |")
-        M += ["", "`bias` is CM_test's own per-round bucket share (rejects outside "
-                  "[0.05, 0.95]); it is reported because the verdict alone hides how much "
-                  "headroom an Accept had. `no verdict` = the sampler could not fill an order "
-                  "barbarik placed, which is neither an Accept nor a Reject."]
-    soft_stats = None
-    if soft:
-        rows = [r for r in (soft.get("rows") or []) if not r.get("vacuous")]
-        ratios = [r.get("ratio_new_over_base") for r in rows]
-        won = [r for r in rows if r.get("soft_won_baseline")]
-        # A "capability loss" is the safe portfolio finding NOTHING where soft found something:
-        # a different failure from being slower, and the one a user would notice.
-        lost = [r for r in rows
-                if (r.get("baseline(+soft)") or {}).get("models")
-                and not (r.get("new(no soft)") or {}).get("models")]
-        soft_stats = {"n": len(rows), "gm": gm(ratios), "won": len(won), "lost": lost,
-                      "vac": len(soft.get("rows") or []) - len(rows)}
-        M += ["", "## Table 5 — the price of dropping `soft`", "",
-              f"Throughput of the uniformity-safe portfolio relative to one that may pick "
-              f"`soft`, over {soft_stats['n']} non-vacuous instances "
-              f"({soft_stats['vac']} vacuous excluded): "
-              f"**{soft_stats['gm']:.3f}x**" if soft_stats["gm"] else "(no ratios)",
-              "",
-              f"* `soft` won the bandit on **{soft_stats['won']}/{soft_stats['n']}** instances "
-              f"— on the rest the two arms are the same configuration, so the geomean understates "
-              f"the effect where it actually applies.",
-              f"* capability losses (safe portfolio finds nothing, soft finds something): "
-              f"**{len(lost)}**"
-              + (": " + ", ".join(f"`{r['instance']}`" for r in lost) if lost else "")]
-        if won:
-            M += ["", "| instance | with soft (samples/s) | safe (samples/s) | ratio |",
-                  "|---|---:|---:|---:|"]
-            for r in sorted(won, key=lambda r: r.get("ratio_new_over_base") or 0)[:12]:
-                b, n_ = r.get("baseline(+soft)") or {}, r.get("new(no soft)") or {}
-                M.append(f"| `{r['instance']}` | {b.get('sps', 0):,.0f} | {n_.get('sps', 0):,.0f} "
-                         f"| {r.get('ratio_new_over_base') or 0:.3f}x |")
-    if rc:
-        M += ["", "## Table 6 — reproducibility (fresh VM, same protocol)", "",
-              f"* deterministic fields (M, support, packed split, propagate variant): "
-              f"**{rc['exact']}/{rc['exact'] + rc['mismatch']} exact**",
-              f"* success rate within 0.05: **{rc['succ_ok']}/{rc['succ_ok'] + rc['succ_bad']}**",
-              f"* throughput recheck/original: geomean **{rc['gm']:.3f}x** "
-              f"({rc['lo']:.2f}–{rc['hi']:.2f}, n={rc['n']})"]
+            M.append(f"| `{arm}`{_ARM_NOTE.get(arm, '')} | {a['accept']}/{a['n']} "
+                     f"| {a['reject']} | {a['error']} |")
+
 
     # ---------------------------------------------------------------- caveats
     # These travel WITH the numbers, and each is derived from the data rather than remembered.
@@ -1517,10 +1264,6 @@ def build(args):
         if not v:
             continue
         stem = f"{stem}/{enc}" if enc else stem
-        exp = expected.get(stem.split("-")[0], v["inst"])
-        if v["inst"] < exp:
-            C.append(f"`{stem}` is an **incomplete stage** ({v['inst']}/{exp} instances) — the "
-                     f"rented-GPU budget ran out. Do not read it as a family result.")
         if v["gm"] and v["n_gm"] < 3:
             why = (f"because CMSGen scored zero on {v['inf']} of {v['n']}" if v["inf"]
                    else f"— a set of {v['inst']} instance(s) after the screens")
@@ -1777,8 +1520,6 @@ def build(args):
                  "zero. It is a statement about OUR budget, not about the rival's capability: "
                  "such a cell is re-runnable at a longer one (docs/findings/"
                  "RIVAL_FAIRNESS_FINDINGS.md §11, §16d).")
-    M += ["", "## Caveats that MUST appear in the text", ""] + [f"* {c}" for c in C]
-
     # ============================================================ what the paper's TEXT quotes
     # Every number the paper states outside a table cell, derived here rather than by hand off a
     # printed table. A hand-derived number cannot be re-checked after a campaign moves a row --
@@ -1848,9 +1589,9 @@ def build(args):
             f"**{N['impl_ratio_gm']:,.0f}x** CMSGen's")
     if bullets:
         M += ["", "## Numbers the paper's text quotes", "",
-              "Derived here, not by hand off the tables above, so a campaign that moves a row "
-              "moves these with it. `eval/artifact/check_paper_numbers.py` compares them "
-              "against what the submitted PDF prints.", ""] + [f"* {b}" for b in bullets]
+              "Checked against the PDF by `eval/artifact/check_paper_numbers.py`.", ""] \
+            + [f"* {b}" for b in bullets]
+
 
     if getattr(args, "out_json", None):
         _bp = (barb or {}).get("params") or {}
@@ -1917,39 +1658,72 @@ def build(args):
             fh.write("\n")
         print(f"wrote {args.out_json}")
 
+    if getattr(args, "out_notes", None):
+        # THE AUTHORS' NOTES: what was rendered beside the tables while the paper was written.
+        # Derived from the same rows, so a campaign that moves a row moves these with it.
+        pa_their = _pa_range([_rival_rows(args.rivals, st) or {}
+                              for st, _k, _r, _p in RIVALS if "rare" not in st])
+        pa_rare = _pa_range([_rival_rows(args.rivals, st) or {}
+                             for st, _k, _r, _p in RIVALS if "rare" in st])
+        NM = ["# Notes on the campaign's numbers — for the paper's authors", "",
+              "The per-campaign analysis behind the paper's wording, from the same rows as "
+              "`RESULTS.md`. The artifact does not produce it; the standing rules are in "
+              "`docs/papers/tacas-27/README.md`.", "",
+              "## Caveats to state with these numbers", ""] + [f"* {c}" for c in C]
+        NM += ["", "## The targets' acceptance probabilities", "",
+               f"* original targets (the 1–5 outputs the rival's own table names): measured "
+               f"p_accept {pa_their}",
+               f"* rare targets (every output pinned to a rare reachable pattern): {pa_rare}"]
+        soli = [p for p in prop.values() if p and p["n"] >= 3]
+        if soli:
+            lo, hi = min(p["gpap"] for p in soli), max(p["gpap"] for p in soli)
+            NM += ["", "## The propagation rate across the rows", "",
+                   f"Over the {len(soli)} rows of Table 3 with at least three cells, GPAP holds "
+                   f"{gm([p['gpap'] for p in soli]):,.3g} implications/s, the fastest within "
+                   f"{hi / lo:.2f}x of the slowest, against CMSGen's "
+                   f"{gm([p['cms'] for p in soli]):,.3g}: a {gm([p['ratio'] for p in soli]):,.0f}x "
+                   "engine advantage that barely moves, while Table 1's sample-rate ratios span "
+                   "two orders of magnitude. The spread is how much work each sample costs, not "
+                   "the propagator."]
+        cal = rival_calibration(args.rivals) if args.rivals else []
+        if cal:
+            NM += [""] + cal
+        if barb:
+            NM += ["", "## Barbarik headroom", "",
+                   "CM_test's own per-round bucket share (it rejects outside [0.05, 0.95]): the "
+                   "verdict alone hides how much headroom an Accept had.", "",
+                   "| sampler under test | mean bias | max bias |", "|---|---:|---:|"]
+            for arm, a in barb["summary"].items():
+                bm = "-" if a["bias_mean"] is None else f"{a['bias_mean']:.3f}"
+                bx = "-" if a["bias_max"] is None else f"{a['bias_max']:.3f}"
+                NM.append(f"| `{arm}` | {bm} | {bx} |")
+        os.makedirs(os.path.dirname(args.out_notes) or ".", exist_ok=True)
+        with open(args.out_notes, "w") as fh:   # noqa: SIM115
+            fh.write("\n".join(NM) + "\n")
+        print(f"wrote {args.out_notes}")
+
     if args.out_md:
         os.makedirs(os.path.dirname(args.out_md) or ".", exist_ok=True)
-        open(args.out_md, "w").write("\n".join(M) + "\n")
+        with open(args.out_md, "w") as fh:      # noqa: SIM115
+            fh.write("\n".join(M) + "\n")
         print(f"wrote {args.out_md}")
-    print(f"\n{tot['cells']} cells | {tot['skipped']} skipped | {tot['errors']} errors | "
-          f"{tot['unsound']} unsound")
-    if uni:
-        print(f"uniformity: {len(uni)} (sampler, kind) groups")
-    if rc:
-        print(f"repro: {rc['exact']}/{rc['exact'] + rc['mismatch']} exact, geomean {rc['gm']:.3f}x")
+    print(f"\n{cell_line}")
 
 
 def main():
-    ap = argparse.ArgumentParser()
-    ap.add_argument("--cmsgen", default=None,
-                    help="`gpap bench` stage directory — the older family matrix, supplementary")
-    ap.add_argument("--cmsgen-ref", default=None)
-    ap.add_argument("--rivals", default=None,
-                    help="the campaign directory (rivals_*.json): Tables 1, 2 and 3 of the "
-                         "converged protocol are read off these rows")
-    ap.add_argument("--recheck", default=None)
-    ap.add_argument("--uniformity", nargs="*", default=[])
+    ap = argparse.ArgumentParser(description="The paper's tables, from a campaign's rows.")
+    ap.add_argument("--rivals", required=True,
+                    help="the campaign directory (rivals_*.json): Tables 1, 2 and 3 are read off "
+                         "these rows")
     ap.add_argument("--barbarik", nargs="*", default=[],
-                    help="barbarik_gpap.py JSONL result files (Table 4b)")
-    ap.add_argument("--soft", default=None)
-    ap.add_argument("--out-md", default=None)
+                    help="barbarik_gpap.py JSONL result files (the uniformity table)")
+    ap.add_argument("--out-md", default=None, help="the tables, as the paper prints them")
     ap.add_argument("--out-json", default=None,
                     help="every published number, machine-readable: the contract "
                          "check_paper_numbers.py holds the paper to")
-    args = ap.parse_args()
-    if not (args.cmsgen or args.rivals):
-        ap.error("nothing to read: pass --rivals (the campaign) and/or --cmsgen (supplementary)")
-    build(args)
+    ap.add_argument("--out-notes", default=None,
+                    help="the per-campaign analysis behind the paper's wording, for the authors")
+    build(ap.parse_args())
 
 
 if __name__ == "__main__":

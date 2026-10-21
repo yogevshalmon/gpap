@@ -33,18 +33,11 @@ sha256sum -c gpap-image-*.tar.gz.sha256
 docker load -i gpap-image-*.tar.gz
 mkdir -p out
 docker run --rm --gpus all gpap-artifact:tacas-27 check
-docker run --rm -v "$PWD/out:/out" gpap-artifact:tacas-27 tables --out /out/tables
 docker run --rm --gpus all -v "$PWD/out:/out" gpap-artifact:tacas-27 smoke --out /out/smoke
 ```
 
-`tables` and `smoke` each write one file to read, `SUMMARY.txt`. `out/tables/SUMMARY.txt`
-includes
-
-```
-163 published values, all reproduced by the generator.
-```
-
-and `out/smoke/SUMMARY.txt` includes
+`check` lists the GPU and what each step costs. `smoke` runs the whole pipeline on 4 cells, and
+`out/smoke/SUMMARY.txt` includes
 
 ```
 PASS — 4 cells compared: same formulas, sound samples, same verdicts.
@@ -53,15 +46,53 @@ ARTIFACT_TIER_COMPLETE
 
 ## Full review
 
-`subset` re-measures 66 of the paper's 142 cells, in about 2.5 hours, and `full` all of them, in
-about 12 hours:
+### The paper's tables (seconds, no GPU)
+
+`tables` regenerates the paper's tables and figures from the per-cell measurements the artifact
+ships, and checks every number the PDF prints against them. Nothing is measured again.
+
+```bash
+docker run --rm -v "$PWD/out:/out" gpap-artifact:tacas-27 tables --out /out/tables
+```
+
+`out/tables/SUMMARY.txt` includes `163 published values, all reproduced by the generator.` The
+files to look at are in `out/tables/details/`:
+
+- `RESULTS.md`: the paper's Tables 1–3, its uniformity counts and the numbers its text quotes,
+  laid out as the paper prints them, plus the ratios the text quotes. Under each table, every
+  cell not counted, by name and reason. Read it beside the PDF.
+- `PAPER_NUMBERS.txt`: every number the PDF prints, checked against the regenerated one.
+- `VERIFICATION.txt`: the checks on the measurements: every emitted sample sound, every CMSGen
+  count exact, every rival failure reported.
+- `plots/`: the figures; the paper's Figure 3 is `sps_scatter_cmsgen.pdf`.
+
+### Re-measuring on a GPU
+
+`subset` re-measures 66 of the paper's 142 cells (none at T=50) in about 2.5 hours, and `full`
+all 142 in about 12 hours. Start one detached and follow it:
 
 ```bash
 docker run -d --name gpap-subset --gpus all -v "$PWD/out:/out" gpap-artifact:tacas-27 subset --out /out/subset
 docker logs -f gpap-subset
 ```
 
-ARTIFACT.md maps each claim of the paper to the file that checks it.
+or, for every cell:
+
+```bash
+docker run -d --name gpap-full --gpus all -v "$PWD/out:/out" gpap-artifact:tacas-27 full --out /out/full
+docker logs -f gpap-full
+```
+
+A rate depends on the GPU, so a tier does not ask for the paper's rates back. It compares each
+re-measured cell with the paper's and checks what must hold on any machine: the same formula,
+every sample sound, and the same verdict (which tool won). When it ends, `out/subset/SUMMARY.txt`
+(or `out/full/`) has a line that begins `PASS — 66 cells compared: same formulas, sound samples`,
+then `ARTIFACT_TIER_COMPLETE`; `details/COMPARISON.txt` beside it compares every cell. On a GPU
+with less than 24 GB, a GPU sampler whose recorded batch does not fit steps down to a smaller
+one; a verdict that changed on such a cell is named in the summary and is not evidence either
+way. A stopped tier resumes: `docker rm gpap-subset`, then the same command again.
+
+ARTIFACT.md maps each claim of the paper to the file that checks it, and explains every step.
 
 ## Platforms tested
 
