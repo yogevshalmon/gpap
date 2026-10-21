@@ -929,21 +929,6 @@ def barbarik(paths):
             "source": sorted(os.path.abspath(p) for p in (paths or []) if os.path.exists(p))}
 
 
-# ------------------------------------------------------------------ the re-check reader
-
-
-def recheck_cells(path):
-    """One re-check stage's scored cells, keyed `(instance, encoder)`.
-
-    THE single reader of a re-check JSON: `verify_artifact.py` gates the deterministic fields over
-    it. There were three copies of this key, one of them in an `eval/recheck_compare.py` whose
-    whole CLI restated what its callers already assert -- and three readers of a row shape is how
-    two of them come to disagree about which cells were compared."""
-    d = load(path) or {}
-    return {(r["name"].split(".")[0], r.get("enc_key") or r.get("encoder")): r
-            for r in d.get("results", []) if not r.get("skipped") and not r.get("error")}
-
-
 # ------------------------------------------------------------------ rendering
 
 # The reasons a cell is not counted, in print order; the names are itemised under each table from
@@ -1098,24 +1083,15 @@ def build(args):
     except Exception:                                   # noqa: BLE001
         commit = "not a git checkout"
 
-    # Totals: `cells`/`unsound` sum over every stage, `inst`/`skipped`/`errors` are taken once per
-    # stage.
-    one_per_stem = {}
-    for (stem, _enc), v in cms.items():
-        if v and stem not in one_per_stem:
-            one_per_stem[stem] = v
-    tot = {kk: sum(v[kk] for v in cms.values() if v) for kk in ("cells", "unsound")}
-    tot["refused"] = sum(v.get("errors", 0) for v in cms.values() if v)
-    tot.update({kk: sum(v[kk] for v in one_per_stem.values())
-                for kk in ("inst", "skipped", "errors")})
-    refused = sorted({n for v in cms.values() if v
-                      for n in (v.get("excl_names") or {}).get("refused", [])})
-    other = tot["errors"] - tot["refused"]
-    cell_line = (f"{tot['cells'] + tot['refused']} cells: {tot['cells']} measured, "
-                 f"{tot['refused']} GPAP could not encode"
+    # Totals over every stage: a cell is measured or GPAP's encoder refused it (a rival stage's
+    # only `errors`). The names are not deduplicated, so a cell refused in two stages shows twice
+    # and the count matches them.
+    live = [v for v in cms.values() if v]
+    tot = {kk: sum(v[kk] for v in live) for kk in ("cells", "errors", "unsound")}
+    refused = sorted(n for v in live for n in v["refused_names"])
+    cell_line = (f"{tot['cells'] + tot['errors']} cells: {tot['cells']} measured, "
+                 f"{tot['errors']} GPAP could not encode"
                  + (f" ({', '.join(refused)})" if refused else "")
-                 + (f", {other} other error(s)" if other > 0 else "")
-                 + (f", {tot['skipped']} skipped" if tot["skipped"] else "")
                  + f", {tot['unsound']} unsound")
 
     # THE CIRCUIT HANDED TO THE RIVAL, stated from the rows: a fairness procedure must name what

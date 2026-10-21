@@ -28,8 +28,7 @@ import sys
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
 from gpap.verdict import sound_verdict                        # noqa: E402
 from eval.artifact.paper_tables import (CMS_FAMILIES, cms_arm_ran,          # noqa: E402
-                                        recheck_cells, sound_failed, sound_unchecked,
-                                        vacuous_pin)
+                                        sound_failed, sound_unchecked, vacuous_pin)
 
 
 def load(p):
@@ -37,6 +36,14 @@ def load(p):
         return json.load(open(p))
     except Exception:                                   # noqa: BLE001
         return None
+
+
+def recheck_cells(path):
+    """One re-check stage's scored cells, keyed `(instance, encoder)`: the one reader of a re-check
+    JSON, so both sides of the deterministic-field gate are read the same way."""
+    d = load(path) or {}
+    return {(r["name"].split(".")[0], r.get("enc_key") or r.get("encoder")): r
+            for r in d.get("results", []) if not r.get("skipped") and not r.get("error")}
 
 
 def gpap_zero(row):
@@ -247,11 +254,11 @@ def main():
         missing = [stem for stem in known if stem not in present_stems]
         if missing:
             warn.append(f"coverage: standard stage(s) with no JSON at all: "
-                        f"{', '.join(missing)} — Table 1 will silently have no row for them; "
+                        f"{', '.join(missing)} — nothing above checked them; "
                         f"confirm those families were deliberately not run")
 
-    # The re-check's deterministic-field claim, RE-DERIVED from the raw rows through the generator's
-    # own cell reader, so this gate and the table it gates read the same cells.
+    # The re-check: a re-measurement must agree with the original sweep on every field the GPU
+    # cannot change, both sides read through `recheck_cells`.
     if args.recheck:
         det_bad, n_shared = [], 0
         for p in stages:
@@ -276,7 +283,7 @@ def main():
             ok.append(f"recheck: deterministic fields match on all {n_shared} shared cells")
         else:
             warn.append("recheck: no shared cells with the original sweep — the "
-                        "reproducibility table would stand on nothing")
+                        "re-check compared nothing")
 
     # ---------------------------------------------------------------- rivals
     if args.rivals:
