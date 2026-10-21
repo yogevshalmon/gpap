@@ -120,9 +120,9 @@ done
 cat > "$STAGE/README-ARTIFACT.md" <<'POINTER'
 # GPAP — artifact for the TACAS 2027 tool paper
 
-Start with [docs/papers/tacas-27/AE_README.md](docs/papers/tacas-27/AE_README.md): what to run,
-what it prints, and how to read it. [ARTIFACT.md](docs/papers/tacas-27/ARTIFACT.md) beside it
-holds the detail.
+Start with [docs/papers/tacas-27/AE_README.md](docs/papers/tacas-27/AE_README.md), the README.md
+of the zip submitted for evaluation: what to run, what it prints, and how to read it.
+[ARTIFACT.md](docs/papers/tacas-27/ARTIFACT.md) beside it holds the detail.
 POINTER
 
 # --- Tier 1, run INSIDE the staged tree ----------------------------------------------------------
@@ -228,7 +228,8 @@ NFILES=$((NFILES + 1))                                   # MANIFEST.md itself, w
   echo
   echo "    $VERDICT"
   echo
-  echo "Start with **docs/papers/tacas-27/AE_README.md** (\`README-ARTIFACT.md\` points to it)."
+  echo "Start with **docs/papers/tacas-27/AE_README.md**, the README.md of the zip submitted for"
+  echo "evaluation (\`README-ARTIFACT.md\` points to it)."
   echo
   echo "| path | what it is |"
   echo "|---|---|"
