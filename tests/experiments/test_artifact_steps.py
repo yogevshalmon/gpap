@@ -100,11 +100,24 @@ def test_the_packager_resolves_a_relative_python_where_it_was_typed(tmp_path):
     assert f"python     : {tmp_path}/./py" in r.stdout, r.stdout
 
 
-def test_the_packager_zips_the_archives_own_readme_and_licence():
-    """The venue's form takes one zip holding a README and a LICENSE. It is written from the
-    archive (\$FINAL), so it cannot drift from the files the archive ships, and the packager
-    refuses before staging anything if the paper folder has no AE_README.md."""
+def test_the_packager_zips_the_archives_own_readme_and_licence(tmp_path):
+    """The venue's form takes one zip holding a README and a LICENSE. The packager's own zip code,
+    run here on two files, writes exactly those two names; it reads them from the finished archive
+    ($FINAL), so the zip cannot drift from the files the archive ships; and the packager refuses
+    to finish if the paper folder has no AE_README.md."""
+    import zipfile
+
     packager = (ARTIFACT / "make_artifact.sh").read_text()
     assert '"$FINAL/docs/papers/tacas-27/AE_README.md" "$FINAL/LICENSE"' in packager
-    assert 'z.write(readme, "README.md")' in packager and 'z.write(licence, "LICENSE")' in packager
     assert "for f in ARTIFACT.md AE_README.md" in packager
+    # The heredoc's body: after the `|| { ... }` line that ends the command, up to its `ZIP`.
+    code = packager.split("<<'ZIP'")[1].split("\nZIP\n")[0]
+    code = code[code.index("\nimport ") + 1:]
+    (tmp_path / "AE_README.md").write_text("the guide\n")
+    (tmp_path / "LICENSE").write_text("MIT\n")
+    out = tmp_path / "out.zip"
+    subprocess.run([sys.executable, "-", str(out), str(tmp_path / "AE_README.md"),
+                    str(tmp_path / "LICENSE")], input=code, text=True, check=True)
+    with zipfile.ZipFile(out) as z:
+        assert z.namelist() == ["README.md", "LICENSE"]
+        assert z.read("README.md") == b"the guide\n" and z.read("LICENSE") == b"MIT\n"

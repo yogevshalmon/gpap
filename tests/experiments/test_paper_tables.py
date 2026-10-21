@@ -1215,9 +1215,10 @@ def test_a_nearly_free_cell_is_screened_like_a_free_one():
 
 
 def test_the_emitted_ledger_sums_to_the_cell_count(tmp_path):
-    """Every accounting line under the emitted tables sums to its cell count. This parses the
-    FILE rather than the dicts behind it: the dicts are tested elsewhere, and what this catches is
-    a renderer printing the wrong count into the right place."""
+    """Every accounting line under the emitted tables sums to its cell count, and each table row
+    prints the same `n`, `C=0` and `Fail` as its accounting line. This parses the FILE rather than
+    the dicts behind it: the dicts are tested elsewhere, and what this catches is a renderer
+    printing the wrong count into the right place."""
     import json
     import re
     import subprocess
@@ -1239,6 +1240,9 @@ def test_the_emitted_ledger_sums_to_the_cell_count(tmp_path):
                     "--rivals", str(tmp_path), "--out-md", str(md)],
                    check=True, capture_output=True, cwd=REPO_ROOT)
 
+    def cells_of(line):
+        return [c.strip() for c in line.strip().strip("|").split("|")]
+
     # Under each table, one line per row: `* <row>: total = n + ... + not counted[; names]`.
     checked = 0
     for line in md.read_text().splitlines():
@@ -1250,6 +1254,22 @@ def test_the_emitted_ledger_sums_to_the_cell_count(tmp_path):
         assert len(parts) in (4, 5), f"Table 1 has four parts and Table 2 five: {line}"
         checked += 1
     assert checked >= 2, "no ledger rows were emitted to check"
+
+    # Each table's rows against its own accounting lines, in order: the printed `n`, `C=0` and
+    # (Table 2) `Fail` must be the terms the line adds up.
+    text = md.read_text()
+    for name, terms in (("Table 1", {"n": 0, "C=0": 1}), ("Table 2", {"n": 0, "C=0": 1, "Fail": 3})):
+        sec = text.split(f"## {name}")[1].split("\n## ")[0]
+        table = [ln for ln in sec.splitlines() if ln.startswith("| ") and "not run" not in ln]
+        hdr = {c: i for i, c in enumerate(cells_of(table[0]))}
+        rows = [cells_of(ln) for ln in table[1:]]
+        acct = [[int(x) for x in m.group(2).split("+")]
+                for m in (re.match(r"\* [^:]+: (\d+) = ([\d + ]+?)(?:;|\.$)", ln)
+                          for ln in sec.splitlines()) if m]
+        assert rows and len(rows) == len(acct), f"{name}: {len(rows)} rows, {len(acct)} lines"
+        for row, parts in zip(rows, acct):
+            for col, k in terms.items():
+                assert int(row[hdr[col]]) == parts[k], f"{name} {col} disagrees: {row} vs {parts}"
 
 
 def test_the_documented_protocol_describes_the_harness_that_exists():
