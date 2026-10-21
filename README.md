@@ -30,14 +30,10 @@ launch**. A foundation for SAT on the GPU, and a library to build on.
 ## What it is
 
 **An engine.** GPAP takes one formula and K partial assignments and propagates each assignment
-to its own BCP fixpoint, all in a single launch. For each one it reports whether it conflicted
-and, if not, what it implied. The engine also has a second entry point that makes decisions
-itself: pick free variables, give them polarities, propagate, and repeat. That runs a whole
-randomized decide-and-propagate trajectory per row, again in one launch.
-
-Both entry points live in one compiled library, [`libgpap`](cpp/), with a Python face and a C++
-face over the same core. The engine is application-agnostic. Anything that needs "propagate a
-large number of assumption sets" can call it, and everything else in this repository does.
+to its own BCP fixpoint, all in a single launch, reporting whether it conflicted and, if not, what
+it implied. A second entry point makes the decisions itself and runs a whole randomized
+decide-and-propagate trajectory per row, again in one launch. The engine is application-agnostic;
+everything else in this repository is built on it.
 
 **Applications built on it today:**
 
@@ -53,14 +49,12 @@ More applications are planned for future work — stay tuned!
 
 **Design at a glance:**
 
-|  |  |
-|---|---|
-| **No clause scanning** | Negated occurrence lists, one packed 32-bit word per long clause, and the sum trick. The whole per-literal clause update is a single `atomic_add`, and its return value detects units and conflicts. |
-| **K private jobs, one shared formula** | Each row owns its assignment, trail and clause words, and rows never communicate. A row that conflicts just stops: there is no conflict analysis to serialize. |
-| **It sizes itself** | The batch is an analytic bound over the card's free VRAM. The kernel choice, trail bound and packed layout are all derived from the formula. |
-| **One library, two faces** | Python (ctypes) and C++ (`#include <gpap/gpap.hpp>`) are thin marshalling layers over the same C ABI. At one seed, config and batch they draw identical models. |
-| **Runs on a driver alone** | The kernels are Triton, compiled ahead of time into the library. At run time `libgpap.so` links `libcuda.so.1` and nothing else: no CUDA toolkit, no nvcc, no Triton, and no torch for the C++ face. |
-| **Checked against a reference** | A BCP fixpoint is unique, so on every row that does not conflict both kernels must match a pure-Python reference propagator exactly. The test suite enforces this. |
+- **No clause scanning.** A clause update is one `atomic_add` on a packed word, and its return
+  value flags units and conflicts ([how](#how-it-works)).
+- **K private jobs, one shared formula.** Rows never communicate. A row that conflicts just stops,
+  so there is nothing to serialize and the batch is as wide as the card's memory.
+- **One library, two faces.** [`libgpap`](cpp/), with Python and C++ faces over one C ABI that
+  draw identical models. It runs on the NVIDIA driver alone.
 
 ## How it works
 
@@ -73,29 +67,17 @@ More applications are planned for future work — stay tuned!
 </picture>
 </div>
 
-**Bytes per clause decide everything.** The formula is built once and every row reads it. What
-propagation changes belongs to each row alone, so the per-row footprint decides how many
-assignments fit on the card at once. That is why each clause's per-row bookkeeping is a counter
-and a key, updated **in place**. Two watched literals per clause would be smaller still, but each
-update *moves* which literals are watched. That kind of irregular pointer work is exactly what a
-GPU does worst.
+Every row reads the same formula; only a few bytes per clause belong to each row, and that
+footprint decides how many rows fit on the card. So a clause is never scanned:
 
-Three choices mean a clause is never scanned:
+1. **Negated occurrence lists.** Setting `l` true visits exactly the clauses where `~l` appears.
+   Binary clauses live there as implication edges, with no per-row state.
+2. **One packed word per longer clause, per row:** how many of its literals are still alive, and
+   the sum of their indices.
+3. **The sum trick.** At count 1 the sum *is* the surviving literal, so one `atomic_add` updates
+   the clause and its return value reveals a unit or a conflict.
 
-1. **Negated occurrence lists** (CSR). `occ[l]` holds the clauses where `~l` appears. Setting `l`
-   TRUE falsifies `~l` in exactly those clauses and in no others. Binary clauses exist only here,
-   as implication edges with no per-row state. Unit clauses are applied once, at construction.
-2. **One packed word per clause of length ≥ 3**, batched over every row. The low bits count the
-   non-falsified literals (`0` means conflict, `1` means unit). The high bits hold the sum of
-   those literals' indices.
-3. **The sum trick.** At count 1, the sum *is* the index of the surviving literal, so no scan or
-   gather is needed. Each clause update is one `atomic_add`, and its return value detects units
-   and conflicts without races.
-
-Literal indexing is `+v → 2(v-1)` and `-v → 2(v-1)+1`, with negation `l ^ 1`. The assignment is a
-bitmap in which `l` and `~l` share a word, so one `atomic_or` answers both "already set?" and
-"contradiction?". Two propagate kernels, scalar and warp-wide, are chosen per formula. The
-details are in [`docs/ENGINE.md`](docs/ENGINE.md), and the kernels are in
+The details are in [`docs/ENGINE.md`](docs/ENGINE.md), the kernels in
 [`cpp/kernels/bcp.py`](cpp/kernels/bcp.py).
 
 ## Install
@@ -112,12 +94,9 @@ pip install -e ".[dev]"      # + pytest, ruff, python-sat
 gpap info                    # device, kernels, encoder, power-limit warning
 ```
 
-To skip the toolchain, run GPAP in Docker instead: [docs/DOCKER.md](docs/DOCKER.md).
-
-`scripts/build_core.sh` compiles the Triton kernels ahead of time and builds the library. It
-needs cmake, a C++17 compiler and the NVIDIA driver, plus triton at build time only. The compiled
-kernels target one GPU architecture, so rebuild when you move to a different card generation. If
-you forget, the loader names the mismatch.
+The kernels are compiled for one GPU architecture: rebuild when you move to another card
+generation (the loader names the mismatch). To skip the toolchain, run GPAP in Docker:
+[docs/DOCKER.md](docs/DOCKER.md).
 
 A first run, on a circuit that ships with the repository (the demo below):
 
@@ -260,38 +239,10 @@ and, on request, its full assignment. `LiteralProbe` checks every k-subset of a 
 within a budget; mining is built on it. See
 [`examples/check_assumptions.py`](examples/check_assumptions.py).
 
-## Layout
+## Contributing
 
-```
-cpp/              # the engine core: libgpap, C ABI + C++ wrapper, shared by both faces
-gpap/
-  engine/         # the Python face of the core (ctypes): checker, probe, engine
-  sampling/       # application: the sampler, its pipeline, preprocessing, output
-  circuits/       # .bench / AIGER parse, unroll, Tseitin, pin -> projected CNF
-  mining.py       # application: entailed-clause mining over the probe primitive
-  cli.py          # `gpap` subcommands
-examples/         # runnable Python examples, one per application
-eval/             # the experiment layer (see Evaluation); nothing in gpap/ imports it
-scripts/          # build libgpap, optional third-party tools, fetch benchmarks
-docs/             # start at docs/README.md
-tests/            # pytest, one directory per area (engine, sampling, mining, ...)
-benchmarks/       # small committed .bench, AIGER and CNF instances
-.gpap/            # built/fetched tools, benchmark sets and run scratch, gitignored
-```
-
-Code carries the rule and `docs/` carries the evidence. A comment says what the code does and why
-it is correct. The measurement that settled a design decision lives in
-[`docs/findings/`](docs/findings/), not in a source file.
-
-## Tests
-
-```bash
-pytest                             # the engine, the applications and repo checks (GPU tests skip off-CUDA)
-pytest -m "not gpu and not slow"   # portable smoke suite, no GPU needed
-pytest tests/experiments           # the experiment layer's tests, not part of the default run
-```
-
-Building from source, the conventions and how to propose a change: [`CONTRIBUTING.md`](CONTRIBUTING.md).
+The tests, the repository layout, the conventions and how to propose a change:
+[`CONTRIBUTING.md`](CONTRIBUTING.md).
 
 ## Evaluation
 
