@@ -3,93 +3,76 @@
 > **Reader:** anyone using or redistributing GPAP — which files here are not GPAP's own, their
 > licences, and what to keep with them.
 
-GPAP's own code and documentation are under the MIT licence in [LICENSE](LICENSE). This
-repository also contains benchmark files and a few quoted lines of code written by others, and
-its scripts can download further tools. Those keep their own licences; the MIT licence does not
-cover them.
+GPAP's own code and documentation are MIT ([LICENSE](LICENSE)). The `gpap` package and `libgpap`
+contain no third-party code. Everything below keeps its own licence, which the MIT licence does
+not cover.
 
-The `gpap` Python package and the `libgpap` library contain no third-party code under a licence;
-the public-domain algorithms they re-implement are listed under Dependencies.
+## In this repository
 
-## Included in this repository
+Unmodified copies of their source (`b15.bench` lacks the original's final empty line).
 
-These files are unmodified copies of their source, except that `b15.bench` lacks the final empty
-line of the I99T original.
-
-| files | what they are | source | licence |
+| files | what | source | licence |
 |---|---|---|---|
-| `benchmarks/circuits/bench/seq/b01.bench` to `b15.bench` | ITC'99 benchmark circuits (I99T), CAD Group, Politecnico di Torino | [cad-polito-it/I99T](https://github.com/cad-polito-it/I99T), commit `8a2c3b5` | EUPL-1.2, text in [LICENSE-ITC99.EUPL-1.2.txt](benchmarks/circuits/LICENSE-ITC99.EUPL-1.2.txt) |
-| `benchmarks/circuits/epfl/` | EPFL Combinational Benchmark Suite, 20 circuits | [lsils/benchmarks](https://github.com/lsils/benchmarks), commit `82d8cc6` | MIT, notice in [LICENSE](benchmarks/circuits/epfl/LICENSE) |
-| `benchmarks/sampling/` | 29 instances of the standard SAT-sampling suite, from Sketch program-synthesis problems | the `Benchmarks/` folder of [QuickSampler](https://github.com/RafaelTupynamba/quicksampler), commit `f9a3e09` | BSD-3-Clause, the licence of that repository, notice in [LICENSE-QuickSampler.BSD-3-Clause.txt](benchmarks/sampling/LICENSE-QuickSampler.BSD-3-Clause.txt) |
-| `benchmarks/circuits/bench/comb/`, `benchmarks/circuits/bench/seq/s*.bench` | ISCAS-85 and ISCAS-89 benchmark circuits | the classic `.bench` distribution | none stated |
-| `benchmarks/circuits/hwmcc17/` | 7 circuits from the HWMCC 2017 single-property set | [fmv.jku.at/hwmcc17](https://fmv.jku.at/hwmcc17/) | none stated |
+| `benchmarks/circuits/bench/seq/b01`–`b15.bench` | ITC'99 circuits (I99T, Politecnico di Torino) | [cad-polito-it/I99T](https://github.com/cad-polito-it/I99T) `8a2c3b5` | [EUPL-1.2](benchmarks/circuits/LICENSE-ITC99.EUPL-1.2.txt) |
+| `benchmarks/circuits/epfl/` | EPFL combinational suite, 20 circuits | [lsils/benchmarks](https://github.com/lsils/benchmarks) `82d8cc6` | [MIT](benchmarks/circuits/epfl/LICENSE) |
+| `benchmarks/sampling/` | 29 SAT-sampling instances (Sketch problems) | `Benchmarks/` of [QuickSampler](https://github.com/RafaelTupynamba/quicksampler) `f9a3e09` | [BSD-3-Clause](benchmarks/sampling/LICENSE-QuickSampler.BSD-3-Clause.txt) |
+| `benchmarks/circuits/bench/comb/`, `benchmarks/circuits/bench/seq/s*.bench` | ISCAS-85 and ISCAS-89 circuits | the classic `.bench` distribution | none stated |
+| `benchmarks/circuits/hwmcc17/` | 7 HWMCC 2017 single-property circuits | [fmv.jku.at/hwmcc17](https://fmv.jku.at/hwmcc17/) | none stated |
 
-"None stated" means that neither the files nor their distributors give a licence. These are
-standard research benchmarks, included so that published experiments can be reproduced. If you
-hold rights in any of them and want them removed, please open an issue.
+- **None stated:** neither the files nor their distributors give a licence. They are standard
+  research benchmarks, kept so published experiments can be reproduced; if you hold rights in one
+  and want it removed, open an issue.
+- **ITC'99 is copyleft (EUPL).** Redistribute those circuits under the EUPL, with its text and the
+  notices inside the files.
+- **Two patches quote the code they change.** `scripts/cmsgen_gpap_eval.patch` quotes CMSGen's
+  `src/main.cpp` and `src/main.h` (MIT, [notice below](#cmsgen-notice)).
+  `eval/rivals/recurrent_gpap_eval.patch` quotes about 30 lines of `src/pytorch/run.py` from
+  [Recurrent-CircuitSAT-Sampler](https://github.com/arashardakani/Recurrent-CircuitSAT-Sampler),
+  which states no licence; its authors keep all rights in them.
 
-The ITC'99 circuits are under the EUPL, a copyleft licence. If you redistribute them, keep the
-licence text and the notices inside the files with them, and keep them under the EUPL. Their
-source is the I99T repository above.
+## Fetched by scripts, not redistributed
 
-Two patch files quote a few lines of the code they change, so that they can be applied:
-
-- `scripts/cmsgen_gpap_eval.patch` quotes CMSGen's `src/main.cpp` and `src/main.h`, which are
-  under the MIT licence; the notice is at the end of this file.
-- `eval/rivals/recurrent_gpap_eval.patch` quotes about 30 lines of `src/pytorch/run.py` from
-  [Recurrent-CircuitSAT-Sampler](https://github.com/arashardakani/Recurrent-CircuitSAT-Sampler).
-  That project states no licence, and its authors keep all rights in those lines.
-
-## Downloaded by scripts, not included
-
-The scripts fetch these from upstream at a fixed commit (the HWMCC'17 archive by checksum). This
-repository does not redistribute them.
+Each is pinned to a commit (the HWMCC'17 archive to a checksum).
 
 | component | script | upstream | licence |
 |---|---|---|---|
-| ITC'99 `b17` to `b22` | `scripts/fetch_benchmarks.sh` | I99T, commit `8a2c3b5` | EUPL-1.2 |
-| the 20 EPFL circuits (the same as committed) and the whole HWMCC'17 set | `scripts/fetch_benchmarks.sh` | as above | MIT; none stated |
-| ABC, the optional circuit encoder | `scripts/build_abc.sh` | [berkeley-abc/abc](https://github.com/berkeley-abc/abc), commit `bcfdf59` | the University of California's permissive licence, in its `copyright.txt` |
-| CMSGen, the CPU sampler used for comparison | `scripts/build_cmsgen.sh` | [meelgroup/cmsgen](https://github.com/meelgroup/cmsgen), commit `8210aa9` | MIT |
-| DEMOTIC, Recurrent-CircuitSAT-Sampler and High-Throughput-SAT-Sampler, the GPU samplers used for comparison | `eval/rivals/rivals_setup.sh` | [github.com/arashardakani](https://github.com/arashardakani), commits `f4e8ede`, `b9b048a`, `5cf5888` | none stated |
-| Barbarik, the uniformity test, with SPUR, the reference sampler it ships as a binary | by hand, as described in `eval/uniformity/barbarik_gpap.py` | [meelgroup/barbarik](https://github.com/meelgroup/barbarik), commit `2c0a669`; [ZaydH/spur](https://github.com/ZaydH/spur) | MIT (both); Barbarik's other bundled binaries have their own licences |
+| ITC'99 `b17`–`b22`; the EPFL and full HWMCC'17 sets | `scripts/fetch_benchmarks.sh` | as above | as above |
+| ABC, the optional circuit encoder | `scripts/build_abc.sh` | [berkeley-abc/abc](https://github.com/berkeley-abc/abc) `bcfdf59` | University of California, permissive (`copyright.txt`) |
+| CMSGen, the CPU sampler compared with | `scripts/build_cmsgen.sh` | [meelgroup/cmsgen](https://github.com/meelgroup/cmsgen) `8210aa9` | MIT |
+| DEMOTIC, Recurrent-CircuitSAT-Sampler, High-Throughput-SAT-Sampler | `eval/rivals/rivals_setup.sh` | [arashardakani](https://github.com/arashardakani) `f4e8ede`, `b9b048a`, `5cf5888` | none stated |
+| Barbarik (uniformity test) and SPUR, the sampler it ships as a binary | by hand, see `eval/uniformity/barbarik_gpap.py` | [meelgroup/barbarik](https://github.com/meelgroup/barbarik) `2c0a669`; [ZaydH/spur](https://github.com/ZaydH/spur) | MIT; Barbarik's other binaries have their own |
 
-The reproduction archive published with the paper contains this repository, the paper's campaign
-data and ITC'99 `b17` to `b22`, unmodified and beside the EUPL text. It contains no third-party
-tools; its Docker image does, as the next section says.
+The paper's reproduction archive holds this repository, the campaign data and ITC'99 `b17`–`b22`
+(unmodified, beside the EUPL text), and no third-party tools.
 
 ## In the Docker images
 
-The images built by `Dockerfile` and `eval/artifact/Dockerfile`, including the one published with
-the paper's artifact, redistribute what they install. Each component keeps its own licence.
+The images built from `Dockerfile` and `eval/artifact/Dockerfile`, the artifact's among them,
+redistribute what they install, each under its own licence:
 
-| component | in | licence |
+| component | image | licence |
 |---|---|---|
-| Ubuntu 24.04 and its packages, among them Python 3.12, g++, cmake and git | both images | each package's own, in its `copyright` file under `/usr/share/doc/` in the image |
-| PyTorch, Triton and the other Python packages, with the NVIDIA CUDA libraries that PyTorch's wheels bring | both images | their own: PyTorch BSD-3-Clause, Triton MIT, and the CUDA libraries under NVIDIA's licence, which ships in each package. `/opt/gpap-image/pip-freeze.txt` lists every package and version. |
-| ABC, built from the commit above | both images | as above |
-| CMSGen, built from the commit above with `scripts/cmsgen_gpap_eval.patch` | the artifact image | MIT |
+| Ubuntu 24.04 packages (Python 3.12, g++, cmake, git, …) | both | each package's, under `/usr/share/doc/<package>/copyright` |
+| PyTorch, Triton and the other Python packages, with the NVIDIA CUDA libraries in PyTorch's wheels | both | PyTorch BSD-3-Clause, Triton MIT, CUDA NVIDIA's (in each package); `/opt/gpap-image/pip-freeze.txt` lists them all |
+| ABC, from the commit above | both | as above |
+| CMSGen, from the commit above with `scripts/cmsgen_gpap_eval.patch` | artifact | MIT |
 
-No image contains the GPU samplers GPAP is compared with. They state no licence, so the artifact's
-`setup` step clones them when it runs.
+The GPU samplers state no licence, so no image contains them: the artifact's `setup` step clones
+them.
 
-## Dependencies
+## Dependencies you install
 
-Installed by you, not redistributed here:
-
-- Python packages: PyTorch (BSD-3-Clause), NumPy (BSD-3-Clause), python-sat (MIT), matplotlib
-  (the Matplotlib licence), pytest (MIT); for the comparison samplers also pycryptosat (MIT),
-  pandas (BSD-3-Clause) and tqdm (MPL-2.0 and MIT).
-- To build: Triton (MIT), which compiles the GPU kernels and includes NVIDIA's `ptxas` and CUDA
-  headers under NVIDIA's licence; CMake and a C++17 compiler.
-- To run: the NVIDIA driver (`libcuda`), under NVIDIA's licence.
+- **Python:** PyTorch and NumPy (BSD-3-Clause), python-sat and pytest (MIT), matplotlib (its own
+  licence); for the comparison samplers, pycryptosat (MIT), pandas (BSD-3-Clause), tqdm (MPL-2.0
+  and MIT).
+- **To build:** Triton (MIT), which bundles NVIDIA's `ptxas` and CUDA headers under NVIDIA's
+  licence; CMake; a C++17 compiler.
+- **To run:** the NVIDIA driver (`libcuda`), under NVIDIA's licence.
 
 The random-number generators in `cpp/src/sample.cpp` and `cpp/kernels/bcp.py` re-implement
-xoshiro256** and splitmix64 by David Blackman and Sebastiano Vigna, whose reference code is in
-the public domain.
+xoshiro256** and splitmix64 (Blackman and Vigna, public domain).
 
-If you use a benchmark suite, please cite it:
-[benchmarks/circuits/README.md](benchmarks/circuits/README.md) and
+Citing a benchmark suite: [benchmarks/circuits/README.md](benchmarks/circuits/README.md) and
 [benchmarks/sampling/README.md](benchmarks/sampling/README.md) list the papers.
 
 ## CMSGen notice
