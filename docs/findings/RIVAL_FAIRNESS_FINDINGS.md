@@ -177,7 +177,8 @@ some instances (seq-c25-rare b04: GPAP x1.2, CMSGen x4.0), so maximising the quo
 shared preprocessing gain to one side. Rule: no selection — Table 1 and Table 3 emit one row per
 (family, encoder), which also keeps the non-monotone encoder A/B visible (ABC unlocks `b14` at a
 rare pin and collapses `b13`'s). `eval/eval_plots.py` selects on `gpap_sps` where it must;
-`slide_tables.py` and `soft_price_tables.py` import the paper's function.
+`soft_price_tables.py` imports the paper's function (as `slide_tables.py` did until its removal
+on 2026-10-21).
 
 ## 9. `wins` and `n` were counted over a different row set than the geomean
 
