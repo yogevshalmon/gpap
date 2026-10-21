@@ -20,8 +20,9 @@ change does not.
   end, and everything else under `details/`. A bare `compare` prints the whole comparison.
 - `compare_campaign.py` names the cells whose verdict changed in its closing block, the part a
   tier's summary shows.
-- `make_artifact.sh` accepts a relative output directory, taken from where it is typed. It used
-  to lose the uniformity rows and refuse to package.
+- `make_artifact.sh` accepts a relative output directory and a relative `PYTHON`, both taken
+  from where they are typed. It used to lose the uniformity rows and refuse to package. It also
+  writes the venue's upload, a zip of the AE README and the licence.
 
 ## 0.3.0 — 2026-10-17, the first public release
 

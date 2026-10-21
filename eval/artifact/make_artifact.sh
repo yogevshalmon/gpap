@@ -10,6 +10,9 @@
 #   benchmarks .../b1[789],b2[012]  the six ITC'99 circuits too large to commit
 #   README-ARTIFACT.md       a pointer to the guide, docs/papers/tacas-27/ARTIFACT.md
 #
+# Beside the archive it writes gpap-ae-<date>-<commit>.zip, the upload the venue's artifact form
+# takes: the paper folder's AE_README.md as README.md, and LICENSE.
+#
 # Left out: the compared samplers (no licence; rivals_setup.sh fetches them at pinned commits)
 # and built binaries (abc, CMSGen, built from pinned sources).
 #
@@ -21,13 +24,15 @@ set -uo pipefail
 export PYTHONDONTWRITEBYTECODE=1
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
-INVOKED_FROM="$PWD"            # a relative OUT_DIR is the caller's, not the checkout's
+INVOKED_FROM="$PWD"            # a relative OUT_DIR or PYTHON is the caller's, not the checkout's
 cd "$REPO_ROOT"
 PY="${PYTHON:-$REPO_ROOT/.venv/bin/python}"
+# Absolute, since the gates run after `cd "$STAGE"`; a bare name is looked up on PATH.
+case "$PY" in /*) ;; */*) PY="$INVOKED_FROM/$PY" ;; esac
 [ -x "$PY" ] || PY="$(command -v python3)"
 
 # Ask, never recompute: eval/paths.py is the one definition (physical, `$GPAP_RESULTS`-aware).
-RESULTS="$(PYTHONPATH="$REPO_ROOT" "${PYTHON:-python3}" -m eval.paths results)"
+RESULTS="$(PYTHONPATH="$REPO_ROOT" "$PY" -m eval.paths results)"
 : "${RESULTS:?cannot resolve — python3 must be able to import the repo (gpap/paths.py, eval/paths.py)}"
 OUT="${1:-$RESULTS}"
 # Absolute, since the gates run after `cd "$STAGE"`, and resolved where it was typed.
@@ -49,6 +54,7 @@ FINAL="$OUT/$NAME"
 echo "repository : $REPO_ROOT @ $COMMIT"
 echo "rows       : $SRC_DATA/data"
 echo "output     : $OUT/$NAME"
+echo "python     : $PY"
 
 [ -d "$SRC_DATA/data" ] || { echo "[FATAL] no published rows at $SRC_DATA/data" >&2; exit 1; }
 # git archive ships HEAD, so a dirty tree would package code other than the code being tested.
@@ -108,8 +114,10 @@ echo "benchmarks : $n_extra/6 large ITC'99 circuits bundled"
 
 # --- the entry point is the first file a reviewer sees --------------------------------------------
 # A pointer, not a copy: the guide's relative links resolve only where it lives.
-[ -f "$STAGE/docs/papers/tacas-27/ARTIFACT.md" ] || {
-    echo "[FATAL] docs/papers/tacas-27/ARTIFACT.md is not in the staged tree" >&2; exit 1; }
+for f in ARTIFACT.md AE_README.md; do     # the guide, and the venue zip's README
+    [ -f "$STAGE/docs/papers/tacas-27/$f" ] || {
+        echo "[FATAL] docs/papers/tacas-27/$f is not in the staged tree" >&2; exit 1; }
+done
 cat > "$STAGE/README-ARTIFACT.md" <<'POINTER'
 # GPAP — artifact for the TACAS 2027 tool paper
 
@@ -252,8 +260,21 @@ mkdir -p "$OUT"
 mv "$STAGE" "$FINAL"
 trap - EXIT
 ( cd "$OUT" && tar czf "$NAME.tar.gz" "$NAME" )
+
+# --- the venue's upload: one small zip that points to the DOI --------------------------------------
+# From the archive's own copies, so the zip says what the archive says.
+ZIP="$OUT/gpap-ae-${NAME#gpap-artifact-}.zip"
+"$PY" - "$ZIP" "$FINAL/docs/papers/tacas-27/AE_README.md" "$FINAL/LICENSE" <<'ZIP' \
+    || { echo "[FATAL] could not write $ZIP" >&2; exit 1; }
+import sys, zipfile
+out, readme, licence = sys.argv[1:]
+with zipfile.ZipFile(out, "w", zipfile.ZIP_DEFLATED) as z:
+    z.write(readme, "README.md")
+    z.write(licence, "LICENSE")
+ZIP
 echo
 echo "artifact: $OUT/$NAME.tar.gz  ($(du -h "$OUT/$NAME.tar.gz" | cut -f1), $NFILES files)"
+echo "upload  : $ZIP  (README.md and LICENSE, for the venue's artifact form)"
 echo "verdict : $VERDICT"
 echo
 echo "Next: upload to Zenodo for the DOI (the Available badge), and put the CONCEPT DOI — the"
