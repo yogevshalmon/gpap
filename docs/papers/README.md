@@ -18,9 +18,9 @@ artifact and its tooling refer to it. A folder holds:
 |---|---|
 | `README.md` | the paper's evaluation, explained: what was compared, the rules the tables follow, where the data comes from |
 | `PROTOCOL.md` | the rules the evaluation ran under, frozen before its campaign |
-| `ARTIFACT.md` | how to regenerate the paper's tables, and to re-measure them |
+| `AE_README.md` | the artifact evaluation guide, and the README a venue's artifact form asks for: what to run, what it prints, how to read it |
+| `ARTIFACT.md` | the detail behind it: how each claim maps to its data, what re-measuring compares and costs, what the archive holds |
 | `published_numbers.json` | the numbers the paper prints from its measurements, checked against the data whenever the tables are regenerated |
-| `AE_README.md` | optional: the README a venue's artifact submission asks for, an excerpt of `ARTIFACT.md` that a test keeps faithful |
 
 The paper's own text lives outside this repository, and no generated table is committed: each
 paper's artifact regenerates them from the campaign data it ships. The tool itself, in `gpap/`

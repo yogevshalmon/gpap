@@ -265,11 +265,11 @@ def _fenced_lines(text):
 
 @pytest.mark.parametrize("folder", sorted(p.parent for p in (REPO / "docs" / "papers").glob("*/AE_README.md")),
                          ids=lambda p: p.name)
-def test_an_ae_readme_quotes_only_what_its_artifact_guide_says(folder):
-    """A venue's AE README is an excerpt of the paper's ARTIFACT.md, the guide the archive carries
-    and the image gate reads. Every command and quoted output in the excerpt appears in the
-    guide, so the two cannot drift apart the way a copy does."""
-    excerpt = _fenced_lines((folder / "AE_README.md").read_text())
-    guide = _fenced_lines((folder / "ARTIFACT.md").read_text())
-    assert excerpt, "the AE README quotes no command"
-    assert not excerpt - guide, f"quoted in AE_README.md but not in ARTIFACT.md: {sorted(excerpt - guide)}"
+def test_an_artifact_detail_never_restates_its_ae_readme(folder):
+    """A venue's AE README is the evaluation guide, the one the image gate reads, and ARTIFACT.md
+    is the detail behind it. No command or quoted output appears in both: a copy drifts, and a
+    reviewer who reads the two would find them disagree."""
+    guide = _fenced_lines((folder / "AE_README.md").read_text())
+    detail = _fenced_lines((folder / "ARTIFACT.md").read_text())
+    assert guide, "the AE README quotes no command"
+    assert not guide & detail, f"in both AE_README.md and ARTIFACT.md: {sorted(guide & detail)}"
