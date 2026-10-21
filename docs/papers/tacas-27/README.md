@@ -205,7 +205,7 @@ Recurrent-CircuitSAT's starting point, are taken from an earlier campaign's reco
 searched for again. The 28 recorded failures of a rival to initialize were carried over instead
 of re-measured; this is the one departure from the protocol's text. [ARTIFACT.md](ARTIFACT.md)
 explains both. The campaigns this one replaces, and why, are in
-[RIVAL_FAIRNESS_FINDINGS.md](../../findings/RIVAL_FAIRNESS_FINDINGS.md) §15 to §17e.
+[RIVAL_FAIRNESS_FINDINGS.md](../../findings/RIVAL_FAIRNESS_FINDINGS.md) §16 to §17e.
 
 The rows ship with the artifact, with a hash of every file that is checked before any table is
 generated.
