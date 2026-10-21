@@ -1176,7 +1176,7 @@ def build(args):
     M += ["", "## Table 2 — GPAP vs the GPU samplers", "",
           "Unique samples per second, the rate the GPU samplers' papers report. The last column "
           "is the ratio the paper's text quotes.", "",
-          "| Baseline | Target | T | n | Baseline | GPAP | Wins | Ties | C=0 | Fail | GPAP/rival |",
+          "| Baseline | Target | T | n | Baseline u/s | GPAP u/s | Wins | Ties | C=0 | Fail | GPAP/rival |",
           "|---|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|"]
     went = []
     for stem, key, rival, _proto in RIVALS:
