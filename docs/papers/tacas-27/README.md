@@ -12,7 +12,8 @@ data.
 |---|---|
 | this page | the evaluation, explained |
 | [PROTOCOL.md](PROTOCOL.md) | the exact rules of the evaluation, frozen before the paper's campaign ran |
-| [ARTIFACT.md](ARTIFACT.md) | the artifact: how to regenerate every table without a GPU, and re-measure on one |
+| [AE_README.md](AE_README.md) | the artifact evaluation guide: regenerate every table without a GPU, and re-measure on one |
+| [ARTIFACT.md](ARTIFACT.md) | the detail behind it |
 | [published_numbers.json](published_numbers.json) | the numbers the paper prints from its measurements, each checked against the data |
 
 ## What is compared
@@ -185,7 +186,7 @@ PDF  ──► (transcribed by hand)      ──► published_numbers.json
 measurements and names the generated row each one checks; the few printed numbers that are not
 generated are listed apart, with the reason. A rate is compared at the precision printed
 (`2.31e6` claims three significant figures), and a count exactly. The check runs whenever the
-tables are regenerated (`eval/artifact/reproduce.sh tables`; see [ARTIFACT.md](ARTIFACT.md)).
+tables are regenerated (`eval/artifact/reproduce.sh tables`; see [AE_README.md](AE_README.md)).
 
 ## Where the numbers come from
 

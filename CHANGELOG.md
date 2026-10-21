@@ -30,6 +30,8 @@ change does not.
   does not cite; `eval/rivals/check_emission_symmetry.py` still runs it. `paper_tables.py` lost
   the tables the paper does not use (the exact-oracle uniformity, the soft-portfolio price, the
   re-check and the `gpap bench` family matrix).
+- The AE README is the evaluation guide, and the image gates read it; `ARTIFACT.md` holds the
+  detail behind it and repeats none of its commands.
 
 ## 0.3.0 — 2026-10-17, the first public release
 

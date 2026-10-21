@@ -1,107 +1,40 @@
-# GPAP — artifact for a tool paper submitted to TACAS 2027
+# GPAP — the artifact in detail, for a tool paper submitted to TACAS 2027
 
 > **Reader:** artifact evaluators of the tool paper submitted to TACAS 2027, *SAT Sampling at
-> Scale via GPU-based Boolean Constraint Propagation* — what to run, what it should print, and
-> how long it takes. No knowledge of the code is assumed.
+> Scale via GPU-based Boolean Constraint Propagation*, who want the detail behind the AE README.
+> No knowledge of the code is assumed.
+
+[AE_README.md](AE_README.md) is the evaluation guide, and the README of the artifact form's zip:
+what the artifact needs, what to run, what it prints and how to read it. This file holds the rest:
+how each claim of the paper maps to the script and data behind it, what a re-measurement
+compares and what each tier costs, reusing GPAP, running without Docker, what the archive holds,
+and the evidence behind each point of the AE README's "Reading the results".
 
 The artifact is GPAP's source, every measurement behind the paper's evaluation (the campaign
 `l4_protocol_20261012`, two Colab NVIDIA L4 sessions, 2026-10-12/13; [README.md](README.md)), and
 a Docker image with all of it installed. One script, `eval/artifact/reproduce.sh`, regenerates
 the paper's tables from the measurements and re-measures them on a GPU.
 
-- **Archive:** [10.5281/zenodo.23241912](https://doi.org/10.5281/zenodo.23241912), built from the
-  release `v0.3.1` of [the repository](https://github.com/yogevshalmon/gpap).
-- **Badges applied for:** Available, Functional and Reusable.
-- **Licence:** MIT ([LICENSE](../../../LICENSE)). Benchmarks and tools by others keep their own licences
-  ([THIRD_PARTY.md](../../../THIRD_PARTY.md)).
+## The paper's tables
 
-GPAP runs only on NVIDIA GPUs, so the artifact is a Docker image; the AE chairs granted the
-special-hardware exemption. Without a GPU, `check` and `tables` still run, in Docker or in the
-TACAS VM ([Without Docker](#without-docker)).
+`tables` regenerates them from the per-cell measurements the archive ships
+(`artifact-data/paper/data/`, one row per cell of the paper's campaign), checks each number the
+PDF prints against the regenerated one, and re-runs the checks on the measurements themselves.
+It shows that the paper's numbers follow from the recorded data; re-measuring shows that the data
+can be produced again.
 
-## What you need
+Beside the four files the AE README describes, `out/tables/details/` holds `paper_numbers.json`,
+the regenerated numbers in machine-readable form, and `tables.log`, everything else the step
+printed. Figure 3, `plots/sps_scatter_cmsgen.pdf`, comes out byte-identical to the paper's.
 
-- Linux on x86-64, or Windows with WSL2.
-- An NVIDIA GPU of compute capability 8.0 or newer (Ampere or later), with a driver for CUDA 12.8
-  or later.
-- Docker with the [NVIDIA Container Toolkit](https://docs.nvidia.com/datacenter/cloud-native/container-toolkit/latest/install-guide.html).
-  This must list the GPU:
-
-  ```bash
-  docker run --rm --gpus all ubuntu:24.04 nvidia-smi
-  ```
-- About 15 GB of disk.
-- For the GPU steps, network access to github.com: the two GPU samplers the paper compares with
-  state no licence, so the artifact does not include them, and each GPU step clones them first.
-
-## Smoke test (about 10 minutes)
-
-```bash
-sha256sum -c gpap-image-*.tar.gz.sha256
-docker load -i gpap-image-*.tar.gz
-mkdir -p out
-docker run --rm --gpus all gpap-artifact:tacas-27 check
-docker run --rm --gpus all -v "$PWD/out:/out" gpap-artifact:tacas-27 smoke --out /out/smoke
-```
-
-The results belong to the owner of `out/`, which is why it is created first.
-
-- `check` lists the GPU and what each step costs on the reference card.
-- `smoke` runs the whole pipeline on 4 cells, compiling the engine for this GPU first. It writes
-  the one file to read, `out/smoke/SUMMARY.txt`, and everything else into `details/` beside it.
-  `SUMMARY.txt` must hold:
-
-  <!-- check_image.sh: the lines out/smoke/SUMMARY.txt must hold -->
-  ```
-  PASS — 4 cells compared: same formulas, sound samples, same verdicts.
-  ARTIFACT_TIER_COMPLETE
-  ```
-
-## Full review
-
-### The paper's tables, from the recorded measurements (seconds, no GPU)
-
-```bash
-docker run --rm -v "$PWD/out:/out" gpap-artifact:tacas-27 tables --out /out/tables
-```
-
-`tables` regenerates the paper's tables and figures from the measurements the artifact ships, one
-row per cell of the paper's campaign (`artifact-data/paper/data/`). It checks each number the PDF
-prints against the regenerated one, and re-runs the checks on the measurements themselves.
-Nothing is measured again: this step shows that the paper's numbers follow from the recorded
-data, and [Re-measuring on a GPU](#re-measuring-on-a-gpu) shows that the data can be produced
-again. `out/tables/SUMMARY.txt` must read:
-
-<!-- check_image.sh: the lines out/tables/SUMMARY.txt must hold -->
-```
-142 cells: 141 measured, 1 GPAP could not encode (b19), 0 unsound
-163 published values, all reproduced by the generator.
-checks on the measurements: 27 ok | 8 warnings | 0 failures
-```
-
-- `b19` is the cell where ABC crashes while GPAP encodes the circuit, a failure in the paper too.
-- The 8 warnings, two for each of Recurrent's four stages, are about its 28 recorded failures:
-  one asks that the paper report them, which its Fail column does; the other says they were
-  carried over from an earlier run on the same setup instead of re-measured
-  ([Two shortcuts](#two-shortcuts-both-recorded-in-every-row)).
-
-The files, in `out/tables/details/`:
-
-| file | what it is |
-|---|---|
-| `RESULTS.md` | the paper's Tables 1–3, its uniformity counts and the numbers its text quotes, laid out as the paper prints them, plus the ratios the text quotes. Under each table, every cell not counted, by name and reason. Read it beside the PDF. |
-| `PAPER_NUMBERS.txt` | every number the PDF prints, checked against the regenerated one at the precision printed |
-| `VERIFICATION.txt` | the checks on the measurements: every emitted sample sound, every CMSGen count exact, every rival failure reported |
-| `plots/` | the figures; the paper's Figure 3 is `sps_scatter_cmsgen.pdf`, byte-identical to the paper's |
-| `paper_numbers.json` | the regenerated numbers, machine-readable |
-| `tables.log` | everything else the step printed |
-
-The archive's own copies, generated when it was built, are in `artifact-data/paper/`, and only the
-date differs:
+The archive's own copies, generated when it was built, are in `artifact-data/paper/`; only the
+generation date can differ:
 
 ```bash
 docker run --rm -v "$PWD/out:/out" gpap-artifact:tacas-27 diff /out/tables/details/RESULTS.md artifact-data/paper/RESULTS.md
 ```
+
+Its first line, `gpap: no NVIDIA GPU in this container`, is a notice: `diff` needs no GPU.
 
 Each claim of the paper, and where to check it:
 
@@ -125,29 +58,12 @@ which the tables, the figures and the checks all import.
 [The paper's evaluation notes](README.md) explain each rule, and [PROTOCOL.md](PROTOCOL.md)
 states the protocol in full.
 
-### Re-measuring on a GPU
+## Re-measuring on a GPU
 
-`subset` re-measures 66 of the 142 cells (none at T=50) in about 2.5 hours, and `full` all 142
-in about 12 hours. Start one detached and follow it:
-
-```bash
-docker run -d --name gpap-subset --gpus all -v "$PWD/out:/out" gpap-artifact:tacas-27 subset --out /out/subset
-docker logs -f gpap-subset
-```
-
-or, for every cell:
-
-```bash
-docker run -d --name gpap-full --gpus all -v "$PWD/out:/out" gpap-artifact:tacas-27 full --out /out/full
-docker logs -f gpap-full
-```
-
-When the tier ends, `out/subset/SUMMARY.txt` (or `out/full/`) holds the verdict: a line that
-begins `PASS — 66 cells compared: same formulas, sound samples` (142 for `full`), then
-`ARTIFACT_TIER_COMPLETE`. Beside it, `details/COMPARISON.txt` compares every cell, and
-`details/` also holds this run's own rows, its `RESULTS.md` and the logs. `docker stop
-gpap-subset` stops a tier, and a stopped tier resumes: remove the container (`docker rm
-gpap-subset`) and run the same command again.
+`subset` and `full` (the AE README gives the commands) write `SUMMARY.txt`, the verdict, and
+beside it `details/`: `COMPARISON.txt`, the comparison cell by cell, and this run's own rows, its
+`RESULTS.md` and the logs. `docker stop gpap-subset` stops a tier, and a stopped tier resumes:
+remove the container (`docker rm gpap-subset`) and run the same command again.
 
 **What is compared.** A sampling rate is a property of the card: the same engine runs 1.82× as
 fast on an A100 and 0.84× on an L4 as on an RTX 4080
@@ -164,8 +80,7 @@ rest:
 
 The tier fails if a formula differs, if a sample is unsound, if fewer cells ran than the tier
 sets out to run, or if any step fails. A changed verdict does not fail it; the `PASS` line then
-says how many verdicts differ, and `SUMMARY.txt` names them. `details/COMPARISON.txt` is the
-comparison cell by cell.
+says how many verdicts differ, and `SUMMARY.txt` names them.
 
 **What each tier costs.** These are estimates, built from the recorded time of every cell plus a
 measured overhead the rows do not carry (start-up, the ABC pass and its equivalence check, the
@@ -174,7 +89,7 @@ soundness replay). The real time depends on the GPU and the host CPU:
 | tier | cells | time | what it covers |
 |---|---|---|---|
 | `tables` | — | seconds, no GPU | every published table and figure |
-| `smoke` | 4 | about 4 min | one cell of each T=25 stage, run exactly as the real tiers run it |
+| `smoke` | 4 | about 4 min | 2 DEMOTIC cells (T=1) and 2 Recurrent-CircuitSAT cells (T=25), run exactly as the real tiers run them |
 | `subset` | 66 | about 2.5 h | all 22 ISCAS-85 cells, and 22 of the 30 sequential instances at T=25 |
 | `full` | 142 | about 12 h | every cell, at T=25 and T=50 |
 | `full --remeasure-failures` | 142 | about 23 h | the same, re-measuring every recorded rival failure |
@@ -190,19 +105,17 @@ two T=25 tasks together take ten minutes or less on the reference card. `eval/ar
 holds the rule, the selection and the per-instance times. The comparison uses the published
 numbers for the same cells, not the paper's averages over all 142.
 
-### Reusing GPAP
+## Reusing GPAP
 
-The image runs GPAP itself, too:
+The image runs GPAP itself, too: the AE README samples the circuit `b10`, and this opens a shell
+with everything installed:
 
 ```bash
-docker run --rm --gpus all --user "$(id -u):$(id -g)" -v "$PWD/out:/out" gpap-artifact:tacas-27 gpap sample benchmarks/circuits/bench/seq/b10.bench --cycles 25 -n 10000 --out /out/b10.txt --sim-check
 docker run --rm -it --gpus all gpap-artifact:tacas-27 bash
 ```
 
-The first writes 10,000 input sequences of the circuit `b10`, unrolled for 25 cycles, that reach
-a fixed output pattern, and replays each through the circuit. The second opens a shell with
-everything installed. The tool alone, without the paper, is the image `gpap:<version>` in the same
-file ([docs/DOCKER.md](../../DOCKER.md)).
+The tool alone, without the paper, is the image `gpap:<version>` in the same file
+([docs/DOCKER.md](../../DOCKER.md)). To run GPAP on your own circuits and formulas:
 
 | to | read |
 |---|---|
@@ -258,12 +171,12 @@ The source archive holds:
 
 | path | what it is |
 |---|---|
-| `README-ARTIFACT.md` | points to this guide, `docs/papers/tacas-27/ARTIFACT.md` |
-| `docs/papers/tacas-27/` | this guide, the paper's evaluation notes and protocol, and the numbers the PDF prints |
+| `README-ARTIFACT.md` | points to the guide, `docs/papers/tacas-27/AE_README.md`, and to this file |
+| `docs/papers/tacas-27/` | the AE README, this file, the paper's evaluation notes and protocol, and the numbers the PDF prints |
 | `MANIFEST.md`, `MANIFEST.sha256` | how the archive was built, and a hash of every file |
 | `eval/artifact/reproduce.sh` | the one entry point: `check`, `tables`, `setup`, `smoke`, `subset`, `full`, `compare` |
 | `artifact-data/paper/data/` | the per-instance measurements of the paper's campaign, with their own hashes |
-| `artifact-data/paper/` | the tables, gate, audit and figures generated from them when the archive was built |
+| `artifact-data/paper/` | the tables, checks and figures generated from them when the archive was built |
 | `benchmarks/` | every benchmark the evaluation uses, including six ITC'99 circuits the repository fetches |
 | `gpap/`, `cpp/` | the tool: the Python package and the C++ engine |
 | `eval/` | the evaluation: campaign drivers, the harnesses for the compared tools, the table generator, and the artifact image's Dockerfile |
@@ -301,8 +214,8 @@ step, but its results can differ. Where a rival's recorded batch does not fit, t
 it down to the next smaller batch that does, and the row records it (`grant_source`). A smaller
 batch slows the rival, so on that cell our ratio looks better and a verdict against the rival
 can change in GPAP's favour. The comparison counts these cells, warns about them and names
-each one, and a verdict that changed there is evidence for neither side. On a 12 GB card, most
-of Recurrent's cells step down. The run still completes.
+each one, and a verdict that changed there is evidence for neither side. On a 12 GB card, more
+than half of the GPU samplers' cells step down. The run still completes.
 
 The other direction is handled by `--vram-cap`, on by default. GPAP's own batch is limited by
 memory on 63 of the campaign's 141 rows, so a larger card would give GPAP more parallelism while
@@ -324,7 +237,8 @@ recorded as "the rival did not initialize within its 1,200 s budget". They were 
 September 2026, in the campaign before the paper's, on the same setup: an NVIDIA L4, with
 Recurrent at the same commit, configuration and budget. The only change to Recurrent since, the
 timer on its copy to the host, does not change what it computes
-([What you receive](#what-you-receive)). These rows are the paper's Fail column. Re-measuring
+([What you receive](#what-you-receive)). 25 of these rows are the paper's Fail column; the
+other 3, all `b19`, are screened out of the table first. Re-measuring
 them costs that budget each, 10 of the 22 hours of a full re-measurement, to produce rows that
 say "no measurement". The campaign the paper reports carried them over, and so does this
 artifact: such a row is marked `not_remeasured`, `VERIFICATION.txt` names it, and the comparison

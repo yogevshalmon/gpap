@@ -6,10 +6,10 @@
 #   eval/artifact/check_image.sh TOOL_IMAGE ARTIFACT_IMAGE [--gpu]
 #
 # One [ok] or [FAIL] line per gate, a log of each in a kept directory, and exit 1 if any gate
-# failed. What `tables` and `smoke` must write into their SUMMARY.txt is read from the guide
-# inside the image (docs/papers/<tag>/ARTIFACT.md, <tag> being the artifact image's: the block
-# after the comment naming this script and that file), so the gate and the guide cannot
-# disagree. GPAP_ARTIFACT_DENYLIST, a file kept outside the repository (check_leaks.sh says
+# failed. What `tables` and `smoke` must write into their SUMMARY.txt is read from the
+# evaluation guide inside the image (docs/papers/<tag>/AE_README.md, <tag> being the artifact
+# image's: the block after the comment naming this script and that file), so the gate and the
+# guide cannot disagree. GPAP_ARTIFACT_DENYLIST, a file kept outside the repository (check_leaks.sh says
 # why), adds the operator's names to the leak gate.
 set -uo pipefail
 
@@ -19,7 +19,7 @@ usage() { sed -n '2,/^set /{/^set /q;p;}' "$0" | sed 's/^# \?//'; exit 2; }
 TOOL="$1"; ART="$2"; GPU=0
 [ "${3:-}" = "--gpu" ] && GPU=1
 TAG="${ART##*:}"
-GUIDE="/opt/gpap/docs/papers/$TAG/ARTIFACT.md"
+GUIDE="/opt/gpap/docs/papers/$TAG/AE_README.md"
 DENY="${GPAP_ARTIFACT_DENYLIST:-}"
 WORK="$(mktemp -d)"
 LOGS="$WORK/logs"; mkdir -p "$LOGS" "$WORK/out" "$WORK/data"

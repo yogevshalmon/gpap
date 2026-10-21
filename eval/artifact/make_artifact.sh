@@ -8,7 +8,7 @@
 #   artifact-data/           the frozen rows, with the Barbarik arm, sha256-manifested;
 #                            reproduce.sh finds them there with nothing set
 #   benchmarks .../b1[789],b2[012]  the six ITC'99 circuits too large to commit
-#   README-ARTIFACT.md       a pointer to the guide, docs/papers/tacas-27/ARTIFACT.md
+#   README-ARTIFACT.md       a pointer to the guide, docs/papers/tacas-27/AE_README.md
 #
 # Beside the archive it writes gpap-ae-<date>-<commit>.zip, the upload the venue's artifact form
 # takes: the paper folder's AE_README.md as README.md, and LICENSE.
@@ -113,15 +113,16 @@ echo "benchmarks : $n_extra/6 large ITC'99 circuits bundled"
 
 # --- the entry point is the first file a reviewer sees --------------------------------------------
 # A pointer, not a copy: the guide's relative links resolve only where it lives.
-for f in ARTIFACT.md AE_README.md; do     # the guide, and the venue zip's README
+for f in AE_README.md ARTIFACT.md; do     # the guide (the venue zip's README), its detail
     [ -f "$STAGE/docs/papers/tacas-27/$f" ] || {
         echo "[FATAL] docs/papers/tacas-27/$f is not in the staged tree" >&2; exit 1; }
 done
 cat > "$STAGE/README-ARTIFACT.md" <<'POINTER'
 # GPAP — artifact for the TACAS 2027 tool paper
 
-Start with [docs/papers/tacas-27/ARTIFACT.md](docs/papers/tacas-27/ARTIFACT.md): what to run, in
-the artifact's Docker image or without it, what it prints, and how to re-measure on a GPU.
+Start with [docs/papers/tacas-27/AE_README.md](docs/papers/tacas-27/AE_README.md): what to run,
+what it prints, and how to read it. [ARTIFACT.md](docs/papers/tacas-27/ARTIFACT.md) beside it
+holds the detail.
 POINTER
 
 # --- Tier 1, run INSIDE the staged tree ----------------------------------------------------------
@@ -227,7 +228,7 @@ NFILES=$((NFILES + 1))                                   # MANIFEST.md itself, w
   echo
   echo "    $VERDICT"
   echo
-  echo "Start with **docs/papers/tacas-27/ARTIFACT.md** (\`README-ARTIFACT.md\` points to it)."
+  echo "Start with **docs/papers/tacas-27/AE_README.md** (\`README-ARTIFACT.md\` points to it)."
   echo
   echo "| path | what it is |"
   echo "|---|---|"
