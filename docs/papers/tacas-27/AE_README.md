@@ -17,6 +17,10 @@ GPAP runs only on NVIDIA GPUs; the AE chairs granted the special-hardware exempt
 
 - Linux on x86-64, or Windows with WSL2.
 - An NVIDIA GPU of compute capability 8.0 or newer, with a driver for CUDA 12.8 or later.
+- 24 GB of GPU memory to run the GPU samplers at the paper's batch sizes: the paper's
+  measurements ran on an NVIDIA L4 (24 GB). A GPU with less memory runs every step, but its
+  results can differ: where a GPU sampler's recorded batch does not fit, it steps down to a
+  smaller one, and the comparison names each such cell (ARTIFACT.md, "Hardware").
 - Docker with the NVIDIA Container Toolkit, and about 15 GB of disk.
 - Network access to github.com for the GPU steps: the two GPU samplers the paper compares with
   state no licence, so they are cloned, not shipped.
@@ -49,8 +53,8 @@ ARTIFACT_TIER_COMPLETE
 
 ## Full review
 
-`subset` re-measures 66 of the paper's 142 cells, in about 3 hours on an NVIDIA L4, and `full`
-all of them, in about 13 hours:
+`subset` re-measures 66 of the paper's 142 cells, in about 2.5 hours, and `full` all of them, in
+about 12 hours:
 
 ```bash
 docker run -d --name gpap-subset --gpus all -v "$PWD/out:/out" gpap-artifact:tacas-27 subset --out /out/subset
@@ -61,12 +65,12 @@ ARTIFACT.md maps each claim of the paper to the file that checks it.
 
 ## Platforms tested
 
-- The Docker image, on x86-64 Windows (WSL2) with an RTX 4080 Laptop GPU: `check` and `tables`
-  with no GPU and no network, and `setup` and `smoke` on the GPU (2026-10-19). On native Ubuntu
-  20.04, with a GPU too old for GPAP: the image loads, `check` and `tables` run, and the GPU
-  steps stop with a message that says why (2026-10-19). `subset` and `full` have not been run
-  in the image.
-- The source archive without Docker: `tables` in offline Ubuntu 22.04 and 24.04 with the stock
-  `python3`; `subset` on an NVIDIA L4 (Colab), where all 66 cells reach the paper's verdict
-  against CMSGen, and all 58 whose rival side was measured, against the rival (2026-10-13 to
-  10-15).
+All on x86-64 (amd64); the image is built for it alone.
+
+- An NVIDIA L4 (24 GB) on Colab, from the source archive: `subset`.
+- An RTX 4080 Laptop GPU (12 GB) on Windows with WSL2, in the Docker image: `check`, `tables`,
+  `setup`, `smoke` and `subset`.
+- Native Ubuntu 20.04 with a GPU too old for GPAP, in the Docker image: the image loads, `check`
+  and `tables` run, and the GPU steps stop with a message that says why.
+- No GPU, from the source archive: `tables` in offline Ubuntu 22.04, 24.04 and 26.04 with the
+  stock `python3`.
