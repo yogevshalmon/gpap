@@ -1,42 +1,32 @@
 #!/usr/bin/env bash
-# THE ARTIFACT'S SINGLE ENTRY POINT — one script, one step per invocation.
+# The artifact's entry point: one step per invocation.
 #
 #   eval/artifact/reproduce.sh check      # what this machine can do, and what each tier costs
 #   eval/artifact/reproduce.sh setup      # build/fetch everything (network; ~20-30 min)
-#   eval/artifact/reproduce.sh tables     # every table and figure, from the SHIPPED rows (CPU)
+#   eval/artifact/reproduce.sh tables     # every table and figure, from the shipped rows (CPU)
 #   eval/artifact/reproduce.sh smoke      # 4 cells end to end on the GPU (~3 min)
-#   eval/artifact/reproduce.sh subset     # the reviewer tier: 66 of 142 cells, T=25 (~2.5 h)
+#   eval/artifact/reproduce.sh subset     # 66 of 142 cells, T=25 (~2.5 h)
 #   eval/artifact/reproduce.sh full       # the whole campaign, T=25 and T=50 (~12 h)
 #   eval/artifact/reproduce.sh compare    # re-run the comparison over an existing --out
 #
-# `tables` and each GPU tier write SUMMARY.txt, the lines a reader checks, at the top of their
-# --out directory when they end, and everything else (rows, tables, gate, comparison, figures,
-# logs) under details/.
+# `tables` and each GPU tier write SUMMARY.txt, the lines to check, at the top of --out when they
+# end, and everything else under details/.
 #
 # Options, on either side of the step: --vram-cap l4|none|MiB   --out DIR   --reference DIR
 #                                      --grants FILE|none    --remeasure-failures  --seeds "5 6 7"
 #                                      --tier smoke|subset|full  (for `compare`: how many cells
-#                                      the directory should hold — a tier sets this itself)
+#                                      the directory should hold; a tier sets this itself)
 #
-# WHAT REPRODUCES AND WHAT DOES NOT. Rates are a property of the card: the same engine measures
-# 1.82x on an A100 and 0.84x on an L4 against one 4080. So this does not ask a reviewer to
-# reproduce a geomean. It asks for the three things that must hold on any machine, and
-# `compare_campaign.py` is the gate: the same formula per cell, every emitted sample sound and
-# replayable through the original circuit, and the same per-cell verdicts. The measured rates
-# are printed as this card's speed factor against ours — evidence about the hardware, not a
-# claim about the tool.
+# Rates are a property of the card, so no tier asks for a geomean back. compare_campaign.py
+# checks what must hold on any machine: the same formula per cell, every sample sound and
+# replayable through the circuit, and the same per-cell verdicts. Rates print as this card's
+# speed factor against ours.
 #
-# THE BATCH IS NOT SEARCHED AGAIN. Each rival cell's batch rung, and Recurrent's start_point,
-# are read from eval/rivals/grants/l4_protocol_20260904.json — the values the published campaign
-# measured. A pinned rung this card cannot finish on is walked down from, and the row says so
-# (`grant_source`); the comparator counts those cells and warns, because a rival handed a
-# smaller batch than the paper gave it makes OUR ratio look better.
-#
-# HARDWARE. A 24 GB card reproduces the grants as recorded. Every one of the 92 pinned Recurrent
-# rungs sits at the reference L4's memory ceiling (the next rung up OOM'd there), so a smaller
-# card walks down on most of them. --vram-cap works the other way: on a LARGER card it holds
-# our own batch to what the L4 allowed, since K is memory-bound on 63 of the campaign's 141 rows
-# and an uncapped 80 GB card would hand us more parallelism while the rival stays pinned.
+# Each rival cell's batch and Recurrent's start_point are the published campaign's
+# (eval/rivals/grants/l4_protocol_20260904.json), not searched again. On a card under the 24 GB
+# reference a pinned batch that does not fit walks down a rung, and the comparison names the cell,
+# since a smaller rival batch flatters our ratio. On a larger card --vram-cap holds our own batch
+# to the reference's (docs/findings/ARTIFACT_FINDINGS.md §1, §2).
 set -uo pipefail
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
@@ -46,23 +36,19 @@ PY="${PYTHON:-$REPO_ROOT/.venv/bin/python}"
 [ -x "$PY" ] || PY="$(command -v python3)"
 export PYTHONPATH="${PYTHONPATH:-.}"
 
-# The GPAP-side VRAM budget the published campaign actually ran under: its rows record 23.45 GB
-# free on every one of the 142, and the engine's model is (free - 800 MB reserve) x 0.80.
-# Re-derive with:  eval/artifact/estimate_wall.py  (it reads the same rows).
+# The GPAP-side VRAM budget the published campaign ran under: its rows record 23.45 GB free, and
+# the engine's model is (free - 800 MB reserve) x 0.80. estimate_wall.py re-derives it.
 L4_BUDGET_MIB=17280
 
 VRAM_CAP="l4"
 OUT=""
 TIER=""                           # set by each GPU tier; sizes the comparator's --expect-cells
 EXPECT_CELLS=""
-# The published rows, looked up in the order that makes the packaged artifact work with nothing
-# set: an explicit override, then the development layout (results beside the checkout), then the
-# copy `make_artifact.sh` bundles INSIDE the artifact.
+# The published rows: an override, then the results beside the checkout, then the copy
+# make_artifact.sh bundles inside the artifact.
 REFERENCE="${GPAP_REFERENCE:-}"
 if [ -z "$REFERENCE" ]; then
-    # Tested for ROWS, not for a directory: an empty `$GPAP_RESULTS/paper/data` — the normal
-    # state of a fresh checkout beside an empty results tree — used to shadow the copy the
-    # artifact bundles, and every step downstream then ran happily over nothing.
+    # Tested for rows, not a directory, so an empty results tree cannot shadow the bundled copy.
     # Ask, never recompute: eval/paths.py is the one definition.
     RESULTS="$(PYTHONPATH="$REPO_ROOT" "${PYTHON:-python3}" -m eval.paths results)"
     : "${RESULTS:?cannot resolve — python3 must be able to import the repo (gpap/paths.py, eval/paths.py)}"
@@ -76,14 +62,10 @@ GRANTS="eval/rivals/grants/l4_protocol_20260904.json"
 HONOUR_FAILURES=1                 # the artifact's default; --remeasure-failures turns it off
 SEEDS="5 6 7"
 
-# The header above IS the help text, to the first line that is not a comment — a hardcoded line
-# count drifts and starts printing the code.
+# The header above is the help text, up to the first line that is not a comment.
 usage() { sed -n '2,${/^[^#]/q;p;}' "$0"; }
 
-# Options are accepted on EITHER side of the step name: `reproduce.sh --out D tables` and
-# `reproduce.sh tables --out D` both work. A parser that only read the left-hand side dropped a
-# trailing `--out` silently and wrote to the default directory, which is a wrong answer with no
-# error message.
+# Options go on either side of the step name.
 STEP=""
 while [ $# -gt 0 ]; do
     case "$1" in
@@ -118,8 +100,8 @@ EXPERIMENTS="$(PYTHONPATH="$REPO_ROOT" "${PYTHON:-python3}" -m eval.paths experi
 OUT="${OUT:-$EXPERIMENTS/artifact/$GPU_SLUG-$STEP}"
 SUBSET_JSON="$REPO_ROOT/eval/artifact/subset.json"
 
-# Every step runs from the repo root, so a relative --out/--reference would resolve there and
-# quietly write inside the checkout. Resolve them against the directory the reviewer typed in.
+# Every step runs from the repo root, so a relative --out or --reference is resolved where it was
+# typed.
 case "$OUT" in       /*) ;; *) OUT="$INVOKED_FROM/$OUT" ;; esac
 case "$REFERENCE" in /*) ;; *) REFERENCE="$INVOKED_FROM/$REFERENCE" ;; esac
 DETAILS="$OUT/details"
@@ -127,16 +109,13 @@ SUMMARY="$OUT/SUMMARY.txt"
 
 say() { echo; echo "=== $* ==="; }
 
-# THE TIER'S FAILURE LEDGER. This script deliberately does not `set -e`: a tier is a sequence of
-# steps and the useful behaviour is to run the rest and report, not to stop at the first. But a
-# recorded failure must reach the exit code AND suppress the completion marker, because a
-# supervisor greps for that marker to decide the run is finished.
+# The failure ledger. No `set -e`: a tier runs every step and reports. A recorded failure still
+# sets the exit code and suppresses the completion marker a supervisor waits for.
 FAILED=()
 fail() { FAILED+=("$1"); echo "[FAIL] $1" >&2; }
 
-# Prints the lines a step shows, and copies them into the summary named by NOTE_TO, when one is
-# being written, without the blank lines, rules and `wrote` lines. Always succeeds, so under
-# `pipefail` a pipeline ending in `| note` still fails exactly when its producer does.
+# Prints a step's lines and copies them into NOTE_TO, when set, without blank lines, rules and
+# `wrote` lines. Always succeeds, so a pipeline ending in `| note` fails when its producer does.
 note() {
     local text; text="$(cat)"; echo "$text"
     if [ -n "${NOTE_TO:-}" ]; then
@@ -166,11 +145,8 @@ try:
     free, total = torch.cuda.mem_get_info()
     print(f"this card: {total/1e9:.1f} GB total, {free/1e9:.1f} GB free")
     print(f"reference: NVIDIA L4, 23.7 GB total, 23.45 GB free on every recorded row")
-    # Asked of the engine, never re-derived here: the memory model lives in
-    # cpp/src/calibrate.cpp and a copy of the arithmetic in a shell heredoc is a copy that drifts.
-    # The warning FIRST, and unconditionally. The cap probe below asks the engine, and before
-    # `setup` has built it that raised — so the one line a reviewer with a smaller card most
-    # needs was the one line `check` never reached.
+    # The warning first: the cap probe below asks the engine, which `setup` may not have built.
+    # The memory model is the engine's (cpp/src/calibrate.cpp), never copied here.
     if total < 23e9:
         print("WARNING: under 24 GB. Every one of the 92 pinned Recurrent rungs sits at the\n"
               "         reference card's memory ceiling, so most cells will walk DOWN a rung.\n"
@@ -213,8 +189,6 @@ EOF
     $PY eval/artifact/estimate_wall.py "$REFERENCE" \
         --mode "$([ "$HONOUR_FAILURES" = 1 ] && echo honour || echo remeasure)" 2>/dev/null \
         || echo "(no reference rows — estimate unavailable)"
-    # The measured parts come from the reference card; the overhead terms are CPU-bound and were
-    # measured on one host, so a machine with a different CPU pays a different constant.
     echo
     echo "(the overhead terms are CPU-bound and were measured on one host: pass --cpu-scale N to"
     echo " estimate_wall.py to carry them to a slower (N>1) or faster (N<1) CPU)"
@@ -234,23 +208,17 @@ step_setup() {
 }
 
 # ---------------------------------------------------------------------------- tier 1: tables
-# Regenerates every published table and figure from rows, on any machine: no GPU, no CUDA
-# wheels. `verify_artifact.py` is the publishability gate and prints the caveats the paper's
-# text is required to carry.
+# Every published table and figure from the rows, on any machine (no GPU). verify_artifact.py is
+# the publishability gate and prints the caveats the paper must carry.
 step_tables() {
-    # $3 = "fresh": a re-measurement's own rows. They are held to the published rows, cell by
-    # cell, by step_compare, never to the PDF: their rates differ by construction, and a smoke
-    # or subset tier has no T=50 rows at all.
+    # $3 = "fresh": a re-measurement's own rows, held to the published rows by step_compare, never
+    # to the PDF (their rates differ, and smoke and subset have no T=50 rows).
     local data="${1:-$REFERENCE}" out="${2:-$OUT}" fresh="${3:-}"
-    # Rows, not a directory: `tables` over an empty directory used to run every generator to
-    # completion and print a publishable verdict about nothing.
+    # Rows, not a directory: over an empty one every generator used to pass.
     [ -n "$(ls "$data"/rivals_*.json 2>/dev/null)" ] || {
         fail "no rivals_*.json in $data — the tables need the campaign's rows"; return 1; }
-    # THE ROWS MUST BE THE ROWS. Without this, a row edited by hand regenerates a table and the
-    # publishability gate still says "Publishable" — about rows that are no longer the published
-    # ones. It lived only in `$GPAP_RESULTS/paper/regenerate.sh`, outside any repository, so a
-    # reviewer regenerating from the shipped rows never got the check at all. Absent manifest is
-    # not a failure: a fresh campaign's own rows have none until one is written.
+    # The rows must be the frozen rows, or an edited row regenerates tables the gate still calls
+    # publishable. No manifest is fine: a fresh campaign's rows have none.
     if [ -f "$data/MANIFEST.sha256" ]; then
         ( cd "$data" && sha256sum --quiet -c MANIFEST.sha256 ) \
             || { fail "$data does not match its MANIFEST.sha256 — these are not the frozen rows,
@@ -267,9 +235,8 @@ step_tables() {
     $PY eval/artifact/paper_tables.py --rivals "$data" ${barargs[@]+"${barargs[@]}"} \
         --out-md "$out/RESULTS.md" --out-json "$out/paper_numbers.json" | tail -3 | note \
         || fail "the table generator failed over $data"
-    # Does the PAPER still say what these rows say? The paper's tables are typeset by hand, so
-    # nothing else compares them: without this step a campaign can move a number under a
-    # published claim and every other gate here still passes. Fatal when they disagree.
+    # Does the paper still print what these rows give? Its tables are typeset by hand, so nothing
+    # else checks. Fatal.
     if [ -z "$fresh" ]; then
         say "the paper's own numbers, against these rows"
         $PY eval/artifact/check_paper_numbers.py --generated "$out/paper_numbers.json" \
@@ -284,8 +251,7 @@ step_tables() {
     $PY eval/rivals/check_emission_symmetry.py --results "$data" --cycles 25 \
         2>&1 | tee "$out/emission_audit.txt" | tail -2 \
         || fail "the emission-symmetry audit failed — see $out/emission_audit.txt"
-    # Figures alone are not fatal: they want matplotlib, which a reviewer regenerating tables on
-    # a bare machine may not have, and no claim in the paper rests on a PNG.
+    # Figures are not fatal: they need matplotlib, and no claim rests on a PNG.
     say "figures"
     $PY eval/eval_plots.py "$data" --out-dir "$out/plots" 2>&1 | tail -4 \
         || echo "(figures skipped — eval_plots.py needs matplotlib; the tables above do not)"
@@ -296,9 +262,8 @@ step_tables() {
 }
 
 # ---------------------------------------------------------------------------- GPU tiers
-# One place invokes the harnesses: eval/run_full_eval.sh, the driver the published campaign ran.
-# This only chooses the cell set and the two artifact defaults (the VRAM cap and the pinned
-# failures), so a tier here cannot drift from the protocol.
+# One place runs the harnesses: eval/run_full_eval.sh, the published campaign's driver. A tier
+# chooses only the cells and the artifact's two defaults (the VRAM cap and the pinned failures).
 run_rivals() {
     local seq_insts="$1" depths="$2" comb="${3:-paper}"
     mkdir -p "$DETAILS"
@@ -306,9 +271,7 @@ run_rivals() {
     echo "grants        : $GRANTS"
     echo "recorded fails: $([ "$HONOUR_FAILURES" = 1 ] && echo 'PINNED (--remeasure-failures re-derives them)' || echo 're-measured')"
     echo "VRAM cap      : ${GPAP_VRAM_BUDGET_MIB:-none} MiB"
-    # A smaller card than the reference is not a refusal — the run completes and the comparator
-    # reports every walked-down cell — but it is said HERE too, not only by `check`, because a
-    # reviewer who goes straight to a tier never saw `check`.
+    # Said here too, not only by `check`: a reviewer may go straight to a tier.
     $PY - <<'EOF'
 import torch
 if torch.cuda.is_available():
@@ -325,9 +288,8 @@ EOF
         RIVAL_HONOUR_FAILURES="$HONOUR_FAILURES" VERIFY_SOUND=1 \
         bash eval/run_full_eval.sh rivals \
         || fail "the measurement driver exited non-zero — the campaign is INCOMPLETE"
-    # How many cells this tier set out to produce, so the comparator can tell a finished run
-    # from one that stopped early. Two tasks per sequential instance and per combinational
-    # entry at T=25, doubled again when T=50 is in play.
+    # The cells this tier should produce, so the comparator can tell a finished run from one that
+    # stopped early.
     EXPECT_CELLS="$($PY eval/artifact/estimate_wall.py "$REFERENCE" --tier "$TIER" --cells-only \
                     2>/dev/null || echo 0)"
 }
@@ -346,9 +308,8 @@ step_smoke() {
 
 step_subset() {
     TIER=subset
-    # `exit 1` inside $(...) exits the SUBSHELL: without this check a missing subset.json left
-    # `insts` empty, and an empty RIVAL_SEQ means "unset" to the driver, which then ran all 30
-    # sequential instances — the full tier, silently, for a reviewer who asked for the short one.
+    # `exit 1` inside $(...) exits only the subshell, and an empty RIVAL_SEQ makes the driver run
+    # all 30 instances: the full tier, for a reviewer who asked for the short one.
     local insts; insts="$(subset_instances)" || exit 1
     [ -n "$insts" ] || { echo "the subset selection is empty — $SUBSET_JSON is unreadable" >&2
                          exit 1; }
@@ -362,9 +323,8 @@ step_full() {
     TIER=full
     local insts n
     insts="$(cd benchmarks/circuits/bench/seq && ls *.bench | sed 's/\.bench$//' | tr '\n' ' ')"
-    # The published campaign is 30 sequential instances. b17-b22 are fetched, not committed, so
-    # a machine that skipped `setup` silently runs 24 of them — 48 of 142 cells missing from a
-    # tier whose whole claim is that it is the whole campaign.
+    # The campaign has 30 sequential instances; without `setup`, b17-b22 are missing and 48 of
+    # 142 cells would silently not run.
     n="$(echo "$insts" | wc -w)"
     [ "$n" -eq 30 ] || { echo "only $n/30 sequential instances present: run" >&2
                          echo "  eval/artifact/reproduce.sh setup     (or scripts/fetch_benchmarks.sh itc99)" >&2
@@ -378,13 +338,8 @@ step_full() {
 step_after_run() {
     step_tables "$DETAILS" "$DETAILS" fresh
     step_compare "$SUMMARY"
-    # The last line a supervisor greps for. A rented GPU is reclaimed mid-run, so the driver has
-    # to say "finished" rather than "stopped": every step above is resumable, and only this line
-    # distinguishes a completed tier from a VM that died between two cells.
-    #
-    # WHICH IS EXACTLY WHY IT IS CONDITIONAL. Printed unconditionally, it told the supervisor
-    # "done" after a driver that died at cell 3, and the reviewer was handed a comparison over
-    # whatever had been written so far.
+    # The line a supervisor waits for, printed only when every step succeeded: it tells a
+    # finished tier from a VM that died between two cells.
     echo
     local rc=0
     if [ ${#FAILED[@]} -eq 0 ]; then
@@ -405,16 +360,15 @@ step_compare() {
     local summary="${1:-}"
     [ -n "$(ls "$REFERENCE"/rivals_*.json 2>/dev/null)" ] || {
         fail "no reference rows at $REFERENCE — cannot compare"; return 1; }
-    # A bare `compare` asserts nothing about coverage unless it is told which tier wrote the
-    # directory; the GPU tiers set TIER themselves before they get here.
+    # A bare `compare` checks coverage only when told the tier (--tier); a GPU tier sets it.
     [ -z "$TIER" ] || EXPECT_CELLS="$($PY eval/artifact/estimate_wall.py "$REFERENCE" \
                                       --tier "$TIER" --cells-only 2>/dev/null || echo 0)"
     # A tier keeps its rows under details/; a directory written before that layout, at its top.
     local fresh="$DETAILS"
     [ -n "$(ls "$fresh"/rivals_*.json 2>/dev/null)" ] || fresh="$OUT"
     say "comparison against the published campaign"
-    # --expect-cells is what turns "every cell I have agrees" into "the tier ran". The report goes
-    # to details/; a tier's console and SUMMARY.txt get its verdict, the block after its last rule.
+    # --expect-cells turns "every cell agrees" into "the tier ran". The report goes to details/;
+    # the console and SUMMARY.txt get its closing block.
     mkdir -p "$OUT"
     $PY eval/artifact/compare_campaign.py "$REFERENCE" "$fresh" --json "$fresh/comparison.json" \
         ${EXPECT_CELLS:+--expect-cells "$EXPECT_CELLS"} >"$fresh/COMPARISON.txt" 2>&1 \
@@ -453,7 +407,6 @@ case "$STEP" in
     *)       echo "unknown step '$STEP'" >&2; usage; exit 2 ;;
 esac
 rc=$?
-# Anything the ledger recorded is a failure of the whole invocation, whatever the last command
-# in the step happened to return.
+# Anything in the ledger fails the invocation, whatever the step returned.
 [ ${#FAILED[@]} -eq 0 ] || rc=1
 exit "$rc"

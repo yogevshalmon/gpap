@@ -944,12 +944,11 @@ def test_each_screening_rule_is_defined_exactly_once_across_eval():
             f"exactly one home, {home.name}")
 
 
-@pytest.mark.parametrize("mod", ["artifact/slide_tables.py", "profiling/soft_price_tables.py"])
+@pytest.mark.parametrize("mod", ["profiling/soft_price_tables.py"])
 def test_the_other_generators_import_the_paper_rules_rather_than_restating_them(mod):
-    """The deck and soft-price tables import `cms_family`, so their numbers cannot diverge from
-    the paper's. Each is named by its path under `eval/`: they do not live in the same directory
-    (the soft-price pair is `eval/profiling/`, outside the artifact), and a bare basename made
-    that a silent skip rather than a failure the day one of them moved."""
+    """The soft-price tables import `cms_family`, so their numbers cannot diverge from the
+    paper's. The module is named by its path under `eval/`: a bare basename made a move a silent
+    skip rather than a failure."""
     import ast
 
     root = Path(_REPO_ROOT) / "eval"

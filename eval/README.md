@@ -11,8 +11,7 @@ so it may depend on third-party tools and result files outside the repo.
 - `artifact/` — the paper and artifact build, and nothing else: every file here is one the
   artifact drivers run. `reproduce.sh` (the entry point), `paper_tables.py` (the single
   generator), `check_paper_numbers.py` and `verify_artifact.py` (the gates),
-  `compare_campaign.py`, `estimate_wall.py`, `make_artifact.sh`. `slide_tables.py` sits here
-  too, importing the generator so the deck cannot drift.
+  `compare_campaign.py`, `estimate_wall.py`, `make_artifact.sh`, and the image scripts.
 - `profiling/` — the GPAP-vs-GPAP sweeps that measure a choice rather than a rival, with their
   own table generators: `kernel_ab.py` (WAVE vs SCALAR) and `profile_soft_portfolio.py` (what
   one portfolio costs another). Nothing in the artifact runs them.

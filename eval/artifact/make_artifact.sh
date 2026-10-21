@@ -1,34 +1,23 @@
 #!/usr/bin/env bash
-# Package the SELF-CONTAINED artifact: the code at HEAD, the published rows, and the benchmarks
-# the repository does not carry — one directory a reviewer can unpack and run.
+# Package the self-contained artifact: the code at HEAD, the published rows and the benchmarks
+# the repository does not carry, in one directory a reviewer can unpack and run.
 #
 #   eval/artifact/make_artifact.sh [OUT_DIR]        # default: $GPAP_RESULTS
 #
-# What goes in, and why each piece is needed:
-#   the repository at HEAD   `git archive`, so nothing untracked or stale can ride along
-#   artifact-data/           the frozen campaign rows the tables are generated from, with the
-#                            Barbarik arm, sha256-manifested. reproduce.sh finds them here with
-#                            no environment set (its bundled-reference fallback).
-#   benchmarks .../b1[789],b2[012]  the six ITC'99 circuits too large to commit, which every
-#                            sequential stage needs and which the repository fetches at run time
-#                            from an unpinned URL. A self-contained artifact carries them.
-#   README-ARTIFACT.md       a pointer to the guide, docs/papers/tacas-27/ARTIFACT.md, so the
-#                            entry point is the first file a reviewer sees in the archive listing.
+#   the repository at HEAD   `git archive`, so nothing untracked rides along
+#   artifact-data/           the frozen rows, with the Barbarik arm, sha256-manifested;
+#                            reproduce.sh finds them there with nothing set
+#   benchmarks .../b1[789],b2[012]  the six ITC'99 circuits too large to commit
+#   README-ARTIFACT.md       a pointer to the guide, docs/papers/tacas-27/ARTIFACT.md
 #
-# What deliberately stays out: the rival checkouts (DEMOTIC, Recurrent-CircuitSAT, HTS ship no
-# licence, so they are fetched at their pinned commits by rivals_setup.sh, and every result row
-# records the commit that actually ran) and the built binaries (abc, CMSGen — built from pinned
-# sources by the same script, and architecture-specific anyway).
+# Left out: the compared samplers (no licence; rivals_setup.sh fetches them at pinned commits)
+# and built binaries (abc, CMSGen, built from pinned sources).
 #
-# THE TIER-1 GATE RUNS INSIDE THE STAGED TREE — staged code over staged rows — before anything is
-# archived, and the shipped tables are REGENERATED there rather than copied. So the verdict and
-# the tables describe the bytes actually shipped, not the checkout they were built from, and a
-# failing verdict refuses to package.
+# The tables are regenerated and the gates run inside the staged tree, staged code over staged
+# rows, so they describe the bytes that ship; a failing gate refuses to package.
 set -uo pipefail
-# Nothing that runs inside the staged tree may leave bytecode in it: every artifact built before
-# this line shipped nine `__pycache__/*.pyc` files, written by the generators and the gate as they
-# ran over the stage. The scrub before the leak gate is the other half, for anything a subprocess
-# writes regardless.
+# Nothing run inside the stage may leave bytecode there; the scrub before the leak gate takes the
+# rest.
 export PYTHONDONTWRITEBYTECODE=1
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
@@ -41,21 +30,16 @@ PY="${PYTHON:-$REPO_ROOT/.venv/bin/python}"
 RESULTS="$(PYTHONPATH="$REPO_ROOT" "${PYTHON:-python3}" -m eval.paths results)"
 : "${RESULTS:?cannot resolve — python3 must be able to import the repo (gpap/paths.py, eval/paths.py)}"
 OUT="${1:-$RESULTS}"
-# Absolute, because the gates below run after `cd "$STAGE"`: a relative OUT left the Barbarik
-# arguments pointing nowhere, and the packager refused over 4 uniformity numbers it had not read.
-# Resolved where it was typed: against the checkout, the archive landed in the repository.
+# Absolute, since the gates run after `cd "$STAGE"`, and resolved where it was typed.
 case "$OUT" in /*) ;; *) OUT="$INVOKED_FROM/$OUT" ;; esac
 mkdir -p "$OUT" && OUT="$(cd "$OUT" && pwd)" || { echo "[FATAL] cannot create $OUT" >&2; exit 1; }
 SRC_DATA="${GPAP_PAPER_DIR:-$RESULTS/paper}"
-# What is archived: HEAD, unless GPAP_ARTIFACT_TREE names another tree-ish — the dry-run knob for
-# packaging UNCOMMITTED work (`git write-tree` on a temporary index gives the working tree as a
-# tree object) so the gates below can be run against a change before it is committed. The name
-# and the manifest then carry that object's id, not HEAD's, so a dry run cannot pass as a release.
+# GPAP_ARTIFACT_TREE archives another tree-ish than HEAD: the dry-run knob for uncommitted work
+# (`git write-tree` on a temporary index). The name and the manifest then carry that object's id.
 TREE="${GPAP_ARTIFACT_TREE:-HEAD}"
 COMMIT="$(git rev-parse --short "$TREE" 2>/dev/null || echo unknown)"
-# A dry run says so IN ITS NAME. A tree id and a commit id are the same seven hex characters, the
-# tarball lands in the same directory as a release one, and the mistake this prevents — uploading
-# a dry run to Zenodo — is not reversible once a DOI exists.
+# A dry run says so in its name: a tree id looks like a commit id, and a dry run uploaded to
+# Zenodo cannot be taken back once it has a DOI.
 DRYRUN=""
 [ -z "${GPAP_ARTIFACT_TREE:-}" ] || DRYRUN="-dryrun"
 NAME="gpap-artifact-$(date +%Y%m%d)-$COMMIT$DRYRUN"
@@ -67,9 +51,7 @@ echo "rows       : $SRC_DATA/data"
 echo "output     : $OUT/$NAME"
 
 [ -d "$SRC_DATA/data" ] || { echo "[FATAL] no published rows at $SRC_DATA/data" >&2; exit 1; }
-# `git archive HEAD` ships committed bytes. Packaging from a dirty tree therefore produces an
-# artifact that differs from the checkout the operator is looking at and testing — silently, and
-# in whichever direction the uncommitted edits went. That is a refusal, not a warning.
+# git archive ships HEAD, so a dirty tree would package code other than the code being tested.
 if [ -n "$(git status --porcelain 2>/dev/null)" ]; then
     if [ "${GPAP_ARTIFACT_ALLOW_DIRTY:-0}" != "1" ]; then
         echo "[FATAL] the working tree is dirty and git archive ships HEAD, so the package would" >&2
@@ -90,18 +72,16 @@ git archive "$TREE" | tar -x -C "$STAGE"
 # --- the rows the tables are generated from -----------------------------------------------------
 mkdir -p "$STAGE/artifact-data/paper"
 cp -r "$SRC_DATA/data" "$STAGE/artifact-data/paper/data"
-# `reproduce.sh tables`, which the folder's regenerate.sh runs, writes these into details/; a
-# folder generated before that layout has them at its top. The newer layout wins.
+# `reproduce.sh tables` (the folder's regenerate.sh) writes these into details/; an older folder
+# has them at its top.
 for f in README.md RESULTS.md VERIFICATION.txt emission_audit.txt plots; do
     for src in "$SRC_DATA/details/$f" "$SRC_DATA/$f"; do
         [ -e "$src" ] && { cp -r "$src" "$STAGE/artifact-data/paper/$f"; break; }
     done
 done
 
-# THE ROWS MUST BE THE FROZEN ROWS. `data/MANIFEST.sha256` pins them, and a row edited without
-# updating it is the one way the shipped tables silently stop describing the published campaign —
-# it is also the check that says whether the copied `emission_audit.txt` below still applies,
-# since that file is produced from these rows and nothing here can re-derive it.
+# The rows must be the frozen rows. The manifest also says whether the copied emission_audit.txt
+# below still applies, since nothing here can re-derive it.
 [ -f "$STAGE/artifact-data/paper/data/MANIFEST.sha256" ] || {
     echo "[FATAL] no data/MANIFEST.sha256 beside the rows in $SRC_DATA/data — without it" >&2
     echo "        nothing here can tell the frozen campaign from a working copy." >&2
@@ -116,9 +96,8 @@ done
 echo "manifest   : the rows match data/MANIFEST.sha256"
 
 # --- the benchmarks the repository does not carry ------------------------------------------------
-# Gitignored because of their size, fetched at run time from a raw GitHub URL that is pinned to
-# a commit but not guaranteed to exist in three years. Six files, 25 MB, and without them a third of
-# the sequential set silently does not run.
+# Gitignored for their size and fetched at run time from a pinned URL that may not last; without
+# them a third of the sequential set does not run.
 n_extra=0
 for b in b17 b18 b19 b20 b21 b22; do
     src="benchmarks/circuits/bench/seq/$b.bench"
@@ -128,8 +107,7 @@ done
 echo "benchmarks : $n_extra/6 large ITC'99 circuits bundled"
 
 # --- the entry point is the first file a reviewer sees --------------------------------------------
-# A pointer, not a copy: the guide lives with its paper, and its relative links resolve only from
-# there. A copy at the root would carry every one of them broken.
+# A pointer, not a copy: the guide's relative links resolve only where it lives.
 [ -f "$STAGE/docs/papers/tacas-27/ARTIFACT.md" ] || {
     echo "[FATAL] docs/papers/tacas-27/ARTIFACT.md is not in the staged tree" >&2; exit 1; }
 cat > "$STAGE/README-ARTIFACT.md" <<'POINTER'
@@ -140,9 +118,8 @@ the artifact's Docker image or without it, what it prints, and how to re-measure
 POINTER
 
 # --- Tier 1, run INSIDE the staged tree ----------------------------------------------------------
-# Every command below runs from $STAGE, so it is the staged copy of the generator and of the gate
-# reading the staged rows. Run from the checkout instead — as this did — and a dirty working tree
-# silently certifies the package with code that is not in it.
+# From $STAGE: the staged generator and gate over the staged rows. Run from the checkout, a dirty
+# tree would certify the package with code that is not in it.
 echo
 echo "== regenerating the tables and running the gate, inside the staged tree"
 BAR=("$STAGE"/artifact-data/paper/data/barbarik/circ_abc_*.jsonl)
@@ -161,10 +138,7 @@ if [ "$TABLES_OK" != 1 ]; then
     exit 1
 fi
 VERIFY_OK=1
-# Beside the tables it judges, and OVER them: the copy loop above brought a `VERIFICATION.txt`
-# from the results folder, and this overwrites it. Written anywhere else, the artifact ships two
-# files of that name with different provenance — one regenerated here, one copied — which agree
-# until the first time the rows change, and then disagree with nothing to say which is authoritative.
+# Over the VERIFICATION.txt the copy loop brought, so the artifact ships one, regenerated here.
 ( cd "$STAGE" && $PY eval/artifact/verify_artifact.py --rivals artifact-data/paper/data \
     ${BARARGS[@]+"${BARARGS[@]}"} ) > "$STAGE/artifact-data/paper/VERIFICATION.txt" 2>&1 \
     || VERIFY_OK=0
@@ -173,8 +147,7 @@ echo "$VERDICT"
 if [ "$VERIFY_OK" != 1 ] && [ "${GPAP_ARTIFACT_ALLOW_FAIL:-0}" != "1" ]; then
     grep '^  FAIL' "$STAGE/artifact-data/paper/VERIFICATION.txt" >&2 \
         || tail -20 "$STAGE/artifact-data/paper/VERIFICATION.txt" >&2
-    # The EXIT trap is about to delete the staging tree, and with it the only copy of the
-    # evidence for this refusal.
+    # The EXIT trap deletes the stage, and with it the only copy of the evidence.
     cp "$STAGE/artifact-data/paper/VERIFICATION.txt" "$OUT/$NAME.VERIFICATION.txt" 2>/dev/null \
         && echo "        the failing verdict is kept at $OUT/$NAME.VERIFICATION.txt" >&2
     echo "[FATAL] the gate FAILED — refusing to package an artifact its own verifier calls" >&2
@@ -184,12 +157,8 @@ if [ "$VERIFY_OK" != 1 ] && [ "${GPAP_ARTIFACT_ALLOW_FAIL:-0}" != "1" ]; then
 fi
 
 # --- do the staged tables still say what the PAPER says? ------------------------------------
-# The gate above asks whether these rows are publishable. This asks a different question: whether
-# the numbers the submitted PDF prints are the ones this tarball's own code derives from this
-# tarball's own rows. The paper typesets its tables by hand, so nothing else compares them, and the
-# artifact is exactly where the answer matters — a reviewer holding the PDF beside the tarball is
-# the first person to check it otherwise. Fatal, like the gate: an artifact whose tables disagree
-# with its paper is the one defect an evaluator cannot miss.
+# Are the numbers the PDF prints the ones this tarball's code derives from its rows? The paper's
+# tables are typeset by hand, so nothing else checks. Fatal, like the gate.
 NUMBERS_OK=1
 ( cd "$STAGE" && $PY eval/artifact/check_paper_numbers.py \
     --generated artifact-data/paper/paper_numbers.json ) \
@@ -210,16 +179,10 @@ if [ "$NUMBERS_OK" != 1 ]; then
     exit 1
 fi
 
-# --- the emission audit is COPIED, deliberately, and must be there ---------------------------------
-# Unlike the tables and the verdict above, this one is NOT re-derived here, and trying to was a
-# mistake worth recording: the audit inspects the RIVALS' OWN SOURCE to show that none was timed
-# while writing samples out, and the staged tree carries no rival checkouts (they ship no licence;
-# `rivals_setup.sh` fetches them at pinned commits). Regenerated in the stage it skipped all three
-# and still said PASS — a weaker claim wearing the same words. It has to come from a machine where
-# the checkouts exist, which is where `$GPAP_RESULTS/paper/regenerate.sh` runs it.
-#
-# So what is checked here instead is that it EXISTS, and that the rows it describes are the frozen
-# ones — see the manifest check above, which is the real staleness signal.
+# --- the emission audit is COPIED, deliberately, and must be there --------------------------------
+# The audit reads the rivals' own source, and the stage has no rival checkouts: regenerated here it
+# skipped all three and still said PASS. It comes from `$GPAP_RESULTS/paper/regenerate.sh`; this
+# checks it exists, and the manifest check above that its rows are the frozen ones.
 [ -f "$STAGE/artifact-data/paper/emission_audit.txt" ] || {
     echo "[FATAL] no emission_audit.txt in $SRC_DATA or its details/ — it is evidence the paper" >&2
     echo "        cites, and it cannot be produced here (no rival checkouts in a staged tree). Run" >&2
@@ -227,23 +190,16 @@ fi
     exit 1
 }
 
-# --- nothing the staging steps themselves wrote may ship --------------------------------------------
+# --- nothing the staging steps themselves wrote may ship ------------------------------------------
 # Before the gate and the manifest, so both see exactly the bytes that ship.
 find "$STAGE" -type d \( -name __pycache__ -o -name .pytest_cache -o -name .ruff_cache \) \
     -prune -exec rm -rf {} +
 
 # --- nothing that names one machine or one person may ship ---------------------------------------
-# A path in a shipped file names the disk it was generated on, and puts a username into an upload
-# that is permanent once it has a DOI. It has happened three times, each from a generator writing
-# the path it was handed (a committed slide table, `emission_audit.txt`, three Barbarik error
-# rows), and the third had a shape the first version of this check — one `/home/` pattern inline
-# here — did not know. The shapes now live in ONE place, `check_leaks.sh` (gated by
-# tests/experiments/test_artifact_gate.py); the generators are fixed at the source
-# (`eval/paths.py::display_path`) and this is what says they stay fixed — over the STAGED BYTES,
-# like the verdict above, because that is what a reviewer receives. `GPAP_ARTIFACT_DENYLIST=<file>`
-# adds literal strings — a username, a hostname — that cannot be spelled in a script that ships.
-# The AUTHORS' names ship deliberately: this is not a double-blind submission (TACAS'27 tool
-# track). What must not ship is whose machine built it.
+# A path in a shipped file names the machine that built it, in an upload a DOI makes permanent.
+# The shapes live in check_leaks.sh; the generators are fixed at the source
+# (eval/paths.py::display_path), and this says they stay fixed. GPAP_ARTIFACT_DENYLIST=<file> adds
+# strings a shipped script cannot spell, such as a username or a hostname.
 leaks="$(bash eval/artifact/check_leaks.sh "$STAGE" \
              ${GPAP_ARTIFACT_DENYLIST:+--denylist "$GPAP_ARTIFACT_DENYLIST"})"
 gate=$?
@@ -258,10 +214,9 @@ elif [ "$gate" != 0 ]; then
     [ "${GPAP_ARTIFACT_ALLOW_LEAK:-0}" = "1" ] || exit 1
 fi
 
-# --- manifest --------------------------------------------------------------------------------------
-# MANIFEST.md is written FIRST so that the hashes cover it: a manifest that advertises
-# `sha256sum -c` while being the one file nobody can check is a manifest with a hole in it. The
-# count comes from find, not from the hash file that does not exist yet.
+# --- manifest -------------------------------------------------------------------------------------
+# MANIFEST.md first, so the hashes cover it; the count comes from find, since the hash file does
+# not exist yet.
 NFILES="$(cd "$STAGE" && find . -type f ! -name MANIFEST.sha256 | wc -l)"
 NFILES=$((NFILES + 1))                                   # MANIFEST.md itself, written next
 {

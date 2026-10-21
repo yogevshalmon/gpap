@@ -5,22 +5,15 @@
 #
 # Exit 0: clean. Exit 1: leaks, listed on stdout as `<shape>  <path>`. Exit 2: usage.
 #
-# `make_artifact.sh` runs this over the STAGED tree, so the verdict is about the bytes a reviewer
-# receives, not about the checkout. It exists because a generator prints the path it was handed,
-# and that path names the disk it ran on: a committed slide table carried a home directory for a
-# month, `emission_audit.txt` reached a staging directory with one, and three rows of the
-# published Barbarik campaign carried an agent's scratch directory with the operator's username
-# flattened into its NAME — a shape with no `/home/` in it, which the first version of this check
-# (one pattern inline in the packager) let through. Every shape below is one that shipped, or
-# reached staging.
+# make_artifact.sh runs it over the staged tree, so the verdict is about the bytes a reviewer
+# receives. A generator prints the path it was handed, and every shape below is one that shipped
+# or reached staging (docs/findings/ARTIFACT_FINDINGS.md §9).
 #
-# WHOSE identity: the operator's, not the authors'. The authors are named on purpose — this is not
-# a double-blind submission — and what must not ship is the machine that built the tarball. A
-# username or a hostname cannot be spelled here anyway, since this file ships inside the tarball it
-# checks, so they come from a denylist kept OUTSIDE the repository: one fixed string per line,
-# matched case-insensitively; blank lines, `#` comments and carriage returns are stripped, because
-# to `grep -F -f` an empty line is a pattern that matches EVERY line and a trailing CR is part of
-# the pattern — the two ways this gate can fail open. Gated by tests/experiments/test_artifact_gate.py.
+# The operator's identity, not the authors' (named on purpose: this is not a double-blind
+# submission). A username or a hostname cannot be spelled in a file that ships, so they come from
+# a denylist kept outside the repository: one fixed string per line, case-insensitive. Blank lines,
+# `#` comments and CRs are stripped, since to `grep -F -f` an empty line matches every line and a
+# trailing CR is part of the pattern. Gated by tests/experiments/test_artifact_gate.py.
 set -uo pipefail
 
 usage() { echo "usage: check_leaks.sh DIR [--denylist FILE]" >&2; exit 2; }
@@ -54,9 +47,7 @@ for shape in "${SHAPES[@]}"; do
     fi
 done
 if [ -n "$DENY" ]; then
-    # Comments and blank lines are stripped BEFORE grep sees a pattern, and so is a carriage
-    # return: `grep -F` takes a trailing CR as part of the pattern, so a denylist saved on Windows
-    # matched nothing and this returned CLEAN — see the header.
+    # Comments, blank lines and CRs are stripped before grep sees a pattern (see the header).
     pats="$(tr -d '\r' < "$DENY" | grep -vE '^[[:space:]]*(#|$)' || true)"
     if [ -n "$pats" ]; then
         hits="$(cd "$DIR" && printf '%s\n' "$pats" | grep -rlIiF -f - . 2>/dev/null || true)"
