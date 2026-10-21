@@ -326,11 +326,15 @@ def main():
               "         grew while the rival stayed pinned to its recorded one. Re-run with\n"
               "         reproduce.sh --vram-cap l4 to compare like with like.")
     if walked:
-        print(f"WARNING: {walked} cells could not run the rival at its recorded batch on this "
-              f"card.\n         The rival was handicapped there and our ratio on those cells is "
-              f"inflated.\n         The reference card is an NVIDIA L4 (24 GB); every pinned "
-              f"Recurrent rung sits\n         at its memory ceiling, so a smaller card walks "
-              f"down on most of them.")
+        # The cells by name, here and not only in the stage report above: a tier's SUMMARY.txt is
+        # this closing block alone.
+        print(f"WARNING: {walked} cells could not run the GPU sampler at its recorded batch on this "
+              f"card (the\n         reference is an NVIDIA L4, 24 GB), so it ran at a smaller "
+              f"one. The sampler was\n         handicapped there: our ratio on those cells is "
+              f"inflated, and a changed verdict\n         there is evidence for neither side:")
+        for stem, g in report["grants"].items():
+            if g["walked_down"]:
+                print(f"           {stem}: " + ", ".join(w.split(":")[0] for w in g["walked_down"]))
     if pinned:
         print(f"NOTE: {pinned} cells carry a recorded rival failure that was pinned, not "
               f"re-measured\n      (--honour-recorded-failures). They are evidence in no "
