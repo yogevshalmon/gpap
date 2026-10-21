@@ -3,12 +3,16 @@
 > **Reader:** readers of a paper that uses GPAP — where its evaluation, its protocol and its
 > artifact are.
 
-| paper | venue | folder |
-|---|---|---|
-| *SAT Sampling at Scale via GPU-based Boolean Constraint Propagation* | TACAS 2027, tool paper | [tacas-27/](tacas-27/README.md) |
+| paper | submitted to | status | folder |
+|---|---|---|---|
+| *SAT Sampling at Scale via GPU-based Boolean Constraint Propagation* | TACAS 2027, tool paper | under review | [tacas-27/](tacas-27/README.md) |
 
-Each paper has one folder here, named for its venue and year (`tacas-27`), and every document
-about the paper lives in it. A folder holds:
+A paper's status lives in this table only; its folder says where it was submitted, which stays
+true whatever the outcome.
+
+Each paper has one folder here, named for the venue and year it was submitted to (`tacas-27`),
+and every document about the paper lives in it. The name does not change with the outcome: the
+artifact and its tooling refer to it. A folder holds:
 
 | file | what it is |
 |---|---|

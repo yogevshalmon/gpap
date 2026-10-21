@@ -132,7 +132,7 @@ Sampling and measurement:
   one without new evidence.
 
 The evaluation:
-- The TACAS 2027 paper's evaluation protocol is frozen
+- The TACAS 2027 submission's evaluation protocol is frozen
   ([PROTOCOL.md](docs/papers/tacas-27/PROTOCOL.md)). A change may fix a bug or the prose, never a
   metric, configuration, screen, budget or set of cells.
   Proposals are logged in [RIVAL_FAIRNESS_FINDINGS.md](docs/findings/RIVAL_FAIRNESS_FINDINGS.md)

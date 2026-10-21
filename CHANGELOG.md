@@ -54,5 +54,5 @@ never published.
 ### Evaluation
 - `eval/`: campaign drivers, and harnesses that run CMSGen and the GPU samplers on the same
   constraints as GPAP ([docs/EVAL_RUNBOOK.md](docs/EVAL_RUNBOOK.md)).
-- The TACAS 2027 paper's evaluation and artifact, in
+- The TACAS 2027 submission's evaluation and artifact, in
   [docs/papers/tacas-27/](docs/papers/tacas-27/README.md).

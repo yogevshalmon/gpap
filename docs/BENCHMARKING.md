@@ -134,8 +134,8 @@ K is hygiene, not a lever — 4× the batch bought +2.8%.
 
 ## 8. Which number to quote
 
-These rules apply to any comparison. The TACAS 2027 paper's evaluation enforces them in one place,
-`eval/artifact/paper_tables.py`, which every table and figure imports
+These rules apply to any comparison. The TACAS 2027 submission's evaluation enforces them in one
+place, `eval/artifact/paper_tables.py`, which every table and figure imports
 ([`papers/tacas-27/README.md`](papers/tacas-27/README.md)).
 
 - **Steady-state vs end-to-end.** `samples_per_s` excludes parse, construction, ELS, warmup and
@@ -144,7 +144,7 @@ These rules apply to any comparison. The TACAS 2027 paper's evaluation enforces 
 - **Against another GPU sampler, one clock — its own.** Compare unique solutions per second on
   the rival's own timer, less anything inside it that is not sampling (such as copying samples to
   the host), against GPAP's steady-state unique/s. Report the rival's whole published benchmark
-  set, not a subset. The TACAS 2027 paper's protocol applies this rule
+  set, not a subset. The TACAS 2027 submission's protocol applies this rule
   ([`PROTOCOL.md`](papers/tacas-27/PROTOCOL.md)).
 - **Rare targets.** At random output pins CPU rejection sampling beats every CNF sampler, so a
   win there is not a sampling result. Quote `--target rare` and report `p_acc` / `amp` beside it.
