@@ -1,7 +1,7 @@
 {
   "paper": "SAT Sampling at Scale via GPU-based Boolean Constraint Propagation",
   "venue": "TACAS 2027, regular tool paper",
-  "pdf": "the submitted PDF, built 2026-10-13 from the paper source at commit 7d0f5f7",
+  "pdf": "the PDF submitted to TACAS 2027",
   "campaign": "l4_protocol_20261012 (protocol v1.0 re-run: Recurrent's host copy deducted, early give-up off, per-row vacuous screen; grants and recorded rival failures pinned from l4_protocol_20260904) + uniformity_20261013 (Barbarik)",
   "_why": [
     "Every number the submitted PDF prints, transcribed BY HAND from the .tex, so that",

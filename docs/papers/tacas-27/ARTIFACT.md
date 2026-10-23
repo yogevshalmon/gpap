@@ -13,8 +13,10 @@ and the evidence behind each point of the artifact README's "Reading the results
 
 The artifact is GPAP's source, every measurement behind the paper's evaluation (the campaign
 `l4_protocol_20261012`, two Colab NVIDIA L4 sessions, 2026-10-12/13; [README.md](README.md)), and
-a Docker image with all of it installed. One script, `eval/artifact/reproduce.sh`, regenerates
-the paper's tables from the measurements and re-measures them on a GPU.
+a Docker image with all of it installed. The engine and the sampler are the ones that measured
+the paper's rows: `cpp/src`, `cpp/kernels`, `cpp/include`, `gpap/engine` and `gpap/sampling` are
+unchanged since the campaign's commit `e821180`. One script, `eval/artifact/reproduce.sh`,
+regenerates the paper's tables from the measurements and re-measures them on a GPU.
 
 ## The paper's tables
 
@@ -169,6 +171,7 @@ tool's own test suite in seconds.
 | `gpap-image-<date>-<commit>.tar.gz` | the Docker images: `gpap-artifact:tacas-27`, and the tool alone, `gpap:<version>` |
 | `gpap-image-<date>-<commit>.tar.gz.sha256` | its checksum |
 | `gpap-artifact-<date>-<commit>.tar.gz` | the source archive: the same files as `/opt/gpap` in the image |
+| `gpap-artifact-<date>-<commit>.tar.gz.sha256` | its checksum |
 
 The source archive holds:
 

@@ -14,7 +14,7 @@ import os
 os.environ.setdefault("PYTORCH_CUDA_ALLOC_CONF", "expandable_segments:True")
 del os                     # not part of the package namespace (`__all__` is the contract)
 
-__version__ = "0.3.0"
+__version__ = "0.3.1"
 
 # THE tier-0 contract (docs/PYTHON_API.md: `__all__` is the supported API).
 __all__ = ["sample", "sample_clauses", "sample_circuit", "MAX_SAMPLES", "__version__"]

@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "gpap"
-version = "0.3.0"
+version = "0.3.1"
 description = "GPU-parallel (partial) assignment propagation: BCP over hundreds of thousands of independent partial assignments in one kernel launch, and the GPU solution sampler built on it"
 readme = "README.md"
 requires-python = ">=3.10"
