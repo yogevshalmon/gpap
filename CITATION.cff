@@ -4,8 +4,8 @@ title: "GPAP: GPU-Parallel (partial) Assignment Propagation and CircuitSAT Sampl
 authors:
   - family-names: Shalmon
     given-names: Yogev
-version: 0.3.0
-date-released: 2026-10-17
+version: 0.3.1
+date-released: 2026-10-23
 repository-code: "https://github.com/yogevshalmon/gpap"
 license: MIT
 keywords:
@@ -14,6 +14,8 @@ keywords:
   - GPU
   - sampling
   - CircuitSAT
-# TODO: the archive DOI (Zenodo, written by eval/artifact/make_artifact.sh); the same DOI goes in
-# the paper's Data Availability Statement and in docs/papers/tacas-27/AE_README.md. The paper
-# reference once it is accepted.
+identifiers:
+  - type: doi
+    value: 10.5281/zenodo.23241912
+    description: "The TACAS 2027 artifact on Zenodo (concept DOI): the source, the paper's measurements and the Docker image"
+# TODO: the paper reference once it is accepted.

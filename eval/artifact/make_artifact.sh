@@ -10,8 +10,8 @@
 #   benchmarks .../b1[789],b2[012]  the six ITC'99 circuits too large to commit
 #   README-ARTIFACT.md       a pointer to the guide, docs/papers/tacas-27/AE_README.md
 #
-# Beside the archive it writes gpap-ae-<date>-<commit>.zip, the upload the venue's artifact form
-# takes: the paper folder's AE_README.md as README.md, and LICENSE.
+# Beside the archive it writes its .sha256, and gpap-ae-<date>-<commit>.zip, the upload the venue's
+# artifact form takes: the paper folder's AE_README.md as README.md, and LICENSE.
 #
 # Left out: the compared samplers (no licence; rivals_setup.sh fetches them at pinned commits)
 # and built binaries (abc, CMSGen, built from pinned sources).
@@ -249,7 +249,7 @@ rm -rf "$FINAL"
 mkdir -p "$OUT"
 mv "$STAGE" "$FINAL"
 trap - EXIT
-( cd "$OUT" && tar czf "$NAME.tar.gz" "$NAME" )
+( cd "$OUT" && tar czf "$NAME.tar.gz" "$NAME" && sha256sum "$NAME.tar.gz" >"$NAME.tar.gz.sha256" )
 
 # --- the venue's upload: one small zip that points to the DOI --------------------------------------
 # From the archive's own copies, so the zip says what the archive says.
@@ -263,11 +263,11 @@ with zipfile.ZipFile(out, "w", zipfile.ZIP_DEFLATED) as z:
     z.write(licence, "LICENSE")
 ZIP
 echo
-echo "artifact: $OUT/$NAME.tar.gz  ($(du -h "$OUT/$NAME.tar.gz" | cut -f1), $NFILES files)"
+echo "artifact: $OUT/$NAME.tar.gz  ($(du -h "$OUT/$NAME.tar.gz" | cut -f1), $NFILES files), and its .sha256"
 echo "upload  : $ZIP  (README.md and LICENSE, for the venue's artifact form)"
 echo "verdict : $VERDICT"
 echo
-echo "Next: upload to Zenodo for the DOI (the Available badge), and put the CONCEPT DOI — the"
-echo "      one Zenodo labels 'all versions', never a version DOI — in CITATION.cff and the"
-echo "      paper's Data Availability Statement. A version DOI goes stale the moment a corrected"
-echo "      artifact is uploaded, and the paper's link with it."
+echo "Next: upload the archive and the image (make_image.sh), each with its .sha256, to the Zenodo"
+echo "      record whose CONCEPT DOI the AE README, CITATION.cff and the paper cite — the one Zenodo"
+echo "      labels 'all versions'. A version DOI goes stale the moment a corrected artifact is"
+echo "      uploaded, and the paper's link with it."

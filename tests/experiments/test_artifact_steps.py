@@ -109,6 +109,8 @@ def test_the_packager_zips_the_archives_own_readme_and_licence(tmp_path):
 
     packager = (ARTIFACT / "make_artifact.sh").read_text()
     assert '"$FINAL/docs/papers/tacas-27/AE_README.md" "$FINAL/LICENSE"' in packager
+    # The source archive's checksum, which Zenodo's file list carries beside it.
+    assert 'sha256sum "$NAME.tar.gz" >"$NAME.tar.gz.sha256"' in packager
     assert "for f in AE_README.md ARTIFACT.md" in packager
     # The heredoc's body: after the `|| { ... }` line that ends the command, up to its `ZIP`.
     code = packager.split("<<'ZIP'")[1].split("\nZIP\n")[0]

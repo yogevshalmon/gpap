@@ -6,7 +6,10 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). The
 follows the rule in [CONTRIBUTING.md](CONTRIBUTING.md): an ABI break moves its soname, an additive
 change does not.
 
-## Unreleased
+## 0.3.1 — 2026-10-23, the TACAS 2027 artifact
+
+The engine is unchanged: libgpap is still 0.3.0, and the sampler is the one that measured the
+paper's rows.
 
 ### Installation
 - A Docker image of the tool (`Dockerfile`; [docs/DOCKER.md](docs/DOCKER.md)). It compiles the
@@ -22,7 +25,8 @@ change does not.
   tier's summary shows.
 - `make_artifact.sh` accepts a relative output directory and a relative `PYTHON`, both taken
   from where they are typed. It used to lose the uniformity rows and refuse to package. It also
-  writes the venue's upload, a zip of the AE README and the licence.
+  writes the venue's upload, a zip of the AE README and the licence, and a `.sha256` of the
+  source archive.
 - `reproduce.sh tables` prints one line per check. `RESULTS.md` is now the paper's tables as the
   paper prints them, with the ratios its text quotes and every cell not counted named under each
   table; the analysis behind the paper's wording moved to `paper_tables.py --out-notes`, which
