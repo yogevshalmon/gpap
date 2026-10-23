@@ -9,7 +9,8 @@ change does not.
 ## 0.3.1 — 2026-10-23, the TACAS 2027 artifact
 
 The engine is unchanged: libgpap is still 0.3.0, and the sampler is the one that measured the
-paper's rows.
+paper's rows. The paper is on arXiv ([arXiv:2610.28805](https://arxiv.org/abs/2610.28805)), and
+`CITATION.cff` cites it.
 
 ### Installation
 - A Docker image of the tool (`Dockerfile`; [docs/DOCKER.md](docs/DOCKER.md)). It compiles the

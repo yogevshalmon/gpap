@@ -253,13 +253,16 @@ The experiments live outside the library:
 - [`docs/BENCHMARKING.md`](docs/BENCHMARKING.md): how to measure GPAP, and compare it with another
   sampler, fairly.
 - [`docs/papers/`](docs/papers/README.md): papers about GPAP, each with its evaluation, protocol
-  and artifact. The first is submitted to TACAS 2027 and under review.
+  and artifact. The first is submitted to TACAS 2027 and under review; its preprint is
+  [arXiv:2610.28805](https://arxiv.org/abs/2610.28805).
 - `gpap bench`: benchmark a glob of instances, optionally against CMSGen
   (`scripts/build_cmsgen.sh`).
 
 ## Citation and licence
 
-To cite GPAP, use [`CITATION.cff`](CITATION.cff); GitHub's "Cite this repository" button reads
+To cite GPAP, cite the paper, *SAT Sampling at Scale via GPU-based Boolean Constraint
+Propagation* ([arXiv:2610.28805](https://arxiv.org/abs/2610.28805)).
+[`CITATION.cff`](CITATION.cff) holds the entry, and GitHub's "Cite this repository" button reads
 it. GPAP is under the MIT licence ([`LICENSE`](LICENSE)). Benchmark files and quoted upstream code
 keep their own licences: see [`THIRD_PARTY.md`](THIRD_PARTY.md).
 

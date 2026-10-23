@@ -49,6 +49,7 @@ Homepage = "https://github.com/yogevshalmon/gpap"
 Documentation = "https://github.com/yogevshalmon/gpap/blob/main/docs/README.md"
 Repository = "https://github.com/yogevshalmon/gpap"
 Issues = "https://github.com/yogevshalmon/gpap/issues"
+Paper = "https://arxiv.org/abs/2610.28805"
 
 [tool.setuptools.packages.find]
 include = ["gpap*"]

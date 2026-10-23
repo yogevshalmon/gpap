@@ -13,7 +13,9 @@ through ctypes and C++ through `<gpap/gpap.hpp>`. The kernels are written in Tri
 ([`cpp/kernels/bcp.py`](../cpp/kernels/bcp.py)) and compiled ahead of time into the library, so
 running it needs only the NVIDIA driver (`libcuda`). This page is for building on the engine or
 judging its claims; using it needs none of it — see [PYTHON_API.md](PYTHON_API.md) and
-[`cpp/README.md`](../cpp/README.md).
+[`cpp/README.md`](../cpp/README.md). The paper ([arXiv:2610.28805](https://arxiv.org/abs/2610.28805),
+Section 4) presents the same design with its rationale: the jobs, the sum-packed word, the
+one-bit-per-literal assignment and Wave.
 
 ## 1. The formula on the GPU
 

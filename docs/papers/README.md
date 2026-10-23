@@ -5,7 +5,7 @@
 
 | paper | submitted to | status | folder |
 |---|---|---|---|
-| *SAT Sampling at Scale via GPU-based Boolean Constraint Propagation* | TACAS 2027, tool paper | under review | [tacas-27/](tacas-27/README.md) |
+| *SAT Sampling at Scale via GPU-based Boolean Constraint Propagation* ([arXiv:2610.28805](https://arxiv.org/abs/2610.28805)) | TACAS 2027, tool paper | under review | [tacas-27/](tacas-27/README.md) |
 
 A paper's status lives in this table only; its folder says where it was submitted, which stays
 true whatever the outcome.
