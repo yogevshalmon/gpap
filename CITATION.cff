@@ -1,5 +1,5 @@
 cff-version: 1.2.0
-message: "If you use GPAP, please cite it as below."
+message: "If you use GPAP, please cite the paper below."
 title: "GPAP: GPU-Parallel (partial) Assignment Propagation and CircuitSAT Sampling"
 authors:
   - family-names: Shalmon
@@ -18,4 +18,19 @@ identifiers:
   - type: doi
     value: 10.5281/zenodo.23241912
     description: "The TACAS 2027 artifact on Zenodo (concept DOI): the source, the paper's measurements and the Docker image"
-# TODO: the paper reference once it is accepted.
+preferred-citation:
+  type: article
+  title: "SAT Sampling at Scale via GPU-based Boolean Constraint Propagation"
+  authors:
+    - family-names: Nadel
+      given-names: Alexander
+    - family-names: Shalmon
+      given-names: Yogev
+    - family-names: Strichman
+      given-names: Ofer
+  journal: "arXiv preprint arXiv:2610.28805"
+  year: 2026
+  month: 10
+  doi: 10.48550/arXiv.2610.28805
+  url: "https://arxiv.org/abs/2610.28805"
+# TODO: the TACAS 2027 proceedings entry replaces the preprint once it is published.

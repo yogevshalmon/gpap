@@ -4,9 +4,10 @@
 > evaluation that did not fit in the paper, the rules its tables follow, and how its numbers are
 > checked against the measurements.
 
-This page accompanies the paper's evaluation. It describes what was compared and how, which
-cells each table counts and why, and how the numbers the paper prints are checked against the
-data.
+This page accompanies the paper's evaluation; the submitted paper is on arXiv as
+[arXiv:2610.28805](https://arxiv.org/abs/2610.28805). It describes what was compared and how,
+which cells each table counts and why, and how the numbers the paper prints are checked against
+the data.
 
 | file | what it holds |
 |---|---|
