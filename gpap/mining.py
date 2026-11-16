@@ -135,9 +135,10 @@ def mine_entailed(num_vars: int, clauses: list, device, *, pool: list | None = N
         current.append(list(clause))
         return True
 
-    probe = None
+    # Outside the try: an engine that cannot be built has proven nothing, so the caller hears
+    # why instead of receiving an empty result.
+    probe = LiteralProbe(num_vars, clauses, device)
     try:
-        probe = LiteralProbe(num_vars, clauses, device)
         if on_plan is not None:
             # UPPER BOUNDS, exact only for the first width run: width 1's units narrow the
             # formula, and its own count is ONE fixpoint round, not the total it will probe.

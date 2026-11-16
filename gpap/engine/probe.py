@@ -99,8 +99,10 @@ class LiteralProbe:
         return self
 
     def _init(self, formula, device, mode) -> None:
-        if device is not None and getattr(device, "type", "cuda") != "cuda":
-            raise RuntimeError("LiteralProbe requires CUDA (the engine is GPU-only)")
+        if (device is not None and getattr(device, "type", "cuda") != "cuda"
+                and _core.backend() == "cuda"):
+            raise RuntimeError("LiteralProbe requires CUDA on the cuda backend (the engine is "
+                               "GPU-only); GPAP_BACKEND=opencl runs on an OpenCL device")
         self._formula = formula
         self._engine = _core.Engine(formula, mode=mode)
         self._num_vars = int(formula.info.num_vars)

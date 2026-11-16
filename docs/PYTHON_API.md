@@ -43,6 +43,8 @@ the tier the one-call faces are written on. Tier 3 is private: its surface track
   measurement (`k_cap`, `pin_batch`, `chunk`), not for normal use.
 - **CUDA + a built `libgpap` are required** (`scripts/build_core.sh`; verify with `gpap info`).
   There is no CPU execution path. `gpap.engine.core_available()` is the programmatic check.
+  Under `GPAP_BACKEND=opencl` mining and checking run on an OpenCL device instead, with CPU
+  tensors unless a device is named ([OPENCL.md](OPENCL.md)).
 - **Return types**: the sampling stack and `AssumptionChecker` speak torch (tensors on the
   formula's device); `LiteralProbe` and everything below `BCPEngine`'s accessors speak numpy.
 - **Errors**: out-of-envelope formulas raise `ValueError` at construction; a missing library

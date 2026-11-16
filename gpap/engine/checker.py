@@ -7,6 +7,7 @@ cpp/src/check.cpp), so validation, chunk sizing and padding are defined once; th
 import numpy as np
 import torch
 
+from gpap.engine import _core
 from gpap.engine.formula import CnfFormula, ext_assumptions
 from gpap.engine.bcp_engine import BCPEngine
 from gpap.engine.calibrate import gpu_mem_available
@@ -33,8 +34,8 @@ def _flatten(assumptions: ext_assumptions, num_vars: int):
 
 
 class AssumptionChecker:
-    """Check assumption sets against a CNF formula, K of them per GPU launch (CUDA + libgpap; there
-    is no CPU path).
+    """Check assumption sets against a CNF formula, K of them per GPU launch (libgpap on CUDA, or
+    on an OpenCL device under GPAP_BACKEND=opencl; there is no CPU path on the cuda backend).
 
         checker = AssumptionChecker("formula.cnf")                # or .from_clauses(nv, clauses)
         r = checker.check_assumptions([[1, -2, 3], [-1, 2]])
@@ -45,7 +46,9 @@ class AssumptionChecker:
 
     def __init__(self, cnf_file: "str | None" = None, device: "torch.device | None" = None):
         if device is None:
-            device = torch.device("cuda")
+            # The opencl backend takes host arrays, so its results live on the CPU even where
+            # torch sees a CUDA GPU (the CLI's default, `cli._require_engine`, is the same rule).
+            device = torch.device("cuda" if _core.backend() == "cuda" else "cpu")
         self._device = device
         self._formula = CnfFormula(device)
         self._engine: BCPEngine | None = None

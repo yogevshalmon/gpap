@@ -77,9 +77,11 @@ class BCPEngine:
         `gpap_engine_reset`, so the dispatch reaches every consumer; same fixpoints either way."""
         self._formula = formula
         self._device = formula.device
-        if self._device.type != "cuda":
-            raise RuntimeError("BCPEngine requires CUDA (the engine is GPU-only; there is no "
-                               "CPU path). Check `gpap info`.")
+        if self._device.type != "cuda" and _core.backend() == "cuda":
+            # The opencl backend takes host arrays, so any torch device serves it.
+            raise RuntimeError("BCPEngine requires CUDA on the cuda backend (there is no CPU "
+                               "path); GPAP_BACKEND=opencl runs on an OpenCL device. Check "
+                               "`gpap info`.")
         self._core = _core.Engine(formula.core, device=self._device.index or 0, mode=mode,
                                   force_shift=8 if force_wide else 0)
         self._mode = self._core.requested_mode
@@ -100,7 +102,8 @@ class BCPEngine:
 
     def plan_for(self, K: int) -> str:
         """The propagate kernel a chunk of K rows will run — PURE, since `reset(K)` applies it.
-        Returns a pinned mode verbatim, $GPAP_KERNEL included."""
+        Returns a pinned mode verbatim, $GPAP_KERNEL included. The rule is asked of the backend
+        $GPAP_BACKEND names now: this engine's, unless the variable changed since it was made."""
         if self.auto_dispatch:
             return dispatch_mode(self.num_clauses, int(K), self._device)
         return self._core.mode
@@ -153,7 +156,9 @@ class BCPEngine:
                 decisions = decisions.unsqueeze(1)
             if decisions.numel() == 0:
                 return
-            if decisions.is_cuda:
+            if decisions.is_cuda and self._core.backend == "cuda":
+                # The zero-copy path: a CUDA tensor's address is only meaningful to the CUDA
+                # backend; any other backend takes the host copy below.
                 # Memory safety, as in _core._decisions: apply_dev hands the core a raw pointer
                 # it reads K rows from, so a short tensor is an out-of-bounds device read.
                 k = self._core.K
@@ -190,7 +195,8 @@ class BCPEngine:
         point 2). `order` is (P,) var indices with support vars first; the kernel picks the next B
         still-free vars with a stateless per-(chunk,k,v) hash polarity, so runs are reproducible
         from `seed` alone. Returns the max decision rounds any row used."""
-        if isinstance(order, torch.Tensor) and order.is_cuda:
+        if (isinstance(order, torch.Tensor) and order.is_cuda
+                and self._core.backend == "cuda"):
             o = order.to(torch.int32).contiguous()
             return self._core.trajectory_dev(o.data_ptr(), o.numel(), n_support, B, seed, soft)
         if isinstance(order, torch.Tensor):
