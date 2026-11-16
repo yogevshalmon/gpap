@@ -619,3 +619,18 @@ def test_a_one_way_implication_is_kept():
     assert not bool(_derivable_mask([[-1, 2]], base, 6, DEV)[0])
     # a clause covered in both directions is still dropped
     assert bool(_derivable_mask([[-1, 3]], [[-1, 2], [-2, 3], [4, 5]], 5, DEV)[0])
+
+
+def test_an_engine_that_cannot_be_built_still_releases_the_device(monkeypatch):
+    """`mine_entailed` raises when its engine cannot be built (it has proven nothing), and hands
+    the device back first: reserved-but-free memory would shrink the next component's batch."""
+    import gpap.mining as mining
+
+    def broken(*a, **kw):
+        raise RuntimeError("no device")
+    released = []
+    monkeypatch.setattr(mining, "LiteralProbe", broken)
+    monkeypatch.setattr(mining, "_release", lambda device: released.append(device))
+    with pytest.raises(RuntimeError, match="no device"):
+        mining.mine_entailed(2, [[1, 2]], "cpu")
+    assert released == ["cpu"]
