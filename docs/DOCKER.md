@@ -14,6 +14,10 @@
   docker run --rm --gpus all ubuntu:24.04 nvidia-smi
   ```
 
+The image runs the CUDA backend only. The OpenCL backend ([OPENCL.md](OPENCL.md)) is not in it
+yet: it has no OpenCL runtime, and it builds the engine only where it sees a CUDA GPU
+([issue 60](https://github.com/yogevshalmon/gpap/issues/60)).
+
 ## Build and run
 
 ```bash
