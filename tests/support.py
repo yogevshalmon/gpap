@@ -3,6 +3,7 @@
 Literals are DIMACS (`+v` / `-v`, 1-based) unless a name says "index" (the engine's `2(v-1)`
 encoding, `tests.reference.bcp.lit_idx`).
 """
+import contextlib
 import os
 import subprocess
 from pathlib import Path
@@ -16,6 +17,24 @@ from tests.reference.bcp import lit_idx
 
 #: Every engine test runs on the GPU; `gpu`-marked tests are skipped without one (conftest.py).
 DEV = torch.device("cuda")
+
+
+# ---------------------------------------------------------------- GPU backends
+
+@contextlib.contextmanager
+def use_backend(name):
+    """Engines created inside the block run on backend `name` ("cuda" | "opencl"). The backend
+    is read from `$GPAP_BACKEND` when an engine is CREATED and is fixed for its life, so engines
+    of both backends can be built in turn and then used side by side."""
+    saved = os.environ.get("GPAP_BACKEND")
+    os.environ["GPAP_BACKEND"] = name
+    try:
+        yield
+    finally:
+        if saved is None:
+            del os.environ["GPAP_BACKEND"]
+        else:
+            os.environ["GPAP_BACKEND"] = saved
 
 
 # ---------------------------------------------------------------- random formulas

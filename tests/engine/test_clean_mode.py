@@ -16,7 +16,15 @@ import torch
 from gpap.engine import _core
 from tests.support import DEV, decision_matrix, random_assumptions, random_cnf
 
-pytestmark = pytest.mark.gpu
+pytestmark = pytest.mark.engine
+
+
+def _repeatable(eng, mode, counters, conflict):
+    """The rows whose counters two launches must agree on: all of them, except that the OpenCL
+    WAVE kernel's lanes race for the trail's order, so there a conflicted row's counters (which
+    the kernel contract leaves unspecified) differ from launch to launch."""
+    racy = mode == "wave" and eng.backend == "opencl"
+    return counters[~conflict] if racy else counters
 
 
 def _awkward_sets(rng, nv, n):
@@ -65,7 +73,8 @@ def test_state_identity_fuzz(mode, shift):
             ta, tc = twin.flags()
             ca, cc = eng.flags()
             assert (cc == tc).all() and (ca == ta).all(), (mode, shift, trial, round_, "flags")
-            assert (eng.num_propagated() == twin.num_propagated()).all(), \
+            assert (_repeatable(eng, mode, eng.num_propagated(), cc)
+                    == _repeatable(eng, mode, twin.num_propagated(), cc)).all(), \
                 (mode, shift, trial, round_, "counters")
             post = eng.packed_rows(np.arange(K))
             assert (post == baseline).all(), \
@@ -89,6 +98,7 @@ def test_deep_row_guard_streams_exactly(mode):
     nv = 400
     clauses = [[-(v), -(v), v + 1] for v in range(1, nv)]    # 1 => 2 => ... => nv, len-3 links
     f = _core.Formula.from_clauses(nv, clauses)
+    assert f.info.num_long == nv - 1, "the links must carry packed words, or nothing is restored"
     eng = _core.Engine(f, mode=mode)
     eng.reset(4)
     baseline = eng.packed_rows(np.arange(4))
@@ -150,7 +160,8 @@ def test_pure_binary_formula_is_stateless(mode):
     ea, ec = eng.flags()
     ta, tc = twin.flags()
     assert (ea == ta).all() and (ec == tc).all()
-    assert (eng.num_propagated() == twin.num_propagated()).all()
+    assert (_repeatable(eng, mode, eng.num_propagated(), ec)
+            == _repeatable(eng, mode, twin.num_propagated(), ec)).all()
     assert eng.num_propagated()[0] == nv - 1, "the whole chain propagated through the edges"
     for i, dec in enumerate([[1], [-nv], [], [-1]]):
         exp_conflict, _ = ref_bcp(clauses, [lit_idx(x) for x in dec])

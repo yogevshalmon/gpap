@@ -17,7 +17,7 @@ from gpap.engine._core import check
 from tests.reference.bcp import assigned_set
 from tests.support import DEV, random_cnf
 
-pytestmark = pytest.mark.gpu
+pytestmark = pytest.mark.engine
 
 
 # ---------------------------------------------------------------- the flush cache
@@ -66,6 +66,8 @@ def test_check_sound_agrees_with_an_independent_recount(mode):
     assert want > 0, "this fixture must actually contain unsound rows, or it proves nothing"
 
 
+@pytest.mark.gpu
+@pytest.mark.cuda_only       # hands the engine a CUDA device pointer (trajectory_dev)
 @pytest.mark.parametrize("mode", ["scalar", "wave"])
 @pytest.mark.parametrize("B", [1, 8])
 def test_trajectory_emits_only_real_models(mode, B):
@@ -94,6 +96,8 @@ def test_trajectory_emits_only_real_models(mode, B):
     assert core.flags()[0][rows].all()
 
 
+@pytest.mark.gpu
+@pytest.mark.cuda_only       # hands the engine a CUDA device pointer (trajectory_dev)
 @pytest.mark.parametrize("mode", ["scalar", "wave"])
 def test_trajectory_counters_agree_with_the_assignment(mode):
     """The counters agree with the assignment (decisions + implications); every reported
@@ -138,6 +142,8 @@ def test_a_zero_width_launch_does_not_report_the_previous_one(entry):
         f"a zero-width {entry} reported the previous launch's implications"
 
 
+@pytest.mark.gpu
+@pytest.mark.cuda_only       # hands the engine a CUDA device pointer (trajectory_dev)
 @pytest.mark.slow
 @pytest.mark.parametrize("name", ["b03-c25", "b06-c10", "s386-c10"])
 def test_circuit_models_are_sound(circuit_cnfs, name):
@@ -251,6 +257,8 @@ def test_small_formulas_take_the_16_bit_split():
     assert core.shift == 16
 
 
+@pytest.mark.gpu
+@pytest.mark.cuda_only       # hands the engine a CUDA device pointer (trajectory_dev)
 def test_wide_split_is_selected_and_sound():
     """8|24 'wide' split: 2N > 65535 forces the second envelope, and it must still be sound."""
     rng = random.Random(31)
@@ -317,9 +325,9 @@ def test_readout_slicing_matches_an_unsliced_read():
     # (K x nv) and (K x 2N) bytes, so keep K small.
     K = step + 96
     core.reset(K)
-    # Run a trajectory first so rows differ. After a reset every row is the same baseline, and
-    # a slice loop that dropped its row offset would still compare equal.
-    core.trajectory(np.arange(nv, dtype=np.int32), nv, 64, 20260831)
+    # Row r assumes its own free variable, so rows differ: after a reset every row is the same
+    # baseline, and a slice loop that dropped its row offset would still compare equal.
+    core.apply(np.array([[2 * (1000 + r)] for r in range(K)], dtype=np.int64))
     rows = np.arange(K, dtype=np.int32)
     core.selection_set(core.SCRATCH_SLOT, rows)
     cols = np.arange(nv, dtype=np.int32)

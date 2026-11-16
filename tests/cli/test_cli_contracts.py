@@ -454,3 +454,39 @@ def test_full_models_honours_the_same_row_ceiling_as_the_bit_path(tmp_path):
     # An explicit collection request still wins over the default ceiling.
     more, xi = gpap.sample_clauses(4, cls, n=50, max_samples=10, full_models=True, n_cov=3000)
     assert len(more) == min(3000, xi["n_collected"]) > 10
+
+
+# ------------------------------------------------------------- the tensor device on opencl
+
+@pytest.mark.core
+def test_opencl_keeps_torch_off_a_cuda_gpu_unless_asked(monkeypatch):
+    """The opencl engine takes host arrays, so under `GPAP_BACKEND=opencl` the CLI and the
+    Python checker keep torch's tensors on the CPU even where torch sees a CUDA GPU: a run whose
+    engine is on another device (an Intel GPU, a CPU) must not also use the NVIDIA card. An
+    explicit `--device` still wins, and the cuda backend's default is unchanged."""
+    import argparse
+
+    import gpap.cli as _cli
+    from gpap.engine.checker import AssumptionChecker
+    monkeypatch.setattr(torch.cuda, "is_available", lambda: True)
+    monkeypatch.setenv("GPAP_BACKEND", "opencl")
+    assert _cli._require_engine(argparse.Namespace(device=None)) == torch.device("cpu")
+    assert AssumptionChecker().formula.device == torch.device("cpu")
+    assert _cli._require_engine(argparse.Namespace(device="cuda:0")) == torch.device("cuda:0")
+    monkeypatch.setenv("GPAP_BACKEND", "cuda")
+    assert _cli._require_engine(argparse.Namespace(device=None)) == torch.device("cuda")
+
+
+@pytest.mark.gpu
+def test_info_does_not_call_the_cuda_gpu_the_device_on_opencl(monkeypatch, capsys):
+    """Under `GPAP_BACKEND=opencl`, `gpap info` must not print the CUDA GPU as THE device: the
+    engine runs on the device its "GPU backend" line names, which may be another vendor's."""
+    import gpap.cli as _cli
+    monkeypatch.setenv("GPAP_BACKEND", "opencl")
+    _cli._cmd_info(None)
+    lines = capsys.readouterr().out.splitlines()
+    assert not any(ln.startswith("device:") for ln in lines)
+    assert any(ln.startswith("CUDA GPU (not the engine's") for ln in lines)
+    monkeypatch.setenv("GPAP_BACKEND", "cuda")
+    _cli._cmd_info(None)
+    assert any(ln.startswith("device:") for ln in capsys.readouterr().out.splitlines())

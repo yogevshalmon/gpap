@@ -11,7 +11,7 @@ from gpap.engine.checker import AssumptionChecker
 from tests.conftest import TEST_DATA_DIR
 from tests.support import random_assumptions, random_cnf
 
-pytestmark = pytest.mark.gpu
+pytestmark = pytest.mark.engine
 
 
 # ---------------------------------------------------------------- assumption checker

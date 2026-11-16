@@ -16,7 +16,7 @@ from gpap.engine.formula import CnfFormula
 from tests.reference.bcp import assigned_set, lit_idx, ref_bcp
 from tests.support import DEV, decision_matrix, random_assumptions, random_cnf
 
-pytestmark = pytest.mark.gpu
+pytestmark = pytest.mark.engine
 
 
 def _mixed_cnf(rng, nv):
@@ -84,6 +84,7 @@ def _python_engine(nv, clauses, mode=None):
     return BCPEngine(f, mode=mode)
 
 
+@pytest.mark.gpu             # its tensors live on the CUDA device
 @pytest.mark.parametrize("mode", ["scalar", "wave"])
 def test_decisions_applied_in_steps_reach_the_reference_fixpoint(mode):
     """Three rounds of decisions on top of each other, one row given a contradiction. The
@@ -110,6 +111,7 @@ def test_decisions_applied_in_steps_reach_the_reference_fixpoint(mode):
                     assert assigned_set(eng.assignment[k].cpu()) == asg
 
 
+@pytest.mark.gpu             # its tensors live on the CUDA device
 def test_fixpoint_matches_the_reference_on_a_circuit(circuit_cnfs):
     """An unrolled circuit: deep implication cascades rather than random clauses."""
     import torch
