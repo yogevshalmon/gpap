@@ -165,9 +165,13 @@ def test_the_vram_cap_actually_moves_the_sampler_batch(monkeypatch):
         "K under a cap must be the memory model's own answer for exactly that budget"
 
 
+@pytest.mark.core
 def test_the_cpu_placeholder_budget_is_capped_too(monkeypatch):
-    """The no-CUDA placeholder budget is capped too, so both sides agree on CPU-only hosts."""
+    """The no-CUDA placeholder budget is capped too, so both sides agree on CPU-only hosts.
+    The placeholder is the cuda backend's (on opencl a CPU device's engine is the OpenCL
+    device), and only libgpap says which backend runs: hence `core`, and the backend pinned."""
     from gpap.engine.calibrate import gpu_mem_available
+    monkeypatch.setenv("GPAP_BACKEND", "cuda")
     uncapped = gpu_mem_available(torch.device("cpu"))
     monkeypatch.setenv("GPAP_VRAM_BUDGET_MIB", "1024")
     assert gpu_mem_available(torch.device("cpu")) == 1024 << 20 < uncapped
