@@ -177,12 +177,11 @@ def test_oversized_result_is_refused_not_spilled():
     the device budget must raise rather than spill to host RAM.
 
     n is derived from the live budget, which the guard compares against, so the request is too
-    big on any card."""
-    from gpap.engine.calibrate import gpu_mem_available
+    big on any card (or host, where the results live on the CPU)."""
     ck = AssumptionChecker()
     ck.formula.init_formula(200_000, [[1, 2]])       # 400 kB of assignment per set
     row_bytes = 2 * 200_000
-    n = int(gpu_mem_available(ck.formula.device) // row_bytes) + 1_000   # over the budget
+    n = int(ck._result_budget() // row_bytes) + 1_000   # over the budget
     with pytest.raises(MemoryError, match="assumption sets"):
         ck.check_assumptions([[1]] * n, assignments=True)
 
