@@ -19,8 +19,8 @@ import numpy as np
 
 
 GPAP_OK = 0
-_STATUS = {0: "OK", 1: "bad argument", 2: "CUDA error", 3: "formula outside packed envelopes",
-           4: "I/O error", 5: "missing kernel binary", 6: "allocation failed"}
+_STATUS = {0: "OK", 1: "bad argument", 2: "GPU driver error", 3: "formula outside packed envelopes",
+           4: "I/O error", 5: "missing kernel", 6: "allocation failed"}
 
 
 class GpapError(RuntimeError):
@@ -184,6 +184,9 @@ def _declare(lib: ctypes.CDLL) -> None:
         ("gpap_engine_num_vars", [c_void_p], c_int32),
         ("gpap_engine_num_clauses", [c_void_p], c_int32),
         ("gpap_engine_num_long", [c_void_p], c_int32),
+        ("gpap_backend", [], c_char_p),
+        ("gpap_engine_backend", [c_void_p], c_char_p),
+        ("gpap_engine_device_name", [c_void_p], c_char_p),
         ("gpap_engine_reset", [c_void_p, c_int32], c_int),
         ("gpap_engine_apply", [c_void_p, _I64P, c_int32], c_int),
         ("gpap_engine_apply_dev", [c_void_p, c_size_t, c_int32], c_int),
@@ -276,6 +279,15 @@ def build_id() -> str:
     return load().gpap_build_id().decode()
 
 
+def backend() -> str:
+    """The GPU backend a new engine gets: "cuda" (the default) or "opencl", from $GPAP_BACKEND.
+    Raises on any other value, as creating an engine would."""
+    name = load().gpap_backend()
+    if name is None:
+        raise GpapError(1, "GPAP_BACKEND", load().gpap_last_error().decode(errors="replace"))
+    return name.decode()
+
+
 def trail_cap(num_vars: int) -> int:
     """Trail slots one row needs — a function of the VARIABLE count alone (see gpap.h)."""
     return int(load().gpap_trail_cap(int(num_vars)))
@@ -293,8 +305,12 @@ def compute_k_safe(num_long: int, N: int, gpu_mem_bytes: float,
                                           int(cap or 0)))
 
 
+# The three engine-less queries below answer for the backend a NEW engine gets ($GPAP_BACKEND);
+# an engine keeps the backend it was created on.
+
 def mem_available(device: int = 0, fraction: float = 0.80) -> int:
-    """Bytes available for new allocations (free VRAM minus a driver reserve, times fraction)."""
+    """Bytes available for new allocations (free memory minus a driver reserve, times fraction;
+    on opencl the device total, which is all OpenCL reports)."""
     return int(load().gpap_mem_available(int(device), float(fraction)))
 
 
@@ -522,6 +538,15 @@ class Engine:
         """Is the CORE still choosing the kernel per reset(K)? Asked of the core, so a local
         set_mode() cannot override a $GPAP_KERNEL pin."""
         return bool(load().gpap_engine_auto(self._h))
+
+    @property
+    def backend(self) -> str:
+        """The GPU backend THIS engine runs on: "cuda" or "opencl" (fixed when it was created)."""
+        return load().gpap_engine_backend(self._h).decode()
+
+    @property
+    def device_name(self) -> str:
+        return load().gpap_engine_device_name(self._h).decode(errors="replace")
 
     @classmethod
     def _mode_code(cls, mode: str) -> int:

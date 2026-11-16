@@ -142,17 +142,31 @@ def _check_input(args):
 
 
 def _require_engine(args):
-    """The two preconditions every GPU subcommand shares -> (device,)."""
+    """The two preconditions every GPU subcommand shares -> (device,). On the opencl backend the
+    engine takes host arrays, so torch's tensors stay on the CPU there unless `--device` names a
+    GPU: an engine on another device must not also load a CUDA GPU torch happens to see
+    (`AssumptionChecker`'s default is the same rule)."""
     import torch
 
     from gpap.engine import core_available
-    if not torch.cuda.is_available():
-        raise SystemExit("this command requires a CUDA GPU — there is no CPU execution path. "
-                         "See `gpap info`.")
+    opencl = os.environ.get("GPAP_BACKEND") == "opencl"
+    if not torch.cuda.is_available() and not opencl:
+        raise SystemExit("this command requires a CUDA GPU — there is no CPU execution path — "
+                         "or GPAP_BACKEND=opencl and an OpenCL device. See `gpap info`.")
     if not core_available():
         raise SystemExit("the engine core (libgpap) is not built. Run scripts/build_core.sh, "
                          "then `gpap info` to confirm.")
-    return torch.device(args.device) if args.device else torch.device("cuda")
+    if args.device:
+        return torch.device(args.device)
+    return torch.device("cuda" if torch.cuda.is_available() and not opencl else "cpu")
+
+
+def _require_sampling_backend():
+    """Sampling runs the trajectory kernel, which only the cuda backend ships: say so before
+    any preprocessing or mining is spent on a run that cannot sample."""
+    if os.environ.get("GPAP_BACKEND") == "opencl":
+        raise SystemExit("sampling needs the cuda backend: the opencl backend ships no "
+                         "trajectory kernel (docs/OPENCL.md). Unset GPAP_BACKEND.")
 
 
 def print_now(*a):
@@ -220,6 +234,7 @@ def _cmd_sample(args):
     # not the machine, so it must not need a GPU to report.
     _check_input(args)
     _check_out_dirs(args, "--out", "--stats")
+    _require_sampling_backend()
     device = _require_engine(args)
     path, tmp, encode_s = _ensure_cnf(args)
     try:
@@ -625,6 +640,20 @@ def _print_abc_status():
               "(build with scripts/build_abc.sh to enable --encoder abc)")
 
 
+def _print_backend_status():
+    """Under a non-default `$GPAP_BACKEND`, say which device libgpap would run on. Asked by
+    building an engine, which is the only way to learn that the backend really works here."""
+    if os.environ.get("GPAP_BACKEND", "cuda") in ("", "cuda"):
+        return
+    try:
+        from gpap.engine import _core
+        eng = _core.Engine(_core.Formula.from_clauses(2, [[1, 2]]))
+        print(f"GPU backend: {eng.backend} on {eng.device_name}  (GPAP_BACKEND; a subset of "
+              f"the engine — docs/OPENCL.md)")
+    except Exception as e:  # noqa: BLE001 — a status line, never fatal
+        print(f"GPU backend: {os.environ['GPAP_BACKEND']} — unavailable ({e})")
+
+
 def _cmd_info(args):
     # Report a missing torch as a finding, not a traceback: `reproduce.sh check` runs this first
     # on machines (the artifact VM) that only regenerate the tables and never install it.
@@ -636,14 +665,23 @@ def _cmd_info(args):
         return
     print(f"torch {torch.__version__}  (CUDA {torch.version.cuda})")
     if not torch.cuda.is_available():
-        print("device: CPU (no CUDA) — the engine CANNOT run (packed-kernel-only, no CPU path);"
-              " only circuit2cnf / preprocessing work here")
+        if os.environ.get("GPAP_BACKEND") == "opencl":
+            print("device: no CUDA GPU — the engine runs on the opencl backend (below): mining "
+                  "and checking, no sampling")
+        else:
+            print("device: CPU (no CUDA) — the cuda backend CANNOT run (no CPU path); "
+                  "GPAP_BACKEND=opencl runs mining and checking on an OpenCL device")
+        _print_backend_status()
         _print_abc_status()
         return
     dev = torch.device("cuda")
     props = torch.cuda.get_device_properties(dev)
     free, total = torch.cuda.mem_get_info(dev)
-    print(f"device: {props.name}  {total/1e9:.1f} GB ({free/1e9:.1f} GB free)  "
+    # On opencl the engine runs on the "GPU backend" line's device, which may be another
+    # vendor's, and torch's tensors stay on the CPU (_require_engine): this GPU is not THE device.
+    opencl = os.environ.get("GPAP_BACKEND") == "opencl"
+    label = "CUDA GPU (not the engine's: see GPU backend below)" if opencl else "device"
+    print(f"{label}: {props.name}  {total/1e9:.1f} GB ({free/1e9:.1f} GB free)  "
           f"SM {props.major}.{props.minor} x{props.multi_processor_count}")
     # A capped budget changes K on memory-bound formulas, so it belongs beside the device, not
     # in a log line somebody has to go looking for.
@@ -667,6 +705,7 @@ def _cmd_info(args):
                   "             build it with:  scripts/build_core.sh")
     except Exception as e:  # noqa: BLE001
         print(f"engine core: unavailable ({e})")
+    _print_backend_status()
     try:
         from gpap.engine._triton import kernel_available
         ok = kernel_available()

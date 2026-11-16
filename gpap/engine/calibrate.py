@@ -39,14 +39,15 @@ def row_bytes(num_long: int, N: int) -> int:
 
 
 def gpu_mem_available(device: torch.device, fraction: float = 0.80) -> int:
-    """Bytes available for new allocations on `device` (free VRAM minus a driver reserve).
+    """Bytes available for new allocations on `device` (free VRAM minus a driver reserve; on the
+    opencl backend the device total, since OpenCL has no free-memory query).
 
     `fraction` is the only headroom in the sizing path, covering readout transients and whatever
     else shares the card. `GPAP_VRAM_BUDGET_MIB` caps the answer (see `vram_budget_cap`) on BOTH
     branches: the core applies it inside `gpap_mem_available` for a real device, and it is
     applied here for the CPU placeholder, which never reaches the core. A ceiling that holds
     only on the branch a given machine happens to take is not a ceiling."""
-    if device.type != "cuda":
+    if device.type != "cuda" and _core.backend() == "cuda":
         placeholder = int(8e9)               # conservative fallback for a CPU device
         cap = vram_budget_cap()
         return min(placeholder, cap) if cap else placeholder
@@ -103,7 +104,8 @@ def resolve_k_cap(k_cap: "int | str | None", device: torch.device) -> "int | Non
 
 
 def resident_warps(device: torch.device) -> int:
-    """Warps this GPU can keep resident at once — SMs x (max threads per SM / 32)."""
+    """Warps this GPU can keep resident at once — SMs x (max threads per SM / 32) — on the
+    backend $GPAP_BACKEND names; 0 on opencl, which cannot say."""
     if device.type != "cuda":
         return 0
     return _core.resident_warps(device.index or 0)
@@ -115,6 +117,7 @@ def dispatch_mode(num_clauses: int, batch: int, device: torch.device) -> str:
     WAVE hands one row a whole warp, so it pays off once a row has work to spread across the
     lanes, which is a property of the clause count and not of the batch. Do not key this on the
     batch alone: that is a proxy a batch-sizing change invalidates. The rule lives in
-    `gpap_dispatch_wave` and is read from there, never mirrored. Both variants reach the same
-    fixpoints (BCP is confluent), so this is a pure launch-flag choice."""
+    `gpap_dispatch_wave` and is read from there, never mirrored, for the backend $GPAP_BACKEND
+    names. Both variants reach the same fixpoints (BCP is confluent), so this is a pure
+    launch-flag choice."""
     return "wave" if _core.dispatch_wave(num_clauses, batch, device.index or 0) else "scalar"
