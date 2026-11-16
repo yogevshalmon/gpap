@@ -1,18 +1,17 @@
-/* Internal plumbing: driver-API helpers, the AOT kernel registry, RAII device buffers and the
- * engine/formula layouts. */
+/* Internal plumbing: error helpers, RAII device buffers and the engine/formula layouts. The
+ * device itself is behind gpu_api.hpp. */
 #ifndef GPAP_INTERNAL_HPP
 #define GPAP_INTERNAL_HPP
 
-#include <cuda.h>
-
 #include <cstdint>
+#include <memory>
 #include <new>
 #include <stdexcept>
 #include <string>
-#include <unordered_map>
 #include <vector>
 
 #include "gpap/gpap.h"
+#include "gpu_api.hpp"
 
 namespace gpap {
 
@@ -35,19 +34,6 @@ inline int64_t lit_index_from_dimacs(int32_t lit, int32_t num_vars) {
     if (v > num_vars) return -1;
     return 2 * (v - 1) + (lit < 0 ? 1 : 0);
 }
-
-/* Every driver call goes through this: it records a readable message and returns. */
-#define GPAP_CU(call)                                                                    \
-    do {                                                                                 \
-        CUresult _rc = (call);                                                           \
-        if (_rc != CUDA_SUCCESS) {                                                        \
-            const char *_msg = nullptr;                                                  \
-            cuGetErrorString(_rc, &_msg);                                                \
-            ::gpap::set_error("%s: %s (%s:%d)", #call, _msg ? _msg : "unknown",          \
-                              __FILE__, __LINE__);                                       \
-            return GPAP_ERR_CUDA;                                                        \
-        }                                                                                \
-    } while (0)
 
 #define GPAP_TRY(expr)                                                                   \
     do {                                                                                 \
@@ -73,31 +59,14 @@ gpap_status guard_entry(const char *what, F &&body) {
     }
 }
 
-struct Kernel {
-    CUfunction fn = nullptr;
-    int shared = 0;
-    int threads = 32;
-};
-
-/* Loads cubins from the generated table on first use and caches the CUfunctions. */
-class KernelCache {
-  public:
-    gpap_status get(const std::string &key, Kernel *out);
-    ~KernelCache();
-
-  private:
-    std::unordered_map<std::string, Kernel> cache_;
-    std::vector<CUmodule> modules_;
-};
-
-/* Launch with a runtime grid; `args` must NOT include triton's two trailing scratch pointers. */
-gpap_status launch(const Kernel &k, unsigned gx, unsigned gy, std::vector<void *> args);
-
+/* A device buffer that grows and frees itself. It remembers the plug that allocated it, so it
+ * can be released without the engine at hand. */
 struct DevBuf {
-    CUdeviceptr ptr = 0;
+    Gpu *gpu = nullptr;
+    GpuMem ptr = 0;
     size_t bytes = 0;
 
-    gpap_status reserve(size_t n);   /* grows only; keeps the allocation if already big enough */
+    gpap_status reserve(Gpu *g, size_t n);   /* grows only; keeps the allocation if big enough */
     gpap_status zero();
     void release();
     ~DevBuf() { release(); }
@@ -106,6 +75,26 @@ struct DevBuf {
     DevBuf(const DevBuf &) = delete;
     DevBuf &operator=(const DevBuf &) = delete;
 };
+inline GpuArg buf(const DevBuf &b, size_t offset = 0) { return buf(b.ptr, offset); }
+
+/* The memory budget one batch may take out of `free_bytes` — the reserve, the fraction and the
+ * $GPAP_VRAM_BUDGET_MIB cap of gpap_mem_available, for a caller that already holds a device. */
+int64_t mem_budget(int64_t free_bytes, double fraction);
+/* gpap_dispatch_wave's rule for one GPU library. An engine passes the library it was created
+ * on, never $GPAP_BACKEND, which may have changed since. */
+int32_t dispatch_wave(const GpuDriver *driver, int32_t num_clauses, int32_t batch, int device);
+/* THE automatic kernel choice of an engine for K rows: dispatch_wave on its own library, and
+ * SCALAR on a device that cannot run WAVE. Every per-engine choice calls this. */
+gpap_mode dispatch_mode(gpap_engine *e, int32_t K);
+/* GPAP_ERR_KERNEL, naming the backend, if the engine's plug has no trajectory kernel: a
+ * sampler refuses at creation rather than at its first launch. */
+gpap_status engine_require_trajectory(gpap_engine *e);
+/* That budget on the engine's own device, at kMemFraction; 0 if the device cannot say. */
+int64_t engine_mem_budget(gpap_engine *e);
+/* Rows one launch may hold whatever the budget says: a plug may limit the size of a single
+ * buffer, and the widest per-row buffer — the engine's own, or `extra_row_bytes` a caller
+ * allocates per row — must fit it. INT32_MAX when the plug sets no limit. */
+int32_t engine_row_limit(gpap_engine *e, int64_t extra_row_bytes);
 
 /* A clause carries a packed word (per-row state) iff it has this many literals; shorter ones
  * are implication edges or flush-cache facts. The one definition. */
@@ -209,10 +198,11 @@ struct gpap_engine {
     int64_t resets_full = 0, resets_lite = 0;
     int clean_enabled = 1;   /* GPAP_CLEAN=0 kills the lite path (A/B lever + escape hatch) */
 
-    CUdevice device = 0;
-    CUcontext ctx = nullptr;   /* primary context, retained */
+    /* The device. Declared before every DevBuf so it is destroyed after them: a buffer frees
+     * itself through this plug. */
+    std::unique_ptr<gpap::Gpu> gpu;
+    const gpap::GpuDriver *driver = nullptr;    /* the library `gpu` was opened from */
     int device_ordinal = 0;
-    gpap::KernelCache kernels;
 
     /* formula-resident (never rebuilt) */
     gpap::DevBuf occ_off, occ_mid, occ_cls, packed_init, packed_flushed, abits_flushed;

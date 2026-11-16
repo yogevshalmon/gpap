@@ -1,8 +1,8 @@
 # libgpap — the GPAP engine core.
 #
-# Build requirements are deliberately thin: a C++17 compiler, CMake, the CUDA *driver* library
-# (libcuda, which ships with the NVIDIA driver) and the `cuda.h` driver header. NO CUDA toolkit
-# and no nvcc: every GPU kernel is Triton, compiled ahead of time by tools/build_kernels.py.
+# Build requirements are deliberately thin: a C++17 compiler, CMake and the `cuda.h` driver
+# header. NO NVIDIA driver (libcuda is opened at run time), NO CUDA toolkit and no nvcc: every
+# CUDA kernel is Triton, compiled ahead of time by tools/build_kernels.py.
 # If no toolkit is installed we fall back to the `cuda.h` bundled inside the triton wheel.
 #
 #   cmake -S cpp -B build && cmake --build build -j
@@ -27,16 +27,8 @@ if(NOT CMAKE_BUILD_TYPE)
 endif()
 
 # ---------------------------------------------------------------- CUDA driver API
-find_library(GPAP_CUDA_DRIVER
-  NAMES cuda
-  HINTS /usr/lib/wsl/lib /usr/lib/x86_64-linux-gnu /usr/local/cuda/lib64
-        /usr/local/cuda/lib64/stubs
-  DOC "libcuda (NVIDIA driver library)")
-if(NOT GPAP_CUDA_DRIVER)
-  message(FATAL_ERROR "libcuda not found. Install the NVIDIA driver, or pass "
-                      "-DGPAP_CUDA_DRIVER=/path/to/libcuda.so.1")
-endif()
-
+# The header only: the CUDA plug opens libcuda at run time (src/gpu_cuda.cpp), so neither the
+# build nor loading the library needs the NVIDIA driver.
 if(NOT GPAP_CUDA_INCLUDE_DIR)
   find_path(GPAP_CUDA_INCLUDE_DIR cuda.h
     HINTS /usr/local/cuda/include /usr/include ENV CUDA_HOME
@@ -69,6 +61,22 @@ if(NOT EXISTS "${GPAP_GENERATED}")
     "(needs triton; add --arch NN to cross-compile for another GPU)")
 endif()
 
+# ---------------------------------------------------------------- OpenCL kernel source
+# The OpenCL backend compiles kernels/bcp.cl on the device at run time, so the library carries
+# the source as a string. Nothing else is needed to BUILD that backend: the OpenCL library is
+# opened at run time (src/gpu_opencl.cpp).
+set(GPAP_CL_EMBEDDED "${CMAKE_CURRENT_BINARY_DIR}/gpap_cl_source.c")
+add_custom_command(
+  OUTPUT "${GPAP_CL_EMBEDDED}"
+  COMMAND ${CMAKE_COMMAND}
+          -DIN=${CMAKE_CURRENT_SOURCE_DIR}/kernels/bcp.cl
+          -DOUT=${GPAP_CL_EMBEDDED}
+          -DSYMBOL=gpap_cl_source
+          -P ${CMAKE_CURRENT_SOURCE_DIR}/tools/embed_source.cmake
+  DEPENDS kernels/bcp.cl tools/embed_source.cmake
+  COMMENT "Embedding kernels/bcp.cl"
+  VERBATIM)
+
 # ---------------------------------------------------------------- library
 add_library(gpap SHARED
   src/runtime.cpp
@@ -79,12 +87,14 @@ add_library(gpap SHARED
   src/probe.cpp
   src/check.cpp
   src/sample.cpp
+  src/gpu_cuda.cpp
+  src/gpu_opencl.cpp
+  ${GPAP_CL_EMBEDDED}
   ${GPAP_GENERATED})
 target_include_directories(gpap
   PUBLIC  $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
           $<INSTALL_INTERFACE:include>
   PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src ${GPAP_CUDA_INCLUDE_DIR})
-target_link_libraries(gpap PRIVATE ${GPAP_CUDA_DRIVER})
 # PUBLIC so it travels through the exported target: <gpap/gpap.hpp> is C++17, and a consumer
 # that only set CMAKE_CXX_STANDARD 11 would otherwise fail to compile it. (C consumers include
 # gpap.h instead and are unaffected — that header is plain C99.)
@@ -93,7 +103,8 @@ target_compile_options(gpap PRIVATE -Wall -Wextra -Wno-unused-parameter)
 # ONE spelling of the version: gpap_version() reports this, rather than a second literal in
 # runtime.cpp that nobody remembers to bump alongside it.
 target_compile_definitions(gpap PRIVATE GPAP_VERSION_STR="${PROJECT_VERSION}")
-# dladdr, so gpap_build_id() can find and fingerprint the library's own file.
+# dlopen, for the GPU libraries (both plugs open theirs at run time), and dladdr, so
+# gpap_build_id() can find and fingerprint the library's own file.
 target_link_libraries(gpap PRIVATE ${CMAKE_DL_LIBS})
 set_target_properties(gpap PROPERTIES VERSION ${PROJECT_VERSION} SOVERSION 1)
 

@@ -15,12 +15,14 @@ extern "C" int64_t gpap_check_chunk_size(gpap_engine *e, int64_t n_sets, int64_t
     if (!e) return 0;
     if (n_sets <= 0) return 1;      /* the documented floor: a launch always holds >= 1 set */
     /* The engine's per-row state (the shared exact model) plus the (chunk, L) decision matrix
-     * only this entry point allocates, against live free memory each call. */
+     * only this entry point allocates, against the engine's budget each call (live free memory
+     * on CUDA, the device total on OpenCL) and within one buffer's limit. */
     const int64_t per_row = gpap_row_bytes(e->num_long, e->num_vars, e->trail_cap) +
                             8ll * std::max<int64_t>(max_lits, 1);
-    const int64_t budget = gpap_mem_available(e->device_ordinal, gpap::kMemFraction);
+    const int64_t budget = gpap::engine_mem_budget(e);
     int64_t k = per_row > 0 ? budget / per_row : 1;
     k = std::min<int64_t>(k, gpap_default_k_cap(e->device_ordinal));
+    k = std::min<int64_t>(k, gpap::engine_row_limit(e, 8ll * std::max<int64_t>(max_lits, 1)));
     k = std::max<int64_t>(k, 1);
     return std::min<int64_t>(k, n_sets);
 }

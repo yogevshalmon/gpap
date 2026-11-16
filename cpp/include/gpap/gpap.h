@@ -10,6 +10,8 @@
  * The library owns every device allocation (driver API) and links against libcuda only. An
  * engine is not thread-safe (one per thread); calls run on the legacy default stream of the
  * device's primary context, so they interoperate with any CUDA runtime user in the process.
+ * (That is the default backend. $GPAP_BACKEND=opencl runs part of the engine through OpenCL,
+ * opened at run time: see gpap_backend below.)
  * Every call returns gpap_status; gpap_last_error() gives a thread-local message. */
 #ifndef GPAP_H
 #define GPAP_H
@@ -24,10 +26,10 @@ extern "C" {
 typedef enum {
     GPAP_OK = 0,
     GPAP_ERR_ARG = 1,       /* bad argument */
-    GPAP_ERR_CUDA = 2,      /* a driver call failed (see gpap_last_error) */
+    GPAP_ERR_CUDA = 2,      /* a GPU driver call failed, on either backend (gpap_last_error) */
     GPAP_ERR_ENVELOPE = 3,  /* formula outside both packed splits */
     GPAP_ERR_IO = 4,        /* file could not be read / parsed */
-    GPAP_ERR_KERNEL = 5,    /* no cubin for the requested specialization */
+    GPAP_ERR_KERNEL = 5,    /* the backend has no kernel for the requested specialization */
     GPAP_ERR_MEMORY = 6     /* an allocation failed — device OR host; the message says which */
 } gpap_status;
 
@@ -98,7 +100,7 @@ gpap_status gpap_packed_envelope(int32_t num_vars, int32_t max_clause_len, int32
 /* Engine options. NULL and `{0}` are the same struct and both mean every default (device 0,
  * auto kernel, auto split): each field's zero is its default. */
 typedef struct {
-    int device;             /* CUDA device ordinal (0) */
+    int device;             /* device ordinal (0): CUDA's, or the OpenCL list (see gpap_backend) */
     gpap_mode mode;         /* GPAP_MODE_AUTO (0) = pick per reset(K); pin a kernel only to A/B */
     int32_t force_shift;    /* 0 = from the formula shape; 8 or 16 pins a split (A/B only) */
     int32_t vscan;          /* wave-kernel decision scan: 0 = default (on), 1 = on, -1 = off */
@@ -119,6 +121,17 @@ int32_t gpap_engine_k(const gpap_engine *e);
 int32_t gpap_engine_num_vars(const gpap_engine *e);
 int32_t gpap_engine_num_clauses(const gpap_engine *e);   /* TOTAL clauses (unit + bin + long) */
 int32_t gpap_engine_num_long(const gpap_engine *e);      /* packed-word clauses: the row width */
+
+/* The GPU backend. The engine reaches the device through one internal interface with a plug per
+ * GPU library: "cuda" (the default, the reference and the fast path) and "opencl" (the fixpoint
+ * kernels and the support kernels in OpenCL C: no trajectory, so no sampling, and no `_dev`
+ * pointers — docs/OPENCL.md). $GPAP_BACKEND chooses when an engine is created, so one
+ * process can hold engines on both. Under "opencl" the `device` option indexes the OpenCL
+ * devices, GPUs first. */
+const char *gpap_backend(void);    /* what a new engine would get; NULL (and an error) if
+                                    * $GPAP_BACKEND names no backend */
+const char *gpap_engine_backend(const gpap_engine *e);
+const char *gpap_engine_device_name(const gpap_engine *e);
 
 /* Restore K rows to the cached post-units-flush state (allocations reused when K matches), and
  * resolve GPAP_MODE_AUTO for this K — every entry point resets, so every entry point dispatches. */
@@ -482,9 +495,14 @@ void gpap_counters_reset(gpap_engine *e);
  * THE one implementation of "how big a batch fits" (cpp/src/calibrate.cpp); consumers in any
  * language call these rather than re-deriving the arithmetic. There is deliberately no
  * formula-bytes helper: gpap_mem_available() already reports memory free AFTER the formula was
- * uploaded, so deducting it again would double-count. */
+ * uploaded, so deducting it again would double-count.
+ * The engine-less queries here answer for the backend a NEW engine gets ($GPAP_BACKEND). Under
+ * opencl two things differ, because OpenCL cannot report them (docs/OPENCL.md): the budget
+ * starts from the device's TOTAL memory, and the resident-warp count is 0. The device also
+ * limits one buffer's size, which the engine's own sizers (probe, check, sampler) respect and
+ * gpap_compute_k_safe does not: size an explicit K for opencl with gpap_check_chunk_size. */
 
-/* Bytes available for new allocations (free VRAM minus a driver reserve, times `fraction`),
+/* Bytes available for new allocations (free memory minus a driver reserve, times `fraction`),
  * capped by GPAP_VRAM_BUDGET_MIB when that is set to a positive integer. The cap is for
  * CROSS-CARD REPRODUCTION — a memory-bound K sizes larger on a larger card — and is a ceiling
  * only: a card with less free memory still reports less. Unset = no cap. */
@@ -507,7 +525,8 @@ int32_t gpap_compute_k_safe(int32_t num_long, int32_t N, int64_t bytes, int32_t 
  * not a memory bound: gpap_compute_k_safe is what keeps a chunk inside VRAM. */
 int32_t gpap_default_k_cap(int device);
 /* Resident-warp count of the device (SMs x warps per SM) — the ceiling on rows a SCALAR launch
- * can have in flight at once, and so the small-batch term of the dispatch rule below. */
+ * can have in flight at once, and so the small-batch term of the dispatch rule below. 0 under
+ * opencl, so small formulas run SCALAR there at any batch. */
 int32_t gpap_resident_warps(int device);
 /* Which propagate kernel a chunk of `batch` rows of an M-clause formula should run: 1 = WAVE,
  * 0 = SCALAR. THE dispatch rule, defined once (cpp/src/calibrate.cpp); it keys off M, not the

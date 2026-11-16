@@ -2,17 +2,16 @@
  * should run. The one implementation — Python calls these through the ABI instead of mirroring
  * the arithmetic, because two copies of a memory model drift silently and the symptom is a spill,
  * not an error. The model is the ALLOCATION LIST of gpap_engine's per-chunk buffers, verified
- * against cuMemGetInfo deltas: if the engine allocates something, add it; if not, do not. */
-#include <cuda.h>
-
+ * against the driver's free-memory deltas: if the engine allocates something, add it; if not, do
+ * not. */
 #include <algorithm>
 #include <cstdint>
 #include <cstdlib>
 
-#include "gpap/gpap.h"
+#include "gpap_internal.hpp"
 
 namespace {
-/* Absolute slack between what cuMemGetInfo reports free and what we then allocate: `free` is a
+/* Absolute slack between what the driver reports free and what we then allocate: `free` is a
  * snapshot of somebody else's bookkeeping, and a paging driver or another process can take memory
  * back underneath us (`fraction` is the proportional margin). Flat on every platform on purpose:
  * making it conditional changes gpap_compute_k_safe's input, i.e. K, unvalidated. */
@@ -105,21 +104,20 @@ extern "C" int64_t gpap_row_bytes(int32_t num_long, int32_t N, int32_t trail_cap
            + GPAP_SLOTS;                                /* one selection mask per slot      */
 }
 
-extern "C" int64_t gpap_mem_available(int device, double fraction) {
-    CUdevice dev;
-    CUcontext ctx;
-    if (cuInit(0) != CUDA_SUCCESS) return 0;
-    if (cuDeviceGet(&dev, device) != CUDA_SUCCESS) return 0;
-    if (cuDevicePrimaryCtxRetain(&ctx, dev) != CUDA_SUCCESS) return 0;
-    cuCtxSetCurrent(ctx);
-    size_t free_b = 0, total_b = 0;
-    CUresult rc = cuMemGetInfo(&free_b, &total_b);
-    cuDevicePrimaryCtxRelease(dev);
-    if (rc != CUDA_SUCCESS) return 0;
-    const int64_t usable = std::max<int64_t>(0, (int64_t)free_b - kFreeVramReserveBytes);
+/* The one budget rule: reserve, fraction, cap. gpap_mem_available applies it to the device named
+ * by an ordinal; an engine applies it to the device it already holds. */
+int64_t gpap::mem_budget(int64_t free_bytes, double fraction) {
+    const int64_t usable = std::max<int64_t>(0, free_bytes - kFreeVramReserveBytes);
     const int64_t budget = (int64_t)(usable * fraction);
     const int64_t cap = env_budget_cap();
     return cap > 0 ? std::min(budget, cap) : budget;
+}
+
+extern "C" int64_t gpap_mem_available(int device, double fraction) {
+    const gpap::GpuDriver *driver = gpap::gpu_driver();
+    int64_t free_b = 0, total_b = 0;
+    if (!driver || driver->mem_info(device, &free_b, &total_b) != GPAP_OK) return 0;
+    return gpap::mem_budget(free_b, fraction);
 }
 
 extern "C" int32_t gpap_default_k_cap(int device) {
@@ -137,13 +135,8 @@ extern "C" int32_t gpap_compute_k_safe(int32_t num_long, int32_t N, int64_t byte
 }
 
 extern "C" int32_t gpap_resident_warps(int device) {
-    CUdevice dev;
-    if (cuInit(0) != CUDA_SUCCESS) return 0;
-    if (cuDeviceGet(&dev, device) != CUDA_SUCCESS) return 0;
-    int sms = 0, threads_per_sm = 0;
-    cuDeviceGetAttribute(&sms, CU_DEVICE_ATTRIBUTE_MULTIPROCESSOR_COUNT, dev);
-    cuDeviceGetAttribute(&threads_per_sm, CU_DEVICE_ATTRIBUTE_MAX_THREADS_PER_MULTIPROCESSOR, dev);
-    return sms * (threads_per_sm / 32);
+    const gpap::GpuDriver *driver = gpap::gpu_driver();
+    return driver ? driver->resident_warps(device) : 0;
 }
 
 /* Which propagate kernel should a chunk of `batch` rows of THIS formula run? 1 = WAVE, 0 = SCALAR.
@@ -159,9 +152,17 @@ extern "C" int32_t gpap_resident_warps(int device) {
  * mid-size formula sitting at the batch cap. A/B at fixed K: docs/findings/KERNEL_AB_FINDINGS.md.
  * The batch term survives only for the regime M cannot speak for: a batch too small to fill even
  * one warp per SM, where SCALAR's extra rows do not exist to be had. */
-extern "C" int32_t gpap_dispatch_wave(int32_t num_clauses, int32_t batch, int device) {
+int32_t gpap::dispatch_wave(const gpap::GpuDriver *driver, int32_t num_clauses, int32_t batch,
+                            int device) {
+    if (!driver) return 0;
     if (num_clauses >= kWaveMinClauses) return 1;
-    /* Only the small-M path needs the device query, so the common case costs nothing. */
-    const int32_t resident = gpap_resident_warps(device);
+    /* Only the small-M path needs the device query, so the common case costs nothing. A
+     * library that cannot answer it (0) keeps small formulas on SCALAR. */
+    const int32_t resident = driver->resident_warps(device);
     return (resident > 0 && batch <= resident) ? 1 : 0;
+}
+
+/* The rule for the backend a NEW engine would get ($GPAP_BACKEND). An engine asks its own. */
+extern "C" int32_t gpap_dispatch_wave(int32_t num_clauses, int32_t batch, int device) {
+    return gpap::dispatch_wave(gpap::gpu_driver(), num_clauses, batch, device);
 }

@@ -161,13 +161,18 @@ class Engine {
     }
     Mode mode() const { return static_cast<Mode>(gpap_engine_mode(h_)); }
     bool auto_dispatch() const { return gpap_engine_auto(h_) != 0; }
+    /** The GPU library this engine runs on ("cuda" | "opencl") and its device. */
+    std::string backend() const { return gpap_engine_backend(h_); }
+    std::string device_name() const { return gpap_engine_device_name(h_); }
     std::int32_t shift() const { return gpap_engine_shift(h_); }
     std::int32_t k() const { return gpap_engine_k(h_); }
     std::int32_t num_vars() const { return gpap_engine_num_vars(h_); }
     std::int32_t num_clauses() const { return gpap_engine_num_clauses(h_); }
     bool flush_conflict() const { return gpap_engine_flush_conflict(h_) != 0; }
 
-    /** Which kernel a batch of `K` rows runs: a pure query; reset() resolves Auto on its own. */
+    /** Which kernel a batch of `K` rows runs: a pure query; reset() resolves Auto on its own.
+     *  The rule is asked of the backend $GPAP_BACKEND names now: this engine's, unless the
+     *  variable changed since it was created. */
     Mode plan_for(std::int32_t K) const {
         if (!gpap_engine_auto(h_)) return mode();
         return gpap_dispatch_wave(gpap_engine_num_clauses(h_), K, device_)

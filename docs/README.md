@@ -12,6 +12,7 @@
 | call GPAP from C or C++ | [../cpp/README.md](../cpp/README.md) |
 | start from working code | [../examples/](../examples/) and [../cpp/examples/](../cpp/examples/) |
 | understand how the engine works and what it guarantees | [ENGINE.md](ENGINE.md) |
+| run the engine through OpenCL instead of CUDA | [OPENCL.md](OPENCL.md) |
 | measure GPAP, or compare it with another sampler, without fooling yourself | [BENCHMARKING.md](BENCHMARKING.md) |
 | run an evaluation campaign of your own: GPAP against CMSGen and the GPU samplers | [EVAL_RUNBOOK.md](EVAL_RUNBOOK.md) |
 

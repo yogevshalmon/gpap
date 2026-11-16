@@ -6,8 +6,11 @@
 > **Measured:** 2026-07-29, after the libgpap port. Hardware-independent by subject: it is about
 > other vendors' GPUs, and no GPAP rate appears in it. The gfx cross-compile result predates
 > CLEAN mode and `tl.gather` — re-run it before quoting.
-> **Rule lives in:** nowhere — nothing here is implemented. `cpp/tools/make_libcuda_stub.py` is
-> the executable inventory of the CUDA surface this file sizes.
+> **Rule lives in:** nowhere — no vendor port here is implemented. `GPAP_CU_FUNCTIONS` in
+> `cpp/src/gpu_cuda.cpp` is the executable inventory of the CUDA surface this file sizes.
+> **Since 2026-11-13:** the interface §6 recommends exists (`cpp/src/gpu_api.hpp`, with a CUDA
+> plug and an OpenCL one: [OPENCL_FINDINGS.md](OPENCL_FINDINGS.md)); §1's line counts describe
+> the code before it.
 > **Record only:** the port estimates and the recommendation.
 
 Short answer: AMD and Intel are a small port the current design already anticipates. Apple is
@@ -29,8 +32,8 @@ cuModuleLoadData  cuModuleGetFunction  cuModuleUnload  cuLaunchKernel  cuGetErro
 
 Init, query, allocate, copy, load a binary, launch. Every one has a direct counterpart in HIP,
 Level Zero, Metal and WebGPU. The formula builder, the K calibrator's arithmetic, selections and
-all orchestration are plain C++. `cpp/tools/make_libcuda_stub.py` is the executable inventory of
-this surface.
+all orchestration are plain C++. `GPAP_CU_FUNCTIONS` (`cpp/src/gpu_cuda.cpp`) is the executable
+inventory of this surface.
 
 ## 2. What is coupled to NVIDIA in the kernels: nothing obvious
 
