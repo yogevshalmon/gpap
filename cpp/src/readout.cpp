@@ -182,6 +182,8 @@ extern "C" gpap_status gpap_assignment_rows(gpap_engine *e, int32_t slot, int8_t
         32, (int64_t)(engine_readout_slice_bytes() / (size_t)std::max(two_n, 1)));
     step = (step / 32) * 32;
     if (step <= 0) step = 32;
+    /* No single-buffer check needed: these rows are the batch's, and a row's 2N bytes here are
+     * fewer than its trail's 4N, a buffer engine_batch already keeps under the device's limit. */
     GPAP_TRY(e->staging_b.reserve(e->gpu.get(), (size_t)std::min(step, n_rows) * (size_t)two_n));
 
     for (int32_t r0 = 0; r0 < n_rows; r0 += step) {

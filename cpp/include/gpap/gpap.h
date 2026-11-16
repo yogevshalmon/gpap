@@ -7,11 +7,11 @@
  * assumption checking, gpap_engine_reset + gpap_engine_apply; (2) fused trajectory sampling,
  * gpap_engine_reset + gpap_engine_trajectory.
  *
- * The library owns every device allocation (driver API) and links against libcuda only. An
- * engine is not thread-safe (one per thread); calls run on the legacy default stream of the
- * device's primary context, so they interoperate with any CUDA runtime user in the process.
- * (That is the default backend. $GPAP_BACKEND=opencl runs part of the engine through OpenCL,
- * opened at run time: see gpap_backend below.)
+ * The library owns every device allocation and links no GPU library: it opens libcuda, or the
+ * OpenCL library under $GPAP_BACKEND=opencl (part of the engine: see gpap_backend below), at
+ * run time. An engine is not thread-safe (one per thread); on CUDA, calls run on the legacy
+ * default stream of the device's primary context, so they interoperate with any CUDA runtime
+ * user in the process.
  * Every call returns gpap_status; gpap_last_error() gives a thread-local message. */
 #ifndef GPAP_H
 #define GPAP_H
