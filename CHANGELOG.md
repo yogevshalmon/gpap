@@ -6,6 +6,28 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). The
 follows the rule in [CONTRIBUTING.md](CONTRIBUTING.md): an ABI break moves its soname, an additive
 change does not.
 
+## Unreleased
+
+### Engine
+- An OpenCL backend, selected with `GPAP_BACKEND=opencl` ([docs/OPENCL.md](docs/OPENCL.md)). It
+  runs batched assumption checking, probing, mining and the readouts on an OpenCL device (a GPU
+  of any vendor, or a CPU), from OpenCL C kernels (`cpp/kernels/bcp.cl`) compiled on the
+  device: the scalar and the WAVE propagate kernel, each with CLEAN mode. It does not sample:
+  `gpap sample` and `gpap_sampler_create` refuse up front. `GPAP_OPENCL_LIB` names the OpenCL
+  library. CUDA stays the default, the reference and the fast path.
+- libgpap no longer links `libcuda`: it opens the NVIDIA driver at run time
+  (`GPAP_CUDA_LIB` names another), so it builds and loads without it, and the CI stub is gone.
+  The CLI and the Python faces run on the OpenCL backend without a CUDA device.
+- The engine reaches the GPU through one internal interface (`cpp/src/gpu_api.hpp`) with a plug
+  per GPU library. Nothing changes on CUDA: same-seed runs give the same models. A CUDA tensor
+  given to an OpenCL engine goes through a host copy.
+- Additive ABI, same soname: `gpap_backend`, `gpap_engine_backend`, `gpap_engine_device_name`.
+  `GPAP_ERR_CUDA` now means a failed GPU driver call on either backend; the Python faces' texts
+  for codes 2 and 5 read "GPU driver error" and "missing kernel".
+- `scripts/setup_opencl.sh` installs a pinned OpenCL runtime without root where the system has
+  none (PoCL: its CPU driver, or its CUDA driver for WSL2).
+- `mine_entailed` raises when its engine cannot be built, instead of returning no clauses.
+
 ## 0.3.1 — 2026-10-23, the TACAS 2027 artifact
 
 The engine is unchanged: libgpap is still 0.3.0, and the sampler is the one that measured the

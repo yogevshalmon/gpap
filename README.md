@@ -106,7 +106,8 @@ gpap sample benchmarks/circuits/bench/seq/b10.bench --cycles 25 -n 50000 --out s
 
 > [!IMPORTANT]
 > An NVIDIA GPU is required. There is no CPU path. This is a design decision, not a gap: the
-> whole point is the batch.
+> whole point is the batch. (Mining and assumption checking also run on other GPUs through
+> OpenCL: [docs/OPENCL.md](docs/OPENCL.md).)
 
 ## Quickstart: Python
 
