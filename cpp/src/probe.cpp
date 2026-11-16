@@ -136,9 +136,10 @@ int32_t probe_batch(gpap_engine *e, int32_t k, int64_t n_tuples, int32_t request
     if (requested > 0) return static_cast<int32_t>(std::min<int64_t>(requested, n_tuples));
     const int64_t per_row =
         gpap_row_bytes(e->num_long, e->num_vars, e->trail_cap) + 8ll * std::max(k, 1);
-    const int64_t budget = gpap_mem_available(e->device_ordinal, gpap::kMemFraction);
+    const int64_t budget = gpap::engine_mem_budget(e);
     int64_t b = per_row > 0 ? budget / per_row : 1;
     b = std::min<int64_t>(b, gpap_default_k_cap(e->device_ordinal));
+    b = std::min<int64_t>(b, gpap::engine_row_limit(e, 8ll * std::max(k, 1)));
     b = std::min<int64_t>(b, n_tuples);
     return static_cast<int32_t>(std::max<int64_t>(1, b));
 }

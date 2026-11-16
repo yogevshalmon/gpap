@@ -3,15 +3,16 @@
 > **Reader:** C and C++ users of libgpap — the entry points, the two API tiers, and how to build and link against it.
 
 The K-parallel packed BCP engine (`docs/ENGINE.md`) as a shared library with a C ABI, linkable from
-C++ and driven from Python. The kernels are not rewritten: [`kernels/bcp.py`](kernels/bcp.py) stays
-the single source of truth, AOT-compiled into embedded cubins (bit-identical at SASS level to the
-Triton JIT's).
+C++ and driven from Python. [`kernels/bcp.py`](kernels/bcp.py) is the reference, AOT-compiled
+into embedded cubins (bit-identical at SASS level to the Triton JIT's); the OpenCL backend's
+[`kernels/bcp.cl`](kernels/bcp.cl) follows it.
 
 ## Build
 
 Requirements are deliberately thin — no CUDA toolkit, no nvcc: a C++17 compiler + CMake for the
-host library; `libcuda.so.1`, the CUDA *driver* that ships with the NVIDIA driver; `cuda.h`, from
-the toolkit if present and else from the triton wheel; and Python + triton at build time only, for the AOT kernel compile.
+host library; `cuda.h`, from the toolkit if present and else from the triton wheel; and Python +
+triton at build time only, for the AOT kernel compile. The NVIDIA driver is needed only to run
+the `cuda` backend: libgpap opens `libcuda.so.1` at run time, so it builds and loads without it.
 
 ```bash
 scripts/build_core.sh                    # both steps below, with diagnostics
@@ -35,6 +36,20 @@ whenever a kernel changes — the only step that regenerates GPU code.
 
 The library is 0.3.0 / SOVERSION 1: an ABI break must move the soname, an additive change must not
 (0.3.0 added `gpap_sampler_*`, changing no existing symbol).
+
+## Backends
+
+The engine reaches the GPU through one internal interface, [`src/gpu_api.hpp`](src/gpu_api.hpp),
+with a plug per GPU library. `GPAP_BACKEND` chooses when an engine is created:
+
+- `cuda` (the default): the driver API and the Triton kernels above. The reference and the fast
+  path; everything in this file.
+- `opencl`: [`kernels/bcp.cl`](kernels/bcp.cl), compiled on the device at first use. It covers
+  batched checking, probing and the readouts, not sampling. Nothing is needed at build time; at
+  run time it opens `libOpenCL.so.1`, on any OpenCL device, with or without the NVIDIA driver.
+  See [docs/OPENCL.md](../docs/OPENCL.md).
+
+`gpap_backend()`, `gpap_engine_backend(e)` and `gpap_engine_device_name(e)` say which is in use.
 
 ## Tier 1 — the whole API for the normal case
 
@@ -159,8 +174,10 @@ helper kernels in [kernels/helpers.py](kernels/helpers.py).
 (DIMACS, occurrence CSR, packed word), `engine.cpp` (state, the two entry points), `sample.cpp`
 (the sampling loop), `check.cpp` (the checker's chunk loop), `probe.cpp` (paged k-subset probing),
 `calibrate.cpp` (memory model, K sizing, wave/scalar dispatch), `readout.cpp` (selections),
-`runtime.cpp` (cubins and launches). `kernels/helpers.py` holds the support kernels in Triton, so
-the toolchain stays nvcc-free; `tools/build_kernels.py` is the AOT compiler.
+`gpu_api.hpp` (the GPU socket), `gpu_cuda.cpp` (cubins and launches), `gpu_opencl.cpp` (the
+OpenCL plug), `runtime.cpp` (errors, the backend choice, the build id). `kernels/helpers.py` holds
+the support kernels in Triton, so the toolchain stays nvcc-free; `tools/build_kernels.py` is the
+AOT compiler; `kernels/bcp.cl` is the OpenCL C source the OpenCL plug compiles.
 
 Examples: [`examples/sample.cpp`](examples/sample.cpp) (`gpap::Sampler`),
 [`examples/assumptions.cpp`](examples/assumptions.cpp) (`gpap::AssumptionChecker`),

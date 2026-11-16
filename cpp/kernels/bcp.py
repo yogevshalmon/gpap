@@ -63,7 +63,7 @@ def _propagate(st_row, ab_row, trail_row, occ_off_ptr, occ_mid_ptr, occ_cls_ptr,
                     tl.store(trail_row + tail, forced)
                     tail += 1
                 else:
-                    conflict = 1                    # structurally unreachable (cap >= N+B)
+                    conflict = 1        # unreachable: a variable enters the trail once, cap >= N
             o += 1
         o = mid
         while (o < end) & (conflict == 0):          # long suffix: packed clause words

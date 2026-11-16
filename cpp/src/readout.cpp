@@ -7,20 +7,18 @@
 #include <string>
 #include <vector>
 
+using gpap::buf;
 using gpap::DevBuf;
-using gpap::Kernel;
-using gpap::launch;
+using gpap::i32;
 using gpap::set_error;
 
 namespace gpap {
 gpap_status engine_use_ctx(gpap_engine *e);
-gpap_status engine_stage(DevBuf &buf, const void *host, size_t n);
+gpap_status engine_stage(gpap_engine *e, DevBuf &dst, const void *host, size_t n);
 gpap_status engine_ensure_rows(gpap_engine *e, int32_t slot);
 size_t engine_readout_slice_bytes();
-unsigned engine_ceil_div(int64_t a, int64_t b);
 }  // namespace gpap
 
-using gpap::engine_ceil_div;
 using gpap::engine_ensure_rows;
 using gpap::engine_readout_slice_bytes;
 using gpap::engine_stage;
@@ -30,11 +28,8 @@ namespace {
 
 /* Reduce an (n,) int8 flag array into e->scratch_i32[0] and read it back (one sync). */
 gpap_status reduce_flags(gpap_engine *e, DevBuf &flags, int32_t n, int32_t *out) {
-    Kernel k;
-    GPAP_TRY(e->kernels.get("sum_i8_to", &k));
-    GPAP_TRY(launch(k, 1, 1, {&flags.ptr, &n, &e->scratch_i32.ptr}));
-    GPAP_CU(cuMemcpyDtoH(out, e->scratch_i32.ptr, sizeof(int32_t)));
-    return GPAP_OK;
+    GPAP_TRY(e->gpu->run("sum_i8_to", 1, 1, {buf(flags), i32(n), buf(e->scratch_i32)}));
+    return e->gpu->download(out, e->scratch_i32.ptr, 0, sizeof(int32_t));
 }
 
 }  // namespace
@@ -54,13 +49,13 @@ extern "C" gpap_status gpap_pair_mask_create(gpap_engine *e, const int32_t *vars
         }
         bits[(size_t)(v >> 4)] |= 1u << (2 * (v & 15));
     }
-    DevBuf *buf = new DevBuf();
-    gpap_status st = engine_stage(*buf, bits.data(), bits.size() * sizeof(uint32_t));
+    DevBuf *mask = new DevBuf();
+    gpap_status st = engine_stage(e, *mask, bits.data(), bits.size() * sizeof(uint32_t));
     if (st != GPAP_OK) {
-        delete buf;
+        delete mask;
         return st;
     }
-    e->pair_masks.push_back(buf);
+    e->pair_masks.push_back(mask);
     *mask_id_out = (int32_t)e->pair_masks.size() - 1;
     return GPAP_OK;
 }
@@ -71,14 +66,11 @@ extern "C" gpap_status gpap_select_complete(gpap_engine *e, int32_t mask_id, int
         return GPAP_ERR_ARG;
     GPAP_TRY(engine_use_ctx(e));
     Selection &s = e->slots[slot];
-    GPAP_TRY(s.mask.reserve((size_t)e->K));
+    GPAP_TRY(s.mask.reserve(e->gpu.get(), (size_t)e->K));
 
-    Kernel k;
-    GPAP_TRY(e->kernels.get("complete_mask", &k));
-    int32_t NW = e->nw;
-    GPAP_TRY(launch(k, (unsigned)e->K, 1,
-                    {&e->abits.ptr, &e->pair_masks[(size_t)mask_id]->ptr, &e->active.ptr,
-                     &s.mask.ptr, &NW}));
+    GPAP_TRY(e->gpu->run("complete_mask", e->K, 1,
+                         {buf(e->abits), buf(*e->pair_masks[(size_t)mask_id]), buf(e->active),
+                          buf(s.mask), i32(e->nw)}));
     s.rows_valid = false;
     s.selected = true;
     GPAP_TRY(reduce_flags(e, s.mask, e->K, &s.count));
@@ -103,7 +95,8 @@ extern "C" gpap_status gpap_selection_set(gpap_engine *e, int32_t slot, const in
      * would pair the NEW count with the OLD device rows, with no error downstream. */
     s.rows_valid = false;
     s.selected = true;
-    GPAP_TRY(engine_stage(s.rows, s.host_rows.data(), s.host_rows.size() * sizeof(int32_t)));
+    GPAP_TRY(engine_stage(e, s.rows, s.host_rows.data(),
+                          s.host_rows.size() * sizeof(int32_t)));
     s.rows_valid = true;
     return GPAP_OK;
 }
@@ -132,15 +125,13 @@ extern "C" gpap_status gpap_check_sound(gpap_engine *e, int32_t slot, int32_t ma
     *n_unsound_out = 0;
     if (n == 0) return GPAP_OK;
 
-    GPAP_TRY(e->staging_b.reserve((size_t)n));
-    Kernel k;
-    GPAP_TRY(e->kernels.get("sound_rows.s" + std::to_string(e->shift), &k));
+    GPAP_TRY(e->staging_b.reserve(e->gpu.get(), (size_t)n));
     /* Long clauses against their packed words, binary/unit against the bitmap via the
      * (n_pairs, 2) pair list (helpers.py::sound_rows). */
-    int32_t M = e->num_long, NW = e->nw, NP = e->n_pairs;
-    GPAP_TRY(launch(k, (unsigned)n, 1,
-                    {&e->packed.ptr, &e->abits.ptr, &s.rows.ptr, &M, &NW, &e->pair_check.ptr,
-                     &NP, &e->staging_b.ptr}));
+    const std::string key = "sound_rows.s" + std::to_string(e->shift);
+    GPAP_TRY(e->gpu->run(key.c_str(), n, 1,
+                         {buf(e->packed), buf(e->abits), buf(s.rows), i32(e->num_long), i32(e->nw),
+                          buf(e->pair_check), i32(e->n_pairs), buf(e->staging_b)}));
     return reduce_flags(e, e->staging_b, n, n_unsound_out);
 }
 
@@ -156,26 +147,23 @@ extern "C" gpap_status gpap_var_bits(gpap_engine *e, int32_t slot, const int32_t
     /* Zero rows or columns are legal: a fully determined formula has nothing to gather. */
     if (n_rows == 0 || n_cols == 0) return GPAP_OK;
 
-    GPAP_TRY(engine_stage(e->staging_a, cols, (size_t)n_cols * sizeof(int32_t)));
+    GPAP_TRY(engine_stage(e, e->staging_a, cols, (size_t)n_cols * sizeof(int32_t)));
     /* Slice the rows so the (rows, n_cols) transient stays bounded. */
     const int64_t per_row = n_cols;
     int32_t step = (int32_t)std::max<int64_t>(
         32, (int64_t)(engine_readout_slice_bytes() / (size_t)std::max<int64_t>(per_row, 1)));
     step = (step / 32) * 32;                 /* keep the row-pointer offset 16-byte aligned */
     if (step <= 0) step = 32;
-    GPAP_TRY(e->staging_b.reserve((size_t)std::min(step, n_rows) * (size_t)n_cols));
+    GPAP_TRY(e->staging_b.reserve(e->gpu.get(), (size_t)std::min(step, n_rows) * (size_t)n_cols));
 
-    Kernel k;
-    GPAP_TRY(e->kernels.get("var_bits", &k));
-    int32_t NW = e->nw, ncols = n_cols;
     for (int32_t r0 = 0; r0 < n_rows; r0 += step) {
         const int32_t rows = std::min(step, n_rows - r0);
-        CUdeviceptr rows_ptr = s.rows.ptr + (size_t)r0 * sizeof(int32_t);
-        GPAP_TRY(launch(k, (unsigned)rows, engine_ceil_div(n_cols, 256),
-                        {&e->abits.ptr, &rows_ptr, &e->staging_a.ptr, &e->staging_b.ptr, &ncols,
-                         &NW}));
-        GPAP_CU(cuMemcpyDtoH(out_host + (size_t)r0 * n_cols, e->staging_b.ptr,
-                             (size_t)rows * n_cols));
+        /* this slice's rows: an input view into the selection's row list */
+        GPAP_TRY(e->gpu->run("var_bits", rows, n_cols,
+                             {buf(e->abits), buf(s.rows, (size_t)r0 * sizeof(int32_t)),
+                              buf(e->staging_a), buf(e->staging_b), i32(n_cols), i32(e->nw)}));
+        GPAP_TRY(e->gpu->download(out_host + (size_t)r0 * n_cols, e->staging_b.ptr, 0,
+                                  (size_t)rows * n_cols));
     }
     return GPAP_OK;
 }
@@ -194,18 +182,15 @@ extern "C" gpap_status gpap_assignment_rows(gpap_engine *e, int32_t slot, int8_t
         32, (int64_t)(engine_readout_slice_bytes() / (size_t)std::max(two_n, 1)));
     step = (step / 32) * 32;
     if (step <= 0) step = 32;
-    GPAP_TRY(e->staging_b.reserve((size_t)std::min(step, n_rows) * (size_t)two_n));
+    GPAP_TRY(e->staging_b.reserve(e->gpu.get(), (size_t)std::min(step, n_rows) * (size_t)two_n));
 
-    Kernel k;
-    GPAP_TRY(e->kernels.get("unpack_rows", &k));
-    int32_t NW = e->nw, tn = two_n;
     for (int32_t r0 = 0; r0 < n_rows; r0 += step) {
         const int32_t rows = std::min(step, n_rows - r0);
-        CUdeviceptr rows_ptr = s.rows.ptr + (size_t)r0 * sizeof(int32_t);
-        GPAP_TRY(launch(k, (unsigned)rows, engine_ceil_div(two_n, 1024),
-                        {&e->abits.ptr, &rows_ptr, &e->staging_b.ptr, &tn, &NW}));
-        GPAP_CU(cuMemcpyDtoH(out_host + (size_t)r0 * two_n, e->staging_b.ptr,
-                             (size_t)rows * two_n));
+        GPAP_TRY(e->gpu->run("unpack_rows", rows, two_n,
+                             {buf(e->abits), buf(s.rows, (size_t)r0 * sizeof(int32_t)),
+                              buf(e->staging_b), i32(two_n), i32(e->nw)}));
+        GPAP_TRY(e->gpu->download(out_host + (size_t)r0 * two_n, e->staging_b.ptr, 0,
+                                  (size_t)rows * two_n));
     }
     return GPAP_OK;
 }
@@ -218,8 +203,8 @@ extern "C" gpap_status gpap_flags(gpap_engine *e, int8_t *active_out, int8_t *co
         return GPAP_ERR_ARG;
     }
     GPAP_TRY(engine_use_ctx(e));
-    if (active_out) GPAP_CU(cuMemcpyDtoH(active_out, e->active.ptr, (size_t)e->K));
-    if (conflict_out) GPAP_CU(cuMemcpyDtoH(conflict_out, e->conflict.ptr, (size_t)e->K));
+    if (active_out) GPAP_TRY(e->gpu->download(active_out, e->active.ptr, 0, (size_t)e->K));
+    if (conflict_out) GPAP_TRY(e->gpu->download(conflict_out, e->conflict.ptr, 0, (size_t)e->K));
     return GPAP_OK;
 }
 
@@ -232,8 +217,8 @@ extern "C" gpap_status gpap_num_propagated(gpap_engine *e, int32_t *out_host,
     }
     GPAP_TRY(engine_use_ctx(e));
     std::vector<int32_t> decs((size_t)e->K);
-    GPAP_CU(cuMemcpyDtoH(out_host, e->nprops.ptr, (size_t)e->K * sizeof(int32_t)));
-    GPAP_CU(cuMemcpyDtoH(decs.data(), e->ndecs.ptr, (size_t)e->K * sizeof(int32_t)));
+    GPAP_TRY(e->gpu->download(out_host, e->nprops.ptr, 0, (size_t)e->K * sizeof(int32_t)));
+    GPAP_TRY(e->gpu->download(decs.data(), e->ndecs.ptr, 0, (size_t)e->K * sizeof(int32_t)));
     for (int32_t i = 0; i < e->K; ++i) out_host[i] -= decs[(size_t)i];   /* implications */
     return GPAP_OK;
 }
@@ -255,11 +240,13 @@ extern "C" gpap_status gpap_sat_rows(gpap_engine *e, const int32_t *rows, int32_
     for (int32_t i = 0; i < n_rows; ++i) {
         if (rows[i] < 0 || rows[i] >= e->K) return GPAP_ERR_ARG;
         if (ML)
-            GPAP_CU(cuMemcpyDtoH(lw.data(), e->packed.ptr + (size_t)rows[i] * ML * sizeof(int32_t),
-                                 (size_t)ML * sizeof(int32_t)));
+            GPAP_TRY(e->gpu->download(lw.data(), e->packed.ptr,
+                                      (size_t)rows[i] * ML * sizeof(int32_t),
+                                      (size_t)ML * sizeof(int32_t)));
         if (need_bits)
-            GPAP_CU(cuMemcpyDtoH(aw.data(), e->abits.ptr + (size_t)rows[i] * e->nw * sizeof(int32_t),
-                                 (size_t)e->nw * sizeof(int32_t)));
+            GPAP_TRY(e->gpu->download(aw.data(), e->abits.ptr,
+                                      (size_t)rows[i] * e->nw * sizeof(int32_t),
+                                      (size_t)e->nw * sizeof(int32_t)));
         auto not_falsified = [&](int32_t li) -> int32_t {
             const int32_t neg = li ^ 1;
             return (int32_t)(1u - ((aw[(size_t)(neg >> 5)] >> (neg & 31)) & 1u));
@@ -290,9 +277,9 @@ extern "C" gpap_status gpap_packed_rows(gpap_engine *e, const int32_t *rows, int
     for (int32_t i = 0; i < n_rows; ++i) {
         if (rows[i] < 0 || rows[i] >= e->K) return GPAP_ERR_ARG;
         if (M)
-            GPAP_CU(cuMemcpyDtoH(out_host + (size_t)i * M,
-                                 e->packed.ptr + (size_t)rows[i] * M * sizeof(int32_t),
-                                 (size_t)M * sizeof(int32_t)));
+            GPAP_TRY(e->gpu->download(out_host + (size_t)i * M, e->packed.ptr,
+                                      (size_t)rows[i] * M * sizeof(int32_t),
+                                      (size_t)M * sizeof(int32_t)));
     }
     return GPAP_OK;
 }
@@ -301,7 +288,8 @@ extern "C" gpap_status gpap_engine_flushed_assignment(gpap_engine *e, int8_t *ou
     if (!e || !out_host) return GPAP_ERR_ARG;
     GPAP_TRY(engine_use_ctx(e));
     std::vector<uint32_t> words((size_t)e->nw);
-    GPAP_CU(cuMemcpyDtoH(words.data(), e->abits_flushed.ptr, (size_t)e->nw * sizeof(uint32_t)));
+    GPAP_TRY(e->gpu->download(words.data(), e->abits_flushed.ptr, 0,
+                              (size_t)e->nw * sizeof(uint32_t)));
     const int32_t two_n = 2 * e->num_vars;
     for (int32_t l = 0; l < two_n; ++l)
         out_host[l] = (int8_t)((words[(size_t)(l >> 5)] >> (l & 31)) & 1u);

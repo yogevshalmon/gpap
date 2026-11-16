@@ -115,9 +115,10 @@ namespace {
 
 int32_t auto_k(gpap_engine *e, int32_t k_cap) {
     const int32_t cap = k_cap == 0 ? gpap_default_k_cap(e->device_ordinal) : k_cap;
-    const int64_t bytes = gpap_mem_available(e->device_ordinal, gpap::kMemFraction);
+    const int64_t bytes = gpap::engine_mem_budget(e);
     /* num_long, never num_clauses: only length>=3 clauses carry per-row state. */
-    return gpap_compute_k_safe(e->num_long, e->num_vars, bytes, cap);
+    return std::min(gpap_compute_k_safe(e->num_long, e->num_vars, bytes, cap),
+                    gpap::engine_row_limit(e, 0));
 }
 
 /* Pin the propagate kernel to the batch the chunks will run, so a short reset elsewhere cannot
@@ -130,8 +131,7 @@ gpap_status pin_mode(gpap_sampler *s) {
         if (!s->we_pinned_mode) return GPAP_OK;
         if (s->e->mode != s->pinned_mode) { s->we_pinned_mode = 0; return GPAP_OK; }
     }
-    const int wave = gpap_dispatch_wave(s->e->num_clauses, s->K, s->e->device_ordinal);
-    s->pinned_mode = wave ? GPAP_MODE_WAVE : GPAP_MODE_SCALAR;
+    s->pinned_mode = gpap::dispatch_mode(s->e, s->K);
     s->we_pinned_mode = 1;
     return gpap_engine_set_mode(s->e, s->pinned_mode);
 }
@@ -171,6 +171,7 @@ extern "C" gpap_status gpap_sampler_create(gpap_engine *e, int64_t seed, int32_t
     }
     *out = nullptr;
     return gpap::guard_entry("gpap_sampler_create", [&]() -> gpap_status {
+        GPAP_TRY(gpap::engine_require_trajectory(e));
         gpap_sampler *s = new gpap_sampler();
         s->e = e;
         s->k_cap = k_cap;

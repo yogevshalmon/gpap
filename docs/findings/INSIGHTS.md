@@ -16,6 +16,7 @@ again before relying on it, or before calling the direction closed.
 
 | topic | file |
 |---|---|
+| the OpenCL backend and the GPU socket (2026-11-13) | [OPENCL_FINDINGS.md](OPENCL_FINDINGS.md) |
 | binary clauses as edges (2026-08-27) | [BINARY_OCC_FINDINGS.md](BINARY_OCC_FINDINGS.md) |
 | the WAVE shuffle lane schedule (2026-08-27) | [WAVE_SHUFFLE_FINDINGS.md](WAVE_SHUFFLE_FINDINGS.md) |
 | CLEAN mode: design and lemmas | [CLEAN_MODE_FINDINGS.md](CLEAN_MODE_FINDINGS.md) |
@@ -35,10 +36,25 @@ again before relying on it, or before calling the direction closed.
 | the 2026-08 L4 campaign | [L4_EVAL_FINDINGS.md](L4_EVAL_FINDINGS.md) | superseded by protocol v1.0; its screens survive in `paper_tables.py` |
 | the sampler's development log | [GPU_SAMPLING_FINDINGS.md](GPU_SAMPLING_FINDINGS.md) | the only record of seven retired configurations, judged on the June engine ↻ |
 | GPU inprocessing for CDCL, retired | [ELS_INPROCESSING_FINDINGS.md](ELS_INPROCESSING_FINDINGS.md) | the only record of a deleted subsystem, measured on the pure-PyTorch engine ↻ |
-| porting to AMD / Intel / Apple | [PORTABILITY.md](PORTABILITY.md) | an analysis; nothing in it is implemented |
+| porting to AMD / Intel / Apple | [PORTABILITY.md](PORTABILITY.md) | an analysis; only the interface of its §6 is implemented (2026-11-13) |
 
 ## Engine & memory model
 
+- **The GPU socket costs the CUDA path nothing (2026-11-16):** probing at 1.00 of the base's
+  rate, sampling within noise, the same results. [OPENCL](OPENCL_FINDINGS.md) §14
+- **OpenCL on a CPU probes at a quarter of a laptop GPU, with SCALAR (2026-11-15).** The
+  automatic choice takes WAVE there, at half that; the guide says to pin SCALAR.
+  [OPENCL](OPENCL_FINDINGS.md) §13
+- **Past 100k clauses the OpenCL kernel is at 0.95 of CUDA's; the batch is the gap
+  (2026-11-15).** One buffer's size limit caps the trail, so OpenCL gets 0.59 of CUDA's rows and
+  0.83 to 0.86 of its rate. Kept as is. [OPENCL](OPENCL_FINDINGS.md) §12
+- **A probe chunk waits for its deepest row (2026-11-14).** Sorting tuples by depth gains up to
+  5.5 on OpenCL and 2.4 on CUDA; a per-row probe queue measured 2 to 9 times CUDA in chunks and
+  is to be built in Triton first (GitHub issue 58). [OPENCL](OPENCL_FINDINGS.md) §10
+- **The engine names no GPU library; OpenCL is a second plug (2026-11-13).** Every device
+  operation goes through `cpp/src/gpu_api.hpp`; libgpap opens libcuda at run time, so it builds
+  and runs without the NVIDIA driver; the OpenCL backend mines byte-identical clauses.
+  [OPENCL](OPENCL_FINDINGS.md) §1, §11
 - **Three path roots, one owner each (2026-09-13).** `.gpap/` holds machinery and all scratch
   (`gpap/paths.py`), `.experiments/` a run's output and `$GPAP_RESULTS` the record
   (`eval/paths.py`); nothing else names them, and shell asks Python instead of re-deriving them

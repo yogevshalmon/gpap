@@ -8,7 +8,7 @@
 ```bash
 python -m venv .venv && . .venv/bin/activate
 pip install -e ".[build,dev]"      # triton to build the kernels; pytest, ruff, python-sat
-scripts/build_core.sh              # builds libgpap; needs cmake, a C++17 compiler, the NVIDIA driver
+scripts/build_core.sh              # builds libgpap; needs cmake and a C++17 compiler
 gpap info                          # confirms the library loads and sees the GPU
 
 pytest -m "not gpu and not slow"   # host-only checks, no GPU needed (this is what CI runs)
@@ -18,7 +18,11 @@ ruff check .
 ```
 
 No CUDA toolkit is needed: the kernels are written in Triton and compiled ahead of time into the
-library, which links against the driver's `libcuda` alone. There is no CPU execution path.
+library, which opens the driver's `libcuda` at run time. There is no CPU execution path on CUDA.
+A second backend runs part of the engine through OpenCL (`GPAP_BACKEND=opencl`,
+[docs/OPENCL.md](docs/OPENCL.md)), on any OpenCL device and without the NVIDIA driver; it needs
+nothing at build time, and `scripts/setup_opencl.sh` installs a runtime where the system has
+none.
 Optional tools build from pinned sources: `scripts/build_abc.sh` (the ABC circuit encoder),
 `scripts/build_cmsgen.sh` (CMSGen, for comparisons) and `scripts/fetch_benchmarks.sh`.
 
@@ -29,9 +33,12 @@ cpp/                     the engine: libgpap, a C ABI and a header-only C++ wrap
   include/gpap/gpap.h    the C ABI: formula, engine, selections, readout, counters, sizing
   include/gpap/gpap.hpp  the C++ wrapper: Sampler / AssumptionChecker over Formula / Engine
   src/                   formula builder, engine state, readout, batch sizing and kernel
-                         dispatch, the sampling loop, probing, batched checking, launches
-  kernels/bcp.py         the BCP kernels, in Triton (the single source)
-  tools/build_kernels.py compiles the kernels into the library ahead of time
+                         dispatch, the sampling loop, probing, batched checking
+  src/gpu_api.hpp        the GPU socket: every device operation, one plug per GPU library
+                         (gpu_cuda.cpp, gpu_opencl.cpp)
+  kernels/bcp.py         the BCP kernels, in Triton (the reference)
+  kernels/bcp.cl         the fixpoint and support kernels in OpenCL C; follows bcp.py
+  tools/build_kernels.py compiles the Triton kernels into the library ahead of time
 gpap/                    the Python package
   engine/                the Python face of the core (ctypes): BCPEngine, AssumptionChecker,
                          LiteralProbe, batch sizing
@@ -117,6 +124,12 @@ The engine:
   tests.
 - The Python and C++ faces share their defaults as well as their loop
   (`tests/cli/test_cli_contracts.py`).
+- The engine names no GPU library. Every device operation goes through `cpp/src/gpu_api.hpp`,
+  and only `gpu_cuda.cpp` includes `cuda.h`.
+- The Triton kernels are the reference and `cpp/kernels/bcp.cl` follows them: a change of
+  behaviour in a kernel both implement lands in both, in one change
+  ([OPENCL.md](docs/OPENCL.md), `tests/engine/test_opencl_backend.py`). A kernel the OpenCL plug
+  does not list is refused by name, never replaced by another.
 
 Sampling and measurement:
 - The batch is not part of the seed. Before comparing counts or rates across runs or machines,
@@ -145,7 +158,8 @@ The evaluation:
 
 - The code, its test and the one doc that owns the rule change together.
 - `pytest -m "not gpu and not slow"` passes, and `pytest` on a machine with a GPU. Run
-  `pytest tests/experiments` if you touched `eval/`.
+  `pytest tests/experiments` if you touched `eval/`, and `GPAP_BACKEND=opencl pytest` if you
+  touched a kernel, the GPU socket or a plug.
 - `ruff check .` is clean.
 - A performance claim comes with a measurement in `docs/findings/`;
   [BENCHMARKING.md](docs/BENCHMARKING.md) says how to take one.

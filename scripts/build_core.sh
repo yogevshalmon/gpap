@@ -6,8 +6,10 @@
 #   scripts/build_core.sh --install    # also copy the .so into gpap/lib/ so Python finds it
 #                                      #   without the repo build directory
 #
-# Requirements: a C++17 compiler, cmake, the NVIDIA driver (libcuda), and python+triton
-# (build time only — it compiles the kernels ahead of time). NO CUDA toolkit, no nvcc.
+# Requirements: a C++17 compiler, cmake, and python+triton (build time only — it compiles the
+# CUDA kernels ahead of time). NO CUDA toolkit, no nvcc, no NVIDIA driver: on a machine without
+# a CUDA GPU the kernels are compiled for sm_80, and the engine runs through OpenCL there
+# (GPAP_BACKEND=opencl, docs/OPENCL.md).
 set -euo pipefail
 
 REPO="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
@@ -39,6 +41,11 @@ if [[ -z "$PYTHON" ]]; then
     exit 1
 fi
 
+if [[ -z "$ARCH" ]] && ! "$PYTHON" -c \
+        "import triton; triton.runtime.driver.active.get_current_target()" >/dev/null 2>&1; then
+    ARCH=80
+    echo "==> no CUDA GPU visible: compiling the CUDA kernels for sm_$ARCH (--arch to choose)"
+fi
 echo "==> compiling kernels ahead of time ($($PYTHON -c 'import triton;print("triton "+triton.__version__)'))"
 "$PYTHON" "$REPO/cpp/tools/build_kernels.py" ${ARCH:+--arch "$ARCH"}
 
