@@ -27,12 +27,14 @@ CPU_PREFIX="$HOME_DIR/opencl-cpu"    # mode cpu: a conda environment
 PREFIX="$HOME_DIR/opencl-cuda"       # mode cuda: a conda environment
 MAMBA="$HOME_DIR/bin/micromamba"
 export MAMBA_ROOT_PREFIX="$HOME_DIR/mamba"     # its package cache, under the same root
-# The versions the kernels were checked with (docs/findings/OPENCL_FINDINGS.md). A new PoCL is
-# a new compiler for bcp.cl: change these deliberately, and re-run the backend's tests. Not
-# PyPI's PoCL 3.0: its LLVM 14 miscompiles the WAVE kernels for an AVX-512 processor and
-# cannot compile for a newer one (docs/findings/OPENCL_FINDINGS.md §15, §16).
-CPU_PACKAGES="pocl-cpu=7.2 ocl-icd=2.3.4"
-CUDA_PACKAGES="pocl=7.2 pocl-cuda=7.2 ocl-icd=2.3.4 clinfo=3.0.21.02.21 oclgrind=21.10"
+# The builds the kernels were checked with (docs/findings/OPENCL_FINDINGS.md). A new PoCL is
+# a new compiler for bcp.cl: change these deliberately, and re-run the backend's tests. Pinned
+# to the BUILD, not just the version: conda-forge publishes several builds of one PoCL version,
+# and a rebuild against another LLVM keeps the version number. Not PyPI's PoCL 3.0: its LLVM 14
+# miscompiles the WAVE kernels for an AVX-512 processor and cannot compile for a newer one
+# (docs/findings/OPENCL_FINDINGS.md §15, §16).
+CPU_PACKAGES="pocl-cpu=7.2=h1a99d23_0 libllvm19=19.1.7 ocl-icd=2.3.4"
+CUDA_PACKAGES="pocl=7.2=hca0ac82_0 libllvm19=19.1.7 ocl-icd=2.3.4 clinfo=3.0.21.02.21 oclgrind=21.10"
 MAMBA_URL="https://github.com/mamba-org/micromamba-releases/releases/download/2.10.0-0/micromamba-linux-64"
 MAMBA_SHA256="701f39c06f8e6a670a0e186c8479b9e5c0502a2f0cda6cef65d83bdd2875e8bd"
 # Two things PoCL's CUDA driver needs that the conda packages do not arrange:

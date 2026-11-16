@@ -180,5 +180,10 @@ samples is skipped when the backend refuses the trajectory kernel by name. Every
 is a real one, and an OpenCL install that cannot compile `bcp.cl` fails the OpenCL tests
 instead of skipping them.
 
+Every OpenCL driver compiles `bcp.cl` with its own compiler, and GPAP's results are checked only
+where these tests run. On a device or driver the findings do not list, run CI's selection,
+`GPAP_BACKEND=opencl pytest -m "(engine or opencl or core) and not slow"`, before trusting what
+it mines: a miscompile need not crash, and a wrong conflict is an unsound clause.
+
 What was measured, and on which devices, is in
 [findings/OPENCL_FINDINGS.md](findings/OPENCL_FINDINGS.md).
