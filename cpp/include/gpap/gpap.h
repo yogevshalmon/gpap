@@ -378,8 +378,8 @@ typedef struct {
     double  verify_s;            /* the soundness self-test (verify = 1) */
 } gpap_sample_stats;
 
-/* Create a sampler over `e` (which must outlive it; nothing else drives it meanwhile). K =
- * min(gpap_compute_k_safe over live free VRAM, k_cap) unless pinned by set_k; `k_cap` 0 =
+/* Create a sampler over `e` (which must outlive it; nothing else drives it meanwhile). K = the
+ * rows that fit the engine's memory budget, at most k_cap, unless pinned by set_k; `k_cap` 0 =
  * gpap_default_k_cap, > 0 verbatim, < 0 uncapped. `seed` seeds the RNG once; runs continue it. */
 gpap_status gpap_sampler_create(gpap_engine *e, int64_t seed, int32_t k_cap,
                                 gpap_sampler **out);

@@ -90,7 +90,7 @@ Two sizing rules differ from CUDA, because OpenCL cannot answer the questions CU
   total memory. On a card that something else uses — another process, or another engine or
   torch in the same one — cap it with `GPAP_VRAM_BUDGET_MIB` or pass an explicit batch.
 - **One buffer's size.** A device limits a single allocation (`CL_DEVICE_MAX_MEM_ALLOC_SIZE`),
-  so the batch is also bounded by the widest per-row buffer (`engine_row_limit` in
+  so the batch is also bounded by the widest per-row buffer (`engine_batch` in
   `cpp/src/engine.cpp`). An explicit batch is not clamped; one that is too large fails at the
   allocation with the device's limit in the message. A raw-ABI caller sizing its own batch
   should take it from `gpap_check_chunk_size`, which applies this limit. On a big formula this

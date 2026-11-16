@@ -126,12 +126,16 @@ extern "C" int32_t gpap_default_k_cap(int device) {
     return kBatchCap;
 }
 
-extern "C" int32_t gpap_compute_k_safe(int32_t num_long, int32_t N, int64_t bytes, int32_t cap) {
-    if (bytes <= 0) return 1;
-    const int64_t per_row = gpap_row_bytes(num_long, N, gpap_trail_cap(N));
-    int64_t k = bytes / std::max<int64_t>(per_row, 1);
+/* The division every batch size makes: rows of `per_row` bytes that fit `bytes`, at most `cap`
+ * (<= 0: no cap), never fewer than one. gpap_compute_k_safe and gpap::engine_batch share it. */
+int32_t gpap::rows_fitting(int64_t bytes, int64_t per_row, int32_t cap) {
+    int64_t k = bytes > 0 ? bytes / std::max<int64_t>(per_row, 1) : 0;
     if (cap > 0) k = std::min<int64_t>(k, cap);
-    return (int32_t)std::max<int64_t>(1, k);
+    return (int32_t)std::min<int64_t>(std::max<int64_t>(k, 1), INT32_MAX);
+}
+
+extern "C" int32_t gpap_compute_k_safe(int32_t num_long, int32_t N, int64_t bytes, int32_t cap) {
+    return gpap::rows_fitting(bytes, gpap_row_bytes(num_long, N, gpap_trail_cap(N)), cap);
 }
 
 extern "C" int32_t gpap_resident_warps(int device) {

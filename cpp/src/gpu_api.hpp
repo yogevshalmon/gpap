@@ -49,7 +49,7 @@ class Gpu {
      * reports the total as free; the caller's reserve and fraction still apply. */
     virtual gpap_status mem_info(int64_t *free_bytes, int64_t *total_bytes) = 0;
     /* The largest single buffer the device allows, or 0 if it sets no limit of its own. The
-     * batch must keep the widest per-row buffer under it (engine_row_limit). */
+     * batch must keep the widest per-row buffer under it (engine_batch). */
     virtual int64_t max_buffer_bytes() const = 0;
 
     virtual gpap_status alloc(size_t bytes, GpuMem *out) = 0;

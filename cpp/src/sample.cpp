@@ -113,14 +113,6 @@ struct gpap_sampler {
 
 namespace {
 
-int32_t auto_k(gpap_engine *e, int32_t k_cap) {
-    const int32_t cap = k_cap == 0 ? gpap_default_k_cap(e->device_ordinal) : k_cap;
-    const int64_t bytes = gpap::engine_mem_budget(e);
-    /* num_long, never num_clauses: only length>=3 clauses carry per-row state. */
-    return std::min(gpap_compute_k_safe(e->num_long, e->num_vars, bytes, cap),
-                    gpap::engine_row_limit(e, 0));
-}
-
 /* Pin the propagate kernel to the batch the chunks will run, so a short reset elsewhere cannot
  * switch kernels mid-measurement — but only when the choice is ours: an explicit pin is never
  * overridden, and once WE pinned, engine_auto goes 0 so re-pins key off we_pinned_mode. */
@@ -177,7 +169,7 @@ extern "C" gpap_status gpap_sampler_create(gpap_engine *e, int64_t seed, int32_t
         s->k_cap = k_cap;
         s->rng.seed((uint64_t)seed);
         s->bandit_rng.seed((uint64_t)seed ^ kBanditSeedXor);
-        s->K_auto = auto_k(e, k_cap);
+        s->K_auto = gpap::engine_batch(e, 0, k_cap);   /* the engine's batch, at the caller's cap */
         s->K = s->K_auto;
         rebuild_phases(s);
         gpap_status st = gpap_pair_mask_create(e, nullptr, 0, &s->mask_all);
