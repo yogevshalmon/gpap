@@ -518,6 +518,19 @@ def test_auto_dispatches_by_clause_count_and_clean_resets_go_lite():
 
 
 @pytest.mark.core
+def test_the_result_guard_measures_where_the_result_lives(monkeypatch):
+    """On opencl a checker's results live on torch's device (the CPU unless one is named), not
+    on the engine's: a small OpenCL device must not refuse a result that fits in host memory."""
+    import torch
+
+    from gpap.engine import checker
+    monkeypatch.setattr(checker, "gpu_mem_available", lambda *a, **kw: 1 << 20)  # a 1 MiB device
+    with use_backend("opencl"):
+        ck = checker.AssumptionChecker(device=torch.device("cpu"))
+        ck._check_result_fits(1000, 4096, assignments=True, sat_count=False)  # 4 MB on the host
+
+
+@pytest.mark.core
 def test_an_unknown_backend_is_an_error():
     """`GPAP_BACKEND` is validated, not defaulted: a typo must not run the other backend."""
     with use_backend("opnecl"):

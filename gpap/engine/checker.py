@@ -4,6 +4,8 @@ asks for nothing but the sets. The chunk loop lives in the CORE (`gpap_check_set
 cpp/src/check.cpp), so validation, chunk sizing and padding are defined once; this module marshals
 — flatten, raise a ValueError before any GPU work, return torch tensors in INPUT ORDER.
 """
+import os
+
 import numpy as np
 import torch
 
@@ -11,6 +13,18 @@ from gpap.engine import _core
 from gpap.engine.formula import CnfFormula, ext_assumptions
 from gpap.engine.bcp_engine import BCPEngine
 from gpap.engine.calibrate import gpu_mem_available
+
+
+def _host_available_bytes() -> int:
+    """Memory the host can still give (Linux's MemAvailable), else its physical memory."""
+    try:
+        with open("/proc/meminfo") as f:
+            for line in f:
+                if line.startswith("MemAvailable:"):
+                    return int(line.split()[1]) * 1024
+    except OSError:
+        pass
+    return os.sysconf("SC_PHYS_PAGES") * os.sysconf("SC_PAGE_SIZE")
 
 
 def _flatten(assumptions: ext_assumptions, num_vars: int):
@@ -144,11 +158,22 @@ class AssumptionChecker:
             out["sat_count"] = dev_sat
         return out
 
+    def _result_budget(self) -> int:
+        """Bytes the result arrays may take where they live: torch's device. On the cuda backend
+        that is the engine's own device, under the one budget rule; on opencl the engine runs
+        elsewhere, so a CUDA device is asked through torch and the CPU through the host's
+        available memory, at the same 0.8 fraction."""
+        if _core.backend() == "cuda":
+            return gpu_mem_available(self._device)
+        if self._device.type == "cuda":
+            return int(torch.cuda.mem_get_info(self._device)[0] * 0.8)
+        return int(_host_available_bytes() * 0.8)
+
     def _check_result_fits(self, n: int, row_bytes: int, assignments: bool, sat_count: bool):
         """Refuse a request whose RESULT cannot fit on the device, before spending GPU time:
         chunking bounds the work but not the (n, 2N) / (n, M) arrays the caller asked for."""
         want = n * row_bytes
-        budget = gpu_mem_available(self._device)
+        budget = self._result_budget()
         if want <= budget:
             return
         asked = " + ".join(k for k, on in (("assignments", assignments),
