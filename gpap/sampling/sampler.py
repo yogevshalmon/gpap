@@ -77,7 +77,7 @@ class GPUSampler:
         self._pyrng = _random.Random(seed)
         self.support: list[int] | None = None   # 0-based independent-support vars (from `c ind`)
         self._recon: dict | None = None
-        # The handle owns the batch (K = min(analytic bound, cap), gpap_compute_k_safe), the
+        # The handle owns the batch (K = min(analytic bound, cap), the core's engine_batch), the
         # sampling RNG, and the kernel pin (pinned to the chunk batch so a short warmup reset
         # cannot switch kernels mid-run; an explicit mode pin is never overridden).
         self._smp = _gcore.Sampler(self.engine._core, seed=(seed if seed is not None else 0),

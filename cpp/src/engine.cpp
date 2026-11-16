@@ -547,18 +547,24 @@ gpap_status engine_require_trajectory(gpap_engine *e) {
     return GPAP_ERR_KERNEL;
 }
 
-int64_t engine_mem_budget(gpap_engine *e) {
+int32_t engine_batch(gpap_engine *e, int64_t extra_row_bytes, int32_t cap) {
     int64_t free_b = 0, total_b = 0;
-    if (use_ctx(e) != GPAP_OK || e->gpu->mem_info(&free_b, &total_b) != GPAP_OK) return 0;
-    return mem_budget(free_b, kMemFraction);
-}
-
-int32_t engine_row_limit(gpap_engine *e, int64_t extra_row_bytes) {
+    const int64_t budget =
+        use_ctx(e) == GPAP_OK && e->gpu->mem_info(&free_b, &total_b) == GPAP_OK
+            ? mem_budget(free_b, kMemFraction) : 0;
+    const int64_t per_row =
+        gpap_row_bytes(e->num_long, e->num_vars, e->trail_cap) + extra_row_bytes;
+    int32_t k = rows_fitting(budget, per_row,
+                             cap == 0 ? gpap_default_k_cap(e->device_ordinal) : cap);
+    /* One buffer's size limit (OpenCL): each per-row buffer holds k rows, so the widest one
+     * bounds k — the engine's own (packed words, bitmap, trail) or the caller's extra. */
     const int64_t limit = e->gpu->max_buffer_bytes();
-    if (limit <= 0) return INT32_MAX;
-    const int64_t widest = std::max<int64_t>(
-        {4ll * e->num_long, 4ll * e->nw, 4ll * e->trail_cap, extra_row_bytes, 1});
-    return (int32_t)std::min<int64_t>(std::max<int64_t>(limit / widest, 1), INT32_MAX);
+    if (limit > 0) {
+        const int64_t widest = std::max<int64_t>(
+            {4ll * e->num_long, 4ll * e->nw, 4ll * e->trail_cap, extra_row_bytes, 1});
+        k = (int32_t)std::min<int64_t>(k, std::max<int64_t>(limit / widest, 1));
+    }
+    return k;
 }
 
 /* Refuse a packed-derived readout after a CLEAN launch: it would answer from the restored

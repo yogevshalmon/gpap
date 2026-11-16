@@ -80,6 +80,8 @@ inline GpuArg buf(const DevBuf &b, size_t offset = 0) { return buf(b.ptr, offset
 /* The memory budget one batch may take out of `free_bytes` — the reserve, the fraction and the
  * $GPAP_VRAM_BUDGET_MIB cap of gpap_mem_available, for a caller that already holds a device. */
 int64_t mem_budget(int64_t free_bytes, double fraction);
+/* Rows of `per_row` bytes that fit `bytes`, at most `cap` (<= 0: no cap), at least one. */
+int32_t rows_fitting(int64_t bytes, int64_t per_row, int32_t cap);
 /* gpap_dispatch_wave's rule for one GPU library. An engine passes the library it was created
  * on, never $GPAP_BACKEND, which may have changed since. */
 int32_t dispatch_wave(const GpuDriver *driver, int32_t num_clauses, int32_t batch, int device);
@@ -89,12 +91,12 @@ gpap_mode dispatch_mode(gpap_engine *e, int32_t K);
 /* GPAP_ERR_KERNEL, naming the backend, if the engine's plug has no trajectory kernel: a
  * sampler refuses at creation rather than at its first launch. */
 gpap_status engine_require_trajectory(gpap_engine *e);
-/* That budget on the engine's own device, at kMemFraction; 0 if the device cannot say. */
-int64_t engine_mem_budget(gpap_engine *e);
-/* Rows one launch may hold whatever the budget says: a plug may limit the size of a single
- * buffer, and the widest per-row buffer — the engine's own, or `extra_row_bytes` a caller
- * allocates per row — must fit it. INT32_MAX when the plug sets no limit. */
-int32_t engine_row_limit(gpap_engine *e, int64_t extra_row_bytes);
+/* THE batch an engine sizes for itself — probing, checking and the sampler all call this, so
+ * none can skip a bound: the rows whose state, plus `extra_row_bytes` the caller allocates per
+ * row, fit mem_budget on the engine's own device (free memory on CUDA, the total on OpenCL; 0
+ * if the device cannot say); at most `cap` (0 = gpap_default_k_cap, < 0 = none); within one
+ * buffer's size limit where the plug has one; and at least one. */
+int32_t engine_batch(gpap_engine *e, int64_t extra_row_bytes, int32_t cap);
 
 /* A clause carries a packed word (per-row state) iff it has this many literals; shorter ones
  * are implication edges or flush-cache facts. The one definition. */
