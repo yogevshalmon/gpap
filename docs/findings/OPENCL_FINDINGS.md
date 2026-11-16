@@ -6,10 +6,11 @@
 >
 > **Status:** current. Correct on CPU OpenCL devices, through PoCL's CUDA driver and on NVIDIA's
 > own driver. The current rates are §12 (an L4) and §13 (a laptop CPU); §14 shows the CUDA path
-> lost nothing. §7 to §10 are the steps that led there.
+> lost nothing. §7 to §10 are the steps that led there. §15: PoCL 3.0 needs a setting on an
+> AVX-512 processor.
 > **Measured:** 2026-11-13 to 2026-11-16. A WSL2 laptop with an RTX 4080 Laptop (12 GB) and an
-> i7-13800H: CUDA, PoCL 3.0 and 7.2 (CPU and CUDA drivers), Oclgrind 21.10. Colab L4s with
-> NVIDIA's driver 580.82 (OpenCL 3.0) for §8, §9, §10 and §12.
+> i7-13800H: CUDA, PoCL 3.0 and 7.2 (CPU and CUDA drivers), Oclgrind 21.10, and Intel SDE
+> 10.13 for §15. Colab L4s with NVIDIA's driver 580.82 (OpenCL 3.0) for §8, §9, §10 and §12.
 > **Rule lives in:** `cpp/src/gpu_api.hpp` (the socket), `cpp/src/gpu_cuda.cpp` and
 > `cpp/src/gpu_opencl.cpp` (the plugs), `cpp/kernels/bcp.cl` (the kernels).
 > **Gated by:** `tests/engine/test_opencl_backend.py`, and every `engine` test under
@@ -246,3 +247,28 @@ The sampling cells are short, and one arm's own repetitions spread by up to 40%.
 farthest from 1, b03 (0.86) and 7.sk_4_50 (1.17), were run eight more times each: best of eight,
 0.99 and 0.94; median of eight, 1.17 and 1.06. The sign changes with the statistic, so neither
 is a difference. Data, scripts and logs: `$GPAP_RESULTS/cuda_nochange_perf_20261116/`.
+
+## 15. PoCL 3.0 miscompiles the WAVE kernels for AVX-512 processors (2026-11-16)
+
+The first CI run of the OpenCL job died with a segmentation fault at the first WAVE test
+(`test_clean_mode.py::test_state_identity_fuzz[16-wave]`), after 21 tests on the scalar kernels
+passed. Its runner was an Intel Xeon Platinum 8573C, for which PoCL 3.0 (pip's, LLVM 14)
+compiles `icelake-client` code, with AVX-512. The next run drew an AMD EPYC 9V74, compiled as
+`znver3`, without AVX-512, and passed: the job's outcome depended on the runner's processor.
+
+On the laptop, whose processor has no AVX-512, the crash reproduces under Intel's emulator (SDE
+10.13) posing as an Ice Lake client: the process writes 4-byte words through an unmapped
+128-byte block, 32 words, the size of one of the WAVE kernels' local arrays. Oclgrind reports no
+out-of-bounds access on the same tests (§11). The WAVE tests of `test_clean_mode.py` under SDE:
+
+| PoCL | emulated processor | work-group method | result |
+|---|---|---|---|
+| 3.0 (pip) | Ice Lake client (AVX-512) | default (the loop vectorizer) | crash |
+| 3.0 (pip) | Haswell (AVX2) | default | the fuzz test passes |
+| 3.0 (pip) | Ice Lake client | `repl` (work-item replication) | 4 of 4 pass |
+| 7.2 (conda-forge), CPU driver | Ice Lake client | default | 4 of 4 pass |
+
+**Rule:** `scripts/setup_opencl.sh env cpu` sets `POCL_WORK_GROUP_METHOD=repl`. PoCL 7.2, which
+the `cuda` mode installs and §13 measured, needs nothing.
+
+Data and logs, CI's included: `$GPAP_RESULTS/pocl_avx512_20261116/`.

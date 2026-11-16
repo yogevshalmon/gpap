@@ -101,6 +101,10 @@ print_env() {
     fi
     echo "export GPAP_OPENCL_LIB=\"$loader\""
     echo "export OCL_ICD_FILENAMES=\"$pocl\""
+    # PoCL 3.0's default work-group method (its loop vectorizer) miscompiles the WAVE kernels
+    # for an AVX-512 processor: they write their local arrays through a bad pointer and the
+    # process dies. Work-item replication does not (docs/findings/OPENCL_FINDINGS.md §15).
+    echo "export POCL_WORK_GROUP_METHOD=\"repl\""
 }
 
 case "${1:-}" in
