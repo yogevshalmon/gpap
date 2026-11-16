@@ -6,8 +6,8 @@
 >
 > **Status:** current. Correct on CPU OpenCL devices, through PoCL's CUDA driver and on NVIDIA's
 > own driver. The current rates are §12 (an L4) and §13 (a laptop CPU); §14 shows the CUDA path
-> lost nothing. §7 to §10 are the steps that led there. §15: PoCL 3.0 needs a setting on an
-> AVX-512 processor.
+> lost nothing. §7 to §10 are the steps that led there. §15 and §16: why the `cpu` mode
+> installs PoCL 7.2, not PyPI's 3.0.
 > **Measured:** 2026-11-13 to 2026-11-16. A WSL2 laptop with an RTX 4080 Laptop (12 GB) and an
 > i7-13800H: CUDA, PoCL 3.0 and 7.2 (CPU and CUDA drivers), Oclgrind 21.10, and Intel SDE
 > 10.13 for §15. Colab L4s with NVIDIA's driver 580.82 (OpenCL 3.0) for §8, §9, §10 and §12.
@@ -269,6 +269,25 @@ out-of-bounds access on the same tests (§11). The WAVE tests of `test_clean_mod
 | 7.2 (conda-forge), CPU driver | Ice Lake client | default | 4 of 4 pass |
 
 **Rule:** `scripts/setup_opencl.sh env cpu` sets `POCL_WORK_GROUP_METHOD=repl`. PoCL 7.2, which
-the `cuda` mode installs and §13 measured, needs nothing.
+the `cuda` mode installs and §13 measured, needs nothing. *(Superseded the same day by §16: the
+`cpu` mode installs PoCL 7.2.)*
 
 Data and logs, CI's included: `$GPAP_RESULTS/pocl_avx512_20261116/`.
+
+## 16. PoCL 3.0 cannot compile for a processor newer than its LLVM (2026-11-16)
+
+With §15's setting, CI passed on an AMD EPYC 7763 (`znver3`), then failed when the same job ran
+again on an AMD EPYC 9V45 (Zen 5): PoCL 3.0's LLVM 14 does not know the processor, `bcp.cl`
+does not compile ("unknown target CPU 'generic'"), and no engine opens. GitHub's runners mix
+Intel Xeons with AVX-512 and AMD EPYCs of several generations, so PoCL 3.0 passes or fails by
+the runner drawn, and PyPI has no newer PoCL.
+
+conda-forge's PoCL 7.2 compiles the kernels for the nearest of a few processor variants built
+into it (`haswell` on the laptop) rather than for the exact processor. On the laptop, installed
+by the new `cpu` mode, it passes CI's selection (204 passed, 22 skipped); under SDE as an
+AVX-512 processor it passes the WAVE tests with its default settings (§15).
+
+**Rule:** `scripts/setup_opencl.sh cpu` installs PoCL 7.2's CPU driver and the ICD loader from
+conda-forge, and `env cpu` sets nothing else.
+
+Data and logs: `$GPAP_RESULTS/pocl_avx512_20261116/`.

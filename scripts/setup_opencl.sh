@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
 # Install an OpenCL runtime for the OpenCL backend (GPAP_BACKEND=opencl), without root.
 #
-#   scripts/setup_opencl.sh cpu          # PoCL's CPU driver, from PyPI: checks the kernels'
-#                                        #   correctness on any machine (what CI runs)
+#   scripts/setup_opencl.sh cpu          # PoCL's CPU driver, from conda-forge: checks the
+#                                        #   kernels' correctness on any machine (what CI runs)
 #   scripts/setup_opencl.sh cuda         # PoCL with its CUDA driver, from conda-forge: OpenCL
 #                                        #   on an NVIDIA GPU whose driver exposes none (WSL2)
 #   scripts/setup_opencl.sh env [MODE]   # print the `export` lines for an installed runtime
@@ -23,13 +23,15 @@ set -euo pipefail
 
 REPO="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 HOME_DIR="$(cd "$REPO" && python3 -m gpap.paths home)"
-VENV="$HOME_DIR/opencl-cpu"          # mode cpu: a virtualenv holding PoCL and an ICD loader
+CPU_PREFIX="$HOME_DIR/opencl-cpu"    # mode cpu: a conda environment
 PREFIX="$HOME_DIR/opencl-cuda"       # mode cuda: a conda environment
 MAMBA="$HOME_DIR/bin/micromamba"
 export MAMBA_ROOT_PREFIX="$HOME_DIR/mamba"     # its package cache, under the same root
 # The versions the kernels were checked with (docs/findings/OPENCL_FINDINGS.md). A new PoCL is
-# a new compiler for bcp.cl: change these deliberately, and re-run the backend's tests.
-CPU_PACKAGES="pocl-binary-distribution==3.0 pyopencl==2026.1.5"
+# a new compiler for bcp.cl: change these deliberately, and re-run the backend's tests. Not
+# PyPI's PoCL 3.0: its LLVM 14 miscompiles the WAVE kernels for an AVX-512 processor and
+# cannot compile for a newer one (docs/findings/OPENCL_FINDINGS.md §15, §16).
+CPU_PACKAGES="pocl-cpu=7.2 ocl-icd=2.3.4"
 CUDA_PACKAGES="pocl=7.2 pocl-cuda=7.2 ocl-icd=2.3.4 clinfo=3.0.21.02.21 oclgrind=21.10"
 MAMBA_URL="https://github.com/mamba-org/micromamba-releases/releases/download/2.10.0-0/micromamba-linux-64"
 MAMBA_SHA256="701f39c06f8e6a670a0e186c8479b9e5c0502a2f0cda6cef65d83bdd2875e8bd"
@@ -47,6 +49,17 @@ triton_python() {
         fi
     done
     return 1
+}
+
+fetch_mamba() {
+    mkdir -p "$HOME_DIR/bin"
+    if [[ ! -x "$MAMBA" ]]; then
+        echo "==> fetching micromamba"
+        curl -fsSL -o "$MAMBA.part" "$MAMBA_URL"
+        echo "$MAMBA_SHA256  $MAMBA.part" | sha256sum -c --quiet
+        chmod +x "$MAMBA.part"
+        mv "$MAMBA.part" "$MAMBA"
+    fi
 }
 
 # Local file work only, safe to repeat.
@@ -91,39 +104,28 @@ print_env() {
         echo "export LD_LIBRARY_PATH=\"$PREFIX/lib:/usr/lib/wsl/lib\${LD_LIBRARY_PATH:+:\$LD_LIBRARY_PATH}\""
         return
     fi
-    local libs loader pocl
-    libs="$(echo "$VENV"/lib/python*/site-packages/pyopencl/.libs)"
-    loader="$(echo "$libs"/libOpenCL-*.so*)"
-    pocl="$(echo "$libs"/libpocl-*.so*)"
-    if [[ ! -f "$loader" || ! -f "$pocl" ]]; then
+    if [[ ! -f "$CPU_PREFIX/etc/OpenCL/vendors/pocl.icd" ]]; then
         echo "the cpu runtime is not installed: run scripts/setup_opencl.sh cpu" >&2
         exit 1
     fi
-    echo "export GPAP_OPENCL_LIB=\"$loader\""
-    echo "export OCL_ICD_FILENAMES=\"$pocl\""
-    # PoCL 3.0's default work-group method (its loop vectorizer) miscompiles the WAVE kernels
-    # for an AVX-512 processor: they write their local arrays through a bad pointer and the
-    # process dies. Work-item replication does not (docs/findings/OPENCL_FINDINGS.md §15).
-    echo "export POCL_WORK_GROUP_METHOD=\"repl\""
+    echo "export GPAP_OPENCL_LIB=\"$CPU_PREFIX/lib/libOpenCL.so.1\""
+    echo "export OCL_ICD_VENDORS=\"$CPU_PREFIX/etc/OpenCL/vendors\""
 }
 
 case "${1:-}" in
     cpu)
-        # pyopencl is installed for the ICD loader its wheel bundles, not for Python use.
-        python3 -m venv "$VENV"
-        # shellcheck disable=SC2086
-        "$VENV/bin/pip" install --quiet $CPU_PACKAGES
+        if [[ ! -f "$CPU_PREFIX/etc/OpenCL/vendors/pocl.icd" ]]; then
+            # Earlier versions put a virtualenv with PyPI's PoCL here: replace it.
+            if [[ -f "$CPU_PREFIX/pyvenv.cfg" ]]; then rm -rf "$CPU_PREFIX"; fi
+            fetch_mamba
+            echo "==> installing PoCL's CPU driver and the ICD loader"
+            # shellcheck disable=SC2086
+            "$MAMBA" create -y -p "$CPU_PREFIX" -c conda-forge $CPU_PACKAGES
+        fi
         ;;
     cuda)
         if [[ ! -f "$PREFIX/etc/OpenCL/vendors/pocl.icd" ]]; then
-            mkdir -p "$HOME_DIR/bin"
-            if [[ ! -x "$MAMBA" ]]; then
-                echo "==> fetching micromamba"
-                curl -fsSL -o "$MAMBA.part" "$MAMBA_URL"
-                echo "$MAMBA_SHA256  $MAMBA.part" | sha256sum -c --quiet
-                chmod +x "$MAMBA.part"
-                mv "$MAMBA.part" "$MAMBA"
-            fi
+            fetch_mamba
             echo "==> installing PoCL (CUDA and CPU drivers), the ICD loader, clinfo, Oclgrind"
             # shellcheck disable=SC2086
             "$MAMBA" create -y -p "$PREFIX" -c conda-forge $CUDA_PACKAGES
