@@ -63,7 +63,10 @@ libgpap needs no OpenCL at build time. At run time it opens the system's ICD loa
   toolkit, and a loader directory that holds PoCL alone. A second driver with its own LLVM in
   the same process (Oclgrind is one) makes PoCL's compiler abort on every kernel.
 - **Any machine, no GPU.** `scripts/setup_opencl.sh cpu` installs PoCL's CPU driver. It runs
-  the kernels on the processor, which is how CI executes them.
+  the kernels on the processor, which is how CI executes them. That driver is PoCL 3.0, which
+  miscompiles the WAVE kernels for a processor with AVX-512 unless `POCL_WORK_GROUP_METHOD=repl`
+  is set; `env cpu` sets it. Set it yourself for another PoCL 3.x
+  ([OPENCL_FINDINGS.md](findings/OPENCL_FINDINGS.md) §15).
 
 After either script: `source <(scripts/setup_opencl.sh env)`. With both installed it prints the
 GPU runtime; `env cpu` and `env cuda` choose one.
