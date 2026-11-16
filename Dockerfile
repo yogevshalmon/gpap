@@ -1,6 +1,6 @@
 # GPAP, the tool, in a container: the gpap package and command, torch and Triton, ABC, and what
 # compiles the engine. The engine itself, libgpap, is NOT in the image: its kernels are compiled
-# ahead of time for one GPU architecture and the engine refuses any other (cpp/src/runtime.cpp),
+# ahead of time for one GPU architecture and the engine refuses any other (cpp/src/gpu_cuda.cpp),
 # so the entry point compiles it for the visible GPU on first use, in under a minute, into /cache.
 # A volume there keeps it.
 #
@@ -49,12 +49,6 @@ RUN /opt/gpap/scripts/build_abc.sh
 COPY . /opt/gpap
 WORKDIR /opt/gpap
 RUN pip install -e ".[solver]" pytest
-
-# cpp/CMakeLists.txt links against `libcuda.so`. On native Linux the NVIDIA Container Toolkit
-# mounts the driver as libcuda.so.1 alone, so this link supplies the name; it dangles until a
-# container starts with --gpus. WSL2's driver directory carries both names, and CMake searches it
-# first.
-RUN ln -s /usr/lib/x86_64-linux-gnu/libcuda.so.1 /usr/local/lib/libcuda.so
 
 # Writable by any user, so `docker run --user "$(id -u):$(id -g)"` works: the compile writes the
 # generated kernels into the tree and the library into the cache, and the artifact's `setup`

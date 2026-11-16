@@ -6,7 +6,7 @@
 #   docker run --gpus all -it gpap bash        # a command on PATH runs as itself
 #
 # WHY IT COMPILES. The kernels are compiled ahead of time for one GPU architecture and the engine
-# refuses any other (cpp/src/runtime.cpp), so no image can carry one library for every card. The
+# refuses any other (cpp/src/gpu_cuda.cpp), so no image can carry one library for every card. The
 # first run on a GPU cross-compiles for that GPU's architecture (`build_core.sh --arch`, which
 # needs no driver to compile) into $GPAP_CACHE/<build key>/sm_<cc>, in under a minute, and
 # exports GPAP_BUILD_DIR, the directory the loader reads. A volume at $GPAP_CACHE keeps it. The

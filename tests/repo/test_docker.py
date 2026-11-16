@@ -42,7 +42,7 @@ def test_the_dockerignore_keeps_local_state_and_paper_data_out(monkeypatch):
 
 def test_the_entrypoint_compiles_for_the_visible_gpu_and_hands_it_to_the_loader():
     """The kernels are compiled for one architecture and the engine refuses another
-    (cpp/src/runtime.cpp), so the image ships no library. The entry point cross-compiles for the
+    (cpp/src/gpu_cuda.cpp), so the image ships no library. The entry point cross-compiles for the
     device it sees (`--arch`, which needs no driver to compile) and exports `GPAP_BUILD_DIR`,
     the variable the build script writes to and the loader reads."""
     code = _code(ENTRYPOINT)
