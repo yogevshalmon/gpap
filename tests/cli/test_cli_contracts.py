@@ -490,3 +490,18 @@ def test_info_does_not_call_the_cuda_gpu_the_device_on_opencl(monkeypatch, capsy
     monkeypatch.setenv("GPAP_BACKEND", "cuda")
     _cli._cmd_info(None)
     assert any(ln.startswith("device:") for ln in capsys.readouterr().out.splitlines())
+
+
+def test_sampling_commands_refuse_the_opencl_backend_up_front(monkeypatch, tmp_path):
+    """`gpap sample` and `gpap bench` run the trajectory kernel, which only the cuda backend
+    ships: under `GPAP_BACKEND=opencl` both stop before converting, preprocessing or mining
+    anything, instead of failing at the sampler on every instance."""
+    from gpap import benchmark
+    started = []
+    monkeypatch.setattr(benchmark, "main", lambda argv: started.append(argv))
+    monkeypatch.setenv("GPAP_BACKEND", "opencl")
+    cnf = _cnf(tmp_path, SMALL)
+    for argv in (["sample", cnf, "-n", "10"], ["bench", str(tmp_path / "*.cnf")]):
+        with pytest.raises(SystemExit, match="sampling needs the cuda backend"):
+            cli_main(argv)
+    assert not started, "gpap bench began its run on a backend that cannot sample"

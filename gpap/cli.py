@@ -551,6 +551,7 @@ def _cmd_mine(args):
 
 
 def _cmd_bench(args):
+    _require_sampling_backend()
     from gpap import benchmark
     argv = ["--glob", args.glob, "--n-time", str(args.n),
             "--time-limit", str(args.time_limit), "--n-cov", str(args.n_cov),
