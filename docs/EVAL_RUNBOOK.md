@@ -173,6 +173,9 @@ that layer is in [findings/ARTIFACT_FINDINGS.md](findings/ARTIFACT_FINDINGS.md).
 The other campaigns:
 - the kernel A/B (`eval/profiling/kernel_ab.py`,
   [findings/KERNEL_AB_FINDINGS.md](findings/KERNEL_AB_FINDINGS.md));
+- the backend A/B, CUDA against OpenCL on probing work (`eval/profiling/backend_ab.py`, on a
+  Colab GPU by `eval/colab/colab_opencl_l4.sh`;
+  [findings/OPENCL_FINDINGS.md](findings/OPENCL_FINDINGS.md));
 - the Barbarik uniformity test and the exact-oracle distance fuzz (`eval/uniformity/`,
   [findings/UNIFORMITY_FINDINGS.md](findings/UNIFORMITY_FINDINGS.md) §4b, §4c, §6);
 - the price of the uniformity-safe default (`eval/profiling/profile_soft_portfolio.py`) and the
