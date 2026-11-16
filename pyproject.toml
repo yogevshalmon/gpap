@@ -66,7 +66,10 @@ testpaths = ["tests/engine", "tests/sampling", "tests/mining", "tests/circuits",
 pythonpath = ["."]   # `eval` and `tests` import from the repo root in any import mode
 markers = [
     "gpu: requires CUDA + a built libgpap (skipped without either)",
+    "engine: requires a built libgpap and a device for the backend the suite runs on ($GPAP_BACKEND): CUDA, or any OpenCL device",
     "core: requires a built libgpap but no GPU (the parser, the formula build, sizing)",
+    "opencl: requires a built libgpap and an OpenCL device, GPU or CPU (the OpenCL backend)",
+    "cuda_only: needs what only the CUDA backend has (the device's resident-warp count)",
     "slow: slow deep-unroll case (c25)",
 ]
 

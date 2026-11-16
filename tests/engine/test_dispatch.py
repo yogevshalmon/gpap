@@ -26,12 +26,14 @@ def _engine(mode=None, nv=6):
     return BCPEngine(f, mode=mode)
 
 
+@pytest.mark.cuda_only          # the small-formula rule needs the device's resident warps
 def test_auto_is_the_default():
     eng = _engine()
     eng.reset(64)                                  # tiny batch -> wave's regime
     assert eng.mode == "wave"
 
 
+@pytest.mark.cuda_only          # the small-formula rule needs the device's resident warps
 def test_auto_dispatches_on_the_clause_count():
     """The rule keys off M, not the batch alone: a large formula at the batch cap still gets
     wave."""
@@ -43,6 +45,7 @@ def test_auto_dispatches_on_the_clause_count():
     assert dispatch_mode(6, 64, DEV) == "wave", "...unless the batch cannot fill the device"
 
 
+@pytest.mark.cuda_only          # the small-formula rule needs the device's resident warps
 def test_auto_re_dispatches_per_reset():
     """Auto is applied on every reset, so changing the batch can still change the kernel on a
     formula small enough for the batch term to bind."""

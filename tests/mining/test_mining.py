@@ -16,7 +16,7 @@ from gpap.sampling.pipeline import sample_clauses
 from tests.reference.combinations import combinations
 from tests.support import DEV, random_cnf
 
-pytestmark = pytest.mark.gpu
+pytestmark = pytest.mark.engine
 
 
 def _brute_models(nv, clauses):
@@ -502,6 +502,7 @@ def test_width_one_skips_the_vacuous_subsumption_check():
 # The pipeline's mining gates do what the help text says. A gate that wrongly declines to mine
 # looks exactly like an instance with nothing to mine.
 
+@pytest.mark.gpu             # its tensors live on the CUDA device
 def test_mine_on_forces_past_the_size_gate():
     """`--mine on` forces mining below MINE_MIN_CLAUSES; `auto` respects the gate."""
     from gpap.sampling import pipeline
@@ -518,6 +519,7 @@ def test_mine_on_forces_past_the_size_gate():
     assert got[True] is not None, "--mine on must force past it"
 
 
+@pytest.mark.gpu             # its tensors live on the CUDA device
 def test_the_keep_if_it_helps_guard_reports_its_decision(circuit_cnfs):
     """The keep-if-it-helps guard reports `kept`/`gain` consistently, and the run is sound.
 
@@ -542,6 +544,7 @@ def test_the_keep_if_it_helps_guard_reports_its_decision(circuit_cnfs):
 # clause (l1|...|lk) forces lj when the other k-1 literals are false; all k directions must be
 # covered. See docs/findings/MINING_FINDINGS.md.
 
+@pytest.mark.gpu             # its tensors live on the CUDA device
 def test_a_transitively_derivable_clause_is_detected():
     """(-1|3) is entailed and not subsumed, but propagation derives it through 1 -> 2 -> 3."""
     cls = [[-1, 2], [-2, 3], [4, 5]]
@@ -549,6 +552,7 @@ def test_a_transitively_derivable_clause_is_detected():
     assert bool(mask[0]), "(-1|3) is derivable through the chain 1 -> 2 -> 3"
 
 
+@pytest.mark.gpu             # its tensors live on the CUDA device
 def test_a_genuine_clause_survives():
     """(1|2) where neither literal propagates the other has to be kept."""
     cls = [[1, 2, 3], [1, 2, -3], [4, 5]]
@@ -573,6 +577,7 @@ def test_drop_levels_are_a_ladder():
     assert got["derivable"] <= got["subsumed"] <= got["none"]
 
 
+@pytest.mark.gpu             # its tensors live on the CUDA device
 def test_what_it_drops_really_is_covered_in_every_direction():
     """Every marked clause is covered in every direction, checked with the reference BCP.
 
@@ -604,6 +609,7 @@ def test_what_it_drops_really_is_covered_in_every_direction():
     assert checked, "the fuzz produced no marked clauses, so it proved nothing"
 
 
+@pytest.mark.gpu             # its tensors live on the CUDA device
 def test_a_one_way_implication_is_kept():
     """A clause covered in only one direction is kept.
 
