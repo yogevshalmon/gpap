@@ -31,6 +31,9 @@ change does not.
   like `(x | y)`, and `(x | x)` is the unit `x`. The repeat used to keep the clause one slot
   short of a unit, so BCP missed its implication (issue 57). Clause count and order are
   unchanged; `total_lits`, clause sizes and the clause read-back count distinct literals.
+- A later call on one engine (`gpap_check_sets`, a probe sweep, a sampler) sizes the batch the
+  first call did. It used to size from what the first call left free: about a sixth of the batch,
+  and half the probing rate on a 1.2M-clause formula (issue 56).
 
 ## 0.3.1 — 2026-10-23, the TACAS 2027 artifact
 

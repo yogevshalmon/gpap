@@ -368,6 +368,8 @@ class OpenClGpu final : public Gpu {
         return GPAP_OK;
     }
 
+    bool free_is_measured() const override { return false; }     /* mem_info reports the total */
+
     int64_t max_buffer_bytes() const override { return d_->max_alloc; }
 
     gpap_status alloc(size_t bytes, GpuMem *out) override {

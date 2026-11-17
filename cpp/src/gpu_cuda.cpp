@@ -147,6 +147,8 @@ class CudaGpu final : public Gpu {
         return GPAP_OK;
     }
 
+    bool free_is_measured() const override { return true; }      /* cuMemGetInfo */
+
     int64_t max_buffer_bytes() const override { return 0; }
 
     gpap_status alloc(size_t bytes, GpuMem *out) override {

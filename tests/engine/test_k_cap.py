@@ -274,3 +274,45 @@ def test_pipeline_reports_the_resolved_cap():
     assert info["engine"]["K"] <= info["engine"]["k_cap"]
 
 
+
+
+# ---------------------------------------------------------------- one engine, many calls
+# Free memory already excludes the rows an engine holds from its last batch, and its next batch
+# reuses those buffers. A sizing that does not count them back gets what the last batch left
+# free, so every call after the first ran a fraction of the batch (#56).
+
+#: Wide rows (the trail alone is 4N bytes), so the batch is memory-bound on any card up to
+#: ~190 GB, never the cap: a capped batch cannot shrink, and the test would prove nothing.
+_WIDE_NV = 150_000
+_WIDE_CLAUSES = [[1, 2, 3], [-1, -2], [4, 5, 6]]
+
+
+def _hold_a_batch(engine, how, rows):
+    """Leave `rows` rows of state allocated on `engine`, the way a caller does."""
+    import numpy as np
+    if how == "check_sets":
+        lits = np.tile(np.array([1, 4, -2], dtype=np.int32), rows)
+        engine.check_sets(lits, np.arange(rows + 1, dtype=np.int64) * 3, chunk=rows)
+    else:
+        with engine.probe_combinations(None, 1, max_tuples=rows, batch=rows):
+            pass
+
+
+@pytest.mark.gpu
+@pytest.mark.parametrize("how", ["check_sets", "probe sweep"])
+def test_a_later_call_on_one_engine_sizes_the_same_batch(how):
+    """After one call has allocated its batch, the same engine sizes the same batch again: the
+    batch is a function of the formula and the card, not of call history. Uncounted, the second
+    call got about a sixth of the first (CPP_BACKEND_FINDINGS.md §7)."""
+    from gpap.engine import _core
+    e = _core.Engine(_core.Formula.from_clauses(_WIDE_NV, _WIDE_CLAUSES))
+    try:
+        k0 = e.check_chunk_size(1 << 40, 3)
+        assert k0 < EXPECTED_CAP, "the batch must be memory-bound to show anything"
+        _hold_a_batch(e, how, k0)
+        k1 = e.check_chunk_size(1 << 40, 3)
+        # 5%: a call that fills the budget leaves a little less free than its buffers' sizes
+        # (CPP_BACKEND_FINDINGS.md §7); the uncounted sizing lost five sixths.
+        assert abs(k1 - k0) <= k0 // 20, (k0, k1)
+    finally:
+        del e        # a failure's traceback would keep the engine's VRAM for the next case

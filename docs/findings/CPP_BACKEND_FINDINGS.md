@@ -3,7 +3,8 @@
 > **Reader:** contributors and researchers — the evidence behind moving the engine into a C++ core. A dated research log, not a user guide.
 >
 > **Status:** settled — the port shipped; the engine is `libgpap`.
-> **Measured:** 2026-07-28, RTX 4080 Laptop (WSL2), torch 2.11 + triton 3.6.
+> **Measured:** 2026-07-28, RTX 4080 Laptop (WSL2), torch 2.11 + triton 3.6; §7 on 2026-11-16,
+> the same laptop.
 > **Rule lives in:** `cpp/` (the core itself), `cpp/tools/build_kernels.py` (the AOT build), and
 > the two ABI rules in `cpp/CMakeLists.txt` and every options struct.
 > **Record only:** the retraction in §4 — "owning the device memory is worth 1.2–1.35×" was a
@@ -119,3 +120,29 @@ Every A/B interleaved in one process or alternated across processes, arms also r
 this laptop's clocks drift enough that a fixed-order comparison is not evidence. Model counts
 compared exactly. The durable artifacts are `cpp/` and `tests/engine/test_core.py`, which re-proves the
 core's contract against the pure-Python oracles; the torch engine was deleted 2026-08-08.
+
+## 7. One engine, many calls: the batch counts the rows the engine holds (2026-11-16)
+
+Every batch is sized from free VRAM (`gpap::engine_batch`: checks, probe sweeps and the sampler).
+Free VRAM already excludes the rows an engine holds from its previous call, and the next call
+reuses those buffers, which grow in place. Until this date nothing counted them back, so every
+call after the first on one engine sized itself from what the first had left free (GitHub issue
+56). Now `engine_batch` adds the engine's row state back to a measured free figure; OpenCL's
+figure is the device total, so nothing is added there. The staging buffer is not added: a caller
+whose matrix is narrower than the last one's leaves part of it held.
+
+The second sweep on one engine, three runs each (median), against the library before the change:
+
+| formula | batch before → after | probes/s before → after |
+|---|---|---|
+| `intel044_T71` (N 453k, M 1.22M), width 1 | 428 → 2,362 | 508k → 1.02M (2.0×) |
+| VanDerWaerden_2-3-14_186 (M 9,795), width 3 | 42,896 → 214,676 | 6.8M → 7.1M (run to run 5.9–7.3M) |
+
+A big formula fits few rows, so losing five sixths of them halves the rate. A small formula
+keeps tens of thousands, past saturation (ENGINE.md §7: the cap is not a throughput lever).
+Peak VRAM was 9.5 GB of 12 in every run, before and after: the later calls reuse the
+first call's allocation, so the kill-switch of [BENCHMARKING.md](../BENCHMARKING.md) §2 never came near.
+A call that fills the budget leaves about 2% less free than its buffers' sizes, which the test
+(`tests/engine/test_k_cap.py`) allows. At 60% of the budget the gap is gone, and no engine buffer
+accounts for it. Scripts and logs: `$GPAP_RESULTS/bugs_20261116/` (`second_sweep.py`,
+`second_sweep.log`, `repro_56*.py`, `ab_56*.py`).

@@ -48,6 +48,10 @@ class Gpu {
     /* Bytes free for new allocations and the device total. A library with no free-memory query
      * reports the total as free; the caller's reserve and fraction still apply. */
     virtual gpap_status mem_info(int64_t *free_bytes, int64_t *total_bytes) = 0;
+    /* True when mem_info's free figure is measured, so it already excludes what this device's
+     * allocations hold; false when it is the total. engine_batch counts the engine's own row
+     * buffers back only in the first case: in the second they were never taken out. */
+    virtual bool free_is_measured() const = 0;
     /* The largest single buffer the device allows, or 0 if it sets no limit of its own. The
      * batch must keep the widest per-row buffer under it (engine_batch). */
     virtual int64_t max_buffer_bytes() const = 0;

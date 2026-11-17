@@ -40,6 +40,9 @@ again before relying on it, or before calling the direction closed.
 
 ## Engine & memory model
 
+- **A later call on one engine sizes the same batch as the first (2026-11-16).** Free VRAM
+  had not counted the rows the engine already held, so on a 1.2M-clause formula the second
+  probe sweep ran 428 rows instead of 2,362, at half the rate. [CPP_BACKEND](CPP_BACKEND_FINDINGS.md) §7
 - **The GPU socket costs the CUDA path nothing (2026-11-16):** probing at 1.00 of the base's
   rate, sampling within noise, the same results. [OPENCL](OPENCL_FINDINGS.md) §14
 - **OpenCL on a CPU probes at a quarter of a laptop GPU, with SCALAR (2026-11-15).** The

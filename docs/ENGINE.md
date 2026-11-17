@@ -191,6 +191,11 @@ throughput proxy the sampling pipeline uses to decide whether mined clauses paid
 The cap is a saturation limit, not a safety one: on the cards measured, 4× the batch bought
 ~3%. Overrides exist for measurement (`k_cap`, `pin_batch`) — pin them for any A/B.
 
+Free VRAM counts the rows the engine already holds: its next batch reuses those buffers, so a
+later call on one engine sizes the batch the first one did, not what the first left free
+([findings/CPP_BACKEND_FINDINGS.md](findings/CPP_BACKEND_FINDINGS.md) §7). Other engines and
+other processes still count as used.
+
 ## 8. Knobs
 
 | | effect | default |
