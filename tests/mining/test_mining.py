@@ -524,7 +524,8 @@ def test_the_keep_if_it_helps_guard_reports_its_decision(circuit_cnfs):
     """The keep-if-it-helps guard reports `kept`/`gain` consistently, and the run is sound.
 
     Mined clauses are entailed, so the decision cannot change the model set; this checks the
-    bookkeeping, not the direction."""
+    bookkeeping, not the direction. Only a find with a clause of width >= 3 can be reverted, and
+    only below 1x; units and binaries stay whatever the noisy score says."""
     c = circuit_cnfs["b03-c25"]
     info = sample_clauses(c["nv"], c["clauses"], c["support"], DEV, n_time=2000,
                           time_limit=30.0, mine=True, verify_sound=True)
@@ -532,9 +533,149 @@ def test_the_keep_if_it_helps_guard_reports_its_decision(circuit_cnfs):
     if mi is None:
         pytest.skip("nothing mined on this instance")
     assert "kept" in mi and "gain" in mi
-    if mi["gain"] is not None and mi["kept"]:
-        assert mi["gain"] > 1.0, "clauses were kept, so the guard must have seen a gain"
+    if mi["gain"] is not None:
+        if mi["kept"]:
+            assert mi["gain"] >= 1.0 or mi["n_ternary"] == 0, "kept below 1x with a wide clause"
+        else:
+            assert mi["gain"] < 1.0 and mi["n_ternary"] > 0, "reverted without a wide loss"
     assert info["sound_check"] == "ok", "the run must be sound whether or not the clauses were kept"
+
+
+# The mining block builds up to three more samplers: after stage 1, after stage 2, and on a
+# revert. A sampler's batch is read from free VRAM when it is built, and a live sampler's rows
+# count as used, so each one must be built after the one before it is gone (#48).
+#
+# x1 is entailed, by (x1 | x2) and (x1 | ~x2), but BCP at the root does not see it, so a clause
+# with x1 in it is one mining could prove. The variables past the support are in no clause: they
+# make every row wide, so the batch is memory-bound and K reads free VRAM, while the sampler
+# decides only the support.
+_GATE_NV = 150_000
+_GATE_SUPPORT = list(range(6))
+_GATE_CLAUSES = [[1, 2], [1, -2], [3, 4, 5], [-3, 4, 6]]
+_GATE_LEARNED = [[1, 3, 5]]          # width 3, so the score decides between keep and revert
+
+
+def _gate_run(monkeypatch, scores=None, learned=_GATE_LEARNED, **kw):
+    """sample_clauses on the _GATE formula, with mining replaced by `learned` and, given
+    `scores` (before, after), the keep-or-revert score too."""
+    from collections import Counter
+
+    from gpap.mining import MiningResult
+    from gpap.sampling import pipeline
+
+    monkeypatch.setattr(pipeline, "mine_entailed", lambda *a, **k: MiningResult(
+        clauses=[list(c) for c in learned], by_width=dict(Counter(len(c) for c in learned))))
+    if scores is not None:
+        score = iter(scores)
+        monkeypatch.setattr(pipeline, "_mine_score", lambda smp, warm: next(score))
+    return sample_clauses(_GATE_NV, _GATE_CLAUSES, _GATE_SUPPORT, DEV, simplify=False, els=False,
+                          n_time=10, time_limit=5.0, configs=pipeline.portfolio("b1"),
+                          min_measure_chunks=1, mine=True, **kw)
+
+
+@pytest.mark.gpu             # its tensors live on the CUDA device
+def test_no_sampler_is_built_while_another_is_alive(monkeypatch):
+    """Every sampler of the mining block (stage 1, stage 2 and the revert) is built after the one
+    before it is gone. Built beside it, the new sampler was sized on what the old one's warm-up
+    rows left free: K came out low, and so did the score the keep-or-revert test compares."""
+    import weakref
+
+    from gpap.sampling.sampler import GPUSampler
+
+    live, alive_at_build = weakref.WeakSet(), []
+    build = GPUSampler.from_clauses.__func__
+
+    def spy(cls, *a, **kw):
+        alive_at_build.append(len(live))
+        s = build(cls, *a, **kw)
+        live.add(s)
+        return s
+
+    monkeypatch.setattr(GPUSampler, "from_clauses", classmethod(spy))
+    info = _gate_run(monkeypatch, [2.0, 1.0], mine_gate=1.01)    # always stuck: stage 2 runs
+    assert len(alive_at_build) == 4, "the first build, stage 1, stage 2 and the revert"
+    assert alive_at_build == [0, 0, 0, 0], alive_at_build
+    assert info["mined"]["kept"] is False
+
+
+@pytest.mark.gpu             # its tensors live on the CUDA device
+@pytest.mark.parametrize("kept", [True, False], ids=["kept", "reverted"])
+def test_a_mined_run_has_the_batch_of_its_final_formula(monkeypatch, kept):
+    """The timed run's batch is the one a sampler built alone gets on the formula the run samples:
+    the mined one when the clauses are kept, the original one on a revert. A reverted run used to
+    sample below the batch of a run that never mined."""
+    import gc
+
+    import torch
+
+    from gpap.engine.calibrate import resolve_k_cap
+    from gpap.sampling.sampler import GPUSampler
+
+    def batch_alone(clauses):
+        gc.collect()
+        torch.cuda.empty_cache()
+        k = GPUSampler.from_clauses(_GATE_NV, clauses, DEV, simplify=False, els=False,
+                                    support=_GATE_SUPPORT).K
+        gc.collect()
+        torch.cuda.empty_cache()
+        return k
+
+    want = batch_alone(_GATE_CLAUSES + _GATE_LEARNED if kept else _GATE_CLAUSES)
+    assert want < resolve_k_cap("auto", DEV), "the batch must be memory-bound to show anything"
+    info = _gate_run(monkeypatch, [1.0, 2.0] if kept else [2.0, 1.0])
+    assert info["mined"]["kept"] is kept
+    # 0.5%: free VRAM moves a little between builds; a sampler left alive cost about 7% here.
+    assert abs(info["engine"]["K"] - want) <= want // 200, (info["engine"]["K"], want)
+
+
+@pytest.mark.gpu             # its tensors live on the CUDA device
+def test_a_failed_rebuild_samples_the_original_formula(monkeypatch):
+    """A rebuild drops the old sampler before it builds the new one, so a device error inside it
+    leaves no sampler at all. Mining is an optimization: the run goes on, on the formula it was
+    given, and reports that mining was skipped."""
+    from gpap.sampling.sampler import GPUSampler
+
+    build, builds = GPUSampler.from_clauses.__func__, []
+
+    def fail_the_second(cls, *a, **kw):
+        builds.append(1)
+        if len(builds) == 2:                 # stage 1's rebuild
+            raise RuntimeError("device error")
+        return build(cls, *a, **kw)
+
+    monkeypatch.setattr(GPUSampler, "from_clauses", classmethod(fail_the_second))
+    info = _gate_run(monkeypatch, [2.0, 1.0])
+    assert info["mined"] is None
+    assert info["n_models"] >= 10
+
+
+@pytest.mark.gpu             # its tensors live on the CUDA device
+@pytest.mark.parametrize("learned, scores, kept", [
+    (_GATE_LEARNED, [1.0, 1.0], True),
+    ([[1]], [2.0, 1.0], True),
+    ([[1, 3]], [2.0, 1.0], True),
+    (_GATE_LEARNED, [2.0, 1.0], False),
+], ids=["tie", "unit", "binary", "wide-loss"])
+def test_only_wide_clauses_that_lose_the_score_are_reverted(monkeypatch, learned, scores, kept):
+    """The score is K x completion, and only a mined clause of width >= 3 adds a packed word per
+    row and so can shrink K: units fold into the flush and binaries are implication edges. With
+    none of those, nothing but noise in the measured completion rate could lower the score, so
+    the clauses stay. A tie also keeps them: the proxy saw no difference, and the clauses are
+    entailed and shorten derivations (MINING_FINDINGS.md, "Derivable is not useless")."""
+    info = _gate_run(monkeypatch, scores, learned=learned)
+    assert info["mined"]["kept"] is kept
+
+
+@pytest.mark.gpu             # its tensors live on the CUDA device
+def test_the_mined_report_carries_both_factors_of_the_score(monkeypatch):
+    """`gain` alone cannot tell a batch that did not move from a completion rate that did not, or
+    a cap-bound K from a saturated rate: the report carries K and the best completion rate on
+    both sides of the decision, and they multiply to the gain."""
+    info = _gate_run(monkeypatch)
+    mi = info["mined"]
+    assert mi["k_after" if mi["kept"] else "k_before"] == info["engine"]["K"]
+    assert mi["gain"] == pytest.approx(mi["k_after"] * mi["success_after"]
+                                       / (mi["k_before"] * mi["success_before"]))
 
 
 # -------------------------------------------- the `derivable` drop level (_derivable_mask)

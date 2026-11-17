@@ -299,9 +299,22 @@ def sample_clauses(nv, clauses, support, device, *, simplify=True, els=True, n_t
         if progress is not None:
             progress(event, data)
 
+    def _new_sampler(cls):
+        """The sampler for `cls`, built after the current one is gone. Its batch is read from free
+        VRAM, where a live sampler's rows count as used: built beside the old one, it came out
+        smaller than its formula allows, and so did the score that keeps or reverts the mined
+        clauses. Drops `smp` itself, because the caller's reference would keep the old one alive
+        through the build."""
+        nonlocal smp
+        smp = None
+        if device.type == "cuda":
+            torch.cuda.empty_cache()     # what it freed sits in torch's cache, which reads as used
+        smp = GPUSampler.from_clauses(nv, cls, device, simplify=simplify, els=els,
+                                      support=support, k_cap=k_cap, seed=seed)
+        return smp
+
     _tc = time.perf_counter()
-    smp = GPUSampler.from_clauses(nv, clauses, device, simplify=simplify, els=els,
-                                  support=support, k_cap=k_cap, seed=seed)
+    smp = _new_sampler(clauses)
     phases["construct"] = time.perf_counter() - _tc
     # The shape of the instance is known now, and everything after it (warmup, up to MINE_SECONDS
     # of mining, the timed run) takes real time: report it before spending any of that.
@@ -323,6 +336,7 @@ def sample_clauses(nv, clauses, support, device, *, simplify=True, els=True, n_t
                 # the wide widths only if the instance is still stuck after the units are in.
                 _tm = time.perf_counter()
                 score_before = _mine_score(smp, w)       # what we have to beat to keep the clauses
+                k_before = smp.K
                 mine_deadline = _tm + MINE_SECONDS      # one budget, shared by both stages
                 mi = mine_entailed(nv, clauses, device, pool=_support_literals(support),
                                    max_tuples=STAGE1_MAX_TUPLES, seconds=MINE_SECONDS)
@@ -332,9 +346,7 @@ def sample_clauses(nv, clauses, support, device, *, simplify=True, els=True, n_t
                 if learned:
                     # Rebuild on the augmented formula and re-warm: the stuck signal and the score.
                     _tm = time.perf_counter()
-                    smp = GPUSampler.from_clauses(
-                        nv, clauses + learned, device, simplify=simplify, els=els,
-                        support=support, k_cap=k_cap, seed=seed)
+                    smp = _new_sampler(clauses + learned)
                     phases["rebuild"] = time.perf_counter() - _tm
                     _tm = time.perf_counter()
                     warm = _warmup(smp)                 # post-units: the stuck signal AND the score
@@ -349,9 +361,7 @@ def sample_clauses(nv, clauses, support, device, *, simplify=True, els=True, n_t
                     if mi2.clauses:
                         learned = learned + list(mi2.clauses)
                         _tm = time.perf_counter()
-                        smp = GPUSampler.from_clauses(
-                            nv, clauses + learned, device, simplify=simplify,
-                            els=els, support=support, k_cap=k_cap, seed=seed)
+                        smp = _new_sampler(clauses + learned)
                         phases["rebuild"] = (phases.get("rebuild", 0.0)
                                              + time.perf_counter() - _tm)
                         _tm = time.perf_counter()
@@ -360,15 +370,20 @@ def sample_clauses(nv, clauses, support, device, *, simplify=True, els=True, n_t
                     for width, n in mi2.by_width.items():
                         mi.by_width[width] = mi.by_width.get(width, 0) + n
                     mi.seconds += mi2.seconds
-                # Keep the clauses only if they help: width >= 3 finds enlarge num_long and so
-                # shrink K (width-1/2 finds are K-free), and `K x success` is the models-per-chunk
-                # proxy. Revert when it did not beat the pre-mining sampler.
-                score_after = _mine_score(smp, warm if learned else w)
+                # Keep the clauses unless they lost. `K x success` is the models-per-chunk proxy,
+                # and only a clause of width >= 3 can cost K: it adds a packed word per row, while
+                # units fold into the flush and binaries are implication edges. Without one, only
+                # noise in the measured success could lower the score, so the clauses stay. A tie
+                # keeps them too: they are entailed, and they shorten derivations, which the proxy
+                # does not see (MINING_FINDINGS.md, "Derivable is not useless").
+                after = warm if learned else w
+                score_after = _mine_score(smp, after)
+                k_after, success_after = smp.K, after["best_success"]
+                wide = any(len(c) >= 3 for c in learned)
                 # No baseline when the un-mined warmup completed nothing: keep the clauses.
-                if learned and score_before > 0 and score_after <= score_before:
+                if wide and score_before > 0 and score_after < score_before:
                     _tm = time.perf_counter()
-                    smp = GPUSampler.from_clauses(nv, clauses, device, simplify=simplify, els=els,
-                                                  support=support, k_cap=k_cap, seed=seed)
+                    smp = _new_sampler(clauses)
                     phases["rebuild"] = phases.get("rebuild", 0.0) + time.perf_counter() - _tm
                     # Re-warm: every other route into the timed run went through `_warmup`, and
                     # a reverted run must not pay first-touch cost inside the measurement.
@@ -381,7 +396,11 @@ def sample_clauses(nv, clauses, support, device, *, simplify=True, els=True, n_t
                 mine_info = {"n_units": mi.by_width.get(1, 0), "n_binary": mi.by_width.get(2, 0),
                              "n_ternary": mi.by_width.get(3, 0), "seconds": mi.seconds,
                              "kept": bool(learned),
-                             "gain": (score_after / score_before) if score_before else None}
+                             "gain": (score_after / score_before) if score_before else None,
+                             # the score's factors, so a 1.00x says which one did not move
+                             "k_before": k_before, "k_after": k_after,
+                             "success_before": w["best_success"],
+                             "success_after": success_after}
                 # `smp` is now the sampler the timed run will use (kept or reverted), so the
                 # active support here is the FINAL one. It is not merely smaller: the rebuild
                 # re-runs simplification and ELS over the augmented formula, which fixes support
@@ -391,6 +410,9 @@ def sample_clauses(nv, clauses, support, device, *, simplify=True, els=True, n_t
                                   "support_size": _active_support(smp)})
             except RuntimeError as e:   # mining is an optimization — never let it kill the run
                 log.warning("mining skipped after a device error: %s", e)
+                if smp is None:         # a rebuild failed after it had dropped the old sampler
+                    smp = _new_sampler(clauses)
+                    _warmup(smp)
     t0 = time.perf_counter()
     # A big-K GPU meets n_time in the bandit cold-start, so `min_measure_chunks` makes the winner
     # run that many back-to-back chunks for a stable, config-consistent rate.

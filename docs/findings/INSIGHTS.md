@@ -109,6 +109,10 @@ again before relying on it, or before calling the direction closed.
 
 ## Sampler, mining and uniformity
 
+- **Mining keeps units, binaries and ties (2026-11-17).** The keep-or-revert test had sized the
+  mined formula beside the old sampler (about a thousand rows short), and its one-order trial
+  read noise as a loss. 9 of 60 instances that mined flip to keep, sampling 1.32× faster and
+  1.19× end to end; the other 51 are unchanged. [MINING](MINING_FINDINGS.md), last section
 - **Barbarik: the shipped portfolio Accepts 65/65 with zero Rejects (2026-10-13),** as do pinned
   `b8` and CMSGen; `soft` is Rejected on 64/65 and opt-in.
   [UNIFORMITY_FINDINGS.md](UNIFORMITY_FINDINGS.md) §4b

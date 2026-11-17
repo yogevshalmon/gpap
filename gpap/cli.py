@@ -209,10 +209,15 @@ def _sample_progress(args):
                 return
             # Whether the clauses were KEPT is the point of the line: width >= 3 finds shrink K,
             # so a mine that found plenty can still be reverted. `gain` is the projected
-            # models-per-chunk ratio (K x success), a proxy and not a measurement.
+            # models-per-chunk ratio (K x success), a proxy and not a measurement; its factors
+            # print beside it, so a 1.00x says which of the two did not move.
             g = d.get("gain")
-            gain_s = f", {g:.2f}x projected models/chunk" if g else ""
+            gain_s = (f", {g:.2f}x projected models/chunk (K {d['k_before']:,} → {d['k_after']:,}, "
+                      f"completion {d['success_before']:.2f} → {d['success_after']:.2f})"
+                      if g else "")
             verdict = f"kept{gain_s}" if d["kept"] else f"reverted — did not pay{gain_s}"
+            if d["kept"] and g and g < 1:
+                verdict += "; units and binaries cannot shrink K"   # only noise scored them < 1x
             # Mining rebuilds the formula, so simplification and ELS run again over
             # `clauses + learned` and the ACTIVE support is recomputed: mined units fix support
             # variables (fewer), and the added clauses also change the equivalence classes, so a
