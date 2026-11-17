@@ -88,12 +88,14 @@ The other entry point tests many assumption sets in one launch:
 gpap::AssumptionChecker checker("formula.cnf");
 auto r = checker.check(sets);                        // ANY number of sets, propagated independently
 r.conflict(1);                                       // did set 1 falsify a clause?
-r.value(0, 5);                                       // True / False / Free for x5 under set 0
+auto a = checker.check(sets, /*assignments=*/true);  // also what each set implies:
+a.value(0, 5);                                       // True / False / Free for x5 under set 0
 ```
 
 `sets` may be any length: launches are sized to free VRAM and the formula's shape, and results come
-back in input order. Pass `with_assignments=false` when only the conflict flags matter — the
-per-row assignment is `n x 2N` bytes, which chunking cannot shrink.
+back in input order. Only the conflict flags and implication counts come back unless you pass
+`assignments=true`, as in the Python face: the per-row assignment is `n x 2N` bytes, which
+chunking cannot shrink.
 
 ## Tier 2 — driving the engine yourself
 
