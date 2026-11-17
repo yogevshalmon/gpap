@@ -34,6 +34,11 @@ change does not.
 - A later call on one engine (`gpap_check_sets`, a probe sweep, a sampler) sizes the batch the
   first call did. It used to size from what the first call left free: about a sixth of the batch,
   and half the probing rate on a 1.2M-clause formula (issue 56).
+- `gpap_check_sets` that returns assignments but no sat counts takes the CLEAN kernel, as a
+  flags-only call does: up to 1.4x faster, identical results. Afterwards the engine refuses a
+  packed readout (`gpap_sat_rows`, `gpap_check_sound`) until its next reset, as after any CLEAN
+  launch (issue 42). The CLEAN contract in the findings now matches the header: bitmap readouts
+  are served after a CLEAN launch.
 
 ### C++
 - `gpap::AssumptionChecker::check(sets)` returns the conflict flags and implication counts only,

@@ -80,9 +80,12 @@ extern "C" gpap_status gpap_check_sets(gpap_engine *e, const int32_t *lits,
 
         GPAP_TRY(gpap_engine_reset(e, K));   /* the LAST chunk is short: reset to its own size
                                               * (this is also where GPAP_MODE_AUTO resolves) */
-        /* Flags-only calls take the CLEAN kernel, whose launch restores its own rows so the next
-         * reset skips the broadcast; calls that read state stay plain. */
-        if (assign_out || sat_out)
+        /* The CLEAN kernel restores the packed words its launch touched, so the next reset skips
+         * the broadcast, and keeps the bitmap at the fixpoint: flags, counts and the assignment
+         * readout (a bitmap readout) are exact after it. Sat counts read the packed words, so a
+         * call that wants them takes the plain kernel. Afterwards a packed readout of these rows
+         * is refused, never answered from the baseline (engine_reject_if_packed_is_baseline). */
+        if (sat_out)
             GPAP_TRY(gpap_engine_apply(e, decisions.data(), static_cast<int32_t>(L)));
         else
             GPAP_TRY(gpap_engine_apply_clean(e, decisions.data(), static_cast<int32_t>(L)));
