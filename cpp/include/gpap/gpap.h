@@ -197,7 +197,9 @@ gpap_status gpap_engine_flushed_assignment(gpap_engine *e, int8_t *out_host); /*
  *   sat_out         (n, M)   int32, or NULL — surviving literals per clause
  * `conflict_out` is exact for every set, and so is everything else on a non-conflicted set
  * (confluence). On a conflicted set the other fields are a snapshot of where BCP stopped, which
- * the chunk size can move (it feeds the kernel dispatch): compare those on `conflict_out`. */
+ * the chunk size can move (it feeds the kernel dispatch): compare those on `conflict_out`.
+ * Without `sat_out` every launch is gpap_engine_apply_clean, so afterwards the engine refuses a
+ * packed readout until its next reset or plain launch; `sat_out` takes the plain kernel. */
 gpap_status gpap_check_sets(gpap_engine *e, const int32_t *lits, const int64_t *offsets,
                             int64_t n, int32_t chunk, int8_t *conflict_out,
                             int32_t *propagated_out, int8_t *assign_out, int32_t *sat_out);

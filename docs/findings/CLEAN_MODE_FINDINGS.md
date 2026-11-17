@@ -5,8 +5,10 @@
 > **Status:** settled — shipped and gated 2026-08-21, contract enforced 2026-08-22. Supersedes
 > the reset-restore plan (deleted; git history keeps it).
 > **Measured:** 2026-08-21, RTX 4080 Laptop (12 GB, WSL2); confirmed same day on a Colab L4.
+> The assignment-check section: 2026-11-16, the same laptop.
 > **Rule lives in:** `cpp/src/engine.cpp` (`gpap_engine_apply_clean`, the reset-lite path),
-> `cpp/src/probe.cpp`, `cpp/kernels/bcp.py`, `cpp/tools/build_kernels.py`, `gpap/engine/_core.py`.
+> `cpp/src/probe.cpp`, `cpp/src/check.cpp`, `cpp/kernels/bcp.py`, `cpp/tools/build_kernels.py`,
+> `gpap/engine/_core.py`.
 > **Gated by:** `tests/engine/test_clean_mode.py`.
 > **Record only:** the four soundness lemmas L1–L4 below. They are per-kernel-version facts with
 > no other home; the test is their tripwire, not their statement.
@@ -67,13 +69,17 @@ length including seeds; do not restore `tail − ndecs`, which under-covers.
 ## The contract
 
 - CLEAN is a per-launch mode, not the universal path. It restores the packed words only; the
-  bitmap keeps the fixpoint. Anything that reads post-apply state — `gpap_sat_rows`,
-  `gpap_check_sound`, `recache_flush`, `check_assumptions(assignments=)`, `gpap_assume_units` —
-  must use plain `apply`; after a clean launch those calls are refused (`engine.abits_diverged`,
-  set by a completed clean launch, cleared by `reset` or any plain apply or trajectory).
-  Copying the state out first would be the broadcast again.
+  bitmap keeps the fixpoint. Anything that reads the post-apply PACKED state — `gpap_sat_rows`,
+  `gpap_check_sound`, `recache_flush`, `gpap_assume_units` — must use plain `apply`; after a
+  clean launch those calls are refused (`engine.abits_diverged`, set by a completed clean launch,
+  cleared by `reset` or any plain apply or trajectory). Copying the state out first would be the
+  broadcast again. The bitmap readouts (`gpap_assignment_rows`, `gpap_var_bits`,
+  `gpap_select_complete`) read the fixpoint and are served. *(Corrected 2026-11-16: this bullet
+  listed `check_assumptions(assignments=)` among the refused calls, which the code never did;
+  GitHub issue 42.)*
 - `gpap_packed_rows` stays open: the debug readout the identity gate uses to prove the restore.
-- Consumers: `probe_chunk` and flags-only `check_sets`. The sampler stays on the broadcast: its
+- Consumers: `probe_chunk`, and `check_sets` unless it returns sat counts (assignment checks
+  since 2026-11-16, last section). The sampler stays on the broadcast: its
   trail ratio (0.32–0.62, × ~8 sector amplification) is the losing side of the crossover, and its
   reset is not its bottleneck.
 - `GPAP_CLEAN=0` is exact legacy and also disables reset-lite, so an A/B is uncontaminated;
@@ -110,3 +116,31 @@ guard. Verified to fail against a broken tail (walk `tail-1`).
 - Prefix-sharing enumeration: touches the core's lex-order contract.
 - Copy-on-write / sparse row state: the asymptotic answer, a separate project.
 - A persistent kernel looping over many tuples: fights chunk granularity and the WSL2 watchdog.
+
+## Assignment checks take the clean kernel (2026-11-16)
+
+`check_sets` took the plain kernel whenever it returned assignments, although the assignment
+readout reads the bitmap, which a clean launch leaves at the fixpoint. Now only a call that
+returns sat counts takes the plain kernel. Results are identical: the A/B below matched on
+conflicts and on every assigned bit, and
+`test_assignment_checks_go_lite_with_identical_answers` compares flags, counts and assignments
+against the plain kernel on both kernels and both splits.
+
+`check_sets(assignments=True)`, fresh engine, fixed chunk: the minimum of 5 runs in each of two
+processes per arm, the arms alternated, and the two minima averaged (RTX 4080 Laptop):
+
+| formula | sets, chunk | plain | clean | |
+|---|---|---|---|---|
+| VanDerWaerden_2-3-14_186 (N 186, M_long 9,795) | 200k, 50k | 0.062 s | 0.044 s | 1.41× |
+| random 3-SAT (N 20k, M 80k) | 40k, 10k | 0.263 s | 0.231 s | 1.14× |
+| `intel044_T71` (N 453k, M_long 408k) | 4k, 1k | 0.558 s | 0.549 s | 1.02× |
+
+The broadcast skipped is `4·M_long` bytes a row and the readout is `2N`, so the gain follows
+`4·M_long / 2N`. It is 105 on VanDerWaerden and 8 on the 3-SAT formula. On `intel044` it is
+1.8, and the 3.6 GB readout leaves nothing to gain.
+
+The price: after an assignment check the engine refuses a packed readout of those rows until
+its next reset (`test_a_packed_readout_after_an_assignment_check_is_refused`). Before, it
+answered with the last chunk's state. No in-tree caller reads packed state after an assignment
+check. The one in-tree caller, `mining._derivable_mask`, builds a fresh checker for its single
+call. Scripts and log: `$GPAP_RESULTS/bugs_20261116/` (`ab_42.py`, `ab_42.log`).

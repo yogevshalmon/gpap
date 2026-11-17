@@ -270,6 +270,25 @@ def test_packed_derived_readouts_refuse_after_clean():
         e.sat_rows([0, 1])
 
 
+def test_bitmap_readouts_are_served_after_clean():
+    """The bitmap keeps the fixpoint through a clean launch, so its readouts answer, and answer
+    what a plain launch gives: assignment rows, variable bits and complete-row selection."""
+    def readouts(clean):
+        f = _core.Formula.from_clauses(8, [[-1, 2], [-2, 3], [3, 4], [-3, -5], [1, 6]])
+        e = _core.Engine(f)
+        e.reset(4)
+        dec = np.array([[0], [1], [-1], [8]], dtype=np.int64)   # x1, ~x1, nothing, x5
+        (e.apply_clean if clean else e.apply)(dec)
+        e.selection_set(2, [0, 1, 2, 3])
+        asg = e.assignment_rows(2, 4)
+        bits = e.var_bits(2, np.arange(8, dtype=np.int32), 4)
+        n_complete = e.select_complete(e.pair_mask(), 1)
+        return asg, bits, n_complete
+
+    for got, want in zip(readouts(clean=True), readouts(clean=False)):
+        np.testing.assert_array_equal(got, want)
+
+
 def test_raw_packed_readout_stays_open():
     """gpap_packed_rows is the raw readout the identity tests above rely on, so it is not
     guarded."""
@@ -335,9 +354,9 @@ def test_probe_sweep_identical_and_lite(monkeypatch):
 
 
 def test_checker_flags_only_goes_lite(monkeypatch):
-    """Flags-only AssumptionChecker calls use clean mode (lite resets, same answers);
-    assignments=True uses the plain kernel. The second half uses a fresh checker because the
-    first reset after a clean call is legitimately lite."""
+    """Flags-only AssumptionChecker calls use clean mode (lite resets, same answers); so do
+    assignment calls (next test), and sat_count calls keep the plain kernel. The second half uses
+    a fresh checker because the first reset after a clean call is legitimately lite."""
     from gpap.engine.checker import AssumptionChecker
 
     CLAUSES = [[1, 2], [-1, 3], [-2, -3], [4, 5], [-4, 6]]
@@ -357,10 +376,53 @@ def test_checker_flags_only_goes_lite(monkeypatch):
 
     ck2 = AssumptionChecker.from_clauses(6, CLAUSES)
     monkeypatch.setattr(ck2, "chunk_size", lambda n, max_lits=1: 17)
-    r = ck2.check_assumptions(sets, assignments=True)
+    r = ck2.check_assumptions(sets, sat_count=True)
     assert ck2.engine._core.reset_stats()[1] == 0, \
-        "state-reading calls must keep the plain kernel (no lite resets)"
-    assert int(r["assignment"].sum()) > 0, "assignments must be the fixpoint, not baseline"
+        "sat counts read the packed words, so they must keep the plain kernel (no lite resets)"
+    assert int(r["sat_count"].sum()) > 0, "sat counts must be the fixpoint's, not baseline"
+
+
+@pytest.mark.parametrize("mode", ["scalar", "wave"])
+@pytest.mark.parametrize("shift", [16, 8])
+def test_assignment_checks_go_lite_with_identical_answers(monkeypatch, mode, shift):
+    """An assignment check reads the bitmap, which a clean launch leaves at the fixpoint, so it
+    takes the clean kernel like a flags-only one: lite resets, and flags, counts and assignments
+    identical to the plain kernel's (GPAP_CLEAN=0) on every row the kernel contract specifies."""
+    rng = random.Random(42)
+    nv = 24
+    clauses = random_cnf(rng, nv, 70, kmin=2, kmax=4)
+    sets = _awkward_sets(rng, nv, 200)
+    lits = np.array([x for s in sets for x in s], dtype=np.int32)
+    offsets = np.cumsum([0] + [len(s) for s in sets]).astype(np.int64)
+
+    def run(clean):
+        monkeypatch.setenv("GPAP_CLEAN", "1" if clean else "0")
+        eng = _core.Engine(_core.Formula.from_clauses(nv, clauses), mode=mode,
+                           force_shift=shift)
+        if eng.flush_conflict:
+            pytest.skip("precondition: this seed's formula must not be UNSAT at the root")
+        out = eng.check_sets(lits, offsets, chunk=17, assignments=True)
+        return out, eng.reset_stats()[1]
+
+    (c_on, p_on, a_on, _), lite_on = run(True)
+    (c_off, p_off, a_off, _), lite_off = run(False)
+    np.testing.assert_array_equal(c_on, c_off)
+    ok = ~c_on
+    assert ok.sum() > 50, "precondition: most sets must survive propagation"
+    np.testing.assert_array_equal(p_on[ok], p_off[ok])
+    np.testing.assert_array_equal(a_on[ok], a_off[ok])
+    assert lite_off == 0
+    assert lite_on >= -(-len(sets) // 17) - 1, f"only {lite_on} lite resets"
+
+
+def test_a_packed_readout_after_an_assignment_check_is_refused():
+    """The assignment check left the packed words at the baseline, so a sat-count readout of its
+    rows must refuse rather than describe the baseline."""
+    e = _core.Engine(_core.Formula.from_clauses(8, [[-1, 2], [-2, 3], [3, 4], [-3, -5, 6]]))
+    e.check_sets(np.array([1, 2], dtype=np.int32), np.array([0, 1, 2], dtype=np.int64),
+                 assignments=True)
+    with pytest.raises(Exception, match="apply_clean|baseline"):
+        e.sat_rows([0, 1])
 
 
 def test_mining_identical_under_env(monkeypatch):

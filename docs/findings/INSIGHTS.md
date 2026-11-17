@@ -40,6 +40,9 @@ again before relying on it, or before calling the direction closed.
 
 ## Engine & memory model
 
+- **Assignment checks take the CLEAN kernel (2026-11-16).** The bitmap keeps the fixpoint, so
+  only sat counts need the plain kernel: 1.41× on a clause-heavy formula, nothing where the
+  assignment readout dominates. [CLEAN_MODE](CLEAN_MODE_FINDINGS.md)
 - **A later call on one engine sizes the same batch as the first (2026-11-16).** Free VRAM
   had not counted the rows the engine already held, so on a 1.2M-clause formula the second
   probe sweep ran 428 rows instead of 2,362, at half the rate. [CPP_BACKEND](CPP_BACKEND_FINDINGS.md) §7
