@@ -15,8 +15,9 @@ def lit_idx(ext: int) -> int:
 def ref_bcp(clauses: list, decisions: list[int]) -> tuple[bool, frozenset]:
     """Unit-propagate `decisions` (literal indices, applied in order; duplicates are skipped,
     l and ~l together conflict) over `clauses` (DIMACS literals), including the formula's own
-    unit clauses. Returns (conflict, set of assigned literal indices)."""
-    idx_clauses = [[lit_idx(x) for x in c] for c in clauses]
+    unit clauses. Returns (conflict, set of assigned literal indices). A clause is the SET of its
+    literals: (x1 | x1 | x2) forces x1 once x2 is false, exactly as (x1 | x2) does."""
+    idx_clauses = [list(dict.fromkeys(lit_idx(x) for x in c)) for c in clauses]
     contains: dict[int, list[int]] = defaultdict(list)
     for ci, lits in enumerate(idx_clauses):
         for l in lits:

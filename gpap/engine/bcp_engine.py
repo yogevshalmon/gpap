@@ -36,7 +36,9 @@ def packed_envelope(num_vars: int, max_clause_len: int) -> "tuple[int | None, st
 
 
 def clauses_envelope(num_vars: int, clauses: list) -> "tuple[int | None, str]":
-    return packed_envelope(num_vars, max((len(c) for c in clauses), default=0))
+    """packed_envelope of a clause list, measured as the builder measures it: a clause's length
+    is its count of DISTINCT literals (repeats are merged at build)."""
+    return packed_envelope(num_vars, max((len(set(c)) for c in clauses), default=0))
 
 
 def make_assumption_tensor(assumptions_lit_indices: list[list[int]],

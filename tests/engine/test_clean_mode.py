@@ -92,12 +92,13 @@ def test_deep_row_guard_streams_exactly(mode):
     """A probe that assigns every variable pushes the restore past the M/8 threshold into the
     stream-the-row path, which must restore exactly too.
 
-    The chain is ternary (-v | -v | v+1) so that it has packed words: a binary chain would have
-    none (test_pure_binary_formula_is_stateless). The duplicate literal still forces v+1 as
-    (-v | v+1) would."""
+    The chain is ternary (-v | v+1 | z) with z false at the root, so that it has packed words: a
+    binary chain would have none (test_pure_binary_formula_is_stateless), and a repeated literal
+    is merged into one. With z false each link forces v+1 as (-v | v+1) would."""
     nv = 400
-    clauses = [[-(v), -(v), v + 1] for v in range(1, nv)]    # 1 => 2 => ... => nv, len-3 links
-    f = _core.Formula.from_clauses(nv, clauses)
+    z = nv + 1
+    clauses = [[-(v), v + 1, z] for v in range(1, nv)] + [[-z]]   # 1 => 2 => ... => nv
+    f = _core.Formula.from_clauses(z, clauses)
     assert f.info.num_long == nv - 1, "the links must carry packed words, or nothing is restored"
     eng = _core.Engine(f, mode=mode)
     eng.reset(4)
@@ -228,8 +229,8 @@ def test_gpap_clean_env_disables(monkeypatch):
     """GPAP_CLEAN=0 (read at engine creation) makes apply_clean a plain apply: the fixpoint
     state stays and no reset goes lite."""
     monkeypatch.setenv("GPAP_CLEAN", "0")
-    nv = 8
-    clauses = [[-1, -1, 2], [-2, -2, 3], [1, 4]]     # ternary, so the change lands in packed words
+    nv = 9
+    clauses = [[-1, 2, 9], [-2, 3, 9], [1, 4], [-9]]   # ternary, so the change lands in packed words
     f = _core.Formula.from_clauses(nv, clauses)
     eng = _core.Engine(f)
     eng.reset(4)

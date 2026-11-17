@@ -15,6 +15,7 @@
 #include <cstring>
 #include <memory>
 #include <string>
+#include <utility>
 #include <vector>
 
 using gpap::set_error;
@@ -59,28 +60,67 @@ static gpap_status build(int32_t num_vars, const int32_t *flat, const int32_t *l
     std::unique_ptr<gpap_formula> f(new gpap_formula());
     f->num_vars = num_vars;
 
-    /* Pass 1: drop empty clauses, measure. */
+    /* Pass 1: drop empty clauses, validate every literal, and keep each clause's DISTINCT
+     * literals. A clause is the set of its literals: counted twice, a repeated literal leaves its
+     * clause one slot short of a unit forever, so BCP never forces it — (x | x | y) is built as
+     * (x | y), and (x | x) as the unit x. Clause count and order do not change: clause indices
+     * are the shape of every per-clause readout. A tautology keeps both of x and ~x, which are
+     * different literals; the counter rule already makes it harmless. Every size, sum and list
+     * below is computed from the distinct literals, so do not measure a clause before this. */
+    const int64_t num_lits = 2ll * num_vars;
     std::vector<int32_t> keep_len;
     std::vector<const int32_t *> keep_ptr;
     keep_len.reserve(m);
     keep_ptr.reserve(m);
-    const int32_t *cur = flat;
-    for (int32_t c = 0; c < m; ++c) {
-        /* A negative length would walk `cur` backwards out of the caller's buffer. */
-        if (lens[c] < 0) {
-            set_error("clause %d has negative length %d", c, lens[c]);
-            return GPAP_ERR_ARG;
-        }
-        if (lens[c] == 0) {
-            f->has_empty_clause = 1;
-        } else {
-            keep_len.push_back(lens[c]);
+    std::vector<int32_t> merged;                     /* distinct literals of clauses that repeat */
+    std::vector<std::pair<int32_t, size_t>> merged_at;   /* (kept clause, offset in `merged`) */
+    {
+        std::vector<int32_t> seen((size_t)num_lits, -1); /* literal -> last kept clause holding it */
+        const int32_t *cur = flat;
+        for (int32_t c = 0; c < m; ++c) {
+            /* A negative length would walk `cur` backwards out of the caller's buffer. */
+            if (lens[c] < 0) {
+                set_error("clause %d has negative length %d", c, lens[c]);
+                return GPAP_ERR_ARG;
+            }
+            if (lens[c] == 0) {
+                f->has_empty_clause = 1;
+                continue;
+            }
+            const int32_t kept = (int32_t)keep_len.size();
+            int32_t distinct = 0;
+            for (int32_t i = 0; i < lens[c]; ++i) {
+                const int32_t li = lit_index(cur[i], num_vars);
+                if (li < 0) {                          /* 0, or a variable past num_vars */
+                    set_error("literal %d out of range for num_vars=%d", cur[i], num_vars);
+                    return GPAP_ERR_ARG;
+                }
+                if (seen[(size_t)li] != kept) {
+                    seen[(size_t)li] = kept;
+                    ++distinct;
+                }
+            }
             keep_ptr.push_back(cur);
-            f->total_lits += lens[c];
-            if (lens[c] > f->max_clause_len) f->max_clause_len = lens[c];
+            if (distinct < lens[c]) {
+                /* First occurrences in input order; -2 marks a literal already copied, and no
+                 * kept clause index is negative. */
+                merged_at.emplace_back(kept, merged.size());
+                for (int32_t i = 0; i < lens[c]; ++i) {
+                    int32_t &s = seen[(size_t)lit_index(cur[i], num_vars)];
+                    if (s == kept) {
+                        merged.push_back(cur[i]);
+                        s = -2;
+                    }
+                }
+            }
+            keep_len.push_back(distinct);
+            f->total_lits += distinct;
+            if (distinct > f->max_clause_len) f->max_clause_len = distinct;
+            cur += lens[c];
         }
-        cur += lens[c];
     }
+    /* Only now is `merged` final, so its addresses are stable. */
+    for (const auto &ka : merged_at) keep_ptr[(size_t)ka.first] = merged.data() + ka.second;
     f->num_clauses = (int32_t)keep_len.size();
     /* The occurrence CSR indexes with int32, so past 2^31 literal slots its offsets wrap into
      * silent corruption. Checked against total_lits, which over-counts the CSR — conservative,
@@ -96,7 +136,6 @@ static gpap_status build(int32_t num_vars, const int32_t *flat, const int32_t *l
     if (gpap_packed_envelope(num_vars, f->max_clause_len, &f->shift) != GPAP_OK) f->shift = 0;
 
     const int32_t M = f->num_clauses;
-    const int64_t num_lits = 2ll * num_vars;
     f->clause_sizes.resize(M);
     f->lit_sum.resize(M);
     f->occ_offsets.assign(num_lits + 1, 0);
@@ -111,11 +150,7 @@ static gpap_status build(int32_t num_vars, const int32_t *flat, const int32_t *l
         const int32_t *lits = keep_ptr[c];
         uint32_t sum = 0;
         for (int32_t i = 0; i < n; ++i) {
-            const int32_t li = lit_index(lits[i], num_vars);
-            if (li < 0) {                          /* 0, or a variable past num_vars */
-                set_error("literal %d out of range for num_vars=%d", lits[i], num_vars);
-                return GPAP_ERR_ARG;
-            }
+            const int32_t li = lit_index(lits[i], num_vars);   /* in range: pass 1 checked */
             sum += (uint32_t)li;
             if (n == 2)
                 bin_cnt[(size_t)(li ^ 1)] += 1;
@@ -405,7 +440,8 @@ extern "C" gpap_status gpap_formula_clauses(const gpap_formula *f, int32_t *lits
     if (!lits_out) return GPAP_OK;
     /* Reconstructed in the ORIGINAL clause order from the per-kind lists (aligned with
      * clause_sizes). Long clauses come back by inverting the long occ sub-ranges: entry (l, j)
-     * says long clause j contains l^1, so duplicates survive and order is ascending. */
+     * says long clause j contains l^1, so order is ascending (each literal once: build()
+     * keeps a clause's distinct literals). */
     std::vector<int64_t> long_pos(static_cast<size_t>(f->num_long), 0);  /* long id -> write pos */
     int64_t pos = 0;
     for (int32_t c = 0; c < f->num_clauses; ++c) {

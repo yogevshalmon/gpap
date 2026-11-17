@@ -42,8 +42,9 @@ def test_packed_envelope_falls_back_to_wide_then_rejects():
 
 
 def test_packed_envelope_guards_the_count_field_of_the_narrow_split():
-    """A clause longer than the sat_count field would carry into the sum field. Only reachable
-    with repeated literals."""
+    """A clause longer than the sat_count field would carry into the sum field. No clause list
+    reaches it (2N <= 65,535 bounds a clause's distinct literals, and the builder merges repeats),
+    so this guards the arithmetic for a caller passing a length directly."""
     assert packed_envelope(10, 65_535)[0] == 16
     assert packed_envelope(10, 65_536)[0] is None
 
@@ -51,6 +52,12 @@ def test_packed_envelope_guards_the_count_field_of_the_narrow_split():
 def test_clauses_envelope_reads_the_max_length_off_the_clause_list():
     assert clauses_envelope(5, [[1, 2], [3]]) == (16, "")
     assert clauses_envelope(5, [])[0] == 16
+
+
+def test_clauses_envelope_measures_distinct_literals_as_the_builder_does():
+    """The builder keeps a clause's distinct literals, so 300 entries naming two literals fit the
+    8|24 split's 255-literal field; a raw-length check would turn the formula away."""
+    assert clauses_envelope(40_000, [[1] * 299 + [2]]) == (8, "")
 
 
 # --------------------------------------------------------------------- encoder specs

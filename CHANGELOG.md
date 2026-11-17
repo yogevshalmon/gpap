@@ -27,6 +27,10 @@ change does not.
 - `scripts/setup_opencl.sh` installs a pinned OpenCL runtime without root where the system has
   none (PoCL: its CPU driver, or its CUDA driver for WSL2).
 - `mine_entailed` raises when its engine cannot be built, instead of returning no clauses.
+- A clause that repeats a literal is built from its distinct literals: `(x | x | y)` propagates
+  like `(x | y)`, and `(x | x)` is the unit `x`. The repeat used to keep the clause one slot
+  short of a unit, so BCP missed its implication (issue 57). Clause count and order are
+  unchanged; `total_lits`, clause sizes and the clause read-back count distinct literals.
 
 ## 0.3.1 — 2026-10-23, the TACAS 2027 artifact
 

@@ -142,9 +142,88 @@ def test_matches_the_reference_parser_as_clause_sets(tmp_path):
 
 
 @pytest.mark.core
-def test_duplicate_literals_survive_the_round_trip():
+def test_a_repeated_literal_is_kept_once():
+    """(x1 | x1 | ~x2) is the binary (x1 | ~x2): counted twice, x1 left the clause one slot
+    short of a unit forever, and BCP never forced it (#57)."""
     f = _core.Formula.from_clauses(2, [[1, 1, -2], [2]])
-    assert [sorted(c) for c in f.clauses()] == [[-2, 1, 1], [2]]
+    assert [sorted(c) for c in f.clauses()] == [[-2, 1], [2]]
+    assert (f.info.num_bin, f.info.num_long) == (1, 0)
+    assert (f.info.total_lits, f.info.max_clause_len) == (3, 2)
+    assert f.clause_arrays()[0].tolist() == [2, 1]
+
+
+@pytest.mark.core
+def test_a_clause_of_one_repeated_literal_is_a_unit():
+    """(x | x) is the unit x, not the implication edge ~x -> x, which never fixes x at the root."""
+    f = _core.Formula.from_clauses(2, [[1, 1], [2, 2, 2]])
+    assert (f.info.num_bin, f.info.num_long) == (0, 0)
+    assert f.clause_arrays()[0].tolist() == [1, 1]
+    assert f.clauses() == [[1], [2]]
+
+
+@pytest.mark.core
+def test_a_tautology_is_kept_whole():
+    """x and ~x are different literals: the clause keeps both, and the counter rule already makes
+    it harmless (only one of the two can ever be false)."""
+    f = _core.Formula.from_clauses(2, [[1, -1, 2], [2, -2]])
+    assert (f.info.num_bin, f.info.num_long) == (1, 1)
+    assert f.clause_arrays()[0].tolist() == [3, 2]
+
+
+@pytest.mark.core
+def test_merging_keeps_clause_count_and_order():
+    """Clause indices are the (n, M) shape of every per-clause readout, so merging may shrink a
+    clause but never drop or reorder one."""
+    clauses = [[3, 3, 1, 2], [-1], [2, 2], [1, -3, 1, -3, 2]]
+    f = _core.Formula.from_clauses(3, clauses)
+    assert f.info.num_clauses == 4
+    assert [sorted(c) for c in f.clauses()] == [[1, 2, 3], [-1], [2], [-3, 1, 2]]
+
+
+@pytest.mark.core
+def test_the_envelope_is_chosen_from_the_merged_length():
+    """2N = 80,000 needs the 8|24 split, whose length field stops at 255. A clause written with
+    300 entries but two distinct literals fits it; measured before merging, it did not."""
+    f = _core.Formula.from_clauses(40_000, [[1] * 299 + [2], [3, 4, 5]])
+    assert f.info.max_clause_len == 3
+    assert f.info.shift == 8
+
+
+@pytest.mark.core
+def test_the_dimacs_reader_merges_too(tmp_path):
+    p = tmp_path / "rep.cnf"
+    p.write_text("p cnf 2 2\n1 1 -2 0\n2 2 0\n")
+    f = _core.Formula.from_file(str(p))
+    assert f.clauses() == [[1, -2], [2]]
+    assert (f.info.num_bin, f.info.total_lits) == (1, 3)
+
+
+def _with_repeats(rng, clauses):
+    """The same clauses with some literals written again, at random positions."""
+    out = []
+    for c in clauses:
+        c = list(c)
+        for _ in range(rng.choice([0, 0, 1, 2, 3])):
+            c.insert(rng.randrange(len(c) + 1), rng.choice(c))
+        out.append(c)
+    return out
+
+
+@pytest.mark.core
+def test_repeated_literals_build_exactly_like_their_literal_sets():
+    """Every structure the engine reads — occ CSR, sizes, sums, kinds — is that of the formula
+    with each clause reduced to its distinct literals, so no kernel can tell them apart."""
+    rng = random.Random(57)
+    for nv, nc in [(6, 10), (40, 120), (200, 900)]:
+        sets = random_cnf(rng, nv, nc)
+        f = _core.Formula.from_clauses(nv, _with_repeats(rng, sets))
+        g = _core.Formula.from_clauses(nv, sets)
+        for field in ("num_clauses", "num_bin", "num_long", "total_lits", "max_clause_len",
+                      "shift"):
+            assert getattr(f.info, field) == getattr(g.info, field), field
+        for a, b in zip(f.occ() + f.clause_arrays(), g.occ() + g.clause_arrays()):
+            np.testing.assert_array_equal(a, b)
+        assert f.clauses() == g.clauses()
 
 
 @pytest.mark.core
@@ -275,7 +354,7 @@ def test_every_read_back_accessor_survives_an_empty_vector():
         # No `or nv == 0` escape: the (0, []) row must be checked too.
         assert len(offsets) == 2 * nv + 1
         assert len(sizes) == len(sums) == f.info.num_clauses == len(back)
-        assert [sorted(c) for c in back] == [sorted(c) for c in clauses if c]
+        assert [sorted(c) for c in back] == [sorted(set(c)) for c in clauses if c]
 
 
 @pytest.mark.core
@@ -379,8 +458,11 @@ def test_every_returned_index_is_a_valid_variable(tmp_path):
 @pytest.mark.core
 def test_formula_structures_match_the_reference_builder():
     rng = random.Random(7)
-    for nv, nc in [(6, 10), (40, 120), (200, 900)]:
+    for nv, nc, repeats in [(6, 10, False), (40, 120, False), (200, 900, False),
+                            (40, 120, True), (200, 900, True)]:
         clauses = random_cnf(rng, nv, nc)
+        if repeats:
+            clauses = _with_repeats(rng, clauses)
         f = ReferenceFormula.from_clauses(nv, clauses)
         cf = _core.Formula.from_clauses(nv, clauses)
 
