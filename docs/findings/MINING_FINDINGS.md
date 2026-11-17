@@ -2,11 +2,11 @@
 
 > **Reader:** contributors and researchers — the evidence behind entailed-clause mining. A dated research log, not a user guide.
 >
-> **Status:** settled — shipped 2026-08-19/21.
-> **Measured:** 2026-08-19 to 2026-08-21, RTX 4080 Laptop unless a section says otherwise (one
-> L4 validation run).
+> **Status:** settled — shipped 2026-08-19/21; the keep-or-revert test revised 2026-11-17.
+> **Measured:** 2026-08-19 to 2026-08-21 and 2026-11-17 (the last section), RTX 4080 Laptop
+> unless a section says otherwise (one L4 validation run).
 > **Rule lives in:** `gpap/mining.py`, `gpap/sampling/pipeline.py` (`STAGE1_MAX_TUPLES`,
-> `MINE_MIN_CLAUSES`, `MINE_SECONDS`), `cpp/src/probe.cpp`.
+> `MINE_MIN_CLAUSES`, `MINE_SECONDS`, the keep-or-revert test), `cpp/src/probe.cpp`.
 > **Gated by:** `tests/mining/test_mining.py`, including `test_mining_is_kernel_invariant`.
 > **Record only:** the "follow-ups, deliberately not built" table.
 
@@ -194,6 +194,10 @@ since binary clauses became implication edges ([BINARY_OCC_FINDINGS.md](BINARY_O
 and the proxy retunes itself: 6s215rb0's gain rose 1.43 → 2.44 and texasparsesysp3 flipped from
 revert to keep with no constant touched.
 
+*(2026-11-17: the batch this test compared was sized beside the sampler it replaced, and its
+trial reads one variable order per configuration. Units, binaries and ties are now kept whatever
+the score: see "Keep-or-revert, measured fairly" below.)*
+
 ### Do not widen the pool
 
 Mining every free literal instead of the support finds 100-1000x more entailed clauses (b03-c25
@@ -239,3 +243,58 @@ a 15% larger batch and 1.75x throughput. A bigger ceiling does not mean a bigger
 | `hyper_binary` size guard (~1000x the formula) | analysis product only; documented |
 | `--sample random` for truncated sweeps | measure on an instance where mining finds something first |
 | Line-by-line review of the Python mining path since the C++ port | noted, not done |
+
+## Keep-or-revert, measured fairly (2026-11-17)
+
+The fix for GitHub issue 48. RTX 4080 Laptop, CUDA. The scripts and every run's `--stats` JSON
+are in `$GPAP_RESULTS/mining_gate_20261117/` (`ab_48.py`, `summarize.py`, `seeds_b1.sh`).
+
+**The batch the test compared was sized beside the sampler it replaced.** A sampler reads its
+batch from free VRAM when it is built. The pipeline built the mined sampler (stage 1, stage 2)
+and the reverted one while the previous sampler still held its formula and its 1,024 warm-up
+rows, so each came out about a thousand rows short. On a memory-bound formula, the score read
+the mined formula as worse than it was, and a reverted run sampled below the batch of a run that
+never mined. Each sampler is now built after the previous one is dropped and torch's cache is
+emptied. Batches of the timed run:
+
+| instance | main | now | mining off |
+|---|---:|---:|---:|
+| bj08amba2g4f3 (main reverted) | 2,621 | 3,595 | 3,408 |
+| bobsynthor | 4,385 | 5,491 | 4,110 |
+| texasparsesysp3 | 4,805 | 6,116 | 4,189 |
+| 6s215rb0 | 13,000 | 13,893 | 12,984 |
+| pdtswvibs8x8p0 | 23,728 | 25,121 | 15,016 |
+
+**The trial's completion rate cannot see a small effect.** The trial runs one chunk per
+configuration at 1,024 rows, and every row of a chunk shares that chunk's variable order. The
+CLI also pins a circuit's outputs to a pattern drawn from the seed, so each seed is a different
+formula. On b08, seed 5, the trial read B=1 completion as 0.64 without the 388 mined units and
+0.56 with them, and main reverted them. The full batch on the same seed agreed: 0.644 and 0.566
+over 3 chunks. Paired over 8 seeds (`--portfolio b1`, about 15 chunks per run), the same units
+leave completion unchanged (1.004×, 0.77-1.13 per seed) and sample 1.125× faster (0.90-1.30).
+On s386: 1.20× completion and 1.17× faster.
+
+**The rule now.** Only a find with a clause of width ≥ 3 can be reverted, and only on a lower
+score: such a clause adds a packed word to every row, while units fold into the flush and
+binaries are implication edges, so a find without one cannot shrink K. A tie keeps the clauses.
+The `mined` report carries both factors of the score (`k_before`, `k_after`, `success_before`,
+`success_after`), and so does the console line.
+
+**Across 66 instances** (29 sk_, 19 ITC99/ISCAS89 at 25 cycles, 7 HWMCC17, 2 ISCAS85, 9 EPFL;
+Tseitin, seed 5, `-n 20000 --time-limit 8 --n-cov 0`, main's pipeline against this one on the
+same library), 60 mined something and 9 decisions changed, all from revert to keep:
+
+| | instances | sampling rate, now / main | end to end, now / main | batch, now / main |
+|---|---:|---:|---:|---:|
+| decision changed | 9 | 1.32× | 1.19× | 1.04× |
+| decision unchanged | 51 | 1.03× | 1.00× | 1.02× |
+
+Of the 9, seven had mined units only and scored 0.84-1.00× on the trial: b02, b08, b09, b10,
+s386, s526 and 35.sk_3_52. On 35.sk_3_52 the units take the formula from 961 clauses to 70, and
+sampling runs 9× faster. cavlc tied with one ternary. bj08amba2g4f3 flipped on the batch alone:
+it scores 1.05× once both batches are sized fairly. Two finds with ternaries are still reverted,
+on both sides (ProjectService3, registerlesSwap).
+
+Rates come from one seed and short runs. Per instance, the end-to-end ratio between two runs
+with the same decision and batch moved from 0.49× to 2.6×, because fixed costs dominate a
+sub-second run. Only the geomeans above and the seed-paired runs are evidence.

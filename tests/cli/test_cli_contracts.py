@@ -2,6 +2,8 @@
 delivery and accounting, UNSAT reporting, the soundness tri-state, writers and defaults shared
 across faces. Each guards a failure that would mislead rather than crash.
 """
+import re
+
 import numpy as np
 import pytest
 import torch
@@ -219,6 +221,18 @@ def test_each_phase_is_printed_where_it_happened(tmp_path, capsys):
     where = {k: next(i for i, ln in enumerate(out) if k in ln)
              for k in ("N=4 M=2", "mined", "models in")}
     assert where["N=4 M=2"] < where["mined"] < where["models in"], out
+
+
+@pytest.mark.gpu
+def test_the_mining_line_prints_both_factors_of_its_gain(tmp_path, capsys):
+    """The keep-or-revert score is K x completion rate, so a gain of 1.00x alone cannot say which
+    one did not move: the console prints both, before and after. x1 is entailed but not by BCP,
+    so mining proves it."""
+    cli_main(["sample", _cnf(tmp_path, "p cnf 3 3\n1 2 0\n1 -2 0\n2 3 0\n"), "-n", "10",
+              "--mine", "on"])
+    line = next(ln for ln in capsys.readouterr().out.splitlines() if "mined" in ln)
+    assert "1 units" in line and "projected models/chunk" in line, line
+    assert re.search(r"K [\d,]+ → [\d,]+, completion \d\.\d\d → \d\.\d\d", line), line
 
 
 @pytest.mark.gpu
