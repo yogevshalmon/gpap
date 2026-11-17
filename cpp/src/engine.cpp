@@ -298,6 +298,19 @@ static gpap_status ensure_state(gpap_engine *e, int32_t K) {
     return GPAP_OK;
 }
 
+/* Bytes the engine holds in the row state ensure_state grows, which its next batch reuses: a
+ * buffer grows in place and frees itself before it allocates, so a new batch never needs these
+ * bytes and its own at once. Not staging_a: a caller whose matrix is narrower than the last one's
+ * leaves part of it held. Keep the list in step with ensure_state. */
+static int64_t row_buffers_held(const gpap_engine *e) {
+    int64_t n = 0;
+    for (const DevBuf *b : {&e->packed, &e->abits, &e->active, &e->conflict, &e->trail,
+                            &e->nprops, &e->nops, &e->ndecs, &e->nrounds})
+        n += (int64_t)b->bytes;
+    for (const Selection &s : e->slots) n += (int64_t)s.mask.bytes;
+    return n;
+}
+
 extern "C" gpap_status gpap_engine_reset(gpap_engine *e, int32_t K) {
     if (!e || K <= 0) return GPAP_ERR_ARG;
     GPAP_TRY(use_ctx(e));
@@ -549,9 +562,15 @@ gpap_status engine_require_trajectory(gpap_engine *e) {
 
 int32_t engine_batch(gpap_engine *e, int64_t extra_row_bytes, int32_t cap) {
     int64_t free_b = 0, total_b = 0;
-    const int64_t budget =
-        use_ctx(e) == GPAP_OK && e->gpu->mem_info(&free_b, &total_b) == GPAP_OK
-            ? mem_budget(free_b, kMemFraction) : 0;
+    int64_t budget = 0;
+    if (use_ctx(e) == GPAP_OK && e->gpu->mem_info(&free_b, &total_b) == GPAP_OK) {
+        /* A measured free figure already excludes the rows this engine holds from its last
+         * batch, which the next batch reuses: count them back, or every call after the first
+         * sizes itself from what the first left free. The batch is then a function of the
+         * formula and the card, not of the engine's call history. */
+        if (e->gpu->free_is_measured()) free_b += row_buffers_held(e);
+        budget = mem_budget(free_b, kMemFraction);
+    }
     const int64_t per_row =
         gpap_row_bytes(e->num_long, e->num_vars, e->trail_cap) + extra_row_bytes;
     int32_t k = rows_fitting(budget, per_row,
