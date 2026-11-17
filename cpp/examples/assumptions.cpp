@@ -22,7 +22,9 @@ static int tutorial() {
     const std::vector<std::vector<std::int32_t>> sets = {{1}, {-1, -2}, {2, 3}, {}};
     const char *label[] = {"x1=T", "x1=F,x2=F", "x2=T,x3=T", "(no assumptions)"};
 
-    const gpap::CheckResults r = checker.check(sets);
+    // The assignments are asked for because value() reads them below; by default only the
+    // conflict flags and implication counts come back.
+    const gpap::CheckResults r = checker.check(sets, /*assignments=*/true);
     std::printf("%zu assumption sets, %zu conflicted:\n\n", r.size(), r.num_conflicts());
     for (std::size_t i = 0; i < r.size(); ++i) {
         std::printf("  %-16s -> ", label[i]);
@@ -63,10 +65,10 @@ static int survey(const char *path) {
             lit = (rng() & 1) ? v : -v;
         }
 
-    // with_assignments=false: only the conflict flags come back. The per-row assignment is
-    // n x 2N bytes and is what makes a large call expensive, so ask for it only if you read it.
+    // Only the conflict flags come back: the default. The per-row assignment is n x 2N bytes and
+    // is what makes a large call expensive, so ask for it only if you read it.
     const auto t0 = std::chrono::steady_clock::now();
-    const gpap::CheckResults r = checker.check(sets, /*with_assignments=*/false);
+    const gpap::CheckResults r = checker.check(sets);
     const double secs = std::chrono::duration<double>(
                             std::chrono::steady_clock::now() - t0).count();
 

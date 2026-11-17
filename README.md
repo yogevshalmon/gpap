@@ -151,7 +151,7 @@ The same library, as a C ABI (`gpap/gpap.h`) plus a header-only C++ layer (`gpap
 #include <gpap/gpap.hpp>
 
 gpap::AssumptionChecker checker("formula.cnf");            // the engine
-gpap::CheckResults r = checker.check({{1, -2, 3}, {-1, 2, -3}});
+gpap::CheckResults r = checker.check({{1, -2, 3}, {-1, 2, -3}}, /*assignments=*/true);
 bool refuted = r.conflict(0);
 gpap::Value x3 = r.value(1, 3);                            // True / False / Free after BCP
 

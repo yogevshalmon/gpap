@@ -414,6 +414,26 @@ def test_the_two_faces_agree_on_the_decision_batch_default():
         "the faces disagree on the default decision batch: " + repr(spellings)
 
 
+def test_the_two_checker_faces_agree_on_the_assignments_default():
+    """Both checker faces return the flags alone unless the caller asks for the assignments,
+    which cost n x 2N bytes. The C++ default was `true`, so the same call cost several times the
+    Python one on a big formula. The header is read as text: no build needed, and it is what C++
+    callers compile."""
+    import inspect
+    import re
+    from pathlib import Path
+
+    from gpap.engine.checker import AssumptionChecker
+
+    hpp = (Path(REPO_ROOT) / "cpp/include/gpap/gpap.hpp").read_text()
+    m = re.search(r"CheckResults\s+check\(const std::vector<std::vector<std::int32_t>>\s*&sets,"
+                  r"\s*bool\s+(\w+)\s*=\s*(true|false)\)", hpp)
+    assert m, "AssumptionChecker::check's assignments parameter not found — did it move?"
+    assert (m.group(1), m.group(2)) == ("assignments", "false"), m.group(0)
+    sig = inspect.signature(AssumptionChecker.check_assumptions)
+    assert sig.parameters["assignments"].default is False
+
+
 def test_no_face_turns_on_the_soft_polarity_by_itself():
     """The Barbarik-rejected soft polarity is opt-in on every face. `--allow-soft` is covered by
     test_sampler.py::test_soft_is_not_in_any_default_portfolio; this checks the C++

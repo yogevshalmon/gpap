@@ -643,7 +643,9 @@ class CheckResults {
     /** Value of DIMACS variable `var` in `row` — True, False, or Free (undetermined);
      *  `literals(row)` lists every literal true there, assumptions and implications alike. */
     Value value(std::size_t row, std::int32_t var) const {
-        if (assign_.empty()) throw Error(GPAP_ERR_ARG, "assignments were not requested");
+        if (assign_.empty())
+            throw Error(GPAP_ERR_ARG, "assignments were not requested: call "
+                                      "check(sets, /*assignments=*/true)");
         const std::size_t base = row * 2 * static_cast<std::size_t>(n_vars_);
         const std::size_t l = base + 2 * static_cast<std::size_t>(var - 1);
         if (assign_[l]) return Value::True;
@@ -684,11 +686,12 @@ class AssumptionChecker {
 
     /** Propagate every set to a fixpoint; `sets` hold DIMACS literals. Any number of sets: they
      *  are split into GPU-sized chunks by `gpap_check_sets` (cpp/src/check.cpp — the one home of
-     *  that loop, shared with the Python face) and come back in input order. `with_assignments`
-     *  materializes the per-row assignment (n x 2N bytes) so `value()` and `literals()` work;
-     *  drop it when only the flags matter, since chunking cannot shrink that term. */
+     *  that loop, shared with the Python face) and come back in input order. Only the flags and
+     *  counts come back unless `assignments` is set, as in the Python face: the per-row
+     *  assignment that `value()` and `literals()` read is n x 2N bytes, which chunking cannot
+     *  shrink. */
     CheckResults check(const std::vector<std::vector<std::int32_t>> &sets,
-                       bool with_assignments = true) {
+                       bool assignments = false) {
         CheckResults r;
         r.n_ = sets.size();
         r.n_vars_ = n_vars_;
@@ -707,12 +710,12 @@ class AssumptionChecker {
 
         r.conflict_.assign(n, 0);
         r.propagated_.assign(n, 0);
-        if (with_assignments)
+        if (assignments)
             r.assign_.assign(n * 2 * static_cast<std::size_t>(n_vars_), 0);
         gpap::check(gpap_check_sets(engine_.handle(), lits.data(), offsets.data(),
                                     static_cast<std::int64_t>(n), /*chunk=*/0,
                                     r.conflict_.data(), r.propagated_.data(),
-                                    with_assignments ? r.assign_.data() : nullptr,
+                                    assignments ? r.assign_.data() : nullptr,
                                     /*sat_out=*/nullptr),
                     "gpap_check_sets");
         return r;

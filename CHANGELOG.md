@@ -35,6 +35,12 @@ change does not.
   first call did. It used to size from what the first call left free: about a sixth of the batch,
   and half the probing rate on a 1.2M-clause formula (issue 56).
 
+### C++
+- `gpap::AssumptionChecker::check(sets)` returns the conflict flags and implication counts only,
+  as the Python face does; `check(sets, /*assignments=*/true)` adds what `value()` and
+  `literals()` read. The default used to be `true`, which cost n x 2N bytes and the plain kernel
+  on every call (issue 44). `value()` on a flags-only result throws and names the call to make.
+
 ## 0.3.1 — 2026-10-23, the TACAS 2027 artifact
 
 The engine is unchanged: libgpap is still 0.3.0, and the sampler is the one that measured the
