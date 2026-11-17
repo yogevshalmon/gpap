@@ -7,7 +7,7 @@ The structures (docs/ENGINE.md). Only clauses of length >= 3 ("long") get a pack
     Binary entries come first, up to `occ_mid[l]`, with the other literal's index as payload;
     then long entries, with the long-clause index (0..num_long-1). Unit clauses have no occ
     entry (the construction flush asserts them). Each part is clause-ascending.
-  * `clause_sizes`: literal count of every kept clause, in input order.
+  * `clause_sizes`: distinct-literal count of every kept clause, in input order.
   * `init_lit_sum`: per-clause sum of literal indices mod 2^32 (the engine masks it to its split).
   * `bin_pairs` (sorted pairs, input order) and `unit_lits`.
 
@@ -44,6 +44,9 @@ class ReferenceFormula:
         self.has_empty_clause = any(len(c) == 0 for c in clauses)
         if self.has_empty_clause:
             clauses = [c for c in clauses if c]
+        # A clause is the SET of its literals: a repeated literal is kept once, so (x | x) is the
+        # unit x and (x | x | y) the binary (x | y). Count and order of the clauses do not change.
+        clauses = [list(dict.fromkeys(c)) for c in clauses]
         self.num_vars = int(num_vars)
         self.num_clauses = len(clauses)
 

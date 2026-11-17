@@ -61,7 +61,10 @@ typedef struct {
 } gpap_formula_info;
 
 /* Literal convention on this ABI: DIMACS signed literals (+v / -v, 1-based). The 2N internal
- * index scheme (+v -> 2(v-1), -v -> 2(v-1)+1) is used only where explicitly documented. */
+ * index scheme (+v -> 2(v-1), -v -> 2(v-1)+1) is used only where explicitly documented.
+ * A clause is the SET of its literals: one written twice is kept once, so (x | x | y) builds as
+ * (x | y) and (x | x) as the unit x, and every size, count and read-back below describes the
+ * distinct literals. Clause count and order are unchanged; a tautology keeps both x and ~x. */
 gpap_status gpap_formula_from_dimacs(const char *path, gpap_formula **out);
 gpap_status gpap_formula_from_clauses(int32_t num_vars, const int32_t *flat_lits,
                                       const int32_t *clause_lens, int32_t num_clauses,

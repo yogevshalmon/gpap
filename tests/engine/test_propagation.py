@@ -60,6 +60,57 @@ def test_fixpoint_matches_the_reference(mode, shift):
     assert compared > 100, f"only {compared} surviving rows compared"
 
 
+@pytest.mark.parametrize("clause", [[1, 1, 2], [2, 1, 1], [1, 2, 1, 1]])
+def test_a_repeated_literal_still_forces_its_unit(clause):
+    """Under ~x2, (x1 | x1 | x2) forces x1 as (x1 | x2) does. Counted twice, x1 kept the clause
+    one slot short of a unit, so the row stopped with x1 free (#57)."""
+    eng = _core.Engine(_core.Formula.from_clauses(2, [clause]))
+    eng.reset(1)
+    eng.apply(decision_matrix([[-2]]))
+    asg = eng.rows_assignment(np.arange(1, dtype=np.int32))
+    assert assigned_set(asg[0]) == {0, 3}          # x1 TRUE (index 0), x2 FALSE (index 3)
+    assert int(eng.num_propagated()[0]) == 1
+
+
+def test_a_clause_of_one_repeated_literal_is_fixed_at_the_root():
+    """(x1 | x1) is the unit x1, true before any decision, so the construction flush propagates
+    it. As the implication edge ~x1 -> x1 it fixed nothing at the root."""
+    eng = _core.Engine(_core.Formula.from_clauses(2, [[1, 1], [-1, 2, 2]]))
+    assert eng.flushed_assignment().tolist() == [1, 0, 1, 0]   # x1, then x2 through (~x1 | x2)
+    unsat = _core.Formula.from_clauses(2, [[1, 1], [-1, 2], [-1, -2]])
+    assert _core.Engine(unsat).flush_conflict                  # x1 forces both x2 and ~x2
+
+
+@pytest.mark.parametrize("mode", ["scalar", "wave"])
+@pytest.mark.parametrize("shift", [16, 8])
+def test_fixpoint_with_repeated_literals_matches_the_reference(mode, shift):
+    """Random formulas whose clauses repeat literals reach the fixpoint of their literal sets,
+    on both propagate kernels and both packed splits."""
+    rng = random.Random(57)
+    compared = 0
+    for _ in range(20):
+        nv = rng.randint(4, 26)
+        clauses = [c + [rng.choice(c) for _ in range(rng.choice([0, 1, 2]))]
+                   for c in _mixed_cnf(rng, nv)]
+        f = _core.Formula.from_clauses(nv, clauses)
+        eng = _core.Engine(f, mode=mode, force_shift=shift)
+        if f.info.has_empty_clause or eng.flush_conflict:
+            continue
+        K = 24
+        sets = random_assumptions(rng, nv, K, wmax=4)
+        eng.reset(K)
+        eng.apply(decision_matrix(sets))
+        _, conflict = eng.flags()
+        asg = eng.rows_assignment(np.arange(K, dtype=np.int32))
+        for i, s in enumerate(sets):
+            want_conflict, want_asg = ref_bcp(clauses, [lit_idx(x) for x in s])
+            assert bool(conflict[i]) == want_conflict, (mode, shift, nv, s)
+            if not want_conflict:
+                assert assigned_set(asg[i]) == want_asg, (mode, shift, nv, s)
+                compared += 1
+    assert compared > 100, f"only {compared} surviving rows compared"
+
+
 def _free_decisions(rng, engine, K, B, contradict_rows=()):
     """(K, B) literal indices over distinct free variables per row, as the sampler decides.
     Rows in `contradict_rows` get an l/~l pair instead, to take the conflict path."""
