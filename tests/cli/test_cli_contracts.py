@@ -442,24 +442,31 @@ def test_the_two_faces_agree_on_the_decision_batch_default():
         "the faces disagree on the default decision batch: " + repr(spellings)
 
 
-def test_the_two_checker_faces_agree_on_the_assignments_default():
-    """Both checker faces return the flags alone unless the caller asks for the assignments,
-    which cost n x 2N bytes. The C++ default was `true`, so the same call cost several times the
-    Python one on a big formula. The header is read as text: no build needed, and it is what C++
-    callers compile."""
+def test_the_checker_faces_agree_on_their_defaults():
+    """Every face of entry point 1 returns the flags and counts alone unless the caller asks for
+    more: assignments cost n x 2N bytes, sat counts n x M. The C++ `check` once defaulted to
+    assignments, so the same call cost several times the Python one on a big formula. Both C++
+    signatures are checked against their Python twins, the list-of-sets `check` and the flat
+    `check_sets`. The header is read as text: no build needed, and it is what C++ callers compile."""
     import inspect
     import re
     from pathlib import Path
 
+    from gpap.engine.bcp_engine import BCPEngine
     from gpap.engine.checker import AssumptionChecker
 
     hpp = (Path(REPO_ROOT) / "cpp/include/gpap/gpap.hpp").read_text()
-    m = re.search(r"CheckResults\s+check\(const std::vector<std::vector<std::int32_t>>\s*&sets,"
-                  r"\s*bool\s+(\w+)\s*=\s*(true|false)\)", hpp)
-    assert m, "AssumptionChecker::check's assignments parameter not found — did it move?"
-    assert (m.group(1), m.group(2)) == ("assignments", "false"), m.group(0)
-    sig = inspect.signature(AssumptionChecker.check_assumptions)
-    assert sig.parameters["assignments"].default is False
+    for cpp_name, py in (("check", AssumptionChecker.check_assumptions),
+                         ("check_sets", BCPEngine.check_sets)):
+        decls = re.findall(rf"CheckResults\s+{cpp_name}\(([^)]*)\)", hpp)
+        assert decls, f"no C++ {cpp_name}() returning CheckResults — did it move?"
+        sig = inspect.signature(py)
+        for params in decls:
+            cpp = dict(re.findall(r"[\w:]+\s+(\w+)\s*=\s*([^,]+?)\s*(?:,|$)", params))
+            assert params.count("=") == len(cpp), ("a default the pattern missed", params)
+            assert {"assignments", "sat_count"} <= set(cpp), (cpp_name, params)
+            for name, default in cpp.items():
+                assert str(sig.parameters[name].default).lower() == default, (cpp_name, name)
 
 
 def test_no_face_turns_on_the_soft_polarity_by_itself():

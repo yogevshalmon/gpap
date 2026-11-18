@@ -123,6 +123,16 @@ From plain C the same sequence is [`examples/c_api.c`](examples/c_api.c), where
 `gpap_engine_create(f, NULL, &e)` with NULL opts means every default: device 0, AUTO kernel, split
 from the formula.
 
+Batched checking also takes its sets flat, in DIMACS, as the C ABI and Python's `check_sets` do:
+tier 1's `check` runs on it, and a caller that already holds flat buffers skips the copy.
+
+```cpp
+// set i is lits[offsets[i] .. offsets[i+1]); offsets holds n + 1 entries
+gpap::CheckResults r = engine.check_sets(lits, offsets);   // flags and implication counts
+auto a = engine.check_sets(lits, offsets, /*assignments=*/true, /*sat_count=*/true);
+a.sat_count(0, 4);                       // surviving literals of clause index 4 (0-based)
+```
+
 ## Getting answers out: the selection API
 
 `gpap::Sampler` does all of this for you; read it if you drive `gpap::Engine`. A chunk ends with K

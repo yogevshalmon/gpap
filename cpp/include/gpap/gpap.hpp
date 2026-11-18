@@ -25,15 +25,21 @@
 
 namespace gpap {
 
-/** Any failed libgpap call. `status()` is the underlying `gpap_status`. */
+/** A failed libgpap call, or a refusal of this wrapper's own (Error::own). `status()` is the
+ *  `gpap_status`. */
 class Error : public std::runtime_error {
   public:
+    /** A libgpap call failed: the core's own message follows `what`. */
     Error(gpap_status st, const std::string &what)
-        : std::runtime_error(what + ": " + (gpap_last_error() ? gpap_last_error() : "")),
-          status_(st) {}
+        : Error(st, what + ": " + (gpap_last_error() ? gpap_last_error() : ""), Own{}) {}
+    /** A refusal of this wrapper's own. No libgpap call failed, so the core's last message,
+     *  which nothing clears, would be stale here and is not attached. */
+    static Error own(gpap_status st, const std::string &what) { return Error(st, what, Own{}); }
     gpap_status status() const noexcept { return status_; }
 
   private:
+    struct Own {};
+    Error(gpap_status st, const std::string &msg, Own) : std::runtime_error(msg), status_(st) {}
     gpap_status status_;
 };
 
@@ -131,6 +137,8 @@ class Formula {
     gpap_formula *h_ = nullptr;
 };
 
+class CheckResults;
+
 /** The K-parallel packed BCP engine. Not thread-safe: use one engine per thread. */
 class Engine {
   public:
@@ -195,6 +203,25 @@ class Engine {
         require_matrix(decisions, L, "apply_clean");
         check(gpap_engine_apply_clean(h_, decisions.data(), L), "gpap_engine_apply_clean");
     }
+
+    /** Entry point 1, flat and batched: `n_sets` assumption sets as DIMACS literals, set i being
+     *  lits[offsets[i] .. offsets[i+1]), so `offsets` holds n_sets + 1 entries. The other shape
+     *  of apply(): the core validates the literals, chunks the sets to the GPU (gpap_check_sets,
+     *  cpp/src/check.cpp, the one loop every face shares) and returns them in input order.
+     *  Flags and implication counts always come back; `assignments` adds the n x 2N per-row
+     *  assignment and `sat_count` the n x M surviving literals per clause, as in the Python face.
+     *  `chunk` <= 0 sizes launches to the GPU. On a conflicted set only the flag is exact: the
+     *  rest is where BCP stopped, which `chunk` can move. Without sat counts the launches are
+     *  CLEAN, so a packed readout (check_sound) is refused until the next reset. Defined after
+     *  CheckResults. */
+    CheckResults check_sets(const std::int32_t *lits, std::size_t num_lits,
+                            const std::int64_t *offsets, std::size_t n_sets,
+                            bool assignments = false, bool sat_count = false,
+                            std::int32_t chunk = 0);
+    CheckResults check_sets(const std::vector<std::int32_t> &lits,
+                            const std::vector<std::int64_t> &offsets,
+                            bool assignments = false, bool sat_count = false,
+                            std::int32_t chunk = 0);
 
     /** Entry point 2: the whole randomized decide+propagate trajectory per row, one launch.
      *  `order` is decision priority (0-based variables, support first) and `n_support` where
@@ -304,10 +331,11 @@ class Engine {
         const std::size_t want = static_cast<std::size_t>(k()) * static_cast<std::size_t>(L);
         /* `<`, not `!=`: a larger buffer is safe. `L < 0` is not redundant — it can wrap small. */
         if (L < 0 || decisions.size() < want)
-            throw Error(GPAP_ERR_ARG, std::string("Engine::") + what + ": decisions holds " +
-                                          std::to_string(decisions.size()) + " literals but K=" +
-                                          std::to_string(k()) + " x L=" + std::to_string(L) +
-                                          " needs " + std::to_string(want));
+            throw Error::own(GPAP_ERR_ARG, std::string("Engine::") + what + ": decisions holds " +
+                                               std::to_string(decisions.size()) +
+                                               " literals but K=" + std::to_string(k()) +
+                                               " x L=" + std::to_string(L) + " needs " +
+                                               std::to_string(want));
     }
 
     void reset_handle() {
@@ -540,10 +568,10 @@ class Sampler {
             out.n_kept_ = static_cast<std::size_t>(kept);
         }
         if (opts_.verify && out.stats_.unsound_rows > 0)
-            throw Error(GPAP_ERR_KERNEL, "a returned row does not satisfy the formula (" +
-                                             std::to_string(out.stats_.unsound_rows) + " of " +
-                                             std::to_string(out.stats_.sound_rows_checked) +
-                                             " checked)");
+            throw Error::own(GPAP_ERR_KERNEL, "a returned row does not satisfy the formula (" +
+                                                  std::to_string(out.stats_.unsound_rows) + " of " +
+                                                  std::to_string(out.stats_.sound_rows_checked) +
+                                                  " checked)");
         return out;
     }
 
@@ -587,7 +615,8 @@ class Sampler {
         } else {
             for (std::int32_t v : vars_)
                 if (v < 1 || v > n_vars_)
-                    throw Error(GPAP_ERR_ARG, "SampleOptions::variables: variable out of range");
+                    throw Error::own(GPAP_ERR_ARG,
+                                     "SampleOptions::variables: variable out of range");
         }
         std::vector<std::int32_t> cols;
         cols.reserve(vars_.size());
@@ -644,8 +673,7 @@ class CheckResults {
      *  `literals(row)` lists every literal true there, assumptions and implications alike. */
     Value value(std::size_t row, std::int32_t var) const {
         if (assign_.empty())
-            throw Error(GPAP_ERR_ARG, "assignments were not requested: call "
-                                      "check(sets, /*assignments=*/true)");
+            throw Error::own(GPAP_ERR_ARG, "assignments were not requested: pass assignments=true");
         const std::size_t base = row * 2 * static_cast<std::size_t>(n_vars_);
         const std::size_t l = base + 2 * static_cast<std::size_t>(var - 1);
         if (assign_[l]) return Value::True;
@@ -662,13 +690,55 @@ class CheckResults {
         return out;
     }
 
+    /** Literals of clause `clause` (0-based, in input order) that `row` has not made false; 0
+     *  means the row falsified it. */
+    std::int32_t sat_count(std::size_t row, std::size_t clause) const {
+        if (sat_.empty())
+            throw Error::own(GPAP_ERR_ARG, "sat counts were not requested: pass sat_count=true");
+        return sat_[row * static_cast<std::size_t>(n_clauses_) + clause];
+    }
+
   private:
-    friend class AssumptionChecker;
+    friend class Engine;
     std::vector<std::int8_t> conflict_, assign_;
-    std::vector<std::int32_t> propagated_;
+    std::vector<std::int32_t> propagated_, sat_;
     std::size_t n_ = 0;
-    std::int32_t n_vars_ = 0;
+    std::int32_t n_vars_ = 0, n_clauses_ = 0;
 };
+
+inline CheckResults Engine::check_sets(const std::int32_t *lits, std::size_t num_lits,
+                                       const std::int64_t *offsets, std::size_t n_sets,
+                                       bool assignments, bool sat_count, std::int32_t chunk) {
+    CheckResults r;
+    r.n_ = n_sets;
+    r.n_vars_ = num_vars();
+    r.n_clauses_ = num_clauses();
+    if (n_sets == 0) return r;
+    /* The core checks the literals and the offsets' shape, but how far `lits` reaches only the
+     * caller's side knows: an end past it would be read unchecked. */
+    if (!offsets) throw Error::own(GPAP_ERR_ARG, "Engine::check_sets: offsets is null");
+    if (offsets[n_sets] > 0 && static_cast<std::size_t>(offsets[n_sets]) > num_lits)
+        throw Error::own(GPAP_ERR_ARG, "Engine::check_sets: the last set ends at " +
+                                           std::to_string(offsets[n_sets]) + ", past the " +
+                                           std::to_string(num_lits) + " literals given");
+    r.conflict_.assign(n_sets, 0);
+    r.propagated_.assign(n_sets, 0);
+    if (assignments) r.assign_.assign(n_sets * 2 * static_cast<std::size_t>(r.n_vars_), 0);
+    if (sat_count) r.sat_.assign(n_sets * static_cast<std::size_t>(r.n_clauses_), 0);
+    check(gpap_check_sets(h_, lits, offsets, static_cast<std::int64_t>(n_sets), chunk,
+                          r.conflict_.data(), r.propagated_.data(),
+                          assignments ? r.assign_.data() : nullptr,
+                          sat_count ? r.sat_.data() : nullptr),
+          "gpap_check_sets");
+    return r;
+}
+
+inline CheckResults Engine::check_sets(const std::vector<std::int32_t> &lits,
+                                       const std::vector<std::int64_t> &offsets,
+                                       bool assignments, bool sat_count, std::int32_t chunk) {
+    return check_sets(lits.data(), lits.size(), offsets.data(),
+                      offsets.empty() ? 0 : offsets.size() - 1, assignments, sat_count, chunk);
+}
 
 /** Tests many assumption sets against one formula in a single kernel launch — the engine's core
  *  primitive. The sets are independent: nothing learned in one affects another.
@@ -680,45 +750,22 @@ class AssumptionChecker {
         : AssumptionChecker(Formula::from_dimacs(cnf_path), device) {}
 
     explicit AssumptionChecker(Formula formula, int device = 0)
-        : formula_(std::move(formula)), engine_(formula_, options(device)) {
-        n_vars_ = formula_.num_vars();
-    }
+        : formula_(std::move(formula)), engine_(formula_, options(device)) {}
 
-    /** Propagate every set to a fixpoint; `sets` hold DIMACS literals. Any number of sets: they
-     *  are split into GPU-sized chunks by `gpap_check_sets` (cpp/src/check.cpp — the one home of
-     *  that loop, shared with the Python face) and come back in input order. Only the flags and
-     *  counts come back unless `assignments` is set, as in the Python face: the per-row
-     *  assignment that `value()` and `literals()` read is n x 2N bytes, which chunking cannot
-     *  shrink. */
+    /** Propagate every set to a fixpoint; `sets` hold DIMACS literals. Flattened here, then
+     *  Engine::check_sets, whose comment says what each output costs. */
     CheckResults check(const std::vector<std::vector<std::int32_t>> &sets,
-                       bool assignments = false) {
-        CheckResults r;
-        r.n_ = sets.size();
-        r.n_vars_ = n_vars_;
-        if (sets.empty()) return r;
-
-        const std::size_t n = sets.size();
+                       bool assignments = false, bool sat_count = false) {
         std::vector<std::int32_t> lits;
-        std::vector<std::int64_t> offsets(n + 1, 0);
+        std::vector<std::int64_t> offsets(sets.size() + 1, 0);
         std::size_t total = 0;
         for (const auto &s : sets) total += s.size();
         lits.reserve(total);
-        for (std::size_t i = 0; i < n; ++i) {
+        for (std::size_t i = 0; i < sets.size(); ++i) {
             lits.insert(lits.end(), sets[i].begin(), sets[i].end());
             offsets[i + 1] = static_cast<std::int64_t>(lits.size());
         }
-
-        r.conflict_.assign(n, 0);
-        r.propagated_.assign(n, 0);
-        if (assignments)
-            r.assign_.assign(n * 2 * static_cast<std::size_t>(n_vars_), 0);
-        gpap::check(gpap_check_sets(engine_.handle(), lits.data(), offsets.data(),
-                                    static_cast<std::int64_t>(n), /*chunk=*/0,
-                                    r.conflict_.data(), r.propagated_.data(),
-                                    assignments ? r.assign_.data() : nullptr,
-                                    /*sat_out=*/nullptr),
-                    "gpap_check_sets");
-        return r;
+        return engine_.check_sets(lits, offsets, assignments, sat_count);
     }
 
     /** Assumption sets one launch holds — `gpap_check_chunk_size`, the core's one memory model. */
@@ -739,7 +786,6 @@ class AssumptionChecker {
     }
     Formula formula_;
     Engine engine_;
-    std::int32_t n_vars_ = 0;
 };
 
 /** When a probe sweep should stop. Every field is optional; the first to bind wins. */
@@ -852,8 +898,9 @@ class Prober {
      *  so a caller whose filter left nothing would get the largest possible sweep. */
     Probe probe(const std::vector<std::int32_t> &pool, std::int32_t k,
                 const ProbeBudget &budget = ProbeBudget()) {
-        if (pool.empty()) throw Error(GPAP_ERR_ARG, "gpap::Prober::probe: the pool is empty — "
-                                      "call probe(k) if you meant every free literal");
+        if (pool.empty())
+            throw Error::own(GPAP_ERR_ARG, "gpap::Prober::probe: the pool is empty — call "
+                                           "probe(k) if you meant every free literal");
         return sweep(pool.data(), static_cast<std::int32_t>(pool.size()), k, budget);
     }
 
