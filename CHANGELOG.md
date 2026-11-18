@@ -50,7 +50,12 @@ change does not.
 - `gpap::AssumptionChecker::check(sets)` returns the conflict flags and implication counts only,
   as the Python face does; `check(sets, /*assignments=*/true)` adds what `value()` and
   `literals()` read. The default used to be `true`, which cost n x 2N bytes and the plain kernel
-  on every call (issue 44). `value()` on a flags-only result throws and names the call to make.
+  on every call (issue 44). `value()` on a flags-only result throws and says which argument to set.
+- `gpap::Engine::check_sets` takes assumption sets flat (DIMACS literals and n + 1 offsets), as
+  the C ABI and Python do, and `AssumptionChecker::check` runs on it. Both can return per-clause
+  sat counts (`sat_count`). Additive: same soname (issue 46).
+- The wrapper's own refusals (`gpap::Error::own`) no longer carry the core's last error message,
+  which was stale there; `gpap_check_sets` names every argument it refuses.
 
 ## 0.3.1 — 2026-10-23, the TACAS 2027 artifact
 

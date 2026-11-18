@@ -242,3 +242,131 @@ def test_c_api_sampling_models_satisfy_the_formula(tmp_path):
         assignment = set(row)
         for clause in clauses:
             assert assignment & set(clause), f"{bits} falsifies {clause}"
+
+
+# ------------------------------------------------------- entry point 1, flat, on the C++ Engine
+
+_FLAT_CNF = "p cnf 4 5\n1 2 0\n-1 3 0\n-2 -3 0\n1 3 4 0\n-4 2 3 0\n"
+_FLAT_SETS = [[1], [-1, -2], [2, 3], [], [-3], [4, -2]]
+
+# Built by the test against the header as it stands, so it can never run a stale binary.
+_FLAT_SRC = r"""
+#include <gpap/gpap.hpp>
+#include <cstdio>
+static void dump(const char *face, const gpap::CheckResults &r, std::int32_t m) {
+    for (std::size_t i = 0; i < r.size(); ++i) {
+        std::printf("%s %zu c=%d p=%d lits=", face, i, (int)r.conflict(i), r.num_propagated(i));
+        for (std::int32_t l : r.literals(i)) std::printf("%d,", l);
+        std::printf(" sat=");
+        for (std::int32_t c = 0; c < m; ++c) std::printf("%d,", r.sat_count(i, c));
+        std::printf("\n");
+    }
+}
+int main(int, char **argv) {
+    gpap::AssumptionChecker checker(argv[1]);
+    const std::vector<std::vector<std::int32_t>> sets = {SETS};
+    std::vector<std::int32_t> lits;
+    std::vector<std::int64_t> offsets{0};
+    for (const auto &s : sets) {
+        lits.insert(lits.end(), s.begin(), s.end());
+        offsets.push_back(static_cast<std::int64_t>(lits.size()));
+    }
+    gpap::Engine &e = checker.engine();
+    const std::int32_t m = e.num_clauses();
+    dump("check", checker.check(sets, /*assignments=*/true, /*sat_count=*/true), m);
+    dump("flat", e.check_sets(lits.data(), lits.size(), offsets.data(), sets.size(),
+                              /*assignments=*/true, /*sat_count=*/true), m);
+    std::printf("k default %d\n", e.k());       // the last launch's rows: chunk reached the core
+    dump("chunk1", e.check_sets(lits, offsets, true, true, /*chunk=*/1), m);
+    std::printf("k chunk1 %d\n", e.k());
+    std::printf("build %s\n", gpap::build_id().c_str());
+    const std::vector<std::int32_t> zero{0};     // the core refuses literal 0 and keeps its message
+    try { e.check_sets(zero, {0, 1}); } catch (const gpap::Error &) { std::printf("zero refused\n"); }
+    const std::int64_t one[] = {0, 1};           // a guard in the core must name itself
+    try { e.check_sets(nullptr, 5, one, 1); } catch (const gpap::Error &x) {
+        std::printf("null lits: %s|\n", x.what());
+    }
+    try {                               // the last set reaches one literal past what was given
+        e.check_sets(lits.data(), lits.size() - 1, offsets.data(), sets.size());
+        std::printf("short lits accepted\n");
+    } catch (const gpap::Error &x) { std::printf("short lits rejected: %s|\n", x.what()); }
+    const gpap::CheckResults flags = e.check_sets(lits, offsets);   // flags and counts alone
+    try { flags.value(0, 1); std::printf("value served\n"); }
+    catch (const gpap::Error &) { std::printf("value refused\n"); }
+    try { flags.sat_count(0, 0); std::printf("sat served\n"); }
+    catch (const gpap::Error &) { std::printf("sat refused\n"); }
+}
+"""
+
+
+def _build_flat_program(tmp_path):
+    """Compile `_FLAT_SRC` against cpp/include and the built libgpap, or skip."""
+    import os
+    import shutil
+
+    from gpap.engine import _core
+    import shlex
+    cxx = shlex.split(os.environ["CXX"]) if os.environ.get("CXX") else (
+        [c] if (c := shutil.which("c++") or shutil.which("g++")) else None)
+    if not cxx:
+        pytest.skip("no C++ compiler")
+    lib = next((c for c in _core._candidates() if c.exists()), None)   # the one Python loads
+    if lib is None:
+        pytest.skip("libgpap not built (scripts/build_core.sh)")
+    sets = ", ".join("{" + ", ".join(map(str, s)) + "}" for s in _FLAT_SETS)
+    src = tmp_path / "flat.cpp"
+    src.write_text(_FLAT_SRC.replace("SETS", sets))
+    exe = tmp_path / "flat"
+    r = subprocess.run([*cxx, "-std=c++17", "-O1", f"-I{Path(__file__).parents[2] / 'cpp/include'}",
+                        str(src), "-o", str(exe), str(lib), f"-Wl,-rpath,{lib.parent}"],
+                       capture_output=True, text=True, timeout=300)
+    assert r.returncode == 0, r.stderr
+    return exe
+
+
+def test_the_flat_check_on_the_cpp_engine_matches_the_python_face(tmp_path):
+    """`Engine::check_sets` takes the sets flat, as the C ABI and the Python face do, and gives
+    what `AssumptionChecker::check` and Python's `check_sets` give: flags, implication counts,
+    assignments and sat counts, row for row (a conflicted row only its flag, the one field the
+    contract makes exact there), at any `chunk`. It refuses offsets that reach past the
+    literals it was given, with its own message and not the core's last one, and the defaults
+    return neither assignments nor sat counts."""
+    import numpy as np
+
+    from gpap.engine import _core
+
+    exe = _build_flat_program(tmp_path)
+    cnf = tmp_path / "f.cnf"
+    cnf.write_text(_FLAT_CNF)
+    out = subprocess.run([str(exe), str(cnf)], capture_output=True, text=True, timeout=120)
+    assert out.returncode == 0, out.stderr
+
+    nv, clauses, _ = parse_dimacs(cnf)
+    lits = np.array([x for s in _FLAT_SETS for x in s], dtype=np.int32)
+    offsets = np.cumsum([0] + [len(s) for s in _FLAT_SETS]).astype(np.int64)
+    eng = _core.Engine(_core.Formula.from_clauses(nv, clauses))
+    conflict, prop, asg, sat = eng.check_sets(lits, offsets, assignments=True, sat_count=True)
+    want = []
+    for i in range(len(_FLAT_SETS)):
+        if conflict[i]:
+            want.append(f"{i} c=1")
+            continue
+        true = [(j // 2 + 1) * (1 if j % 2 == 0 else -1) for j in np.flatnonzero(asg[i])]
+        want.append(f"{i} c=0 p={int(prop[i])} "
+                    f"lits={''.join(f'{x},' for x in sorted(true, key=abs))} "
+                    f"sat={''.join(f'{int(x)},' for x in sat[i])}")
+    assert conflict.any() and not conflict.all(), "the sets must exercise both outcomes"
+    lines = out.stdout.splitlines()
+    for face in ("check", "flat", "chunk1"):
+        got = [ln.split(" ", 1)[1] for ln in lines if ln.startswith(face + " ")]
+        got = [" ".join(g.split()[:2]) if " c=1 " in g else g for g in got]
+        assert got == want, (face, got, want)
+    # the wrapper's own refusal, after a core error, carries none of the core's stale message
+    assert f"build {_core.build_id()}" in lines, "the program ran another libgpap than Python"
+    assert ("k default 6" in lines and "k chunk1 1" in lines), "chunk must reach the core"
+    assert "zero refused" in lines
+    assert "short lits rejected: Engine::check_sets: the last set ends at 8, past the 7 literals " \
+           "given|" in lines, lines
+    null = next(ln for ln in lines if ln.startswith("null lits: "))
+    assert "lits is NULL" in null and "literal 0" not in null, null
+    assert "value refused" in lines and "sat refused" in lines

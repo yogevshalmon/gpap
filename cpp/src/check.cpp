@@ -23,9 +23,18 @@ extern "C" gpap_status gpap_check_sets(gpap_engine *e, const int32_t *lits,
                                        const int64_t *offsets, int64_t n, int32_t chunk,
                                        int8_t *conflict_out, int32_t *propagated_out,
                                        int8_t *assign_out, int32_t *sat_out) {
-    if (!e || n < 0) return GPAP_ERR_ARG;
+    /* Every guard names itself: gpap_last_error() is a thread-local nothing clears, so a bare
+     * return would leave the caller reading an earlier call's message. */
+    if (!e || n < 0) {
+        set_error("gpap_check_sets: %s", !e ? "engine must not be NULL" : "n must be >= 0");
+        return GPAP_ERR_ARG;
+    }
     if (n == 0) return GPAP_OK;
-    if (!offsets || !conflict_out || !propagated_out) return GPAP_ERR_ARG;
+    if (!offsets || !conflict_out || !propagated_out) {
+        set_error("gpap_check_sets: %s must not be NULL",
+                  !offsets ? "offsets" : !conflict_out ? "conflict_out" : "propagated_out");
+        return GPAP_ERR_ARG;
+    }
     if (offsets[0] != 0) {
         set_error("gpap_check_sets: offsets[0] must be 0 (got %lld)",
                   static_cast<long long>(offsets[0]));
@@ -50,7 +59,11 @@ extern "C" gpap_status gpap_check_sets(gpap_engine *e, const int32_t *lits,
         return GPAP_ERR_ARG;
     }
     const int64_t total = offsets[n];
-    if (total > 0 && !lits) return GPAP_ERR_ARG;
+    if (total > 0 && !lits) {
+        set_error("gpap_check_sets: lits is NULL but the sets hold %lld literals",
+                  static_cast<long long>(total));
+        return GPAP_ERR_ARG;
+    }
     for (int64_t i = 0; i < total; ++i) {
         if (lit_index_from_dimacs(lits[i], e->num_vars) < 0) {
             set_error("assumption literal %d out of range (formula has %d variables; literals "
