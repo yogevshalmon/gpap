@@ -299,17 +299,17 @@ def sample_clauses(nv, clauses, support, device, *, simplify=True, els=True, n_t
         if progress is not None:
             progress(event, data)
 
-    def _new_sampler(cls):
-        """The sampler for `cls`, built after the current one is gone. Its batch is read from free
+    def _new_sampler(cnf):
+        """The sampler for the clauses `cnf`, built after the current one is gone. Its batch is read from free
         VRAM, where a live sampler's rows count as used: built beside the old one, it came out
         smaller than its formula allows, and so did the score that keeps or reverts the mined
         clauses. Drops `smp` itself, because the caller's reference would keep the old one alive
         through the build."""
         nonlocal smp
-        smp = None
+        smp = None                       # libgpap frees the old sampler's device memory here
         if device.type == "cuda":
-            torch.cuda.empty_cache()     # what it freed sits in torch's cache, which reads as used
-        smp = GPUSampler.from_clauses(nv, cls, device, simplify=simplify, els=els,
+            torch.cuda.empty_cache()     # blocks torch cached for anyone else read as used too
+        smp = GPUSampler.from_clauses(nv, cnf, device, simplify=simplify, els=els,
                                       support=support, k_cap=k_cap, seed=seed)
         return smp
 
@@ -411,8 +411,12 @@ def sample_clauses(nv, clauses, support, device, *, simplify=True, els=True, n_t
             except RuntimeError as e:   # mining is an optimization — never let it kill the run
                 log.warning("mining skipped after a device error: %s", e)
                 if smp is None:         # a rebuild failed after it had dropped the old sampler
+                    _tm = time.perf_counter()
                     smp = _new_sampler(clauses)
+                    phases["rebuild"] = phases.get("rebuild", 0.0) + time.perf_counter() - _tm
+                    _tm = time.perf_counter()
                     _warmup(smp)
+                    phases["recheck"] = phases.get("recheck", 0.0) + time.perf_counter() - _tm
     t0 = time.perf_counter()
     # A big-K GPU meets n_time in the bandit cold-start, so `min_measure_chunks` makes the winner
     # run that many back-to-back chunks for a stable, config-consistent rate.

@@ -547,8 +547,8 @@ def test_the_keep_if_it_helps_guard_reports_its_decision(circuit_cnfs):
 #
 # x1 is entailed, by (x1 | x2) and (x1 | ~x2), but BCP at the root does not see it, so a clause
 # with x1 in it is one mining could prove. The variables past the support are in no clause: they
-# make every row wide, so the batch is memory-bound and K reads free VRAM, while the sampler
-# decides only the support.
+# make every row wide, so the batch is memory-bound and K reads free VRAM, and deciding them is
+# cheap because no clause can conflict.
 _GATE_NV = 150_000
 _GATE_SUPPORT = list(range(6))
 _GATE_CLAUSES = [[1, 2], [1, -2], [3, 4, 5], [-3, 4, 6]]
@@ -580,6 +580,7 @@ def test_no_sampler_is_built_while_another_is_alive(monkeypatch):
     rows left free: K came out low, and so did the score the keep-or-revert test compares."""
     import weakref
 
+    from gpap.sampling import pipeline
     from gpap.sampling.sampler import GPUSampler
 
     live, alive_at_build = weakref.WeakSet(), []
@@ -592,6 +593,7 @@ def test_no_sampler_is_built_while_another_is_alive(monkeypatch):
         return s
 
     monkeypatch.setattr(GPUSampler, "from_clauses", classmethod(spy))
+    monkeypatch.setattr(pipeline, "MINE_SECONDS", 60.0)          # stage 2 needs time left over
     info = _gate_run(monkeypatch, [2.0, 1.0], mine_gate=1.01)    # always stuck: stage 2 runs
     assert len(alive_at_build) == 4, "the first build, stage 1, stage 2 and the revert"
     assert alive_at_build == [0, 0, 0, 0], alive_at_build
@@ -624,8 +626,9 @@ def test_a_mined_run_has_the_batch_of_its_final_formula(monkeypatch, kept):
     assert want < resolve_k_cap("auto", DEV), "the batch must be memory-bound to show anything"
     info = _gate_run(monkeypatch, [1.0, 2.0] if kept else [2.0, 1.0])
     assert info["mined"]["kept"] is kept
-    # 0.5%: free VRAM moves a little between builds; a sampler left alive cost about 7% here.
-    assert abs(info["engine"]["K"] - want) <= want // 200, (info["engine"]["K"], want)
+    # A sampler left alive costs about the 1,024 warm-up rows it holds, on any card; two clean
+    # builds have come out equal. An absolute bound, so a card with more VRAM still catches it.
+    assert abs(info["engine"]["K"] - want) <= 64, (info["engine"]["K"], want)
 
 
 @pytest.mark.gpu             # its tensors live on the CUDA device
@@ -646,7 +649,10 @@ def test_a_failed_rebuild_samples_the_original_formula(monkeypatch):
     monkeypatch.setattr(GPUSampler, "from_clauses", classmethod(fail_the_second))
     info = _gate_run(monkeypatch, [2.0, 1.0])
     assert info["mined"] is None
+    assert info["engine"]["M_eff"] == len(_GATE_CLAUSES), "it must sample the formula it was given"
     assert info["n_models"] >= 10
+    # the fallback's rebuild and warm-up are billed like any other, so `phases` still sums to the wall
+    assert sum(info["phases"].values()) == pytest.approx(info["wall_total_s"], rel=0.05)
 
 
 @pytest.mark.gpu             # its tensors live on the CUDA device
@@ -670,10 +676,11 @@ def test_only_wide_clauses_that_lose_the_score_are_reverted(monkeypatch, learned
 def test_the_mined_report_carries_both_factors_of_the_score(monkeypatch):
     """`gain` alone cannot tell a batch that did not move from a completion rate that did not, or
     a cap-bound K from a saturated rate: the report carries K and the best completion rate on
-    both sides of the decision, and they multiply to the gain."""
-    info = _gate_run(monkeypatch)
+    both sides of the decision, and they multiply to the gain. A mined unit is always kept, so
+    the timed run is the sampler the `after` factors describe."""
+    info = _gate_run(monkeypatch, learned=[[1]])
     mi = info["mined"]
-    assert mi["k_after" if mi["kept"] else "k_before"] == info["engine"]["K"]
+    assert mi["kept"] and mi["k_after"] == info["engine"]["K"]
     assert mi["gain"] == pytest.approx(mi["k_after"] * mi["success_after"]
                                        / (mi["k_before"] * mi["success_before"]))
 

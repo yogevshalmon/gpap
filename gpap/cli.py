@@ -211,12 +211,13 @@ def _sample_progress(args):
             # so a mine that found plenty can still be reverted. `gain` is the projected
             # models-per-chunk ratio (K x success), a proxy and not a measurement; its factors
             # print beside it, so a 1.00x says which of the two did not move.
-            g = d.get("gain")
-            gain_s = (f", {g:.2f}x projected models/chunk (K {d['k_before']:,} → {d['k_after']:,}, "
-                      f"completion {d['success_before']:.2f} → {d['success_after']:.2f})"
-                      if g else "")
+            g = d.get("gain")                    # None: nothing completed before mining
+            gain_s = f", {g:.2f}x projected models/chunk" if g is not None else ""
+            if d.get("k_before") is not None:
+                gain_s += (f" (K {d['k_before']:,} → {d['k_after']:,}, completion "
+                           f"{d['success_before']:.2f} → {d['success_after']:.2f})")
             verdict = f"kept{gain_s}" if d["kept"] else f"reverted — did not pay{gain_s}"
-            if d["kept"] and g and g < 1:
+            if d["kept"] and g is not None and g < 1:
                 verdict += "; units and binaries cannot shrink K"   # only noise scored them < 1x
             # Mining rebuilds the formula, so simplification and ELS run again over
             # `clauses + learned` and the ACTIVE support is recomputed: mined units fix support

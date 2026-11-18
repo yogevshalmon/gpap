@@ -41,15 +41,10 @@ change does not.
   are served after a CLEAN launch.
 
 ### Sampling
-- A run that mines builds each new sampler after dropping the one before, so its batch is the
-  one its formula gets. Built beside the old sampler, it was about a thousand rows short: a
-  reverted run sampled below a run that never mined (2,621 rows against 3,408 on bj08amba2g4f3),
-  and the keep-or-revert test read the mined formula as worse than it was (issue 48).
-- Mined units and binaries are always kept, and so is a tie: they cannot shrink the batch, and
-  the trial's completion rate is too noisy to revert them on. Of 60 instances that mined, 9 flip
-  to keep, sampling 1.32x faster and 1.19x end to end; the other 51 are unchanged.
-- The `mined` report and the console line give the batch and the best completion rate before and
-  after mining: the two factors of the projected gain.
+- Mining no longer builds a sampler while the previous one is alive, which left the new batch
+  about a thousand rows short and could revert clauses that paid (issue 48).
+- Mined units, binaries and ties are kept; only a find with a wider clause can be reverted. The
+  `mined` report gives the batch and completion rate before and after.
 
 ### C++
 - `gpap::AssumptionChecker::check(sets)` returns the conflict flags and implication counts only,

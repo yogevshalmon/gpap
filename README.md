@@ -229,8 +229,9 @@ Assume a set of literals and propagate. If BCP hits a conflict, the formula enta
 of that set, which is a clause. `gpap mine` sweeps every k-subset of a literal pool under a work
 budget and writes the clauses it proves. Width 1 gives the BCP-visible backbone. Every clause
 found is entailed, so adding them leaves the solution set exactly unchanged and makes later
-propagation stronger. The sampler runs mining as a preprocessing step and keeps the mined clauses
-only if they pay for themselves. See [`examples/mine_clauses.py`](examples/mine_clauses.py).
+propagation stronger. The sampler runs mining as a preprocessing step. It keeps mined units and
+two-literal clauses, and keeps wider ones only if they do not slow sampling down. See
+[`examples/mine_clauses.py`](examples/mine_clauses.py).
 
 ### Batched assumption checking
 

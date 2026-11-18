@@ -109,10 +109,9 @@ again before relying on it, or before calling the direction closed.
 
 ## Sampler, mining and uniformity
 
-- **Mining keeps units, binaries and ties (2026-11-17).** The keep-or-revert test had sized the
-  mined formula beside the old sampler (about a thousand rows short), and its one-order trial
-  read noise as a loss. 9 of 60 instances that mined flip to keep, sampling 1.32× faster and
-  1.19× end to end; the other 51 are unchanged. [MINING](MINING_FINDINGS.md), last section
+- **Mining keeps units, binaries and ties (2026-11-17).** Rebuilt samplers had been sized beside
+  the old one, and the one-order trial read noise as a loss: 9 of 60 instances flip to keep, the
+  rest are unchanged. [MINING](MINING_FINDINGS.md), "Keep-or-revert, measured fairly"
 - **Barbarik: the shipped portfolio Accepts 65/65 with zero Rejects (2026-10-13),** as do pinned
   `b8` and CMSGen; `soft` is Rejected on 64/65 and opt-in.
   [UNIFORMITY_FINDINGS.md](UNIFORMITY_FINDINGS.md) §4b
@@ -133,7 +132,8 @@ again before relying on it, or before calling the direction closed.
 - **A losing lever stays a bandit option:** `soft` lookahead is 0% success on `sk_` instances and
   10% → 88% on tight circuits.
 - **Mining (2026-08-19/21):** entailed clauses are kept only if they pay (models per chunk =
-  K × success); `subsumed` is the default redundancy, and backbone units are the top lever.
+  K × success; since 2026-11-17 only finds of width ≥ 3 can be reverted); `subsumed` is the
+  default redundancy, and backbone units are the top lever.
   [MINING](MINING_FINDINGS.md)
 - **Simplification (2026-06/07):** ↻ unit propagation is model-preserving and the big lever
   (about 4.5× over plain); ELS adds 1.48×, sound when reconstruction is class-consistent. On a

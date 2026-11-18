@@ -53,11 +53,9 @@ pick the fastest one for the formula during a short warmup.
 
 **Mining.** For formulas of 500 clauses or more, `--mine auto` first proves clauses the formula
 already implies, within a 5-second budget shared by its two stages and the rebuild between them.
-Mined units and two-literal clauses are always kept: they cannot shrink the batch. A mined clause
-of three literals or more takes memory in every row, so a find that has one is kept only if a short
-trial shows that more rows completing makes up for fewer rows. `--mine on` mines smaller formulas
-too, and `--mine off` skips it. The run reports what it found, whether it kept it, and the trial's
-batch and completion rate before and after.
+Mined units and two-literal clauses are always kept. A wider clause takes memory in every row, so
+a find with one is dropped if a short trial says it slows sampling. `--mine on` mines smaller
+formulas too, and `--mine off` skips it. The run reports what it found and whether it kept it.
 
 ## How many, and for how long
 
@@ -151,7 +149,7 @@ re-checks every emitted sample on the GPU. The stats report:
 | `success_rate` | the fraction of trajectories that ended in a solution |
 | `phases` | where the time went; the phases add up to `wall_total_s` |
 | `phases_diag` | time spent on optional self-checks, kept out of every rate |
-| `mined` | clauses found by mining, whether they were kept, the projected gain, and its two factors before and after: the batch (`k_before`, `k_after`) and the best completion rate (`success_before`, `success_after`) |
+| `mined` | clauses found by mining, whether they were kept, and the projected gain with its factors (`k_before`/`k_after`, `success_before`/`success_after`) |
 | `stop`, `chunk_capped` | why the run ended, and whether a limit cut it short |
 | `engine` | the kernel, the batch size and the packed layout the engine chose |
 

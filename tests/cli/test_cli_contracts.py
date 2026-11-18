@@ -236,6 +236,20 @@ def test_the_mining_line_prints_both_factors_of_its_gain(tmp_path, capsys):
 
 
 @pytest.mark.gpu
+def test_the_mining_line_prints_the_factors_when_there_is_no_gain(tmp_path, capsys):
+    """With no completion before mining the score has no baseline and no gain, which is when
+    the factors say the most: they still print. Each pair (x | y), (x | ~y) entails x, and a row
+    that decides x false before y conflicts, so 60 pairs leave 1,024 trial rows with nothing."""
+    pairs = 60
+    text = f"p cnf {2 * pairs} {2 * pairs}\n" + "".join(
+        f"{x} {x + pairs} 0\n{x} -{x + pairs} 0\n" for x in range(1, pairs + 1))
+    cli_main(["sample", _cnf(tmp_path, text), "-n", "10", "--mine", "on"])
+    line = next(ln for ln in capsys.readouterr().out.splitlines() if "mined" in ln)
+    assert "projected models/chunk" not in line, line        # no baseline, so no gain
+    assert re.search(r"K [\d,]+ → [\d,]+, completion 0\.00 → \d\.\d\d", line), line
+
+
+@pytest.mark.gpu
 def test_a_formula_only_mining_refutes_is_reported_as_unsat(tmp_path, capsys):
     """Every 3-literal clause over 3 variables: construction cannot refute it, but mining fails
     every literal, so UNSAT is known only after mining. The real-pipeline half of the stubbed
