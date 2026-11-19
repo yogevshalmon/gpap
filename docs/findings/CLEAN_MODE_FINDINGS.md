@@ -84,7 +84,7 @@ length including seeds; do not restore `tail − ndecs`, which under-covers.
   reset is not its bottleneck.
 - `GPAP_CLEAN=0` is exact legacy and also disables reset-lite, so an A/B is uncontaminated;
   `gpap_engine_reset_stats` shows whether lite resets fired (a silent fallback measures
-  1.00× and looks worthless). Runs record it since 2026-11-18: `mined.resets_lite`, `gpap mine
+  1.00× and looks worthless). Runs record it from 0.4.0: `mined.resets_lite`, `gpap mine
   --stats`, `BCPEngine.reset_stats()`. A lite count above 0 shows CLEAN ran; 0 also occurs when
   no sweep had a second chunk or a reset to skip, so `GPAP_CLEAN=0` is the control.
 - Both entry points check the row count in the binding: a short array is read past its end, and an

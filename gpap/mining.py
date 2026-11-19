@@ -186,11 +186,13 @@ def mine_entailed(num_vars: int, clauses: list, device, *, pool: list | None = N
             if found and width > 1 and width < max(widths):
                 # Build first, then bank the old engine and swap. A failed build leaves `probe`
                 # unbanked for `finally` to bank once; and the old engine stays alive through the
-                # build, so the GPU context is not torn down and created again in between.
+                # build, so the GPU context is not torn down and created again in between
+                # (MINING_FINDINGS.md, "Rebuilding the probe engine"). The swap leaves no second
+                # name on the new engine: `del probe` must free it.
                 rebuilt = LiteralProbe(num_vars, current, device)
                 res.implications += probe.implications
                 _bank_resets(res, probe)
-                probe = rebuilt
+                probe, rebuilt = rebuilt, None
     except RuntimeError as e:
         # Mining is an OPTIMIZATION: every clause already proven stays valid, so a mid-tier CUDA
         # failure abandons the rest rather than failing the caller's job.
@@ -199,8 +201,8 @@ def mine_entailed(num_vars: int, clauses: list, device, *, pool: list | None = N
         res.skipped[-1] = f"device error: {e}"
     finally:
         if probe is not None:
+            _bank_resets(res, probe)                # a host read: banked even if the next raises
             res.implications += probe.implications
-            _bank_resets(res, probe)
         del probe
         _release(device)
 

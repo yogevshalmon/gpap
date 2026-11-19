@@ -864,3 +864,41 @@ def test_a_failed_rebuild_counts_each_probe_engine_once(monkeypatch):
     assert res.skipped.get(-1, "").startswith("device error"), "precondition: the rebuild failed"
     assert (res.resets_full, res.resets_lite) == made[0].reset_stats()
     assert res.implications == made[0].implications
+
+
+def test_no_probe_engine_outlives_mining_after_a_rebuild(monkeypatch):
+    """Mining frees every probe engine before it hands the device back (`_release`), the one
+    rebuilt after a wide width included: the next component, `drop="derivable"`'s checker or the
+    sampler, sizes its batch from free VRAM, so a live engine there costs it rows."""
+    import gc
+    import weakref
+
+    import gpap.mining as mining
+
+    alive = weakref.WeakSet()
+
+    class Fake:
+        unsat, implications = False, 0
+
+        def __init__(self, *a, **k):
+            alive.add(self)
+
+        def reset_stats(self):
+            return (0, 0)
+
+        def assigned_literals(self):
+            return np.empty(0, np.int32)
+
+    at_release = []
+
+    def release(device):
+        gc.collect()
+        at_release.append(len(alive))
+
+    found = mining._WidthResult(1, True, 1, 1, 1, "")
+    monkeypatch.setattr(mining, "LiteralProbe", Fake)
+    monkeypatch.setattr(mining, "_mine_units", lambda *a, **k: found)
+    monkeypatch.setattr(mining, "_mine_width", lambda *a, **k: found)
+    monkeypatch.setattr(mining, "_release", release)
+    mine_entailed(3, [[1, 2, 3]], DEV, widths=(1, 2, 3), seconds=None)
+    assert at_release == [0]
