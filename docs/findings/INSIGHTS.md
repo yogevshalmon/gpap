@@ -221,6 +221,8 @@ A ↻ entry lost on a much slower engine; today's engine is the new evidence to 
   (2026-07-13). ↻
 - Shared-memory staging of the row state (2026-07-13). ↻
 - A runtime memory probe to size K (2026-07-01).
+- Freeing the old probe engine before building the next: the CUDA context is released and
+  created again, mining 1.5-1.8× slower (2026-11-18, MINING_FINDINGS.md).
 - Full-propagation lookahead: more success, less throughput (~3× propagations, half the K). ↻
 - The `orac` config: 0 of 64 wins (2026-07-06). ↻
 - UCB-style bandit bonuses: 0.52× on small budgets (2026-07). ↻

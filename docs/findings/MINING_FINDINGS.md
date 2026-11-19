@@ -3,7 +3,8 @@
 > **Reader:** contributors and researchers — the evidence behind entailed-clause mining. A dated research log, not a user guide.
 >
 > **Status:** settled — shipped 2026-08-19/21; the keep-or-revert test revised 2026-11-17.
-> **Measured:** 2026-08-19 to 2026-08-21 and 2026-11-17 ("Keep-or-revert, measured fairly"), RTX 4080 Laptop
+> **Measured:** 2026-08-19 to 2026-08-21, 2026-11-17 ("Keep-or-revert, measured fairly") and
+> 2026-11-18 ("Rebuilding the probe engine"), RTX 4080 Laptop
 > unless a section says otherwise (one L4 validation run).
 > **Rule lives in:** `gpap/mining.py`, `gpap/sampling/pipeline.py` (`STAGE1_MAX_TUPLES`,
 > `MINE_MIN_CLAUSES`, `MINE_SECONDS`, the keep-or-revert test), `cpp/src/probe.cpp`.
@@ -265,3 +266,13 @@ keep, at 1.04× sampling and 1.11× end to end on eight and 9× on 35.sk_3_52 (9
 other 51 are unchanged. Memory-bound instances regain their batch (bobsynthor 4,385 → 5,491).
 Single-seed end-to-end ratios are noisy (0.5-2.6× at equal decisions): trust the geomeans and the
 seed pairs.
+
+## Rebuilding the probe engine (2026-11-18)
+
+GitHub issue 43; RTX 4080 Laptop. Data and scripts: `$GPAP_RESULTS/reset_stats_20261118/`.
+
+`mine_entailed` builds the next probe engine while the old one is alive, then swaps. Freeing the
+old one first made mining 1.5-1.8× slower where it rebuilds (10.sk_1_46, ProcessBean): with no
+engine alive, the CUDA primary context is released and the next build creates it again (66 ms,
+against 0.5 ms with another engine alive). The sampling pipeline's rebuilds do not pay this,
+because torch holds the context there.
