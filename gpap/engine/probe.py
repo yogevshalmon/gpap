@@ -127,6 +127,10 @@ class LiteralProbe:
         c = self._engine.counters()
         return int(c.props - c.decs)
 
+    def reset_stats(self) -> "tuple[int, int]":
+        """(full, lite) resets of this probe's engine, as gpap_engine_reset_stats counts them."""
+        return self._engine.reset_stats()
+
     @property
     def engine(self):
         """The underlying `_core.Engine`, the low-level numpy binding to the C ABI — an escape

@@ -59,6 +59,9 @@ class MiningResult:
     #: clauses removed because propagation already derives them (`drop="derivable"` only).
     derivable: int = 0
     seconds: float = 0.0
+    #: resets of every probe engine built, as gpap_engine_reset_stats counts them (gpap.h).
+    resets_full: int = 0
+    resets_lite: int = 0
 
     @property
     def implications_per_s(self) -> float:
@@ -181,8 +184,13 @@ def mine_entailed(num_vars: int, clauses: list, device, *, pool: list | None = N
             # Each width STRENGTHENS the formula the next one probes. Units are folded in place
             # by `assume`; wider clauses need the rebuild, and skipping it costs real clauses.
             if found and width > 1 and width < max(widths):
-                res.implications += probe.implications      # bank before the rebuild resets them
-                probe = LiteralProbe(num_vars, current, device)
+                # Build first, then bank the old engine and swap. A failed build leaves `probe`
+                # unbanked for `finally` to bank once; and the old engine stays alive through the
+                # build, so the GPU context is not torn down and created again in between.
+                rebuilt = LiteralProbe(num_vars, current, device)
+                res.implications += probe.implications
+                _bank_resets(res, probe)
+                probe = rebuilt
     except RuntimeError as e:
         # Mining is an OPTIMIZATION: every clause already proven stays valid, so a mid-tier CUDA
         # failure abandons the rest rather than failing the caller's job.
@@ -192,6 +200,7 @@ def mine_entailed(num_vars: int, clauses: list, device, *, pool: list | None = N
     finally:
         if probe is not None:
             res.implications += probe.implications
+            _bank_resets(res, probe)
         del probe
         _release(device)
 
@@ -398,6 +407,13 @@ def _mine_width(probe: LiteralProbe, width: int, pool, budget: ProbeBudget, max_
     for row in r.conflicting:
         found += keep(tuple(sorted(-int(x) for x in row)))
     return _WidthResult(found, r.exhausted, r.total, r.probed, 1, r.stopped)
+
+
+def _bank_resets(res: MiningResult, probe) -> None:
+    """Add a probe engine's resets to the result before the engine goes: they are its own."""
+    full, lite = probe.reset_stats()
+    res.resets_full += full
+    res.resets_lite += lite
 
 
 def _release(device) -> None:

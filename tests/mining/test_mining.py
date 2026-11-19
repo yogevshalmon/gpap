@@ -555,16 +555,22 @@ _GATE_CLAUSES = [[1, 2], [1, -2], [3, 4, 5], [-3, 4, 6]]
 _GATE_LEARNED = [[1, 3, 5]]          # width 3, so the score decides between keep and revert
 
 
-def _gate_run(monkeypatch, scores=None, learned=_GATE_LEARNED, **kw):
-    """sample_clauses on the _GATE formula, with mining replaced by `learned` and, given
-    `scores` (before, after), the keep-or-revert score too."""
+def _gate_run(monkeypatch, scores=None, learned=_GATE_LEARNED, resets=(0, 0), **kw):
+    """sample_clauses on the _GATE formula, with mining replaced by `learned` (each call
+    reporting `resets` (full, lite) of its probe engines) and, given `scores` (before, after),
+    the keep-or-revert score too."""
     from collections import Counter
 
     from gpap.mining import MiningResult
     from gpap.sampling import pipeline
 
-    monkeypatch.setattr(pipeline, "mine_entailed", lambda *a, **k: MiningResult(
-        clauses=[list(c) for c in learned], by_width=dict(Counter(len(c) for c in learned))))
+    def fake(*a, **k):
+        r = MiningResult(clauses=[list(c) for c in learned],
+                         by_width=dict(Counter(len(c) for c in learned)))
+        r.resets_full, r.resets_lite = resets
+        return r
+
+    monkeypatch.setattr(pipeline, "mine_entailed", fake)
     if scores is not None:
         score = iter(scores)
         monkeypatch.setattr(pipeline, "_mine_score", lambda smp, warm: next(score))
@@ -782,3 +788,79 @@ def test_an_engine_that_cannot_be_built_still_releases_the_device(monkeypatch):
     with pytest.raises(RuntimeError, match="no device"):
         mining.mine_entailed(2, [[1, 2]], "cpu")
     assert released == ["cpu"]
+
+
+@pytest.mark.gpu             # its tensors live on the CUDA device
+def test_the_mined_report_sums_the_probe_resets_of_both_stages(monkeypatch):
+    """A run's `mined` record carries the resets of every probe engine mining built, stage 1's
+    and stage 2's, so a finished run says whether CLEAN mode's lite resets fired."""
+    from gpap.sampling import pipeline
+
+    monkeypatch.setattr(pipeline, "MINE_SECONDS", 60.0)          # stage 2 needs time left over
+    info = _gate_run(monkeypatch, [1.0, 2.0], resets=(3, 2), mine_gate=1.01)  # stuck: stage 2
+    assert (info["mined"]["resets_full"], info["mined"]["resets_lite"]) == (6, 4)
+
+
+def test_mining_reports_the_resets_of_every_probe_engine(monkeypatch):
+    """`MiningResult` sums the resets of every probe engine mining builds, the one rebuilt after
+    a wide width included. A lite count above 0 records that CLEAN mode ran; with GPAP_CLEAN=0 it
+    reads 0 while the full count does not, so a silent fallback shows (CLEAN_MODE_FINDINGS.md)."""
+    from pathlib import Path
+
+    import gpap.mining as mining
+    from gpap.engine.probe import LiteralProbe
+    from tests.conftest import REPO_ROOT
+    from tests.support import parse_dimacs
+
+    nv, clauses, _ = parse_dimacs(Path(REPO_ROOT) / "benchmarks/sampling/10.sk_1_46.cnf")
+
+    def run():
+        made = []
+
+        class Recorded(LiteralProbe):
+            def __init__(self, *a, **k):
+                super().__init__(*a, **k)
+                made.append(self)
+
+        monkeypatch.setattr(mining, "LiteralProbe", Recorded)
+        res = mine_entailed(nv, clauses, DEV, max_tuples={1: 0, 2: 1_000_000, 3: 40_000},
+                            seconds=60)
+        return res, [p.reset_stats() for p in made]
+
+    res, per_engine = run()
+    assert len(per_engine) >= 2, "precondition: a wide width proved something and was rebuilt"
+    assert (res.resets_full, res.resets_lite) == tuple(map(sum, zip(*per_engine)))
+    # Here the lite resets are `assume`'s reset(1) after a CLEAN sweep: width 1 proves units in
+    # rounds. A change to how `assume` recaches can move this count without CLEAN regressing.
+    assert res.resets_lite > 0
+    monkeypatch.setenv("GPAP_CLEAN", "0")
+    res, _ = run()
+    assert res.resets_lite == 0 and res.resets_full > 0
+
+
+def test_a_failed_rebuild_counts_each_probe_engine_once(monkeypatch):
+    """Mining banks an engine's resets and implications before it rebuilds after a wide width.
+    If the rebuild fails (a device error: mining keeps what it proved), the old engine must not
+    be banked a second time when mining ends."""
+    from pathlib import Path
+
+    import gpap.mining as mining
+    from gpap.engine.probe import LiteralProbe
+    from tests.conftest import REPO_ROOT
+    from tests.support import parse_dimacs
+
+    nv, clauses, _ = parse_dimacs(Path(REPO_ROOT) / "benchmarks/sampling/10.sk_1_46.cnf")
+    made = []
+
+    class FailTheRebuild(LiteralProbe):
+        def __init__(self, *a, **k):
+            if made:
+                raise RuntimeError("device error")
+            super().__init__(*a, **k)
+            made.append(self)
+
+    monkeypatch.setattr(mining, "LiteralProbe", FailTheRebuild)
+    res = mine_entailed(nv, clauses, DEV, max_tuples={1: 0, 2: 1_000_000, 3: 40_000}, seconds=60)
+    assert res.skipped.get(-1, "").startswith("device error"), "precondition: the rebuild failed"
+    assert (res.resets_full, res.resets_lite) == made[0].reset_stats()
+    assert res.implications == made[0].implications

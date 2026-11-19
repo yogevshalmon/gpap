@@ -370,6 +370,8 @@ def sample_clauses(nv, clauses, support, device, *, simplify=True, els=True, n_t
                     for width, n in mi2.by_width.items():
                         mi.by_width[width] = mi.by_width.get(width, 0) + n
                     mi.seconds += mi2.seconds
+                    mi.resets_full += mi2.resets_full
+                    mi.resets_lite += mi2.resets_lite
                 # Keep the clauses unless they lost. `K x success` is the models-per-chunk proxy,
                 # and only a clause of width >= 3 can cost K: it adds a packed word per row, while
                 # units fold into the flush and binaries are implication edges. Without one, only
@@ -400,7 +402,9 @@ def sample_clauses(nv, clauses, support, device, *, simplify=True, els=True, n_t
                              # the score's factors, so a 1.00x says which one did not move
                              "k_before": k_before, "k_after": k_after,
                              "success_before": w["best_success"],
-                             "success_after": success_after}
+                             "success_after": success_after,
+                             # resets of mining's probe engines (CLEAN_MODE_FINDINGS.md)
+                             "resets_full": mi.resets_full, "resets_lite": mi.resets_lite}
                 # `smp` is now the sampler the timed run will use (kept or reverted), so the
                 # active support here is the FINAL one. It is not merely smaller: the rebuild
                 # re-runs simplification and ELS over the augmented formula, which fixes support

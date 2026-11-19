@@ -531,6 +531,7 @@ def _cmd_mine(args):
                     "max_tuples": args.max_tuples, "seconds_budget": args.seconds,
                     "drop": args.drop, "n_dropped_derivable": res.derivable,
                     "n_mined": len(res.clauses),
+                    "resets_full": res.resets_full, "resets_lite": res.resets_lite,
                     "probed_total": total_probed,
                     "coverage": {str(w): (res.probed.get(w, 0) / res.candidates[w])
                                  for w in sorted(res.candidates) if res.candidates.get(w)},

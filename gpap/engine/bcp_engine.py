@@ -188,6 +188,12 @@ class BCPEngine:
         return self._core.check_sets(lits, offsets, chunk=chunk, assignments=assignments,
                                      sat_count=sat_count)
 
+    def reset_stats(self) -> "tuple[int, int]":
+        """(full, lite) resets of this engine, as gpap_engine_reset_stats counts them: a lite
+        reset skips the broadcast because the rows are already clean (gpap.h). Trajectories dirty
+        every row, so a sampler's resets are full."""
+        return self._core.reset_stats()
+
     def check_chunk_size(self, n_sets: int, max_lits: int = 1) -> int:
         return self._core.check_chunk_size(n_sets, max_lits)
 
