@@ -3,6 +3,7 @@ delivery and accounting, UNSAT reporting, the soundness tri-state, writers and d
 across faces. Each guards a failure that would mislead rather than crash.
 """
 import re
+from pathlib import Path
 
 import numpy as np
 import pytest
@@ -221,6 +222,18 @@ def test_each_phase_is_printed_where_it_happened(tmp_path, capsys):
     where = {k: next(i for i, ln in enumerate(out) if k in ln)
              for k in ("N=4 M=2", "mined", "models in")}
     assert where["N=4 M=2"] < where["mined"] < where["models in"], out
+
+
+@pytest.mark.gpu
+def test_mine_stats_record_the_probe_resets(tmp_path):
+    """`gpap mine --stats` records the probe engines' resets, full and lite, so a finished run
+    says whether CLEAN mode's lite resets fired."""
+    import json
+    stats = tmp_path / "s.json"
+    cli_main(["mine", str(Path(REPO_ROOT) / "benchmarks/sampling/10.sk_1_46.cnf"),
+              "--stats", str(stats)])
+    d = json.loads(stats.read_text())
+    assert d["resets_full"] > 0 and d["resets_lite"] > 0, d
 
 
 @pytest.mark.gpu

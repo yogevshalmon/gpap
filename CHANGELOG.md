@@ -45,6 +45,9 @@ change does not.
   about a thousand rows short and could revert clauses that paid (issue 48).
 - Mined units, binaries and ties are kept; only a find with a wider clause can be reverted. The
   `mined` report gives the batch and completion rate before and after.
+- Mining records its probe engines' resets (`resets_full`, `resets_lite`) in the `mined` report
+  and `gpap mine --stats`; `BCPEngine.reset_stats()` and `LiteralProbe.reset_stats()` read them.
+  A lite count above 0 is the record that CLEAN mode ran (issue 43).
 
 ### C++
 - `gpap::AssumptionChecker::check(sets)` returns the conflict flags and implication counts only,

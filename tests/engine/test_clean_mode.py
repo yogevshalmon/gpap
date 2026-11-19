@@ -364,9 +364,9 @@ def test_checker_flags_only_goes_lite(monkeypatch):
     ck = AssumptionChecker.from_clauses(6, CLAUSES)
     one = ck.check_assumptions(sets)
     monkeypatch.setattr(ck, "chunk_size", lambda n, max_lits=1: 17)
-    before = ck.engine._core.reset_stats()[1]
+    before = ck.engine.reset_stats()[1]
     many = ck.check_assumptions(sets)
-    gained = ck.engine._core.reset_stats()[1] - before
+    gained = ck.engine.reset_stats()[1] - before
     assert torch.equal(one["conflict"], many["conflict"])
     # Compare with the chunk count, not > 0: the first reset is lite anyway (left clean by the
     # previous call), so > 0 would pass without any chunking.
@@ -377,7 +377,7 @@ def test_checker_flags_only_goes_lite(monkeypatch):
     ck2 = AssumptionChecker.from_clauses(6, CLAUSES)
     monkeypatch.setattr(ck2, "chunk_size", lambda n, max_lits=1: 17)
     r = ck2.check_assumptions(sets, sat_count=True)
-    assert ck2.engine._core.reset_stats()[1] == 0, \
+    assert ck2.engine.reset_stats()[1] == 0, \
         "sat counts read the packed words, so they must keep the plain kernel (no lite resets)"
     assert int(r["sat_count"].sum()) > 0, "sat counts must be the fixpoint's, not baseline"
 
