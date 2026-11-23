@@ -24,10 +24,26 @@ project(gpap VERSION 0.4.0 LANGUAGES C CXX)
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_POSITION_INDEPENDENT_CODE ON)
-if(NOT CMAKE_BUILD_TYPE)
+
+# ---------------------------------------------------------------- embedding
+# libgpap builds on its own (`cmake -S cpp`) or inside a host project (add_subdirectory or
+# FetchContent with SOURCE_SUBDIR cpp). A host typically wants it static, without the examples,
+# and, when it brings its own GPU layer, without CUDA: GPAP_WITH_CUDA=OFF needs neither cuda.h
+# nor the generated kernels, and leaves the OpenCL plug, which is then the default backend.
+if(CMAKE_SOURCE_DIR STREQUAL CMAKE_CURRENT_SOURCE_DIR)
+  set(GPAP_TOP_LEVEL ON)
+else()
+  set(GPAP_TOP_LEVEL OFF)
+endif()
+option(GPAP_WITH_CUDA "Build the CUDA plug (needs cuda.h and the generated kernels)" ON)
+option(GPAP_SHARED "Build libgpap as a shared library (OFF: static)" ON)
+option(GPAP_BUILD_EXAMPLES "Build the examples" ${GPAP_TOP_LEVEL})
+
+if(GPAP_TOP_LEVEL AND NOT CMAKE_BUILD_TYPE)
   set(CMAKE_BUILD_TYPE Release CACHE STRING "" FORCE)
 endif()
 
+if(GPAP_WITH_CUDA)
 # ---------------------------------------------------------------- CUDA driver API
 # The header only: the CUDA plug opens libcuda at run time (src/gpu_cuda.cpp), so neither the
 # build nor loading the library needs the NVIDIA driver.
@@ -62,6 +78,7 @@ if(NOT EXISTS "${GPAP_GENERATED}")
     "    python cpp/tools/build_kernels.py\n"
     "(needs triton; add --arch NN to cross-compile for another GPU)")
 endif()
+endif()  # GPAP_WITH_CUDA
 
 # ---------------------------------------------------------------- OpenCL kernel source
 # The OpenCL backend compiles kernels/bcp.cl on the device at run time, so the library carries
@@ -80,7 +97,7 @@ add_custom_command(
   VERBATIM)
 
 # ---------------------------------------------------------------- library
-add_library(gpap SHARED
+set(GPAP_SOURCES
   src/runtime.cpp
   src/formula.cpp
   src/engine.cpp
@@ -88,15 +105,27 @@ add_library(gpap SHARED
   src/calibrate.cpp
   src/probe.cpp
   src/check.cpp
-  src/sample.cpp
-  src/gpu_cuda.cpp
-  src/gpu_opencl.cpp
-  ${GPAP_CL_EMBEDDED}
-  ${GPAP_GENERATED})
+  src/sample.cpp)
+if(GPAP_WITH_CUDA)
+  list(APPEND GPAP_SOURCES src/gpu_cuda.cpp)
+endif()
+list(APPEND GPAP_SOURCES src/gpu_opencl.cpp ${GPAP_CL_EMBEDDED})
+if(GPAP_WITH_CUDA)
+  list(APPEND GPAP_SOURCES ${GPAP_GENERATED})
+endif()
+if(GPAP_SHARED)
+  add_library(gpap SHARED ${GPAP_SOURCES})
+else()
+  add_library(gpap STATIC ${GPAP_SOURCES})
+endif()
+add_library(gpap::gpap ALIAS gpap)
 target_include_directories(gpap
   PUBLIC  $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
           $<INSTALL_INTERFACE:include>
-  PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src ${GPAP_CUDA_INCLUDE_DIR})
+  PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src)
+if(GPAP_WITH_CUDA)
+  target_include_directories(gpap PRIVATE ${GPAP_CUDA_INCLUDE_DIR})
+endif()
 # PUBLIC so it travels through the exported target: <gpap/gpap.hpp> is C++17, and a consumer
 # that only set CMAKE_CXX_STANDARD 11 would otherwise fail to compile it. (C consumers include
 # gpap.h instead and are unaffected — that header is plain C99.)
@@ -104,13 +133,15 @@ target_compile_features(gpap PUBLIC cxx_std_17)
 target_compile_options(gpap PRIVATE -Wall -Wextra -Wno-unused-parameter)
 # ONE spelling of the version: gpap_version() reports this, rather than a second literal in
 # runtime.cpp that nobody remembers to bump alongside it.
-target_compile_definitions(gpap PRIVATE GPAP_VERSION_STR="${PROJECT_VERSION}")
+target_compile_definitions(gpap PRIVATE GPAP_VERSION_STR="${PROJECT_VERSION}"
+                                         GPAP_WITH_CUDA=$<BOOL:${GPAP_WITH_CUDA}>)
 # dlopen, for the GPU libraries (both plugs open theirs at run time), and dladdr, so
 # gpap_build_id() can find and fingerprint the library's own file.
 target_link_libraries(gpap PRIVATE ${CMAKE_DL_LIBS})
 set_target_properties(gpap PROPERTIES VERSION ${PROJECT_VERSION} SOVERSION 1)
 
 # ---------------------------------------------------------------- examples
+if(GPAP_BUILD_EXAMPLES)
 add_executable(gpap_c_api examples/c_api.c)                   # plain C, the raw ABI
 target_link_libraries(gpap_c_api PRIVATE gpap)
 
@@ -123,7 +154,13 @@ target_link_libraries(gpap_assumptions PRIVATE gpap)
 add_executable(gpap_probe examples/probe.cpp)                # C++, gpap::Prober
 target_link_libraries(gpap_probe PRIVATE gpap)
 
+add_executable(gpap_host_plug examples/host_plug.cpp)        # C++, a host's own gpap::Gpu
+target_link_libraries(gpap_host_plug PRIVATE gpap)
+endif()
+
 # ---------------------------------------------------------------- install / find_package
+# Only for libgpap built on its own: a host that embeds it installs what it needs itself.
+if(GPAP_TOP_LEVEL)
 # Downstream projects then just:
 #     find_package(gpap REQUIRED)
 #     target_link_libraries(my_app PRIVATE gpap::gpap)
@@ -153,3 +190,4 @@ include(\"\${CMAKE_CURRENT_LIST_DIR}/gpapTargets.cmake\")\n")
 install(FILES "${CMAKE_CURRENT_BINARY_DIR}/gpapConfig.cmake"
               "${CMAKE_CURRENT_BINARY_DIR}/gpapConfigVersion.cmake"
         DESTINATION ${CMAKE_INSTALL_LIBDIR}/cmake/gpap)
+endif()  # GPAP_TOP_LEVEL

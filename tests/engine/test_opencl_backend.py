@@ -544,11 +544,16 @@ def test_an_unknown_backend_is_an_error():
 
 # ---------------------------------------------------------------- the kernel list
 
+#: THE launch rules of bcp.cl, shared by GPAP's OpenCL plug and any host plug (gpu_api.hpp).
+LAUNCH_RULES = os.path.join(REPO_ROOT, "cpp", "include", "gpap", "opencl_launch.hpp")
+
+
 def test_the_kernel_list_matches_bcp_cl():
-    """Every kernel key the OpenCL plug lists is defined in bcp.cl under the name the plug
-    derives from it, and bcp.cl defines no kernel the plug cannot reach. No device needed."""
-    plug = open(os.path.join(REPO_ROOT, "cpp", "src", "gpu_opencl.cpp")).read()
-    table = plug[plug.index("kSpecs[] = {"):plug.index("constexpr size_t kGroup")]
+    """Every kernel key the launch rules list is defined in bcp.cl under the name they derive
+    from it, and bcp.cl defines no kernel a plug cannot reach. No device needed."""
+    rules = open(LAUNCH_RULES).read()
+    start = rules.index("kSpecs[] = {")
+    table = rules[start:rules.index("};", start)]
     keys = re.findall(r'\{"([a-z0-9_.]+)",\s*(?:ROWS|GRID|GROUP|LANES)', table)
     assert len(keys) == len(set(keys)) >= 17, keys
 
@@ -559,7 +564,7 @@ def test_the_kernel_list_matches_bcp_cl():
 
 
 def _launch_sizes(plug: str, src: str) -> dict:
-    """The group sizes the plug launches with and the ones bcp.cl is written for, and the
+    """The group sizes the launch rules launch with and the ones bcp.cl is written for, and the
     WAVE kernel macros' headers."""
     num = lambda pattern, text: int(re.search(pattern, text).group(1))  # noqa: E731
     return {
@@ -577,7 +582,7 @@ def test_the_plug_launches_the_group_sizes_bcp_cl_is_written_for():
     most GPAP_GROUP_MAX items: a launch of any other shape would mix rows or lose a sum without
     an error. The plug's two constants equal bcp.cl's, and both WAVE kernel macros declare the
     group size (reqd_work_group_size), so a host that launches them otherwise is refused."""
-    sizes = _launch_sizes(open(os.path.join(REPO_ROOT, "cpp", "src", "gpu_opencl.cpp")).read(),
+    sizes = _launch_sizes(open(LAUNCH_RULES).read(),
                           open(os.path.join(REPO_ROOT, "cpp", "kernels", "bcp.cl")).read())
     assert sizes["plug_wave"] == sizes["cl_wave"]
     assert sizes["plug_reduce"] == sizes["cl_reduce"]

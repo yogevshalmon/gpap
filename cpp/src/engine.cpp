@@ -130,23 +130,21 @@ static gpap_status build_flush_cache(gpap_engine *e, const gpap_formula *f) {
     return GPAP_OK;
 }
 
-extern "C" gpap_status gpap_engine_create(const gpap_formula *f, const gpap_engine_options *opts,
-                                          gpap_engine **out) {
-    if (!f || !out) return GPAP_ERR_ARG;
-    *out = nullptr;
-    /* All-zero, exactly what `gpap_engine_options o = {0}` gets: the header calls both
-     * spellings "the defaults" and they must not differ. */
+/* All-zero, exactly what `gpap_engine_options o = {0}` gets: the header calls both
+ * spellings "the defaults" and they must not differ. */
+static gpap_engine_options options_or_defaults(const gpap_engine_options *opts) {
     const gpap_engine_options defaults = {0, GPAP_MODE_AUTO, 0, 0};
-    const gpap_engine_options o = opts ? *opts : defaults;
-    const int device = o.device;
-    const gpap::GpuDriver *driver = gpap::gpu_driver();     /* $GPAP_BACKEND */
-    if (!driver) return GPAP_ERR_ARG;
-    gpap::Gpu *g = nullptr;
-    GPAP_TRY(driver->open(device, &g));
-    gpap_engine *e = new gpap_engine();
-    e->gpu.reset(g);
-    e->driver = driver;
-    e->device_ordinal = device;
+    return opts ? *opts : defaults;
+}
+
+/* Everything an engine needs once its device (e->gpu) is open: the formula's state on it.
+ * Shared by the two ways in, gpap_engine_create and gpap::engine_create_on. */
+static gpap_status engine_init(gpap_engine *e, const gpap_formula *f,
+                               const gpap_engine_options &o) {
+    gpap::Gpu *g = e->gpu.get();
+    /* Every buffer below lives on this device: a plug tied to the calling thread's current
+     * context must be current before the first allocation (gpu_api.hpp: make_current). */
+    GPAP_TRY(use_ctx(e));
     gpap_status st = GPAP_OK;
     do {
 
@@ -231,13 +229,46 @@ extern "C" gpap_status gpap_engine_create(const gpap_formula *f, const gpap_engi
         if (st != GPAP_OK) break;
         st = build_flush_cache(e, f);
     } while (0);
+    return st;
+}
 
+/* engine_init, then hand the engine out; on failure free it, and with it the device. */
+static gpap_status engine_finish(gpap_engine *e, const gpap_formula *f,
+                                 const gpap_engine_options &o, gpap_engine **out) {
+    const gpap_status st = engine_init(e, f, o);
     if (st != GPAP_OK) {
         gpap_engine_free(e);
         return st;
     }
     *out = e;
     return GPAP_OK;
+}
+
+extern "C" gpap_status gpap_engine_create(const gpap_formula *f, const gpap_engine_options *opts,
+                                          gpap_engine **out) {
+    if (!f || !out) return GPAP_ERR_ARG;
+    *out = nullptr;
+    const gpap_engine_options o = options_or_defaults(opts);
+    const int device = o.device;
+    const gpap::GpuDriver *driver = gpap::gpu_driver();     /* $GPAP_BACKEND */
+    if (!driver) return GPAP_ERR_ARG;
+    gpap::Gpu *g = nullptr;
+    GPAP_TRY(driver->open(device, &g));
+    gpap_engine *e = new gpap_engine();
+    e->gpu.reset(g);
+    e->device_ordinal = device;
+    return engine_finish(e, f, o, out);
+}
+
+gpap_status gpap::engine_create_on(const gpap_formula *f, const gpap_engine_options *opts,
+                                   std::unique_ptr<gpap::Gpu> gpu, gpap_engine **out) {
+    if (out) *out = nullptr;
+    if (!f || !gpu || !out) return GPAP_ERR_ARG;    /* `gpu`, if any, goes with this scope */
+    const gpap_engine_options o = options_or_defaults(opts);
+    gpap_engine *e = new gpap_engine();
+    e->gpu = std::move(gpu);
+    e->device_ordinal = o.device;
+    return engine_finish(e, f, o, out);
 }
 
 extern "C" void gpap_engine_free(gpap_engine *e) {
@@ -548,8 +579,7 @@ gpap_mode dispatch_mode(gpap_engine *e, int32_t K) {
     /* A device that cannot form a WAVE work group runs SCALAR; a pin is honoured instead, and
      * fails at the launch with a message that says so. */
     if (!e->gpu->has_kernel(fixpoint_key("fixpoint", e->shift, 1).c_str())) return GPAP_MODE_SCALAR;
-    return dispatch_wave(e->driver, e->num_clauses, K, e->device_ordinal) ? GPAP_MODE_WAVE
-                                                                          : GPAP_MODE_SCALAR;
+    return dispatch_wave(*e->gpu, e->num_clauses, K) ? GPAP_MODE_WAVE : GPAP_MODE_SCALAR;
 }
 
 gpap_status engine_require_trajectory(gpap_engine *e) {

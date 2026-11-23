@@ -8,9 +8,9 @@
 > CLEAN mode and `tl.gather` — re-run it before quoting.
 > **Rule lives in:** nowhere — no vendor port here is implemented. `GPAP_CU_FUNCTIONS` in
 > `cpp/src/gpu_cuda.cpp` is the executable inventory of the CUDA surface this file sizes.
-> **Since 2026-11-13:** the interface §6 recommends exists (`cpp/src/gpu_api.hpp`, with a CUDA
-> plug and an OpenCL one: [OPENCL_FINDINGS.md](OPENCL_FINDINGS.md)); §1's line counts describe
-> the code before it.
+> **Since 2026-11-13:** the interface §6 recommends exists (`cpp/include/gpap/gpu_api.hpp`,
+> with a CUDA plug and an OpenCL one: [OPENCL_FINDINGS.md](OPENCL_FINDINGS.md)); §1's line
+> counts describe the code before it.
 > **Record only:** the port estimates and the recommendation.
 
 Short answer: AMD and Intel are a small port the current design already anticipates. Apple is

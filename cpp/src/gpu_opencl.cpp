@@ -6,12 +6,12 @@
  * backend there is an error that says what is missing.
  *
  * What the plug owns, so that bcp.cl and the engine stay ignorant of each other:
- *   * the kernel list (kSpecs): which keys exist here and how a work extent becomes a launch;
- *   * the parameter block: scalars go into a small buffer, buffers follow in order (the
- *     layout is documented at the top of bcp.cl);
+ *   * running bcp.cl by its launch rules (gpap/opencl_launch.hpp, shared with host plugs):
+ *     which keys exist, the parameter block, how a work extent becomes a launch;
  *   * one context and one compiled program per device, shared by every engine in the process
  *     and kept until it exits — compiling takes seconds, creating an engine must not. */
 #include "gpap_internal.hpp"
+#include "gpap/opencl_launch.hpp"
 
 #include <algorithm>
 #include <cstdlib>
@@ -140,52 +140,6 @@ gpap_status cl_fail(const char *what, cl_int rc) {
         cl_int _rc = (call);                                                             \
         if (_rc != CL_SUCCESS) return cl_fail(#call, _rc);                               \
     } while (0)
-
-/* ------------------------------------------------------------------ the kernel list */
-
-/* How a work extent (n0, n1) becomes an OpenCL launch. Always one-dimensional: an OpenCL built
- * over CUDA (PoCL's driver) limits every dimension but the first to 65,535 work groups, and a
- * batch has more rows than that. */
-enum Shape {
-    ROWS,    /* one work item per element of axis 0 */
-    GRID,    /* one work item per (row, block of `chunk` columns), numbered row * blocks + block */
-    GROUP,   /* a single work group, whatever the extent (the two reductions) */
-    LANES    /* a work group of `chunk` items per element of axis 0, numbered row * chunk + lane */
-};
-
-constexpr int kWaveW = 32;               /* GPAP_WAVE_W in bcp.cl: the lanes of a WAVE row */
-
-/* THE list of kernels this plug ships: bcp.cl defines `gpap_<key with . as _>` for each. A key
- * missing here is a kernel the OpenCL backend does not have (the trajectory).
- * A scalar fixpoint kernel (.w0) runs a row on one work item, a WAVE one (.w1) on a work group
- * of kWaveW. A row per work item, not per warp, because the scalar kernel is dispatched on
- * small formulas, where a warp per row loses (docs/findings/OPENCL_FINDINGS.md §9).
- * bcast_rows copies 4 columns per work item (measured: §8). */
-const struct ClSpec {
-    const char *key;
-    Shape shape;
-    int chunk;
-} kSpecs[] = {
-    {"fixpoint.s16.w0", ROWS, 1},             {"fixpoint.s8.w0", ROWS, 1},
-    {"fixpoint_clean.s16.w0", ROWS, 1},       {"fixpoint_clean.s8.w0", ROWS, 1},
-    {"fixpoint.s16.w1", LANES, kWaveW},       {"fixpoint.s8.w1", LANES, kWaveW},
-    {"fixpoint_clean.s16.w1", LANES, kWaveW}, {"fixpoint_clean.s8.w1", LANES, kWaveW},
-    {"bcast_rows", GRID, 4},                  {"fill_i8", ROWS, 1},
-    {"complete_mask", ROWS, 1},               {"sound_rows.s16", ROWS, 1},
-    {"sound_rows.s8", ROWS, 1},               {"var_bits", GRID, 64},
-    {"unpack_rows", GRID, 64},                {"sum_i8_to", GROUP, 1},
-    {"sum_i32_acc", GROUP, 1},
-};
-
-constexpr size_t kGroup = 64;            /* work-group size of the ROWS and GRID kernels (the
-                                          * size made no difference: §8) */
-constexpr size_t kReduceGroup = 256;     /* GPAP_GROUP_MAX in bcp.cl */
-
-const ClSpec *find_spec(const char *key) {
-    for (const ClSpec &s : kSpecs)
-        if (std::strcmp(key, s.key) == 0) return &s;
-    return nullptr;
-}
 
 /* ------------------------------------------------------------------ devices and programs */
 
@@ -347,7 +301,7 @@ gpap_status ensure_program(ClDevice *d) {
 class OpenClGpu final : public Gpu {
   public:
     OpenClGpu(const ClDevice *d, cl_command_queue queue, cl_mem null_buf)
-        : d_(d), queue_(queue), null_buf_(null_buf), group_(std::min(kGroup, d->max_group)) {}
+        : d_(d), queue_(queue), null_buf_(null_buf) {}
 
     ~OpenClGpu() override {
         for (auto &kv : kernels_) {
@@ -427,8 +381,8 @@ class OpenClGpu final : public Gpu {
     /* A WAVE kernel needs work groups of kWaveW items: a device that cannot form one does not
      * have it, and the engine then dispatches scalar. */
     bool has_kernel(const char *key) const override {
-        const ClSpec *s = find_spec(key);
-        return s && !(s->shape == LANES && (size_t)s->chunk > d_->max_group);
+        const opencl::Spec *s = opencl::find_spec(key);
+        return s && opencl::fits(*s, d_->max_group);
     }
 
     gpap_status run(const char *key, int64_t n0, int64_t n1,
@@ -437,12 +391,8 @@ class OpenClGpu final : public Gpu {
         Bound *k = nullptr;
         GPAP_TRY(bind(key, &k));
 
-        /* The parameter block, then the buffers in order (the layout at the top of bcp.cl). */
-        const Shape shape = k->spec->shape;
-        const int chunk = k->spec->chunk;
-        std::vector<int64_t> prm = {n0, n1, chunk};
-        for (const GpuArg &a : args)
-            if (a.kind != GpuArg::BUF) prm.push_back(a.value);
+        /* The parameter block, then the buffers in order (gpap/opencl_launch.hpp). */
+        const std::vector<int64_t> prm = opencl::param_block(*k->spec, n0, n1, args);
         cl_mem prm_buf = nullptr;
         GPAP_TRY(params(k, prm, &prm_buf));
         GPAP_CL(g_cl.clSetKernelArg(k->kernel, 0, sizeof(cl_mem), &prm_buf));
@@ -464,20 +414,9 @@ class OpenClGpu final : public Gpu {
             }
         }
         if (st == GPAP_OK) {
-            size_t global = 1, local = group_;
-            if (shape == LANES) {                   /* a group per row */
-                local = (size_t)chunk;
-                global = (size_t)n0 * local;
-            } else if (shape == ROWS) {
-                global = round_up((size_t)n0, local);
-            } else if (shape == GRID) {
-                const size_t blocks = ((size_t)n1 + chunk - 1) / chunk;
-                global = round_up((size_t)n0 * blocks, local);
-            } else {
-                local = global = std::min(kReduceGroup, d_->max_group);
-            }
-            const cl_int rc = g_cl.clEnqueueNDRangeKernel(queue_, k->kernel, 1, nullptr, &global,
-                                                          &local, 0, nullptr, nullptr);
+            const opencl::Launch l = opencl::launch(*k->spec, n0, n1, d_->max_group);
+            const cl_int rc = g_cl.clEnqueueNDRangeKernel(queue_, k->kernel, 1, nullptr, &l.global,
+                                                          &l.local, 0, nullptr, nullptr);
             if (rc != CL_SUCCESS) {
                 set_error("OpenCL: launching kernel '%s' failed with %d (%s)", key, (int)rc,
                           cl_error_name(rc));
@@ -495,12 +434,10 @@ class OpenClGpu final : public Gpu {
         cl_mem buf;
     };
     struct Bound {
-        const ClSpec *spec = nullptr;
+        const opencl::Spec *spec = nullptr;
         cl_kernel kernel = nullptr;
         std::vector<Params> params;         /* the few parameter blocks this kernel runs with */
     };
-
-    static size_t round_up(size_t n, size_t to) { return (n + to - 1) / to * to; }
 
     gpap_status bind(const char *key, Bound **out) {
         auto it = kernels_.find(key);
@@ -508,7 +445,7 @@ class OpenClGpu final : public Gpu {
             *out = &it->second;
             return GPAP_OK;
         }
-        const ClSpec *spec = find_spec(key);
+        const opencl::Spec *spec = opencl::find_spec(key);
         if (!spec) {
             set_error("kernel '%s' is not part of the opencl backend, which ships the fixpoint "
                       "kernels and the support kernels (no sampling trajectory). Use "
@@ -521,8 +458,7 @@ class OpenClGpu final : public Gpu {
                       d_->name.c_str(), d_->max_group);
             return GPAP_ERR_KERNEL;
         }
-        std::string fn = std::string("gpap_") + key;
-        std::replace(fn.begin(), fn.end(), '.', '_');
+        const std::string fn = opencl::function_name(key);
         cl_int rc = CL_SUCCESS;
         cl_kernel kernel = g_cl.clCreateKernel(d_->program, fn.c_str(), &rc);
         if (rc != CL_SUCCESS || !kernel) {
@@ -586,7 +522,6 @@ class OpenClGpu final : public Gpu {
     const ClDevice *d_;
     cl_command_queue queue_;                /* in order: a launch sees every earlier one */
     cl_mem null_buf_;                       /* what a kernel gets for a "no buffer" argument */
-    const size_t group_;                    /* work items per group, ROWS and GRID kernels */
     std::unordered_map<std::string, Bound> kernels_;
 };
 

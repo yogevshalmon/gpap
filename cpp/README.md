@@ -31,6 +31,22 @@ find_package(gpap REQUIRED)
 target_link_libraries(my_solver PRIVATE gpap::gpap)
 ```
 
+Or inside the host's own build (`add_subdirectory`, or `FetchContent` with `SOURCE_SUBDIR cpp`),
+with these options:
+- `GPAP_WITH_CUDA` (ON). OFF builds without `cuda.h` and the generated kernels, leaving the OpenCL
+  plug, which is then the default backend.
+- `GPAP_SHARED` (ON). OFF builds a static library.
+- `GPAP_BUILD_EXAMPLES` (ON only when GPAP is the top-level project).
+
+A host with its own GPU layer brings its own plug: implement `gpap::Gpu` from
+[`include/gpap/gpu_api.hpp`](include/gpap/gpu_api.hpp) and create the engine with
+`gpap::engine_create_on` (C API only: the C++ wrapper cannot hold such an engine). Such a plug
+runs the OpenCL kernels by the launch rules in
+[`include/gpap/opencl_launch.hpp`](include/gpap/opencl_launch.hpp); `gpap::open_gpu` opens
+GPAP's own plug, for a host that wraps it. [`examples/host_plug.cpp`](examples/host_plug.cpp)
+is a plug that checks the contract, and [`examples/embed/`](examples/embed/) a host project that
+embeds libgpap static and without CUDA.
+
 `build_kernels.py` targets the local GPU; `--arch 89` cross-compiles (no GPU needed). Rerun it
 whenever a kernel changes — the only step that regenerates GPU code.
 
@@ -39,8 +55,9 @@ The library is 0.4.0 / SOVERSION 1: an ABI break must move the soname, an additi
 
 ## Backends
 
-The engine reaches the GPU through one internal interface, [`src/gpu_api.hpp`](src/gpu_api.hpp),
-with a plug per GPU library. `GPAP_BACKEND` chooses when an engine is created:
+The engine reaches the GPU through one interface, the GPU socket
+[`include/gpap/gpu_api.hpp`](include/gpap/gpu_api.hpp), with a plug per GPU library.
+`GPAP_BACKEND` chooses when an engine is created:
 
 - `cuda` (the default): the driver API and the Triton kernels above. The reference and the fast
   path; everything in this file.
@@ -186,15 +203,18 @@ helper kernels in [kernels/helpers.py](kernels/helpers.py).
 (DIMACS, occurrence CSR, packed word), `engine.cpp` (state, the two entry points), `sample.cpp`
 (the sampling loop), `check.cpp` (the checker's chunk loop), `probe.cpp` (paged k-subset probing),
 `calibrate.cpp` (memory model, K sizing, wave/scalar dispatch), `readout.cpp` (selections),
-`gpu_api.hpp` (the GPU socket), `gpu_cuda.cpp` (cubins and launches), `gpu_opencl.cpp` (the
-OpenCL plug), `runtime.cpp` (errors, the backend choice, the build id). `kernels/helpers.py` holds
+`include/gpap/gpu_api.hpp` (the GPU socket), `gpu_cuda.cpp` (cubins and launches),
+`gpu_opencl.cpp` (the OpenCL plug, over `include/gpap/opencl_launch.hpp`), `runtime.cpp`
+(errors, the backend choice, the build id). `kernels/helpers.py` holds
 the support kernels in Triton, so the toolchain stays nvcc-free; `tools/build_kernels.py` is the
 AOT compiler; `kernels/bcp.cl` is the OpenCL C source the OpenCL plug compiles.
 
 Examples: [`examples/sample.cpp`](examples/sample.cpp) (`gpap::Sampler`),
 [`examples/assumptions.cpp`](examples/assumptions.cpp) (`gpap::AssumptionChecker`),
 [`examples/probe.cpp`](examples/probe.cpp) (`gpap::Prober`),
-[`examples/c_api.c`](examples/c_api.c) (plain C, the raw ABI), and the Python ones in
+[`examples/c_api.c`](examples/c_api.c) (plain C, the raw ABI),
+[`examples/host_plug.cpp`](examples/host_plug.cpp) (a host's own `gpap::Gpu`), and the Python
+ones in
 [`../examples/`](../examples/). `gpap.engine._core` binds the same ABI with `ctypes`, taking the
 library from `$GPAP_LIB`, then `$GPAP_BUILD_DIR` (what `scripts/build_core.sh` builds into),
 then `<repo>/build/`, then `<repo>/cpp/build/`, then the copy installed beside the package.

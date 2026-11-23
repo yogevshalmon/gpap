@@ -70,6 +70,7 @@ jobs:
           test -x build/gpap_sample
           test -x build/gpap_assumptions
           test -x build/gpap_probe
+          test -x build/gpap_host_plug
           if readelf -d build/libgpap.so | grep -qi libcuda; then   # opened at run time instead
             echo "libgpap links libcuda: it would not load without the NVIDIA driver"; exit 1
           fi

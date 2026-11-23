@@ -32,10 +32,12 @@ Optional tools build from pinned sources: `scripts/build_abc.sh` (the ABC circui
 cpp/                     the engine: libgpap, a C ABI and a header-only C++ wrapper
   include/gpap/gpap.h    the C ABI: formula, engine, selections, readout, counters, sizing
   include/gpap/gpap.hpp  the C++ wrapper: Sampler / AssumptionChecker over Formula / Engine
+  include/gpap/gpu_api.hpp  the GPU socket: every device operation, one plug per GPU library
+                         (src/gpu_cuda.cpp, src/gpu_opencl.cpp, or a host's own)
+  include/gpap/opencl_launch.hpp  the OpenCL launch rules: kernel list, launch shapes and
+                         parameter block, shared by the OpenCL plug and a host's own
   src/                   formula builder, engine state, readout, batch sizing and kernel
                          dispatch, the sampling loop, probing, batched checking
-  src/gpu_api.hpp        the GPU socket: every device operation, one plug per GPU library
-                         (gpu_cuda.cpp, gpu_opencl.cpp)
   kernels/bcp.py         the BCP kernels, in Triton (the reference)
   kernels/bcp.cl         the fixpoint and support kernels in OpenCL C; follows bcp.py
   tools/build_kernels.py compiles the Triton kernels into the library ahead of time
@@ -124,8 +126,8 @@ The engine:
   tests.
 - The Python and C++ faces share their defaults as well as their loop
   (`tests/cli/test_cli_contracts.py`).
-- The engine names no GPU library. Every device operation goes through `cpp/src/gpu_api.hpp`,
-  and only `gpu_cuda.cpp` includes `cuda.h`.
+- The engine names no GPU library. Every device operation goes through
+  `cpp/include/gpap/gpu_api.hpp`, and only `gpu_cuda.cpp` includes `cuda.h`.
 - The Triton kernels are the reference and `cpp/kernels/bcp.cl` follows them: a change of
   behaviour in a kernel both implement lands in both, in one change
   ([OPENCL.md](docs/OPENCL.md), `tests/engine/test_opencl_backend.py`). A kernel the OpenCL plug

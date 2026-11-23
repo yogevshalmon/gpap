@@ -11,7 +11,7 @@
 > **Measured:** 2026-11-13 to 2026-11-16. A WSL2 laptop with an RTX 4080 Laptop (12 GB) and an
 > i7-13800H: CUDA, PoCL 3.0 and 7.2 (CPU and CUDA drivers), Oclgrind 21.10, and Intel SDE
 > 10.13 for §15. Colab L4s with NVIDIA's driver 580.82 (OpenCL 3.0) for §8, §9, §10 and §12.
-> **Rule lives in:** `cpp/src/gpu_api.hpp` (the socket), `cpp/src/gpu_cuda.cpp` and
+> **Rule lives in:** `cpp/include/gpap/gpu_api.hpp` (the socket), `cpp/src/gpu_cuda.cpp` and
 > `cpp/src/gpu_opencl.cpp` (the plugs), `cpp/kernels/bcp.cl` (the kernels).
 > **Gated by:** `tests/engine/test_opencl_backend.py`, and every `engine` test under
 > `GPAP_BACKEND=opencl` (in CI on PoCL's CPU driver, with no NVIDIA driver).

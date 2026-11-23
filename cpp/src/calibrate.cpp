@@ -156,14 +156,24 @@ extern "C" int32_t gpap_resident_warps(int device) {
  * mid-size formula sitting at the batch cap. A/B at fixed K: docs/findings/KERNEL_AB_FINDINGS.md.
  * The batch term survives only for the regime M cannot speak for: a batch too small to fill even
  * one warp per SM, where SCALAR's extra rows do not exist to be had. */
-int32_t gpap::dispatch_wave(const gpap::GpuDriver *driver, int32_t num_clauses, int32_t batch,
-                            int device) {
-    if (!driver) return 0;
+template <class ResidentWarps>
+static int32_t wave_rule(int32_t num_clauses, int32_t batch, ResidentWarps resident_warps) {
     if (num_clauses >= kWaveMinClauses) return 1;
     /* Only the small-M path needs the device query, so the common case costs nothing. A
      * library that cannot answer it (0) keeps small formulas on SCALAR. */
-    const int32_t resident = driver->resident_warps(device);
+    const int32_t resident = resident_warps();
     return (resident > 0 && batch <= resident) ? 1 : 0;
+}
+
+int32_t gpap::dispatch_wave(const gpap::GpuDriver *driver, int32_t num_clauses, int32_t batch,
+                            int device) {
+    if (!driver) return 0;
+    return wave_rule(num_clauses, batch, [&] { return driver->resident_warps(device); });
+}
+
+/* An engine asks the device it runs on, which may be a host's plug with no driver behind it. */
+int32_t gpap::dispatch_wave(const gpap::Gpu &gpu, int32_t num_clauses, int32_t batch) {
+    return wave_rule(num_clauses, batch, [&] { return gpu.resident_warps(); });
 }
 
 /* The rule for the backend a NEW engine would get ($GPAP_BACKEND). An engine asks its own. */

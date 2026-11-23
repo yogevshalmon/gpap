@@ -58,8 +58,9 @@ again before relying on it, or before calling the direction closed.
   5.5 on OpenCL and 2.4 on CUDA; a per-row probe queue measured 2 to 9 times CUDA in chunks and
   is to be built in Triton first (GitHub issue 58). [OPENCL](OPENCL_FINDINGS.md) §10
 - **The engine names no GPU library; OpenCL is a second plug (2026-11-13).** Every device
-  operation goes through `cpp/src/gpu_api.hpp`; libgpap opens libcuda at run time, so it builds
-  and runs without the NVIDIA driver; the OpenCL backend mines byte-identical clauses.
+  operation goes through `cpp/include/gpap/gpu_api.hpp`; libgpap opens libcuda at run time,
+  so it builds and runs without the NVIDIA driver; the OpenCL backend mines byte-identical
+  clauses.
   [OPENCL](OPENCL_FINDINGS.md) §1, §11
 - **Three path roots, one owner each (2026-09-13).** `.gpap/` holds machinery and all scratch
   (`gpap/paths.py`), `.experiments/` a run's output and `$GPAP_RESULTS` the record

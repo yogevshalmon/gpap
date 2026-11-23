@@ -125,15 +125,16 @@ int32_t gpap_engine_num_vars(const gpap_engine *e);
 int32_t gpap_engine_num_clauses(const gpap_engine *e);   /* TOTAL clauses (unit + bin + long) */
 int32_t gpap_engine_num_long(const gpap_engine *e);      /* packed-word clauses: the row width */
 
-/* The GPU backend. The engine reaches the device through one internal interface with a plug per
- * GPU library: "cuda" (the default, the reference and the fast path) and "opencl" (the fixpoint
- * kernels and the support kernels in OpenCL C: no trajectory, so no sampling, and no `_dev`
- * pointers — docs/OPENCL.md). $GPAP_BACKEND chooses when an engine is created, so one
+/* The GPU backend. The engine reaches the device through one interface (gpap/gpu_api.hpp) with
+ * a plug per GPU library: "cuda" (the default, the reference and the fast path) and "opencl"
+ * (the fixpoint kernels and the support kernels in OpenCL C: no trajectory, so no sampling, and
+ * no `_dev` pointers — docs/OPENCL.md). $GPAP_BACKEND chooses when an engine is created, so one
  * process can hold engines on both. Under "opencl" the `device` option indexes the OpenCL
  * devices, GPUs first. */
 const char *gpap_backend(void);    /* what a new engine would get; NULL (and an error) if
                                     * $GPAP_BACKEND names no backend */
-const char *gpap_engine_backend(const gpap_engine *e);
+const char *gpap_engine_backend(const gpap_engine *e);   /* or a host plug's own name
+                                                         * (gpap::engine_create_on) */
 const char *gpap_engine_device_name(const gpap_engine *e);
 
 /* Restore K rows to the cached post-units-flush state (allocations reused when K matches), and

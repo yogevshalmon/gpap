@@ -11,6 +11,11 @@
 #include <dlfcn.h>                 /* dladdr, for gpap_build_id */
 #endif
 
+/* CMake sets it (option GPAP_WITH_CUDA); a build without it is the default, CUDA build. */
+#ifndef GPAP_WITH_CUDA
+#define GPAP_WITH_CUDA 1
+#endif
+
 namespace gpap {
 
 static thread_local char g_error[1024] = "";
@@ -26,14 +31,39 @@ const char *get_error() { return g_error; }
 
 const PackedSplit kPackedSplits[2] = {{16, 65535, 65535}, {8, 0xFFFFFF, 255}};
 
-/* $GPAP_BACKEND picks the plug. Read on every call, never cached: a process may open engines on
- * both, which is how the two are compared on one device. */
-const GpuDriver *gpu_driver() {
-    const char *b = std::getenv("GPAP_BACKEND");
+/* The plug named `b` (NULL or "" = the default); `source` says where the name came from, for
+ * the message. A library built without CUDA (GPAP_WITH_CUDA=OFF) has the OpenCL plug only, and
+ * it is the default there. */
+static const GpuDriver *driver_named(const char *b, const char *source) {
+#if GPAP_WITH_CUDA
     if (!b || !*b || std::strcmp(b, "cuda") == 0) return &kCudaDriver;
     if (std::strcmp(b, "opencl") == 0) return &kOpenClDriver;
-    set_error("GPAP_BACKEND='%s' is not a backend: use cuda (the default) or opencl", b);
+    set_error("%s='%s' is not a backend: use cuda (the default) or opencl", source, b);
+#else
+    if (!b || !*b || std::strcmp(b, "opencl") == 0) return &kOpenClDriver;
+    if (std::strcmp(b, "cuda") == 0)
+        set_error("%s='cuda': this libgpap was built without CUDA (GPAP_WITH_CUDA=OFF); "
+                  "use opencl", source);
+    else
+        set_error("%s='%s' is not a backend: this libgpap has opencl only", source, b);
+#endif
     return nullptr;
+}
+
+/* $GPAP_BACKEND picks the plug. Read on every call, never cached: a process may open engines on
+ * both, which is how the two are compared on one device. */
+const GpuDriver *gpu_driver() { return driver_named(std::getenv("GPAP_BACKEND"), "GPAP_BACKEND"); }
+
+gpap_status open_gpu(const char *backend, int device, std::unique_ptr<Gpu> *out) {
+    if (!out) return GPAP_ERR_ARG;
+    out->reset();
+    const GpuDriver *driver =
+        (backend && *backend) ? driver_named(backend, "open_gpu: backend") : gpu_driver();
+    if (!driver) return GPAP_ERR_ARG;
+    Gpu *g = nullptr;
+    GPAP_TRY(driver->open(device, &g));
+    out->reset(g);
+    return GPAP_OK;
 }
 
 gpap_status DevBuf::reserve(Gpu *g, size_t n) {

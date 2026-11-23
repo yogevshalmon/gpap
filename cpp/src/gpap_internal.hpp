@@ -11,12 +11,27 @@
 #include <vector>
 
 #include "gpap/gpap.h"
-#include "gpu_api.hpp"
+#include "gpap/gpu_api.hpp"
 
 namespace gpap {
 
-void set_error(const char *fmt, ...);
-const char *get_error();
+const char *get_error();          /* set_error is public: gpap/gpu_api.hpp */
+
+/* One GPU library: what can be asked of it without an engine. */
+struct GpuDriver {
+    const char *name;
+    gpap_status (*open)(int device, Gpu **out);
+    gpap_status (*mem_info)(int device, int64_t *free_bytes, int64_t *total_bytes);
+    /* Warps the device keeps resident (the WAVE dispatch's small-batch term); 0 = unknown. */
+    int32_t (*resident_warps)(int device);
+};
+
+/* The plug new engines get: $GPAP_BACKEND = cuda (the default) or opencl, read on every call
+ * so one process can open engines on both. NULL, with the error set, for any other value. */
+const GpuDriver *gpu_driver();
+
+extern const GpuDriver kCudaDriver;      /* gpu_cuda.cpp; only in a build with CUDA */
+extern const GpuDriver kOpenClDriver;    /* gpu_opencl.cpp */
 
 /* Share of free VRAM one batch may occupy — the only proportional headroom in the sizing path,
  * defined once so a formula cannot pick a different batch per entry point. */
@@ -85,7 +100,10 @@ int32_t rows_fitting(int64_t bytes, int64_t per_row, int32_t cap);
 /* gpap_dispatch_wave's rule for one GPU library. An engine passes the library it was created
  * on, never $GPAP_BACKEND, which may have changed since. */
 int32_t dispatch_wave(const GpuDriver *driver, int32_t num_clauses, int32_t batch, int device);
-/* THE automatic kernel choice of an engine for K rows: dispatch_wave on its own library, and
+/* The same rule for an engine: it asks the engine's own device (gpu.resident_warps()), which may
+ * be a host's plug opened through no library of ours. */
+int32_t dispatch_wave(const Gpu &gpu, int32_t num_clauses, int32_t batch);
+/* THE automatic kernel choice of an engine for K rows: dispatch_wave on its own device, and
  * SCALAR on a device that cannot run WAVE. Every per-engine choice calls this. */
 gpap_mode dispatch_mode(gpap_engine *e, int32_t K);
 /* GPAP_ERR_KERNEL, naming the backend, if the engine's plug has no trajectory kernel: a
@@ -203,7 +221,6 @@ struct gpap_engine {
     /* The device. Declared before every DevBuf so it is destroyed after them: a buffer frees
      * itself through this plug. */
     std::unique_ptr<gpap::Gpu> gpu;
-    const gpap::GpuDriver *driver = nullptr;    /* the library `gpu` was opened from */
     int device_ordinal = 0;
 
     /* formula-resident (never rebuilt) */

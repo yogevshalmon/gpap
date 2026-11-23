@@ -8,6 +8,23 @@ change does not.
 
 ## Unreleased
 
+### Embedding
+- libgpap embeds in a host's build (`add_subdirectory`, or `FetchContent` with `SOURCE_SUBDIR cpp`).
+  `GPAP_WITH_CUDA=OFF` builds it without `cuda.h` and the generated kernels; the OpenCL plug is
+  then the default backend, and `GPAP_BACKEND=cuda` is refused with a message. `GPAP_SHARED=OFF`
+  builds it static. Only a top-level GPAP builds its examples by default, sets a default build
+  type and installs itself. The target is also `gpap::gpap`. `cpp/examples/embed/` is such a
+  host.
+- A host can bring its own GPU plug. The GPU socket moved from `cpp/src/gpu_api.hpp` to the
+  public `<gpap/gpu_api.hpp>`, which states the plug contract: `gpap::engine_create_on` creates an
+  engine on a `gpap::Gpu` the host opened, `gpap::open_gpu` opens GPAP's own plug,
+  `gpap::set_error` sets a plug's message, and `Gpu::resident_warps()` (default 0) feeds the WAVE
+  dispatch. The OpenCL launch rules moved into the public `<gpap/opencl_launch.hpp>`, shared by
+  GPAP's OpenCL plug and host plugs. `cpp/examples/host_plug.cpp` is such a plug. Additive: same
+  soname.
+- An engine makes its plug current before its first allocation. `gpap_engine_create` already got
+  that from the CUDA plug's open; a host's plug did not.
+
 ### Evaluation
 - `eval/colab/colab_supervisor.py` drives the VM through `colab ssh` and needs google-colab-cli
   0.8 or later, which removed the `console` it used; it refuses an older CLI at start

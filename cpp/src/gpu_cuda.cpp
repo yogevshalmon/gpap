@@ -118,12 +118,23 @@ int device_cc(CUdevice dev) {
     return major * 10 + minor;
 }
 
+/* Warps `dev` keeps resident: SMs x (threads per SM / 32); 0 if the driver cannot say. */
+int32_t resident_warps_of(CUdevice dev) {
+    int sms = 0, threads_per_sm = 0;
+    g_cu.cuDeviceGetAttribute(&sms, CU_DEVICE_ATTRIBUTE_MULTIPROCESSOR_COUNT, dev);
+    g_cu.cuDeviceGetAttribute(&threads_per_sm, CU_DEVICE_ATTRIBUTE_MAX_THREADS_PER_MULTIPROCESSOR,
+                              dev);
+    return sms * (threads_per_sm / 32);
+}
+
 class CudaGpu final : public Gpu {
   public:
     CudaGpu(CUdevice device, CUcontext ctx) : device_(device), ctx_(ctx) {
         char name[128] = "";
         if (g_cu.cuDeviceGetName(name, sizeof(name), device_) == CUDA_SUCCESS) name_ = name;
     }
+
+    int32_t resident_warps() const override { return resident_warps_of(device_); }
 
     ~CudaGpu() override {
         g_cu.cuCtxSetCurrent(ctx_);
@@ -327,11 +338,7 @@ int32_t cuda_resident_warps(int device) {
     CUdevice dev;
     if (load_cuda() != GPAP_OK || g_cu.cuInit(0) != CUDA_SUCCESS) return 0;
     if (g_cu.cuDeviceGet(&dev, device) != CUDA_SUCCESS) return 0;
-    int sms = 0, threads_per_sm = 0;
-    g_cu.cuDeviceGetAttribute(&sms, CU_DEVICE_ATTRIBUTE_MULTIPROCESSOR_COUNT, dev);
-    g_cu.cuDeviceGetAttribute(&threads_per_sm, CU_DEVICE_ATTRIBUTE_MAX_THREADS_PER_MULTIPROCESSOR,
-                              dev);
-    return sms * (threads_per_sm / 32);
+    return resident_warps_of(dev);
 }
 
 }  // namespace

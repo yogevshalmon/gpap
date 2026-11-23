@@ -5,7 +5,7 @@
 > to the Triton ones.
 
 GPAP's engine reaches the GPU through one small interface, the GPU socket
-(`cpp/src/gpu_api.hpp`), with one plug per GPU library:
+(`cpp/include/gpap/gpu_api.hpp`), with one plug per GPU library:
 
 | plug | kernels | use it for |
 |---|---|---|
@@ -108,20 +108,25 @@ for GPUs and takes WAVE on all but small formulas, the slower kernel on a CPU. C
 it, and a CPU gains little from a large batch
 ([findings/OPENCL_FINDINGS.md](findings/OPENCL_FINDINGS.md) §13).
 
-The launch shapes are fixed in the plug (`kSpecs`, `kGroup` in `cpp/src/gpu_opencl.cpp`), from
-measurements ([findings/OPENCL_FINDINGS.md](findings/OPENCL_FINDINGS.md) §8, §9).
+The launch shapes are fixed in the launch rules (`kSpecs`, `kGroup` in
+`cpp/include/gpap/opencl_launch.hpp`), from measurements
+([findings/OPENCL_FINDINGS.md](findings/OPENCL_FINDINGS.md) §8, §9).
 `GPAP_KERNEL` and `GPAP_CLEAN` pin the kernel and the mode as on CUDA.
 
 
 ## How it is built
 
-- **The socket.** `gpap::Gpu` (`cpp/src/gpu_api.hpp`) is every device operation the engine
+- **The socket.** `gpap::Gpu` (`cpp/include/gpap/gpu_api.hpp`) is every device operation the engine
   performs: allocate, copy, read back, and run a kernel named by its key over a work extent
   (rows, or rows × columns) with its arguments in the order of the Triton signature. The engine
   above it names no GPU library.
-- **The plug.** `cpp/src/gpu_opencl.cpp` owns the list of kernels the backend ships, how an
-  extent becomes a launch, and the parameter block. It opens the OpenCL library with `dlopen`.
-  One context and one compiled program per device are shared by every engine in the process.
+- **The launch rules.** `cpp/include/gpap/opencl_launch.hpp` holds the list of kernels the
+  backend ships, how an extent becomes a launch, and the parameter block. It is public and
+  header-only, so a host that runs `bcp.cl` through its own GPU layer (a host plug,
+  `gpap::engine_create_on`) launches the kernels exactly as GPAP does.
+- **The plug.** `cpp/src/gpu_opencl.cpp` runs the kernels by those rules. It opens the OpenCL
+  library with `dlopen`. One context and one compiled program per device are shared by every
+  engine in the process.
 - **The kernels.** `cpp/kernels/bcp.cl` is plain OpenCL C 1.2. CMake embeds it in the library,
   so the source a library compiles is always the one it was built with. It ships as source
   because an OpenCL binary belongs to one device and one driver: the driver compiles it once per
@@ -153,7 +158,7 @@ kernel first.
    both, in the same change. A change of **speed** need not be.
 2. Keep the translation function by function: each OpenCL function names its Triton
    counterpart, and the Triton docstring is the contract.
-3. A new OpenCL kernel is one entry in `kSpecs` (`gpu_opencl.cpp`) and one `gpap_<key>`
+3. A new OpenCL kernel is one entry in `kSpecs` (`opencl_launch.hpp`) and one `gpap_<key>`
    function in `bcp.cl`; `test_the_kernel_list_matches_bcp_cl` keeps the two lists equal.
 4. Run the tests on both backends (below).
 
