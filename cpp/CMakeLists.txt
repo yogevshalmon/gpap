@@ -17,7 +17,9 @@ cmake_minimum_required(VERSION 3.18)
 # 1 where a gpap_probe_options* is now dereferenced. Bump both again on the next break.
 # 0.3.0 — ADDITIVE: the gpap_sampler_* sampling entry points (cpp/src/sample.cpp). No
 # existing symbol or struct changed, so SOVERSION stays 1.
-project(gpap VERSION 0.3.0 LANGUAGES C CXX)
+# 0.4.0 — ADDITIVE: gpap_backend, gpap_engine_backend, gpap_engine_device_name (the OpenCL
+# backend). No existing symbol or struct changed, so SOVERSION stays 1.
+project(gpap VERSION 0.4.0 LANGUAGES C CXX)
 
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)

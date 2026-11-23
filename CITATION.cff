@@ -4,8 +4,8 @@ title: "GPAP: GPU-Parallel (partial) Assignment Propagation and CircuitSAT Sampl
 authors:
   - family-names: Shalmon
     given-names: Yogev
-version: 0.3.1
-date-released: 2026-10-23
+version: 0.4.0
+date-released: 2026-11-23
 repository-code: "https://github.com/yogevshalmon/gpap"
 license: MIT
 keywords:
