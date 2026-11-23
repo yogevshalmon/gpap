@@ -6,6 +6,13 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). The
 follows the rule in [CONTRIBUTING.md](CONTRIBUTING.md): an ABI break moves its soname, an additive
 change does not.
 
+## Unreleased
+
+### Evaluation
+- `eval/colab/colab_supervisor.py` drives the VM through `colab ssh` and needs google-colab-cli
+  0.8 or later, which removed the `console` it used; it refuses an older CLI at start
+  ([eval/colab/README.md](eval/colab/README.md)). The TACAS 2027 artifact keeps its own copy.
+
 ## 0.4.0 — 2026-11-23
 
 An OpenCL backend, and fixes to the engine, its C++ face and mining. libgpap is 0.4.0 with the

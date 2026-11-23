@@ -1,10 +1,10 @@
 #!/usr/bin/env python3
 """Run a long GPAP sweep on a Colab VM that will be taken away before it finishes.
 
-A rented GPU assignment is reclaimed after roughly an hour even with the keep-alive daemon
-running, so a multi-hour sweep cannot be launched and collected: it has to survive the VM dying
-repeatedly. Results only exist once they are on the LOCAL disk — checkpointing to the VM's own
-disk buys nothing, because that disk dies with it.
+A rented GPU assignment is reclaimed after roughly an hour whatever it is doing, so a multi-hour
+sweep cannot be launched and collected: it has to survive the VM dying repeatedly. Results only
+exist once they are on the LOCAL disk — checkpointing to the VM's own disk buys nothing, because
+that disk dies with it.
 
     ensure session -> bootstrap -> push local partials -> launch -> poll+PULL every cycle
          ^                                                              |
@@ -24,9 +24,10 @@ Stop the SESSION before restarting this script: killing the supervisor mid-boots
 relaunching starts a second bootstrap on the same VM, the two race over /content/gpap, and the
 run burns a VM recovering. Wait for the cycle to reach 'launching', or `colab stop` first.
 
-Console quirks this works around: `colab exec` is broken, so everything goes through
-`colab console`; the console exits on piped EOF, so commands are fire-and-forget and progress is
-polled separately; tmux line-wraps and corrupts long one-liners, so commands stay short.
+The VM is driven through `colab ssh` (google-colab-cli 0.8 or later; an older CLI is refused at
+start): a shell script goes to the VM's bash on stdin, and every decision is taken on the remote
+exit status, never on scraped text. Long work is detached on the VM and polled, because a call that
+waited for it would die with the connection.
 """
 import argparse
 import os
@@ -46,31 +47,73 @@ def log(msg):
     print(f"[{time.strftime('%H:%M:%S')}] {msg}", flush=True)
 
 
-def run(cmd, timeout=600):
+def run(cmd, timeout=600, stdin=None):
+    """Run a local command with `stdin` as its input, or /dev/null when None: ssh allocates a
+    terminal when stdin is one, and a terminal adds escapes to the output."""
     try:
-        p = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout)
+        p = subprocess.run(cmd, input=stdin,
+                           stdin=subprocess.DEVNULL if stdin is None else None,
+                           capture_output=True, text=True, timeout=timeout)
         return p.returncode, (p.stdout or "") + (p.stderr or "")
     except subprocess.TimeoutExpired:
         return 124, "TIMEOUT"
 
 
-def console(session, lines, timeout=600):
-    """Fire shell lines into the tmux console. Returns whatever came back (escapes stripped).
-    NEVER rely on this for long synchronous work — the console exits on EOF."""
-    payload = "".join(l + "\n" for l in lines)
-    try:
-        p = subprocess.run([COLAB, "console", "-s", session], input=payload,
-                           capture_output=True, text=True, timeout=timeout)
-        out = (p.stdout or "") + (p.stderr or "")
-    except subprocess.TimeoutExpired:
-        return "TIMEOUT"
-    import re
-    return re.sub(r"\x1b\[[0-9;?]*[a-zA-Z]", "", out).replace("\r", "")
+def require_ssh():
+    """Stop unless the CLI has `colab ssh`: google-colab-cli 0.6 has only a tmux console, which
+    this script no longer drives."""
+    rc, out = run([COLAB, "ssh", "--help"], timeout=60)
+    if rc != 0:
+        sys.exit(f"{COLAB} has no `colab ssh`; install google-colab-cli 0.8 or later, or point "
+                 f"COLAB_BIN at one. {out.strip()[:200]}")
+
+
+def remote(session, script, timeout=600):
+    """Run a shell script on the VM, its bash reading the script on stdin. Returns the remote exit
+    status and the output. Nothing long goes through here: a call that outlives the connection
+    dies with it, so long work is detached (`detach`) and polled."""
+    return run([COLAB, "ssh", "-s", session, "--", "bash", "-s"], timeout=timeout, stdin=script)
+
+
+def exists(session, path):
+    """True or False for a file on the VM, None when the call itself failed. The VM answers with
+    exit status 10 or 11, which neither a CLI error (1) nor an ssh failure (255) can imitate, so a
+    caller can tell 'absent' from 'could not ask'."""
+    rc, _ = remote(session, f"if [ -e {path} ]; then exit 10; else exit 11; fi", timeout=180)
+    return {10: True, 11: False}.get(rc)
+
+
+def detach(script, log):
+    """The line that starts `script` on the VM and returns at once. `setsid nohup` keeps the job
+    alive when the connection closes; with its stdin, stdout and stderr all redirected nothing
+    holds the connection open, so ssh returns instead of waiting for the job."""
+    return f"setsid nohup bash {script} > {log} 2>&1 < /dev/null &\n"
+
+
+def launch_job(session, remote_cmd):
+    """Start the remote command from the repo, detached. The command goes into a script file
+    verbatim and that file is what runs: `nohup` execs its first word, so an env-var prefix given
+    to it directly makes it look for a program named "FOO=bar" and fail silently, in a log nobody
+    reads, after the VM has already been built."""
+    job = f"{vm_root()}/job.sh"
+    return remote(session, f"cat > {job} <<'GPAPJOBEOF'\ncd {vm_repo()} || exit 1\n{remote_cmd}\n"
+                           f"GPAPJOBEOF\n" + detach(job, f"{vm_root()}/run.log"))
 
 
 def session_alive(session):
     rc, out = run([COLAB, "status", "-s", session], timeout=120)
     return rc == 0 and "not found" not in out and "lost" not in out.lower()
+
+
+def endpoint_of(session, status_out):
+    """The endpoint on this session's status line (`[name] endpoint | Hardware: ...`), or None.
+    Read from that line only: a notice the CLI prints first (an update check) would otherwise
+    change the endpoint, and a changed endpoint makes the loop rebuild a live VM from scratch."""
+    head = f"[{session}] "
+    for ln in status_out.splitlines():
+        if ln.startswith(head):
+            return ln[len(head):].split("|")[0].strip() or None
+    return None
 
 
 def ensure_session(session, gpu):
@@ -85,47 +128,30 @@ def ensure_session(session, gpu):
     return True
 
 
-def marker(session, path):
-    """True iff `path` exists on the VM.
-
-    Two traps stacked here, both of which produced wrong answers:
-
-    1. The console ECHOES the command it runs, so a plain `grep -c BOOT_FAIL ...` matches its own
-       command text (and `set -x` prints a script's `|| { echo BOOT_FAIL...; }` branches even on
-       success) — any literal-string probe reads as a hit the moment you look.
-    2. `ls | wc -l` answers with a bare digit, which dodges (1) but NOT tmux: a redraw can emit a
-       lone digit line of its own, which false-positived a bootstrap into "FAILED" twice.
-
-    So the reply token is SPLIT in the command text (`"MRK""OK"`) and joined only by the shell.
-    The echoed command therefore contains `MRK""OK`, never the token itself, and any line holding
-    the joined token with no stray quotes is genuine output.
-    """
-    out = console(session, [f'ls {path} >/dev/null 2>&1 && echo "MRK""OK" || echo "MRK""NO"'])
-    return any("MRKOK" in ln and '"' not in ln for ln in out.splitlines())
-
-
 def bootstrap(session, tarball, bootstrap_sh):
     log("bootstrapping VM ...")
-    for local, remote in ((tarball, f"{vm_root()}/gpap_src.tgz"),
-                          (bootstrap_sh, f"{vm_root()}/bootstrap.sh")):
-        rc, out = run([COLAB, "upload", "-s", session, local, remote], timeout=900)
+    for local, dest in ((tarball, f"{vm_root()}/gpap_src.tgz"),
+                        (bootstrap_sh, f"{vm_root()}/bootstrap.sh")):
+        rc, out = run([COLAB, "upload", "-s", session, local, dest], timeout=900)
         if rc != 0:
             log(f"upload failed {local}: {out.strip()[:200]}")
             return False
-    console(session, [f"nohup bash {vm_root()}/bootstrap.sh > /dev/null 2>&1 &",
-                      "echo LAUNCHED"])
+    rc, out = remote(session, detach(f"{vm_root()}/bootstrap.sh", "/dev/null"))
+    if rc != 0:
+        log(f"could not start the bootstrap: {out.strip()[:200]}")
+        return False
     deadline = time.time() + 1800
     while time.time() < deadline:
         time.sleep(30)
         if not session_alive(session):
             log("VM died during bootstrap")
             return False
-        if marker(session, f"{vm_root()}/bootstrap.ok"):
+        if exists(session, f"{vm_root()}/bootstrap.ok"):
             log("bootstrap complete")
             return True
-        if marker(session, f"{vm_root()}/bootstrap.fail"):
-            log("bootstrap FAILED: " + console(session, [f"cat {vm_root()}/bootstrap.fail"]).strip()
-                .replace("\n", " ")[:160])
+        if exists(session, f"{vm_root()}/bootstrap.fail"):
+            log("bootstrap FAILED: " + remote(session, f"cat {vm_root()}/bootstrap.fail")[1]
+                .strip().replace("\n", " ")[:160])
             return False
     log("bootstrap timed out")
     return False
@@ -133,7 +159,7 @@ def bootstrap(session, tarball, bootstrap_sh):
 
 def push_partials(session, local_dir, remote_dir, files):
     """Seed the fresh VM with everything already collected, so --resume skips it."""
-    console(session, [f"mkdir -p {remote_dir}"])
+    remote(session, f"mkdir -p {remote_dir}")
     for f in files:
         p = os.path.join(local_dir, f)
         if os.path.isfile(p):
@@ -186,7 +212,9 @@ def main():
     ap.add_argument("--session", required=True)
     ap.add_argument("--gpu", default="L4")
     ap.add_argument("--tarball", required=True, help="repo tarball to unpack on the VM")
-    ap.add_argument("--bootstrap", required=True, help="bootstrap script (must echo BOOTSTRAP_DONE)")
+    ap.add_argument("--bootstrap", required=True,
+                    help=f"bootstrap script; it ends by creating {vm_root()}/bootstrap.ok, or "
+                         f"{vm_root()}/bootstrap.fail holding the reason")
     ap.add_argument("--remote-cmd", required=True,
                     help=f"run from {vm_repo()}, must be resumable")
     ap.add_argument("--remote-dir", required=True, help="where the remote job writes its JSONs")
@@ -206,6 +234,7 @@ def main():
     ap.add_argument("--max-hours", type=float, default=8.0)
     ap.add_argument("--log-name", default="run.log")
     args = ap.parse_args()
+    require_ssh()
 
     os.makedirs(args.local_dir, exist_ok=True)
     local_log = os.path.join(args.local_dir, args.log_name)
@@ -220,19 +249,23 @@ def main():
             time.sleep(120)
             continue
         rc, st = run([COLAB, "status", "-s", args.session], timeout=120)
-        endpoint = st.split("|")[0].strip() if "|" in st else st.strip()
+        endpoint = endpoint_of(args.session, st)
+        if endpoint is None:
+            log(f"no endpoint in the status, asking again: {st.strip()[:200]}")
+            time.sleep(60)
+            continue
 
         if endpoint != launched_on:          # fresh VM: build it, seed it, start the job
             # Cached binaries go up before bootstrap so it can use them instead of rebuilding:
             # a CMSGen build is a large fraction of a VM's whole lifetime.
             for spec in args.cache:
-                remote, _, local = spec.partition(":")
+                dest, _, local = spec.partition(":")
                 if os.path.isfile(local):
                     # the upload does not create parent dirs; without this the push fails and
                     # the VM silently rebuilds from source
-                    console(args.session, [f"mkdir -p {os.path.dirname(remote)}"])
-                    rc, _ = run([COLAB, "upload", "-s", args.session, local, remote], timeout=900)
-                    console(args.session, [f"chmod +x {remote}"])
+                    remote(args.session, f"mkdir -p {os.path.dirname(dest)}")
+                    rc, _ = run([COLAB, "upload", "-s", args.session, local, dest], timeout=900)
+                    remote(args.session, f"chmod +x {dest}")
                     log(f"  cache HIT -> pushed {os.path.basename(local)}"
                         if rc == 0 else f"  cache push FAILED {local}")
             if not bootstrap(args.session, args.tarball, args.bootstrap):
@@ -248,7 +281,7 @@ def main():
             boot_fails = 0
             # Fill the cache from the first VM that built it, so no later VM has to.
             for spec in args.cache:
-                remote, _, local = spec.partition(":")
+                _, _, local = spec.partition(":")
                 if not os.path.isfile(local):
                     os.makedirs(os.path.dirname(local) or ".", exist_ok=True)
                     src = spec.split(":", 1)[0]
@@ -269,24 +302,20 @@ def main():
                         if os.path.exists(local):
                             os.remove(local)
             for spec in args.push:
-                local, _, remote = spec.partition(":")
+                local, _, dest = spec.partition(":")
                 if not os.path.isfile(local):
                     log(f"  push source missing, skipped: {local}")
                     continue
-                rc, _ = run([COLAB, "upload", "-s", args.session, local, remote], timeout=900)
-                console(args.session, [f"chmod +x {remote}"])
-                log(f"  pushed {os.path.basename(local)} -> {remote}"
+                rc, _ = run([COLAB, "upload", "-s", args.session, local, dest], timeout=900)
+                remote(args.session, f"chmod +x {dest}")
+                log(f"  pushed {os.path.basename(local)} -> {dest}"
                     if rc == 0 else f"  push FAILED {local}")
             push_partials(args.session, args.local_dir, args.remote_dir, args.files)
             log(f"launching: {args.remote_cmd}")
-            # Write the command to a script and nohup that: `nohup` execs directly, so an
-            # env-var prefix makes it look for a program literally named "FOO=bar" and fail
-            # silently, in a log nobody reads, after the VM has already been built.
-            console(args.session, [
-                f"cd {vm_repo()}",
-                f"cat > {vm_root()}/job.sh <<'GPAPJOBEOF'\n{args.remote_cmd}\nGPAPJOBEOF",
-                f"nohup bash {vm_root()}/job.sh > {vm_root()}/run.log 2>&1 &",
-                "echo LAUNCHED_JOB"])
+            rc, out = launch_job(args.session, args.remote_cmd)
+            if rc != 0:
+                log(f"launch failed, rebuilding: {out.strip()[:200]}")
+                continue
             launched_on = endpoint
 
         time.sleep(args.poll)
@@ -299,12 +328,12 @@ def main():
         # A VM can be reset without the session changing endpoint: status still reads OK while
         # /content has been wiped. Going from "results" to "none" is that signal, so force a
         # rebuild rather than polling a dead disk for the rest of the budget.
-        if not got and had_results and not marker(args.session, args.remote_dir):
+        if not got and had_results and exists(args.session, args.remote_dir) is False:
             log("remote results vanished (VM reset, same endpoint) — rebuilding")
             launched_on = None
             continue
         had_results = had_results or bool(got)
-        tail = console(args.session, [f"tail -c 3000 {vm_root()}/run.log"])
+        _, tail = remote(args.session, f"tail -c 3000 {vm_root()}/run.log")
         with open(local_log, "a") as fh:
             fh.write(f"\n===== {time.strftime('%F %T')} =====\n{tail}\n")
         log(f"mirrored {len(got)}/{len(args.files)}: {', '.join(got) or 'nothing yet'}")
