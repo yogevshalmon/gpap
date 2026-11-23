@@ -34,8 +34,8 @@ target_link_libraries(my_solver PRIVATE gpap::gpap)
 `build_kernels.py` targets the local GPU; `--arch 89` cross-compiles (no GPU needed). Rerun it
 whenever a kernel changes — the only step that regenerates GPU code.
 
-The library is 0.3.0 / SOVERSION 1: an ABI break must move the soname, an additive change must not
-(0.3.0 added `gpap_sampler_*`, changing no existing symbol).
+The library is 0.4.0 / SOVERSION 1: an ABI break must move the soname, an additive change must not
+(0.3.0 added `gpap_sampler_*` and 0.4.0 the backend queries, changing no existing symbol).
 
 ## Backends
 

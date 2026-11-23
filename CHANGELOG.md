@@ -6,7 +6,12 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). The
 follows the rule in [CONTRIBUTING.md](CONTRIBUTING.md): an ABI break moves its soname, an additive
 change does not.
 
-## Unreleased
+## 0.4.0 — 2026-11-23
+
+An OpenCL backend, and fixes to the engine, its C++ face and mining. libgpap is 0.4.0 with the
+same soname: no existing symbol or struct changed. Callers note two changed behaviours, both below:
+`gpap_check_sets` without sat counts refuses a later packed readout, and C++
+`AssumptionChecker::check` returns flags only by default.
 
 ### Engine
 - An OpenCL backend, selected with `GPAP_BACKEND=opencl` ([docs/OPENCL.md](docs/OPENCL.md)). It
