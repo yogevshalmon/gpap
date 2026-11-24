@@ -16,6 +16,7 @@ again before relying on it, or before calling the direction closed.
 
 | topic | file |
 |---|---|
+| the job queue: many sets on few rows (2026-11-20) | [PROBE_QUEUE_FINDINGS.md](PROBE_QUEUE_FINDINGS.md) |
 | the OpenCL backend and the GPU socket (2026-11-13) | [OPENCL_FINDINGS.md](OPENCL_FINDINGS.md) |
 | binary clauses as edges (2026-08-27) | [BINARY_OCC_FINDINGS.md](BINARY_OCC_FINDINGS.md) |
 | the WAVE shuffle lane schedule (2026-08-27) | [WAVE_SHUFFLE_FINDINGS.md](WAVE_SHUFFLE_FINDINGS.md) |
@@ -40,6 +41,12 @@ again before relying on it, or before calling the direction closed.
 
 ## Engine & memory model
 
+- **Probe sweeps and flags-only checks run on a queue (2026-11-20; host side 2026-11-24).** A
+  row takes set after set and restores what it touched, so no row waits for a launch's deepest
+  set: 2.5 / 2.2 / 1.8 times the chunked sweep at widths 1 / 2 / 3 on an L4 and 3.7 / 3.1 / 2.8
+  on 36 SAT Competition 2024 formulas, never slower, with the same results, clauses and models;
+  the shipped host side is 1.15 times as fast again. It runs WAVE on every formula, since its
+  rows are counted in warps. [PROBE_QUEUE](PROBE_QUEUE_FINDINGS.md) §4, §6, §10, §11, §12
 - **Assignment checks take the CLEAN kernel (2026-11-16).** The bitmap keeps the fixpoint, so
   only sat counts need the plain kernel: 1.41× on a clause-heavy formula, nothing where the
   assignment readout dominates. [CLEAN_MODE](CLEAN_MODE_FINDINGS.md)
@@ -55,8 +62,8 @@ again before relying on it, or before calling the direction closed.
   (2026-11-15).** One buffer's size limit caps the trail, so OpenCL gets 0.59 of CUDA's rows and
   0.83 to 0.86 of its rate. Kept as is. [OPENCL](OPENCL_FINDINGS.md) §12
 - **A probe chunk waits for its deepest row (2026-11-14).** Sorting tuples by depth gains up to
-  5.5 on OpenCL and 2.4 on CUDA; a per-row probe queue measured 2 to 9 times CUDA in chunks and
-  is to be built in Triton first (GitHub issue 58). [OPENCL](OPENCL_FINDINGS.md) §10
+  5.5 on OpenCL and 2.4 on CUDA; a per-row probe queue measured 2 to 9 times CUDA in chunks.
+  Built on both backends on 2026-11-19 (the entry above). [OPENCL](OPENCL_FINDINGS.md) §10
 - **The engine names no GPU library; OpenCL is a second plug (2026-11-13).** Every device
   operation goes through `cpp/src/gpu_api.hpp`; libgpap opens libcuda at run time, so it builds
   and runs without the NVIDIA driver; the OpenCL backend mines byte-identical clauses.
