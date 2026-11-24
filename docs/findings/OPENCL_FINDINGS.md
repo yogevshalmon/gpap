@@ -146,7 +146,9 @@ backend at its own batch. Data and scripts: `$GPAP_RESULTS/opencl_probe_ideas_20
   (geometric means by width), up to 9 on the largest; the rate levels off at about 1,000 rows.
   Removed on 2026-11-15 because `bcp.cl` follows the Triton kernels and Triton has no queue:
   GitHub issue 58 holds the design and the numbers, and the prototype is a patch in the data
-  directory.
+  directory. *(2026-11-19: built in the Triton kernels and brought back here,
+  [PROBE_QUEUE_FINDINGS.md](PROBE_QUEUE_FINDINGS.md). The "about 1,000 rows" came from arms that
+  ran a quarter of the tuples, so it mixed rows with work per row; §3 there has the row count.)*
 
 ## 11. The review of the branch, and the gates it adds (2026-11-15)
 
