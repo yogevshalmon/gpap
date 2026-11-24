@@ -183,8 +183,9 @@ class BCPEngine:
     def check_sets(self, lits, offsets, *, chunk: int = 0, assignments: bool = False,
                    sat_count: bool = False) -> tuple:
         """Entry point 1, batched: any number of assumption sets (flattened DIMACS literals +
-        (n+1,) offsets), chunked to the GPU by the CORE (cpp/src/check.cpp, one loop for every
-        face) and returned in input order as numpy arrays; `chunk` <= 0 sizes launches."""
+        (n+1,) offsets), run by the CORE (cpp/src/check.cpp, one loop for every face) and
+        returned in input order as numpy arrays. `chunk` is the rows of engine state a launch
+        uses, <= 0 sizes it; flags only, the sets run on the queue (_core.Engine.check_sets)."""
         return self._core.check_sets(lits, offsets, chunk=chunk, assignments=assignments,
                                      sat_count=sat_count)
 

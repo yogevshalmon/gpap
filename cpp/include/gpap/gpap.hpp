@@ -210,10 +210,12 @@ class Engine {
      *  cpp/src/check.cpp, the one loop every face shares) and returns them in input order.
      *  Flags and implication counts always come back; `assignments` adds the n x 2N per-row
      *  assignment and `sat_count` the n x M surviving literals per clause, as in the Python face.
-     *  `chunk` <= 0 sizes launches to the GPU. On a conflicted set only the flag is exact: the
-     *  rest is where BCP stopped, which `chunk` can move. Without sat counts the launches are
-     *  CLEAN, so a packed readout (check_sound) is refused until the next reset. Defined after
-     *  CheckResults. */
+     *  `chunk` is the rows of engine state a launch uses; <= 0 sizes it. On a conflicted set
+     *  only the flag is exact: the rest is where BCP stopped, which `chunk` can move. With
+     *  neither option the sets run on the queue when it engages (more sets than its rows; see
+     *  gpap_check_sets), and the engine ends as after a reset to its rows; otherwise, and with
+     *  `assignments` alone, the launches are CLEAN chunks, so a packed readout (check_sound) is
+     *  refused until the next reset. Defined after CheckResults. */
     CheckResults check_sets(const std::int32_t *lits, std::size_t num_lits,
                             const std::int64_t *offsets, std::size_t n_sets,
                             bool assignments = false, bool sat_count = false,
@@ -790,14 +792,15 @@ class AssumptionChecker {
 
 /** When a probe sweep should stop. Every field is optional; the first to bind wins. */
 struct ProbeBudget {
-    /** Wall-clock ceiling, checked between chunks (the smallest unit of GPU work). */
+    /** Wall-clock ceiling, checked between launches (the smallest unit of GPU work). */
     double seconds = 0.0;
     /** A work budget, checked against an exact count before anything is generated: the sweep
      *  probes this many and reports `exhausted() == false`, and every conflict it found is still
      *  a genuine entailed clause. `refuse_over_max` refuses such a sweep outright instead. */
     std::int64_t max_tuples = 0;
     bool refuse_over_max = false;
-    /** Tuples per launch; 0 sizes it from free VRAM with the library's one memory model. */
+    /** Rows of engine state a launch uses (a chunked launch probes one tuple per row, a queued
+     *  one many); 0 sizes it with the library's one memory model. */
     std::int32_t batch = 0;
     /** Drop tuples holding two literals of one variable: they conflict for reasons that have
      *  nothing to do with the formula. */

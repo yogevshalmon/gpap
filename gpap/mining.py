@@ -100,7 +100,7 @@ def mine_entailed(num_vars: int, clauses: list, device, *, pool: list | None = N
     `pool`: DIMACS literals to combine at widths >= 2 (None = every free literal); pass both
       polarities of a variable to ask about it in general, one for a single side. Width 1 always
       sweeps ALL free literals — the backbone is cheap and the dominant win.
-    `seconds`: wall-clock budget across all widths (None = unbounded), binding between chunks.
+    `seconds`: wall-clock budget across all widths (None = unbounded), binding between launches.
     `max_tuples`: per-width work budget, an int for every width or {width: budget}. A width above
       it probes that many candidates and is reported not exhaustive (`.candidates` / `.probed`).
     `min_units_for_wide`: run widths >= 2 only if width 1 proved at least this many units, so

@@ -87,8 +87,8 @@ class LiteralProbe:
 
     def __init__(self, num_vars: int, clauses: list, device: "torch.device | None" = None,
                  *, mode: str | None = None):
-        """`mode` pins the propagate kernel; the default lets the CORE dispatch per chunk, which
-        is what a sweep wants (the rule picks WAVE from M >= 2048 up)."""
+        """`mode` pins the propagate kernel; the default leaves it to the CORE: a sweep on the
+        queue runs WAVE, one in chunks takes the dispatch rule's (docs/ENGINE.md §6b)."""
         self._init(_core.Formula.from_clauses(num_vars, clauses), device, mode)
 
     @classmethod

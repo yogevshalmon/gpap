@@ -11,6 +11,7 @@
 #include "gpap_internal.hpp"
 
 #include <algorithm>
+#include <chrono>
 #include <climits>
 #include <cstdlib>
 #include <cstring>
@@ -91,6 +92,15 @@ gpap_status ensure_rows(gpap_engine *e, int32_t slot) {
 }
 
 gpap_status use_ctx(gpap_engine *e) { return e->gpu->make_current(); }
+
+/* A queued call's launches put every row back to the baseline it copied at begin, so until it
+ * ends nothing else may change the rows or the kernel: each such entry point refuses by name. */
+gpap_status refuse_while_queued(const gpap_engine *e, const char *what) {
+    if (!e->queued_call) return GPAP_OK;
+    set_error("%s: a queued call holds the engine's rows (gpap::QueuedCall); nothing may change "
+              "them or the kernel until it ends", what);
+    return GPAP_ERR_ARG;
+}
 
 }  // namespace
 
@@ -181,6 +191,10 @@ extern "C" gpap_status gpap_engine_create(const gpap_formula *f, const gpap_engi
         e->vscan = o.vscan < 0 ? 0 : 1;
         const char *ce = std::getenv("GPAP_CLEAN");
         e->clean_enabled = (ce && ce[0] == '0') ? 0 : 1;
+        /* GPAP_QUEUE=0 keeps every sweep in chunks, one set per row per launch: the sweep as
+         * it ran before the queue, for A/Bs (QueuedCall::begin). */
+        const char *qe = std::getenv("GPAP_QUEUE");
+        e->queue_enabled = (qe && qe[0] == '0') ? 0 : 1;
         /* GPAP_KERNEL=scalar|wave forces the propagate kernel for an A/B. Read in the core so it
          * reaches every consumer, and applied where AUTO resolves, so an explicit pin wins. */
         const char *ke = std::getenv("GPAP_KERNEL");
@@ -246,6 +260,7 @@ extern "C" void gpap_engine_free(gpap_engine *e) {
 
 extern "C" gpap_status gpap_engine_set_mode(gpap_engine *e, gpap_mode mode) {
     if (!e) return GPAP_ERR_ARG;
+    GPAP_TRY(refuse_while_queued(e, "gpap_engine_set_mode"));
     /* Pinning clears auto; asking for auto hands the choice back to reset(K). The sampler pins
      * its chunk's kernel so a short final reset cannot switch mid-measurement. */
     e->auto_mode = (mode == GPAP_MODE_AUTO) ? 1 : 0;
@@ -313,6 +328,7 @@ static int64_t row_buffers_held(const gpap_engine *e) {
 
 extern "C" gpap_status gpap_engine_reset(gpap_engine *e, int32_t K) {
     if (!e || K <= 0) return GPAP_ERR_ARG;
+    GPAP_TRY(refuse_while_queued(e, "gpap_engine_reset"));
     GPAP_TRY(use_ctx(e));
     /* A grow is a realloc, so the packed rows are gone and no longer the baseline — dropped on
      * FAILURE too, or the next reset takes the lite path over an uninitialized buffer. */
@@ -341,7 +357,7 @@ extern "C" gpap_status gpap_engine_reset(gpap_engine *e, int32_t K) {
         e->resets_full++;
     }
     GPAP_TRY(broadcast_rows(e, e->abits, e->abits_flushed, e->nw, K));
-    e->abits_diverged = 0;             /* abits are the baseline again, same as packed */
+    e->abits_diverged = 0;            /* abits are the baseline again, same as packed */
     GPAP_TRY(fill_flags(e, e->active, e->flush_conflict ? 0 : 1, K));
     GPAP_TRY(fill_flags(e, e->conflict, e->flush_conflict ? 1 : 0, K));
     return GPAP_OK;
@@ -349,6 +365,7 @@ extern "C" gpap_status gpap_engine_reset(gpap_engine *e, int32_t K) {
 
 extern "C" gpap_status gpap_engine_recache_flush(gpap_engine *e) {
     if (!e) return GPAP_ERR_ARG;
+    GPAP_TRY(refuse_while_queued(e, "gpap_engine_recache_flush"));
     if (e->abits_diverged) {
         /* Refused, not silently wrong: after a CLEAN launch packed holds the baseline and abits
          * the fixpoint, so caching that pair yields a baseline whose abits claim literals true
@@ -377,6 +394,7 @@ extern "C" gpap_status gpap_engine_recache_flush(gpap_engine *e) {
 
 static gpap_status apply_common(gpap_engine *e, gpap::GpuMem decisions, int32_t L, int clean) {
     if (!e || L < 0 || (L > 0 && !decisions)) return GPAP_ERR_ARG;
+    GPAP_TRY(refuse_while_queued(e, "gpap_engine_apply"));
     /* The per-launch counters describe THE LAST CALL and reset() does not clear them, so a
      * zero-width apply must — which is why this sits above the L == 0 return. */
     GPAP_TRY(use_ctx(e));
@@ -460,6 +478,7 @@ static gpap_status trajectory_common(gpap_engine *e, gpap::GpuMem order, int32_t
                                      int32_t n_support, int32_t B, int64_t seed, int soft,
                                      int32_t *max_rounds_out) {
     if (!e || P < 0 || B <= 0 || (P > 0 && !order)) return GPAP_ERR_ARG;
+    GPAP_TRY(refuse_while_queued(e, "gpap_engine_trajectory"));
     /* n_support ends decision phase 1 and the kernel walks `order` to it, so n_support > P
      * reads past the caller's buffer. O(1) to refuse. */
     if (n_support < 0 || n_support > P) {
@@ -540,6 +559,166 @@ extern "C" gpap_status gpap_engine_trajectory(gpap_engine *e, const int32_t *ord
     return trajectory_common(e, e->staging_a.ptr, P, n_support, B, seed, soft, max_rounds_out);
 }
 
+/* ------------------------------------------------------------------ the queue */
+
+namespace {
+
+std::string queue_key(int32_t shift, int wave) {
+    return "queue.s" + std::to_string(shift) + ".w" + std::to_string(wave);
+}
+
+}  // namespace
+
+namespace gpap {
+
+gpap_status QueuedCall::begin(int32_t requested, int64_t n_sets, int64_t first_block) {
+    gpap_engine *e = e_;
+    if (!e || rows_ > 0) {
+        set_error("QueuedCall::begin: %s", !e ? "engine must not be NULL" : "already begun");
+        return GPAP_ERR_ARG;
+    }
+    GPAP_TRY(refuse_while_queued(e, "QueuedCall::begin"));   /* one call holds the rows */
+    first_ = std::min<int64_t>(std::max<int64_t>(first_block, 1), kQueueMaxJobs);
+    /* A queued row restores itself with CLEAN mode's restore, so $GPAP_CLEAN=0, the escape
+     * hatch from that restore, keeps the calls in chunks on the plain kernel too. */
+    if (!e->queue_enabled || !e->clean_enabled || !e->flush_ready) return GPAP_OK;
+    if (e->flush_conflict || e->has_empty_clause) return GPAP_OK;
+    int32_t resident = e->driver->resident_warps(e->device_ordinal);
+    if (resident <= 0) resident = kQueueRowsUnknown;
+    /* The rows that fit with the launch buffers taken out of the budget. In bytes, not rows: the
+     * batch is capped by gpap_default_k_cap, so rows taken off it say nothing of memory. A pin
+     * is held to it too. A queued row is the engine's state alone: no per-row decision matrix. */
+    const int64_t fit = engine_batch(e, 0, 0, kQueueBufferBytes);
+    int64_t rows = requested > 0 ? std::min<int64_t>(requested, fit) : fit;
+    rows = std::max<int64_t>(std::min<int64_t>(rows, resident), 1);
+    if (n_sets <= rows) return GPAP_OK;
+    /* WAVE unless pinned: the rows are counted in warps, and a WAVE row is one warp on both
+     * backends. A SCALAR row is a warp with one working lane (CUDA) or one work item, so a
+     * thirty-second of a warp (OpenCL). */
+    const gpap_mode mode = !e->auto_mode                     ? e->mode
+                           : e->env_mode != GPAP_MODE_AUTO ? e->env_mode
+                                                           : GPAP_MODE_WAVE;
+    if (!e->gpu->has_kernel(queue_key(e->shift, mode == GPAP_MODE_WAVE ? 1 : 0).c_str()))
+        return GPAP_OK;
+
+    GPAP_TRY(use_ctx(e));
+    /* A grow is a realloc: those rows are no longer the baseline, on failure too. */
+    const size_t packed_cap = e->packed.bytes;
+    const gpap_status alloc = ensure_state(e, (int32_t)rows);
+    if (alloc != GPAP_OK || e->packed.bytes != packed_cap) e->packed_clean_rows = 0;
+    if (alloc != GPAP_OK) return alloc;
+    for (int i = 0; i < GPAP_SLOTS; ++i) {
+        e->slots[i].rows_valid = false;
+        e->slots[i].count = 0;
+        e->slots[i].selected = false;
+    }
+    /* Every row at the baseline, as a reset leaves it: the packed words unless the claim
+     * already covers these rows, the bitmap always. */
+    if (e->packed_clean_rows < rows) {
+        GPAP_TRY(broadcast_rows(e, e->packed, e->packed_flushed, e->num_long, (int32_t)rows));
+        e->packed_clean_rows = (int32_t)rows;
+        e->resets_full++;
+    } else {
+        e->resets_lite++;
+    }
+    GPAP_TRY(broadcast_rows(e, e->abits, e->abits_flushed, e->nw, (int32_t)rows));
+    e->abits_diverged = 0;
+    /* The rows' flags and per-row counters describe no job: leave them as a reset does. */
+    GPAP_TRY(fill_flags(e, e->active, 1, (int32_t)rows));
+    GPAP_TRY(fill_flags(e, e->conflict, 0, (int32_t)rows));
+    GPAP_TRY(e->nprops.zero());
+    GPAP_TRY(e->nops.zero());
+    GPAP_TRY(e->ndecs.zero());
+    e->K = (int32_t)rows;
+    e->mode = mode;               /* the queue's kernel, until the call ends */
+    e->queued_call = 1;
+    rows_ = (int32_t)rows;
+    return GPAP_OK;
+}
+
+int64_t QueuedCall::next_block(double seconds_left) {
+    if (last_ <= 0) return last_ = first_;
+    if (last_ > first_ && took_ >= 0.05) return last_;
+    if (8.0 * took_ >= seconds_left) return last_;
+    return last_ = std::min<int64_t>(last_ * 8, kQueueMaxJobs);
+}
+
+gpap_status QueuedCall::launch(const int32_t *jobs, int64_t n, int32_t L, int8_t *conflict_out,
+                               int32_t *implied_out) {
+    gpap_engine *e = e_;
+    if (rows_ <= 0 || !jobs || !conflict_out || n <= 0 || n > kQueueMaxJobs || L <= 0 ||
+        e->K <= 0) {
+        set_error("QueuedCall::launch: bad arguments (n=%lld of at most %lld, L=%d, rows=%d)",
+                  (long long)n, (long long)kQueueMaxJobs, L, rows_);
+        return GPAP_ERR_ARG;
+    }
+    const auto t0 = std::chrono::steady_clock::now();
+    GPAP_TRY(use_ctx(e));
+    const int32_t rows = e->K;
+    gpap::Gpu *g = e->gpu.get();
+    GPAP_TRY(stage(e, e->queue_dec, jobs, (size_t)n * (size_t)L * sizeof(int32_t)));
+    GPAP_TRY(e->queue_conf.reserve(g, (size_t)n));
+    GPAP_TRY(e->queue_impl.reserve(g, (size_t)n * sizeof(int32_t)));
+    GPAP_TRY(e->queue_sums.reserve(g, (size_t)rows * 3 * sizeof(int64_t)));
+    GPAP_TRY(e->queue_next.reserve(g, 16));
+    GPAP_TRY(e->queue_next.zero());
+
+    /* Dirty until the readbacks below show the launch ran to its end: a launch that died
+     * half-way leaves rows mid-job, so the next call must copy them, and until a reset a packed
+     * readout or recache_flush is refused rather than served from them (abits_diverged). */
+    const int32_t clean_prev = e->packed_clean_rows;
+    e->packed_clean_rows = 0;
+    e->abits_diverged = 1;
+    const std::string key = queue_key(e->shift, e->mode == GPAP_MODE_WAVE ? 1 : 0);
+    const int32_t M = e->num_long, NW = e->nw, cap = e->trail_cap;
+    GPAP_TRY(g->run(key.c_str(), rows, 1,
+                    {buf(e->packed), buf(e->abits), buf(e->queue_dec), buf(e->occ_off),
+                     buf(e->occ_mid), buf(e->occ_cls), buf(e->packed_flushed),
+                     buf(e->abits_flushed), buf(e->trail), buf(e->queue_next),
+                     buf(e->queue_conf), buf(e->queue_impl), buf(e->queue_sums), i32(M),
+                     i32(NW), i32(L), i32(cap), i32((int32_t)n)}));
+    e->launches++;
+    e->queue_launches++;
+    e->queue_jobs += n;
+    e->queue_mode = e->mode;
+    GPAP_TRY(g->download(conflict_out, e->queue_conf.ptr, 0, (size_t)n));
+    if (implied_out)
+        GPAP_TRY(g->download(implied_out, e->queue_impl.ptr, 0, (size_t)n * sizeof(int32_t)));
+    std::vector<int64_t> sums((size_t)rows * 3);
+    GPAP_TRY(g->download(sums.data(), e->queue_sums.ptr, 0, sums.size() * sizeof(int64_t)));
+    for (int32_t r = 0; r < rows; ++r) {
+        e->host_ops += sums[(size_t)r * 3];
+        e->host_props += sums[(size_t)r * 3 + 1];
+        e->host_decs += sums[(size_t)r * 3 + 2];
+    }
+    e->packed_clean_rows = clean_prev;
+    e->abits_diverged = 0;
+    last_ = n;                    /* next_block grows from what ran, which a cut makes smaller */
+    took_ = std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count();
+    return GPAP_OK;
+}
+
+QueuedCall::~QueuedCall() {
+    gpap_engine *e = e_;
+    if (rows_ <= 0 || !e) return;
+    e->queued_call = 0;
+    if (!e->gpu) return;
+    e->gpu->make_current();
+    for (DevBuf *b : {&e->queue_dec, &e->queue_next, &e->queue_conf, &e->queue_impl,
+                      &e->queue_sums})
+        b->release();
+    if (e->auto_mode && e->K > 0) e->mode = resolve_mode(e, e->K);   /* as gpap_engine_reset */
+}
+
+}  // namespace gpap
+
+extern "C" void gpap_engine_queue_stats(const gpap_engine *e, int64_t *launches_out,
+                                        int64_t *jobs_out, gpap_mode *mode_out) {
+    if (launches_out) *launches_out = e ? e->queue_launches : 0;
+    if (jobs_out) *jobs_out = e ? e->queue_jobs : 0;
+    if (mode_out) *mode_out = e ? e->queue_mode : GPAP_MODE_AUTO;
+}
+
 /* Selections and readout live in readout.cpp; these helpers are shared with it. */
 namespace gpap {
 gpap_status engine_use_ctx(gpap_engine *e) { return use_ctx(e); }
@@ -560,7 +739,8 @@ gpap_status engine_require_trajectory(gpap_engine *e) {
     return GPAP_ERR_KERNEL;
 }
 
-int32_t engine_batch(gpap_engine *e, int64_t extra_row_bytes, int32_t cap) {
+int32_t engine_batch(gpap_engine *e, int64_t extra_row_bytes, int32_t cap,
+                     int64_t reserve_bytes) {
     int64_t free_b = 0, total_b = 0;
     int64_t budget = 0;
     if (use_ctx(e) == GPAP_OK && e->gpu->mem_info(&free_b, &total_b) == GPAP_OK) {
@@ -569,7 +749,7 @@ int32_t engine_batch(gpap_engine *e, int64_t extra_row_bytes, int32_t cap) {
          * sizes itself from what the first left free. The batch is then a function of the
          * formula and the card, not of the engine's call history. */
         if (e->gpu->free_is_measured()) free_b += row_buffers_held(e);
-        budget = mem_budget(free_b, kMemFraction);
+        budget = std::max<int64_t>(mem_budget(free_b, kMemFraction) - reserve_bytes, 0);
     }
     const int64_t per_row =
         gpap_row_bytes(e->num_long, e->num_vars, e->trail_cap) + extra_row_bytes;
@@ -610,9 +790,9 @@ extern "C" gpap_status gpap_counters_get(gpap_engine *e, gpap_counters *out) {
     GPAP_TRY(e->gpu->download(&v[0], e->acc_ops.ptr, 0, sizeof(int64_t)));
     GPAP_TRY(e->gpu->download(&v[1], e->acc_props.ptr, 0, sizeof(int64_t)));
     GPAP_TRY(e->gpu->download(&v[2], e->acc_decs.ptr, 0, sizeof(int64_t)));
-    out->ops = v[0];
-    out->props = v[1];
-    out->decs = v[2];
+    out->ops = v[0] + e->host_ops;          /* the queued launches' sums live on the host */
+    out->props = v[1] + e->host_props;
+    out->decs = v[2] + e->host_decs;
     out->launches = e->launches;
     return GPAP_OK;
 }
@@ -629,5 +809,6 @@ extern "C" void gpap_counters_reset(gpap_engine *e) {
     e->acc_ops.zero();
     e->acc_props.zero();
     e->acc_decs.zero();
+    e->host_ops = e->host_props = e->host_decs = 0;
     e->launches = 0;
 }

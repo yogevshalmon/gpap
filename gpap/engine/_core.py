@@ -192,6 +192,8 @@ def _declare(lib: ctypes.CDLL) -> None:
         ("gpap_engine_apply_dev", [c_void_p, c_size_t, c_int32], c_int),
         ("gpap_engine_apply_clean", [c_void_p, _I64P, c_int32], c_int),
         ("gpap_engine_reset_stats", [c_void_p, POINTER(c_int64), POINTER(c_int64)], None),
+        ("gpap_engine_queue_stats", [c_void_p, POINTER(c_int64), POINTER(c_int64),
+                                     POINTER(c_int)], None),
         ("gpap_engine_trajectory", [c_void_p, _I32P, c_int32, c_int32, c_int32, c_int64, c_int,
                                     _I32P], c_int),
         ("gpap_engine_trajectory_dev", [c_void_p, c_size_t, c_int32, c_int32, c_int32, c_int64,
@@ -628,9 +630,11 @@ class Engine:
         """Propagate every assumption set to its BCP fixpoint; the chunk loop runs in the CORE
         (`gpap_check_sets`, cpp/src/check.cpp), so every face shares one validation, chunk model
         and padding rule. `lits` is the sets FLATTENED as DIMACS literals, `offsets` is (n+1,)
-        int64 with set i = lits[offsets[i]:offsets[i+1]], `chunk` <= 0 sizes launches with
-        `check_chunk_size`. Returns `(conflict (n,), propagated (n,), assignment (n, 2N) int8 or
-        None, sat (n, M) int32 or None)`, the last two only when asked for."""
+        int64 with set i = lits[offsets[i]:offsets[i+1]], `chunk` is the rows of engine state a
+        launch uses, <= 0 sizes it (`check_chunk_size`). Flags only, the sets run on the queue
+        (docs/ENGINE.md §6b) and the engine ends as after a reset to its rows. Returns
+        `(conflict (n,), propagated (n,), assignment (n, 2N) int8 or None, sat (n, M) int32 or
+        None)`, the last two only when asked for."""
         lits = np.ascontiguousarray(lits, dtype=np.int32).reshape(-1)
         off = np.ascontiguousarray(offsets, dtype=np.int64).reshape(-1)
         n = int(off.size) - 1
@@ -800,6 +804,21 @@ class Engine:
         lite = c_int64(0)
         load().gpap_engine_reset_stats(self._h, byref(full), byref(lite))
         return int(full.value), int(lite.value)
+
+    def queue_stats(self) -> "tuple[int, int]":
+        """(launches, sets) this engine ran on the queue; (0, 0) where its sweeps ran in chunks
+        — under GPAP_QUEUE=0, on a backend without the kernel, or reading row state."""
+        launches = c_int64(0)
+        jobs = c_int64(0)
+        load().gpap_engine_queue_stats(self._h, byref(launches), byref(jobs), None)
+        return int(launches.value), int(jobs.value)
+
+    def queue_mode(self) -> "str | None":
+        """The kernel the last queued launch ran, "wave" or "scalar"; None if none has run.
+        `mode` is the engine's own, the dispatch rule's again once a queued call ends."""
+        mode = c_int(0)
+        load().gpap_engine_queue_stats(self._h, None, None, byref(mode))
+        return {self.MODE_WAVE: "wave", self.MODE_SCALAR: "scalar"}.get(mode.value)
 
     def flushed_assignment(self) -> np.ndarray:
         out = np.empty(2 * self.num_vars, dtype=np.int8)
