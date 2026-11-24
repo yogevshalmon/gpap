@@ -178,8 +178,18 @@ gpap_status gpap_engine_trajectory_dev(gpap_engine *e, uintptr_t order_dev, int3
 gpap_status gpap_engine_recache_flush(gpap_engine *e);
 
 /* How this engine's resets executed: *full_out = K*M broadcasts run, *lite_out = broadcasts
- * skipped after a CLEAN launch. A non-zero lite count is the proof the optimization engaged. */
+ * skipped because the rows already held the baseline packed words (after a CLEAN or a queued
+ * launch). A reset, and the start of each queued call, counts one. A non-zero lite count is the
+ * proof the optimization engaged. */
 void gpap_engine_reset_stats(const gpap_engine *e, int64_t *full_out, int64_t *lite_out);
+/* How much of this engine's checking and probing ran on the QUEUE (docs/ENGINE.md): launches
+ * made, assumption sets they took, and the propagate kernel of the last one (GPAP_MODE_AUTO if
+ * none; gpap_engine_mode is the dispatch rule's again once a queued call ends). The counts stay
+ * zero where the calls ran in chunks: under $GPAP_QUEUE=0 or $GPAP_CLEAN=0, on a backend
+ * without the queue kernel, and for calls that read row state. A non-zero count is the proof
+ * the queue engaged. Any out pointer may be NULL. */
+void gpap_engine_queue_stats(const gpap_engine *e, int64_t *launches_out, int64_t *jobs_out,
+                             gpap_mode *mode_out);
 int gpap_engine_flush_conflict(const gpap_engine *e);
 gpap_status gpap_engine_flushed_assignment(gpap_engine *e, int8_t *out_host); /* (2N,) */
 
@@ -189,8 +199,8 @@ gpap_status gpap_engine_flushed_assignment(gpap_engine *e, int8_t *out_host); /*
 
 /* Sets are FLATTENED DIMACS literals: set i is lits[offsets[i] .. offsets[i+1]), offsets has
  * n+1 entries with offsets[0] == 0 (an empty set propagates to the units flush). The whole
- * input is validated before any launch. `chunk` sets per launch; <= 0 sizes it with
- * gpap_check_chunk_size. Outputs, host buffers:
+ * input is validated before any launch. `chunk` is the rows of engine state a launch uses
+ * (one set per row in a chunked launch); <= 0 sizes it. Outputs, host buffers:
  *   conflict_out    (n,)     int8, required — the set (with its implications) falsifies a clause
  *   propagated_out  (n,)     int32, required — implications BCP derived beyond the assumptions
  *   assign_out      (n, 2N)  int8, or NULL — 1 where that literal index is TRUE
@@ -198,15 +208,22 @@ gpap_status gpap_engine_flushed_assignment(gpap_engine *e, int8_t *out_host); /*
  * `conflict_out` is exact for every set, and so is everything else on a non-conflicted set
  * (confluence). On a conflicted set the other fields are a snapshot of where BCP stopped, which
  * the chunk size can move (it feeds the kernel dispatch): compare those on `conflict_out`.
- * Without `sat_out` every launch is gpap_engine_apply_clean, so afterwards the engine refuses a
- * packed readout until its next reset or plain launch; `sat_out` takes the plain kernel. */
+ * With neither `assign_out` nor `sat_out` the sets run on the queue (a few rows, each taking
+ * set after set and restoring itself) when it engages: more sets than its rows, $GPAP_QUEUE and
+ * $GPAP_CLEAN not 0, a backend with the queue kernel. After GPAP_OK the engine is as
+ * gpap_engine_reset(e, R) leaves it, R being the queue's rows: every row at the baseline, its
+ * kernel the dispatch rule's (gpap_engine_queue_stats says whether it ran). Otherwise, and for a
+ * call that reads row state, the sets run in chunks, one row per set: without `sat_out` every
+ * launch is gpap_engine_apply_clean, so afterwards the engine refuses a packed readout until its
+ * next reset or plain launch; `sat_out` takes the plain kernel. */
 gpap_status gpap_check_sets(gpap_engine *e, const int32_t *lits, const int64_t *offsets,
                             int64_t n, int32_t chunk, int8_t *conflict_out,
                             int32_t *propagated_out, int8_t *assign_out, int32_t *sat_out);
 
-/* Assumption sets one launch holds: the engine's per-row state (gpap_row_bytes) plus the
- * (chunk, max_lits) int64 decision matrix this entry point allocates, read against LIVE free
- * memory, capped by gpap_default_k_cap and never larger than n_sets. */
+/* Assumption sets one chunked launch holds (a call that reads row state; a flags-only call runs
+ * on the queue, which sizes its own rows): the engine's per-row state (gpap_row_bytes) plus
+ * the (chunk, max_lits) int64 decision matrix this entry point allocates, read against LIVE
+ * free memory, capped by gpap_default_k_cap and never larger than n_sets. */
 int64_t gpap_check_chunk_size(gpap_engine *e, int64_t n_sets, int64_t max_lits);
 
 /* ------------------------------------------------------------------ probing
@@ -224,16 +241,17 @@ typedef struct gpap_probe gpap_probe;
 typedef enum {
     GPAP_PROBE_COMPLETE = 0,  /* the whole enumeration was probed */
     GPAP_PROBE_CEILING  = 1,  /* candidates exceeded max_tuples */
-    GPAP_PROBE_DEADLINE = 2,  /* the wall-clock budget expired between chunks */
+    GPAP_PROBE_DEADLINE = 2,  /* the wall-clock budget expired between launches */
     GPAP_PROBE_UNSAT    = 3   /* the formula's own units already conflict; nothing to probe */
 } gpap_probe_stop;
 
 /** How to sweep, and when to stop. Every field is optional and 0 is its default, so `{0}` and a
  *  NULL options pointer are the same sweep. */
 typedef struct {
-    double  seconds;       /* wall-clock budget, checked BETWEEN chunks (a chunk is atomic) */
+    double  seconds;       /* wall-clock budget, checked BETWEEN launches (a launch is atomic) */
     int64_t max_tuples;    /* probe at most this many candidates (EXACT count, before generation) */
-    int32_t batch;         /* tuples per launch; 0 = size it from free VRAM */
+    int32_t batch;         /* rows of engine state a launch uses (a chunked launch probes one
+                            * tuple per row, a queued one many); 0 = size it */
     int32_t same_var;      /* 1 = keep tuples with two literals of one variable (they conflict
                             * regardless of the formula); 0 = drop them. Named for the opt-out. */
     int32_t refuse_over_max; /* 0 (default) = max_tuples is a WORK BUDGET: probe that many, report

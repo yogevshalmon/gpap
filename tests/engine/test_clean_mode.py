@@ -11,7 +11,6 @@ import random
 
 import numpy as np
 import pytest
-import torch
 
 from gpap.engine import _core
 from tests.support import DEV, decision_matrix, random_assumptions, random_cnf
@@ -332,8 +331,10 @@ def test_apply_validates_row_count(rows):
 # The callers that use clean mode, end to end.
 
 def test_probe_sweep_identical_and_lite(monkeypatch):
-    """The probe sweep finds the same conflict tuples with clean mode on and off, and with it
-    on, resets after the first chunk go lite."""
+    """The chunked probe sweep finds the same conflict tuples with clean mode on and off, and
+    with it on, resets after the first chunk go lite. GPAP_QUEUE=0 keeps the sweep in chunks: the
+    queue has no reset between tuples to count (tests/engine/test_queue.py)."""
+    monkeypatch.setenv("GPAP_QUEUE", "0")
     nv = 8
     clauses = [[1, 2, 3], [-1, -2], [-2, -3], [-1, -3], [4, 5], [-5, 6], [-4, -6, 7]]
     f = _core.Formula.from_clauses(nv, clauses)
@@ -354,20 +355,26 @@ def test_probe_sweep_identical_and_lite(monkeypatch):
 
 
 def test_checker_flags_only_goes_lite(monkeypatch):
-    """Flags-only AssumptionChecker calls use clean mode (lite resets, same answers); so do
-    assignment calls (next test), and sat_count calls keep the plain kernel. The second half uses
-    a fresh checker because the first reset after a clean call is legitimately lite."""
+    """In chunks, flags-only AssumptionChecker calls use clean mode (lite resets, same answers);
+    so do assignment calls (next test), and sat_count calls keep the plain kernel. The second half
+    uses a fresh checker because the first reset after a clean call is legitimately lite.
+    GPAP_QUEUE=0 keeps the flags-only calls in chunks: by default they run on the queue. A
+    flags-only face call pins no chunk (the core sizes it), so the 17-set chunks are pinned
+    through the engine the face drives."""
     from gpap.engine.checker import AssumptionChecker
+
+    monkeypatch.setenv("GPAP_QUEUE", "0")
 
     CLAUSES = [[1, 2], [-1, 3], [-2, -3], [4, 5], [-4, 6]]
     sets = [[1], [2, 4], [-3], [], [1, -1], [5]] * 40
     ck = AssumptionChecker.from_clauses(6, CLAUSES)
     one = ck.check_assumptions(sets)
-    monkeypatch.setattr(ck, "chunk_size", lambda n, max_lits=1: 17)
+    lits = np.array([x for s in sets for x in s], dtype=np.int32)
+    offsets = np.cumsum([0] + [len(s) for s in sets]).astype(np.int64)
     before = ck.engine.reset_stats()[1]
-    many = ck.check_assumptions(sets)
+    many, _, _, _ = ck.engine.check_sets(lits, offsets, chunk=17)
     gained = ck.engine.reset_stats()[1] - before
-    assert torch.equal(one["conflict"], many["conflict"])
+    np.testing.assert_array_equal(one["conflict"].cpu().numpy(), many.astype(bool))
     # Compare with the chunk count, not > 0: the first reset is lite anyway (left clean by the
     # previous call), so > 0 would pass without any chunking.
     n_chunks = -(-len(sets) // 17)

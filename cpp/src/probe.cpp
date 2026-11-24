@@ -130,16 +130,29 @@ class Combinations {
 
 const gpap_probe_options kDefaults = {};   /* every field's default IS 0 — see the header */
 
-/* Tuples one launch can hold: the engine's per-row state plus the (batch, k) decision matrix
- * only this entry point allocates. One model, the shared one. */
+/* Tuples one chunk holds, which is also the queue's first block: the engine's per-row state
+ * plus the (batch, k) decision matrix only this entry point allocates. One model, the shared
+ * one. */
 int32_t probe_batch(gpap_engine *e, int32_t k, int64_t n_tuples, int32_t requested) {
     if (requested > 0) return static_cast<int32_t>(std::min<int64_t>(requested, n_tuples));
     const int32_t b = gpap::engine_batch(e, 8ll * std::max(k, 1), 0);
     return static_cast<int32_t>(std::max<int64_t>(1, std::min<int64_t>(b, n_tuples)));
 }
 
-/* Run one chunk of materialized tuples, appending conflicts to `out`. No redundancy filter, on
- * purpose: redundancy is a property of a CLAUSE against a FORMULA (gpap.mining's job). */
+/* Append the conflicting tuples of one launch to `out`, in launch order. No redundancy filter,
+ * on purpose: redundancy is a property of a CLAUSE against a FORMULA (gpap.mining's job). */
+void append_conflicts(const std::vector<int64_t> &tuples, const std::vector<int8_t> &flags,
+                      int64_t rows, int32_t k, gpap_probe *out) {
+    for (int64_t r = 0; r < rows; ++r) {
+        if (!flags[static_cast<size_t>(r)]) continue;
+        for (int32_t j = 0; j < k; ++j)
+            out->conflicts.push_back(
+                to_dimacs(tuples[static_cast<size_t>(r) * static_cast<size_t>(k) + j]));
+        out->stats.conflicts += 1;
+    }
+}
+
+/* Run one chunk of materialized tuples, appending conflicts to `out`. */
 gpap_status probe_chunk(gpap_engine *e, const std::vector<int64_t> &tuples, int32_t k,
                         std::vector<int8_t> &flags, gpap_probe *out) {
     const int32_t rows = static_cast<int32_t>(tuples.size() / static_cast<size_t>(k));
@@ -150,52 +163,31 @@ gpap_status probe_chunk(gpap_engine *e, const std::vector<int64_t> &tuples, int3
     GPAP_TRY(gpap_engine_apply_clean(e, tuples.data(), k));
     flags.resize(static_cast<size_t>(rows));
     GPAP_TRY(gpap_flags(e, nullptr, flags.data(), rows));
-    for (int32_t r = 0; r < rows; ++r) {
-        if (!flags[static_cast<size_t>(r)]) continue;
-        for (int32_t j = 0; j < k; ++j)
-            out->conflicts.push_back(
-                to_dimacs(tuples[static_cast<size_t>(r) * static_cast<size_t>(k) + j]));
-        out->stats.conflicts += 1;
-    }
+    append_conflicts(tuples, flags, rows, k, out);
     return GPAP_OK;
 }
 
-/* The shared sweep driver. `gen` yields chunks; everything else is budget and bookkeeping. */
+/* A sweep's clock: seconds since it began. */
+class Stopwatch {
+  public:
+    double seconds() const {
+        return std::chrono::duration<double>(std::chrono::steady_clock::now() - t0_).count();
+    }
+
+  private:
+    std::chrono::steady_clock::time_point t0_ = std::chrono::steady_clock::now();
+};
+
+/* In chunks of `batch` tuples: a reset and one CLEAN launch per chunk (probe_chunk). */
 template <typename NextChunk>
-gpap_status run_sweep(gpap_engine *e, int32_t k, int64_t total, const gpap_probe_options &o,
-                      NextChunk next, gpap_probe *out) {
-    const auto t0 = std::chrono::steady_clock::now();
-    const auto elapsed = [&t0] {
-        return std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count();
-    };
-    out->k = k;
-    out->stats.total = total;
-
-    if (e->flush_conflict || e->has_empty_clause) {
-        /* The formula's own units already conflict, so every set conflicts trivially. */
-        out->stats.stop = GPAP_PROBE_UNSAT;
-        out->stats.seconds = elapsed();
-        return GPAP_OK;
-    }
-    int64_t limit = total;
-    if (o.max_tuples > 0 && total > o.max_tuples) {
-        /* A WORK BUDGET by default: every conflict found is a genuine entailed clause whatever
-         * went unprobed, so only `exhausted` is lost. */
-        if (o.refuse_over_max) {
-            out->stats.stop = GPAP_PROBE_CEILING;
-            out->stats.seconds = elapsed();
-            return GPAP_OK;
-        }
-        limit = o.max_tuples;
-        out->stats.stop = GPAP_PROBE_CEILING;
-    }
-
-    const int32_t batch = probe_batch(e, k, std::max<int64_t>(limit, 1), o.batch);
+gpap_status sweep_in_chunks(gpap_engine *e, int32_t k, int64_t limit, int32_t batch,
+                            const gpap_probe_options &o, const Stopwatch &clock, NextChunk &next,
+                            gpap_probe *out) {
     std::vector<int64_t> chunk;
     std::vector<int8_t> flags;
     while (out->stats.probed < limit) {
         /* Checked BETWEEN chunks: abandoning one mid-flight leaves row state half-written. */
-        if (o.seconds > 0.0 && elapsed() > o.seconds) {
+        if (o.seconds > 0.0 && clock.seconds() > o.seconds) {
             out->stats.stop = GPAP_PROBE_DEADLINE;
             break;
         }
@@ -205,9 +197,83 @@ gpap_status run_sweep(gpap_engine *e, int32_t k, int64_t total, const gpap_probe
         GPAP_TRY(probe_chunk(e, chunk, k, flags, out));
         out->stats.probed += got;
     }
+    return GPAP_OK;
+}
+
+/* On the queue: a launch takes a block of tuples over the call's few rows, and a row takes its
+ * next tuple as it finishes one, so no row waits for the block's deepest probe and nothing is
+ * reset between tuples (QueuedCall::launch). The tuples go out in enumeration order and their
+ * flags come back in it, so the conflicts are appended exactly as the chunk loop appends them. */
+template <typename NextChunk>
+gpap_status sweep_on_queue(gpap::QueuedCall &q, int32_t k, int64_t limit,
+                           const gpap_probe_options &o, const Stopwatch &clock, NextChunk &next,
+                           gpap_probe *out) {
+    const int64_t max_block = gpap::kQueueMaxLits / std::max(k, 1);
+    std::vector<int64_t> chunk;
+    std::vector<int32_t> jobs;
+    std::vector<int8_t> flags;
+    while (out->stats.probed < limit) {
+        /* Checked BETWEEN launches, as between chunks (next_block bounds a launch). */
+        if (o.seconds > 0.0 && clock.seconds() > o.seconds) {
+            out->stats.stop = GPAP_PROBE_DEADLINE;
+            break;
+        }
+        const double left = o.seconds > 0.0 ? o.seconds - clock.seconds()
+                                            : std::numeric_limits<double>::infinity();
+        const int64_t want = std::min({q.next_block(left), max_block, limit - out->stats.probed});
+        const int64_t got = next(chunk, want);
+        if (got == 0) break;
+        jobs.resize(chunk.size());
+        for (size_t i = 0; i < chunk.size(); ++i) jobs[i] = static_cast<int32_t>(chunk[i]);
+        flags.resize(static_cast<size_t>(got));
+        GPAP_TRY(q.launch(jobs.data(), got, k, flags.data(), nullptr));
+        append_conflicts(chunk, flags, got, k, out);
+        out->stats.probed += got;
+    }
+    return GPAP_OK;
+}
+
+/* The shared sweep driver. `next` yields chunks; everything else is budget and bookkeeping. */
+template <typename NextChunk>
+gpap_status run_sweep(gpap_engine *e, int32_t k, int64_t total, const gpap_probe_options &o,
+                      NextChunk next, gpap_probe *out) {
+    const Stopwatch clock;
+    out->k = k;
+    out->stats.total = total;
+
+    if (e->flush_conflict || e->has_empty_clause) {
+        /* The formula's own units already conflict, so every set conflicts trivially. */
+        out->stats.stop = GPAP_PROBE_UNSAT;
+        out->stats.seconds = clock.seconds();
+        return GPAP_OK;
+    }
+    int64_t limit = total;
+    if (o.max_tuples > 0 && total > o.max_tuples) {
+        /* A WORK BUDGET by default: every conflict found is a genuine entailed clause whatever
+         * went unprobed, so only `exhausted` is lost. */
+        if (o.refuse_over_max) {
+            out->stats.stop = GPAP_PROBE_CEILING;
+            out->stats.seconds = clock.seconds();
+            return GPAP_OK;
+        }
+        limit = o.max_tuples;
+        out->stats.stop = GPAP_PROBE_CEILING;
+    }
+
+    const int32_t batch = probe_batch(e, k, std::max<int64_t>(limit, 1), o.batch);
+    {
+        /* On the queue when it engages, else in chunks; `options.batch` pins the rows of
+         * either. A queued call ends at this block's close, inside the sweep's time. */
+        gpap::QueuedCall q(e);
+        GPAP_TRY(q.begin(o.batch, limit, batch));
+        if (q.engaged())
+            GPAP_TRY(sweep_on_queue(q, k, limit, o, clock, next, out));
+        else
+            GPAP_TRY(sweep_in_chunks(e, k, limit, batch, o, clock, next, out));
+    }
     out->stats.exhausted =
         (out->stats.stop == GPAP_PROBE_COMPLETE && out->stats.probed == total) ? 1 : 0;
-    out->stats.seconds = elapsed();
+    out->stats.seconds = clock.seconds();
     return GPAP_OK;
 }
 

@@ -142,10 +142,11 @@ class AssumptionChecker:
         dev_assign = (torch.zeros((n, 2 * nv), dtype=torch.int8, device=dev)
                       if assignments else None)
         dev_sat = torch.zeros((n, M), dtype=torch.int32, device=dev) if sat_count else None
-        # Chunk size from the GLOBAL longest set: a chunk's matrix is sized by its own longest,
-        # so budgeting for the worst only over-reserves. Passed explicitly so the core runs
-        # exactly the chunks this face reports.
-        step = self.chunk_size(n, int(lens.max()))
+        # A call that reads row state runs the chunks this face sizes, after the allocations
+        # above, from the GLOBAL longest set (a chunk's matrix is sized by its own longest, so
+        # budgeting for the worst only over-reserves). A flags-only call allocates nothing and
+        # pins nothing, as the C++ face's does not: the core sizes its queue, or the same chunks.
+        step = self.chunk_size(n, int(lens.max())) if (assignments or sat_count) else 0
         conflict, prop, assign, sat = self.engine.check_sets(
             flat, off, chunk=step, assignments=assignments, sat_count=sat_count)
         out = {"conflict": torch.from_numpy(conflict).to(dev),

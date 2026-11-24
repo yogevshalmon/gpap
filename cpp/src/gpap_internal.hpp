@@ -94,9 +94,90 @@ gpap_status engine_require_trajectory(gpap_engine *e);
 /* THE batch an engine sizes for itself — probing, checking and the sampler all call this, so
  * none can skip a bound: the rows whose state, plus `extra_row_bytes` the caller allocates per
  * row, fit mem_budget on the engine's own device (free memory on CUDA, the total on OpenCL; 0
- * if the device cannot say); at most `cap` (0 = gpap_default_k_cap, < 0 = none); within one
- * buffer's size limit where the plug has one; and at least one. */
-int32_t engine_batch(gpap_engine *e, int64_t extra_row_bytes, int32_t cap);
+ * if the device cannot say) less `reserve_bytes` the caller allocates once (the queue's launch
+ * buffers); at most `cap` (0 = gpap_default_k_cap, < 0 = none); within one buffer's size limit
+ * where the plug has one; and at least one. */
+int32_t engine_batch(gpap_engine *e, int64_t extra_row_bytes, int32_t cap,
+                     int64_t reserve_bytes = 0);
+
+/* ---- The job queue (engine.cpp): entry point 1 for many sets on few rows. A row takes the next
+ * set as it finishes one and puts back the words it touched, so a launch does not wait for its
+ * deepest set and nothing is reset between sets. The calls that only need a flag and a count
+ * per set run on it (probe.cpp, check.cpp); a caller that reads row state afterwards cannot.
+ * A queued call is one QueuedCall: begin, then next_block and launch once per block. Until it
+ * ends, when the object goes, on every return path, the engine refuses every call that would
+ * change the rows or the kernel (gpap_engine::queued_call). */
+
+/* Sets one queued launch may take: bounds the job counter and the per-launch buffers. */
+constexpr int64_t kQueueMaxJobs = 1 << 20;
+/* Literals one queued launch may take, padding included: bounds the job matrix of wide sets. */
+constexpr int64_t kQueueMaxLits = 1 << 24;
+/* Device bytes of one launch's buffers at those bounds: the job matrix, a flag and a count per
+ * job, and a megabyte for the counter and the per-row sums. QueuedCall::begin takes them off
+ * the memory budget. Keep in step with the reserves in QueuedCall::launch. */
+constexpr int64_t kQueueBufferBytes = kQueueMaxLits * 4 + kQueueMaxJobs * 5 + (1 << 20);
+/* Rows of a queue on a device whose library cannot say how many it runs at once (OpenCL). */
+constexpr int32_t kQueueRowsUnknown = 4096;
+
+class QueuedCall {
+  public:
+    explicit QueuedCall(gpap_engine *e) : e_(e) {}
+    /* Ends the call begin started, whatever happened after it: frees the per-launch buffers, so
+     * a later batch is sized as on a fresh engine, and leaves the engine as
+     * gpap_engine_reset(e, R) leaves it, its kernel chosen for K = R by the normal rule. */
+    ~QueuedCall();
+    QueuedCall(const QueuedCall &) = delete;
+    QueuedCall &operator=(const QueuedCall &) = delete;
+
+    /* Start a call of `n_sets` sets, or decline it (engaged() stays false, nothing on the engine
+     * changed), which sends the caller to
+     * its chunk loop (every backend has one): the switch is off ($GPAP_QUEUE, or
+     * $GPAP_CLEAN=0, since a queued row restores itself with CLEAN mode's restore), the
+     * formula's own units conflict (no baseline to restore to), the engine's plug has no queue
+     * kernel, or the call has no more sets than the queue has rows — every row would then take
+     * one set, which is a chunk with more bookkeeping. Otherwise the call is engaged on R rows,
+     * all at the baseline. `first_block` is the sets the caller's chunk loop gives one launch.
+     * ROWS: `requested` if > 0 (a caller's pin), else all that fit: engine_batch() with the
+     * launch buffers (kQueueBufferBytes) taken out of the budget, which bounds a pin too; never
+     * more than the device runs at once (a row it is not running takes no job and only costs
+     * memory; kQueueRowsUnknown where its library cannot say).
+     * COPY: the packed words where packed_clean_rows does not cover the R rows; the bitmap
+     * always, since no claim covers it (a CLEAN launch leaves it at its fixpoint). That one copy
+     * per call is the price of keeping no second claim that every launch path would have to
+     * drop.
+     * KERNEL: a pin ($GPAP_KERNEL, gpap_engine_set_mode), else WAVE, for every formula: the
+     * rows are counted in warps, and only a WAVE row fills one on both backends. Not the
+     * dispatch rule, which chooses for a chunk; the call's end gives the engine that rule's
+     * kernel back. */
+    gpap_status begin(int32_t requested, int64_t n_sets, int64_t first_block);
+    /* Whether begin started a call: the caller then launches, else it runs its chunk loop. */
+    bool engaged() const { return rows_ > 0; }
+    /* Sets the next launch takes, with `seconds_left` of the call's deadline (infinity without
+     * one). The first takes `first_block`, so it is no longer than the chunk it replaces. The
+     * second takes eight times that, whatever the first took: a launch pays for its deepest
+     * set once, so a row needs several sets a launch to amortize it, also where one set a row
+     * already takes long. Later blocks grow eightfold while launches take under 50 ms, which
+     * hides a launch's fixed cost, and are never smaller than the last launch: growth starts
+     * from the sets it took, which a caller's cut can make fewer than its block, never from a
+     * block that did not run. A block grows only while eight times the
+     * last launch fits in what is left of the deadline, which is checked between launches, so
+     * a sweep ends within about one launch of it. So no launch lasts much more than eight
+     * chunks or 0.4 s. Results never depend on the sizes. */
+    int64_t next_block(double seconds_left);
+    /* One launch on the call's rows, timed for next_block: `n` jobs (<= kQueueMaxJobs) of up
+     * to `L` literal INDICES each, row-major int32 with -1 padding; a caller keeps n * L within
+     * kQueueMaxLits unless one set alone is wider. conflict_out (n,) is exact; implied_out
+     * (n,), which may be NULL, is exact on a job that did not conflict. Every row is at the
+     * baseline after the launch as before it, so launches follow each other with no reset. */
+    gpap_status launch(const int32_t *jobs, int64_t n, int32_t L, int8_t *conflict_out,
+                       int32_t *implied_out);
+
+  private:
+    gpap_engine *e_;
+    int32_t rows_ = 0;
+    int64_t first_ = 1, last_ = 0;   /* the first block, and the sets the last launch took */
+    double took_ = 0.0;              /* seconds the last launch took */
+};
 
 /* A clause carries a packed word (per-row state) iff it has this many literals; shorter ones
  * are implication edges or flush-cache facts. The one definition. */
@@ -191,14 +272,28 @@ struct gpap_engine {
     int flush_ready = 0;      /* the post-units cache is built (not packed_flushed.ptr) */
     int64_t launches = 0;
 
-    /* CLEAN-mode: leading rows KNOWN equal to packed_flushed. Raised by a full reset,
-     * preserved by a completed CLEAN apply, else zeroed. */
+    /* CLEAN-mode: leading rows KNOWN equal to packed_flushed. Raised by a full reset or a
+     * queued call's copy, preserved by a completed CLEAN apply or queued launch, else zeroed.
+     * The only claim: the bitmap has none, and a queued call copies it at its start. */
     int32_t packed_clean_rows = 0;
     /* 1 = packed and abits describe DIFFERENT states (a CLEAN launch restored packed while
      * abits kept the fixpoint); recache_flush refuses on it, reset clears it. */
     int abits_diverged = 0;
     int64_t resets_full = 0, resets_lite = 0;
     int clean_enabled = 1;   /* GPAP_CLEAN=0 kills the lite path (A/B lever + escape hatch) */
+
+    /* The queue. queue_enabled is $GPAP_QUEUE (0 = chunks only); queue_mode is the kernel of
+     * the last queued launch (AUTO: none yet), since the engine's own goes back to the dispatch
+     * rule's when a queued call ends. */
+    int queue_enabled = 1;
+    /* Set while a QueuedCall holds the rows (begin to its end): reset, apply, trajectory,
+     * recache_flush, set_mode and another queued call are refused until it is cleared. */
+    int queued_call = 0;
+    int64_t queue_launches = 0, queue_jobs = 0;
+    gpap_mode queue_mode = GPAP_MODE_AUTO;
+    /* The queued launches' work, summed on the host from each row's sums and added to the
+     * device accumulators by gpap_counters_get. */
+    int64_t host_ops = 0, host_props = 0, host_decs = 0;
 
     /* The device. Declared before every DevBuf so it is destroyed after them: a buffer frees
      * itself through this plug. */
@@ -218,6 +313,9 @@ struct gpap_engine {
     gpap::DevBuf packed, abits, active, conflict, trail;
     gpap::DevBuf nprops, nops, ndecs, nrounds;
     gpap::DevBuf acc_ops, acc_props, acc_decs;   /* int64 accumulators, no host sync */
+    /* one queued launch: the jobs, the shared counter, a flag and an implied count per job,
+       three int64 sums per row; released when a queued call ends (~QueuedCall) */
+    gpap::DevBuf queue_dec, queue_next, queue_conf, queue_impl, queue_sums;
 
     gpap::DevBuf scratch_i32;           /* scratch: small results (counts) */
     gpap::DevBuf staging_a, staging_b;  /* staging: uploads and readout buffers */
