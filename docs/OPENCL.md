@@ -36,6 +36,7 @@ engine's; the engine's device is on its `GPU backend` line.
 | the scalar propagate kernel, both packed splits | yes | yes |
 | the WAVE propagate kernel | yes | yes |
 | CLEAN mode | yes | yes |
+| the queue ([ENGINE.md](ENGINE.md) §6b), scalar and WAVE | yes | yes |
 | sampling (`gpap sample`, `gpap_sampler_*`, `gpap_engine_trajectory`) | yes | no: refused |
 | device pointers (`gpap_engine_apply_dev`, `gpap_engine_trajectory_dev`) | yes | no: refused |
 
@@ -45,8 +46,11 @@ before any work: by `gpap_sampler_create`, and by `gpap sample` before it prepro
 
 Kernel dispatch follows the one rule (`gpap_dispatch_wave`): WAVE from the clause threshold up.
 Below it the rule asks how many warps the device keeps resident, which OpenCL cannot report, so
-a small formula runs scalar at any batch. `GPAP_KERNEL` and `GPAP_CLEAN` pin the choice as on
-CUDA.
+a small formula runs scalar at any batch. The queue runs WAVE on every formula, as on CUDA
+([ENGINE.md](ENGINE.md) §6b). `GPAP_KERNEL`, `GPAP_CLEAN` and `GPAP_QUEUE` pin the choice as on
+CUDA. For the same reason the queue cannot ask how many rows the device runs at once: it takes
+a fixed number (`kQueueRowsUnknown` in `cpp/src/gpap_internal.hpp`), or the memory batch when
+that is smaller.
 
 ## Getting an OpenCL runtime
 

@@ -127,7 +127,8 @@ of §2 resolve exactly those.
 The clause count decides which one runs (`gpap_dispatch_wave` in `cpp/src/calibrate.cpp`,
 resolved inside every `reset`, so every consumer gets it): WAVE when `M ≥ 2048`, or when the
 batch is no larger than the card's resident warps; scalar otherwise. Do not key the rule off the
-batch: a batch-based rule was a proxy for `M` that broke when batch sizing changed.
+batch: a batch-based rule was a proxy for `M` that broke when batch sizing changed. The queue
+of §6b is not a batch of rows and runs WAVE.
 `GPAP_KERNEL=scalar|wave` forces a kernel; it can only change speed, never results.
 
 **Confluence.** A BCP fixpoint is unique, so the two kernels — which visit clauses in different
@@ -168,6 +169,65 @@ that need the post-apply state (`sat_rows`, `check_sound`, `recache_flush`) refu
 launch — use plain `apply` for those. `GPAP_CLEAN=0` is the exact legacy behaviour, for A/Bs.
 Design, lemmas and measurements: [findings/CLEAN_MODE_FINDINGS.md](findings/CLEAN_MODE_FINDINGS.md).
 
+## 6b. The queue: many sets on few rows
+
+A chunked sweep gives every set a row of its own, and a launch ends with its slowest row. On a
+big formula most rows sit idle while a few deep sets finish, and every chunk starts with a reset.
+The queue turns this around. A launch takes a block of sets and a few rows of state. A row takes
+the next set from a shared counter, propagates it with the code of §4, writes that set's conflict
+flag and implied count, puts back the words it touched, and takes another. No row waits, and
+nothing is reset between sets.
+
+Two restores bring a row back: the packed words, as in CLEAN mode (§6), and the bitmap words of
+the literals on the row's trail. The second is complete because the baseline is a BCP fixpoint:
+no clause can force a literal that is false there, so a bit set during a set belongs to a literal
+on the trail or to the negation of one, and a literal shares its word with its negation.
+
+What runs on it: the probe sweeps (`gpap_probe_*`, so mining too) and `gpap_check_sets` when it
+returns flags and counts only. A call that reads a row after its set, for assignments or sat
+counts, stays in chunks: a queued row is back at the baseline by then. The answers are the
+chunked sweep's, in the same order, because a set starts from the baseline whichever row runs it
+and BCP is confluent.
+
+A queued call has three steps. Between them the engine refuses, by name, every call that would
+change the rows or the kernel (reset, apply, trajectory, `recache_flush`, `set_mode`, another
+queued call):
+
+- **Begin.** Every row it uses is put at the baseline. The packed words are copied only where
+  the CLEAN-mode claim (§6) does not already cover the rows; the bitmap is copied every time, so
+  no second claim exists for a launch path to forget to drop. The bitmap is small, and a chunked
+  sweep copies it at every chunk.
+- **Launches.** Each one takes a block of sets and leaves every row at the baseline again, so
+  the next follows with no reset. A launch that fails drops the claim, and the next call copies.
+- **End.** The engine is as `gpap_engine_reset` leaves it for the queue's rows: every row at the
+  baseline, its kernel the one §4's rule gives for them, and no selection. A readout then reads
+  the baseline.
+
+The sizes:
+
+- **Rows.** As many as the device runs at once, and never more than the batch of §7 less the
+  rows the launch buffers would fill: a row the device is not running takes no set.
+- **Kernel.** WAVE for every formula, unless one is pinned (`GPAP_KERNEL`,
+  `gpap_engine_set_mode`). The rows are counted in warps, and only a WAVE row fills one: a scalar
+  row is a warp with one working lane on CUDA, and one work item on OpenCL. §4's rule chooses for
+  chunks. `gpap_engine_queue_stats` reports the kernel the queue ran.
+- **Blocks.** The first launch takes the sets a chunk would, so it is never longer than the
+  chunk it replaces. The second takes eight times as many, whatever the first took: a launch
+  pays for its deepest set once, so each row needs several sets a launch to amortize it, also
+  on a formula where one set a row is already slow. Later blocks grow eightfold while launches
+  take under 50 ms, which hides a launch's fixed cost, and are never smaller than the last
+  launch; growth starts from the sets a launch took, which a block cut to keep its job matrix
+  in bounds makes fewer. A sweep's `seconds` is
+  checked between launches, and a block grows only while eight times the last launch fits in
+  what is left of it, so a sweep ends within about one launch of its budget. No launch lasts
+  much more than eight chunks or 0.4 s. No answer depends on the sizes.
+
+`GPAP_QUEUE=0` runs every sweep in chunks, as before the queue, and `gpap_engine_queue_stats`
+says which path ran. So does `GPAP_CLEAN=0`: a queued row restores itself with CLEAN mode's
+restore, and that switch is the escape hatch from it. The OpenCL backend has the same kernel
+([OPENCL.md](OPENCL.md)).
+Measurements: [findings/PROBE_QUEUE_FINDINGS.md](findings/PROBE_QUEUE_FINDINGS.md).
+
 ## 7. Batch size
 
 Nobody names K. Every face sizes it from the formula and the GPU (`cpp/src/calibrate.cpp`):
@@ -201,7 +261,8 @@ other processes still count as used.
 | | effect | default |
 |---|---|---|
 | `GPAP_KERNEL=scalar\|wave` | force the propagate kernel | auto (§4) |
-| `GPAP_CLEAN=0` | disable CLEAN mode and the reset skip (exact legacy behaviour) | on |
+| `GPAP_CLEAN=0` | disable CLEAN mode, the reset skip and the queue (exact legacy behaviour) | on |
+| `GPAP_QUEUE=0` | run probe sweeps and flags-only checks in chunks, one set per row per launch (§6b) | on |
 | `vscan = -1` in `gpap_engine_options` | disable the warp-wide decision scan | on in WAVE |
 | `GPAP_LIB=/path/libgpap.so` | which library the Python face loads | `$GPAP_BUILD_DIR`, `build/`, `cpp/build/`, then the installed copy |
 | `GPAP_VRAM_BUDGET_MIB=<MiB>` | caps the memory the batch is sized from, for every caller of `gpap_mem_available` (C, C++ and Python alike). A ceiling only: it lets a larger card reproduce a smaller card's batch, and changes nothing on a card with less free memory | unset (no cap) |
@@ -210,8 +271,8 @@ other processes still count as used.
 
 ## 9. What is guaranteed
 
-- **Two entry points** — `apply_and_propagate` (with `check_sets`, the probe and `apply_clean`
-  over it) and `run_trajectory` — plus readout. Application code never touches row state. The
+- **Two entry points** — `apply_and_propagate` (with `check_sets`, the probe, `apply_clean` and
+  the queue over it) and `run_trajectory` — plus readout. Application code never touches row state. The
   sampling chunk loop over entry point 2 (chunks, the config bandit, stop valves, kept-row
   buckets, accounting) is also the core's — `gpap_sampler_*` in `cpp/src/sample.cpp` — so the
   Python and C++ sampler faces are marshalling over one implementation.
@@ -233,6 +294,7 @@ other processes still count as used.
 | the WAVE propagate and its shuffle-based lane schedule | [findings/WAVE_SHUFFLE_FINDINGS.md](findings/WAVE_SHUFFLE_FINDINGS.md) |
 | the `M ≥ 2048` dispatch rule; the wave/scalar ratio by formula size | [findings/KERNEL_AB_FINDINGS.md](findings/KERNEL_AB_FINDINGS.md), INSIGHTS.md 2026-08-18 |
 | CLEAN mode | [findings/CLEAN_MODE_FINDINGS.md](findings/CLEAN_MODE_FINDINGS.md), [findings/MINING_FINDINGS.md](findings/MINING_FINDINGS.md) |
+| the queue | [findings/PROBE_QUEUE_FINDINGS.md](findings/PROBE_QUEUE_FINDINGS.md) |
 | the batch model, the cap, and why K is not a throughput lever | [findings/CROSS_GPU_FINDINGS.md](findings/CROSS_GPU_FINDINGS.md), INSIGHTS.md |
 | the C++ core and the ahead-of-time kernel build | [findings/CPP_BACKEND_FINDINGS.md](findings/CPP_BACKEND_FINDINGS.md) |
 | what was tried and lost — XOR word, 1-byte state, W > 32, in-kernel retry, clause renumbering | INSIGHTS.md, "Measured and lost" |
