@@ -170,6 +170,8 @@ const struct ClSpec {
     {"fixpoint_clean.s16.w0", ROWS, 1},       {"fixpoint_clean.s8.w0", ROWS, 1},
     {"fixpoint.s16.w1", LANES, kWaveW},       {"fixpoint.s8.w1", LANES, kWaveW},
     {"fixpoint_clean.s16.w1", LANES, kWaveW}, {"fixpoint_clean.s8.w1", LANES, kWaveW},
+    {"queue.s16.w0", ROWS, 1},                {"queue.s8.w0", ROWS, 1},
+    {"queue.s16.w1", LANES, kWaveW},          {"queue.s8.w1", LANES, kWaveW},
     {"bcast_rows", GRID, 4},                  {"fill_i8", ROWS, 1},
     {"complete_mask", ROWS, 1},               {"sound_rows.s16", ROWS, 1},
     {"sound_rows.s8", ROWS, 1},               {"var_bits", GRID, 64},

@@ -497,6 +497,199 @@ GPAP_WAVE_KERNEL(gpap_fixpoint_s8_w1, 8)
 GPAP_WAVE_CLEAN_KERNEL(gpap_fixpoint_clean_s16_w1, 16)
 GPAP_WAVE_CLEAN_KERNEL(gpap_fixpoint_clean_s8_w1, 8)
 
+/* ------------------------------------------------------------------ the queue */
+
+/* bcp.py::_seed_job: gpap_seed, from row `job` of the (N_JOBS, B) int32 job matrix. */
+void gpap_seed_job(__global uint *ab_row, __global int *trail_row, __global const int *dec,
+                   const long job, const int B, gpap_trail *t)
+{
+    t->head = 0;
+    t->tail = 0;
+    t->conflict = 0;
+    t->nops = 0;
+    for (int j = 0; j < B; ++j) {
+        const int lit = dec[job * (long)B + j];
+        if (lit >= 0 && t->conflict == 0) {
+            const uint w = ab_row[lit >> 5];        /* lit and lit^1 share this word */
+            if ((w & (1u << ((lit ^ 1) & 31))) != 0u) {
+                t->conflict = 1;
+            } else if ((w & (1u << (lit & 31))) == 0u) {
+                ab_row[lit >> 5] = w | (1u << (lit & 31));
+                trail_row[t->tail] = lit;
+                t->tail += 1;
+            }
+        }
+    }
+}
+
+/* bcp.py::_clean_bitmap, the entries `first`, `first + step`, ... of the trail: rewrite the
+ * bitmap words a job can have set back to the baseline `ab_init`. A bit set during a job is a
+ * literal on its trail or the negation of one, and the two share a word, so the trail's words
+ * cover them. A job that assigned more literals than the bitmap has words copies the row. */
+void gpap_clean_bitmap(__global uint *ab_row, __global const uint *ab_init,
+                       __global const int *trail_row, const int tail, const long NW,
+                       const int first, const int step)
+{
+    if ((long)tail >= NW) {
+        for (long j = first; j < NW; j += step) ab_row[j] = ab_init[j];
+        return;
+    }
+    for (int t = first; t < tail; t += step) {
+        const int w = trail_row[t] >> 5;
+        ab_row[w] = ab_init[w];
+    }
+}
+
+/* bcp.py::_bcp_queue_kernel, WAVE = 0: one work item per row. The row takes the next job from
+ * the shared counter, seeds and propagates it, writes the job's flag and implied count,
+ * restores the packed words and the bitmap words it touched, and takes another, until the
+ * jobs run out. Every row is at the baseline before and after.
+ * Extent: (rows). Scalars: M, NW, B, TRAIL_CAP, N_JOBS. */
+void gpap_queue_scalar_row(__global const long *prm, __global uint *st, __global uint *ab,
+                           __global const int *dec, __global const int *occ_off,
+                           __global const int *occ_mid, __global const int *occ_cls,
+                           __global const uint *init, __global const uint *ab_init,
+                           __global int *trail, volatile __global int *next,
+                           __global char *conf, __global int *impl, __global long *rowsum,
+                           const int SHIFT)
+{
+    const long k = (long)get_global_id(0);
+    if (k >= prm[GPAP_PRM_N0]) return;
+    const long M = prm[GPAP_PRM_ARG + 0];
+    const long NW = prm[GPAP_PRM_ARG + 1];
+    const int B = (int)prm[GPAP_PRM_ARG + 2];
+    const int TRAIL_CAP = (int)prm[GPAP_PRM_ARG + 3];
+    const int n_jobs = (int)prm[GPAP_PRM_ARG + 4];
+    __global uint *st_row = st + k * M;
+    __global uint *ab_row = ab + k * NW;
+    __global int *trail_row = trail + k * (long)TRAIL_CAP;
+
+    long sum_ops = 0, sum_props = 0, sum_decs = 0;
+    for (;;) {
+        const int job = atomic_inc(next);
+        if (job >= n_jobs) break;
+        gpap_trail t;
+        gpap_seed_job(ab_row, trail_row, dec, (long)job, B, &t);
+        const int decided = t.tail;                 /* the literals assigned ARE the decisions */
+        gpap_propagate(st_row, ab_row, trail_row, occ_off, occ_mid, occ_cls, &t, TRAIL_CAP, SHIFT);
+        conf[job] = (char)(t.conflict != 0);
+        impl[job] = t.tail - decided;
+        sum_ops += t.nops;
+        sum_props += t.tail;
+        sum_decs += decided;
+        gpap_clean_packed(st_row, init, trail_row, occ_off, occ_mid, occ_cls, t.tail, M);
+        gpap_clean_bitmap(ab_row, ab_init, trail_row, t.tail, NW, 0, 1);
+    }
+    rowsum[k * 3] = sum_ops;
+    rowsum[k * 3 + 1] = sum_props;
+    rowsum[k * 3 + 2] = sum_decs;
+}
+
+/* bcp.py::_bcp_queue_kernel, WAVE = 1: a work group of GPAP_WAVE_W lanes per row. Lane 0 takes
+ * the job and seeds it while the others wait at the barrier; the lanes propagate it and
+ * restore what it touched; a second barrier closes the job. The job index travels in `sh`, so
+ * every lane leaves the loop on the same pass. */
+#define GPAP_SH_JOB 2
+
+void gpap_queue_wave_row(__global const long *prm, __global uint *st, __global uint *ab,
+                         __global const int *dec, __global const int *occ_off,
+                         __global const int *occ_mid, __global const int *occ_cls,
+                         __global const uint *init, __global const uint *ab_init,
+                         __global int *trail, volatile __global int *next,
+                         __global char *conf, __global int *impl, __global long *rowsum,
+                         volatile __local int *sh, __local int *seg_s, __local int *seg_e,
+                         __local uint *seg_neg, const int SHIFT)
+{
+    const int W = GPAP_WAVE_W;
+    const int lane = (int)get_local_id(0);
+    const long k = (long)get_global_id(0) / W;
+    if (k >= prm[GPAP_PRM_N0]) return;              /* a whole group, or none of it */
+    const long M = prm[GPAP_PRM_ARG + 0];
+    const long NW = prm[GPAP_PRM_ARG + 1];
+    const int B = (int)prm[GPAP_PRM_ARG + 2];
+    const int TRAIL_CAP = (int)prm[GPAP_PRM_ARG + 3];
+    const int n_jobs = (int)prm[GPAP_PRM_ARG + 4];
+    __global uint *st_row = st + k * M;
+    __global uint *ab_row = ab + k * NW;
+    __global int *trail_row = trail + k * (long)TRAIL_CAP;
+
+    long sum_ops = 0, sum_props = 0, sum_decs = 0;  /* lane 0's */
+    int decided = 0;
+    for (;;) {
+        if (lane == 0) {
+            const int taken = atomic_inc(next);
+            if (taken < n_jobs) {
+                gpap_trail t;
+                gpap_seed_job(ab_row, trail_row, dec, (long)taken, B, &t);
+                sh[GPAP_SH_JOB] = taken;
+                sh[GPAP_SH_TAIL] = t.tail;
+                sh[GPAP_SH_CONFLICT] = t.conflict;
+                decided = t.tail;
+            } else {
+                sh[GPAP_SH_JOB] = -1;
+            }
+        }
+        barrier(CLK_LOCAL_MEM_FENCE | CLK_GLOBAL_MEM_FENCE);
+        const int job = sh[GPAP_SH_JOB];
+        if (job < 0) break;
+
+        int tail = 0, conflicted = 0, n_ops = 0;
+        gpap_wave_propagate(st_row, ab_row, trail_row, occ_off, occ_cls, sh, seg_s, seg_e,
+                            seg_neg, TRAIL_CAP, SHIFT, &tail, &conflicted, &n_ops);
+        if (lane == 0) {
+            conf[job] = (char)(conflicted != 0);
+            impl[job] = tail - decided;
+            sum_ops += n_ops;
+            sum_props += tail;
+            sum_decs += decided;
+        }
+        gpap_wave_clean(st_row, init, trail_row, occ_off, occ_mid, occ_cls, seg_s, tail, M);
+        gpap_clean_bitmap(ab_row, ab_init, trail_row, tail, NW, lane, W);
+        barrier(CLK_LOCAL_MEM_FENCE | CLK_GLOBAL_MEM_FENCE);
+    }
+    if (lane == 0) {
+        rowsum[k * 3] = sum_ops;
+        rowsum[k * 3 + 1] = sum_props;
+        rowsum[k * 3 + 2] = sum_decs;
+    }
+}
+
+#define GPAP_QUEUE_KERNEL(NAME, SHIFT)                                                        \
+    __kernel void NAME(__global const long *prm, __global uint *st, __global uint *ab,       \
+                       __global const int *dec, __global const int *occ_off,                 \
+                       __global const int *occ_mid, __global const int *occ_cls,             \
+                       __global const uint *init, __global const uint *ab_init,              \
+                       __global int *trail, __global int *next, __global char *conf,         \
+                       __global int *impl, __global long *rowsum)                            \
+    {                                                                                         \
+        gpap_queue_scalar_row(prm, st, ab, dec, occ_off, occ_mid, occ_cls, init, ab_init,    \
+                              trail, (volatile __global int *)next, conf, impl, rowsum,      \
+                              SHIFT);                                                        \
+    }
+
+#define GPAP_QUEUE_WAVE_KERNEL(NAME, SHIFT)                                                   \
+    __kernel GPAP_WAVE_GROUP                                                                  \
+    void NAME(__global const long *prm, __global uint *st, __global uint *ab,                \
+                       __global const int *dec, __global const int *occ_off,                 \
+                       __global const int *occ_mid, __global const int *occ_cls,             \
+                       __global const uint *init, __global const uint *ab_init,              \
+                       __global int *trail, __global int *next, __global char *conf,         \
+                       __global int *impl, __global long *rowsum)                            \
+    {                                                                                         \
+        volatile __local int sh[3];                                                           \
+        __local int seg_s[GPAP_WAVE_W];                                                       \
+        __local int seg_e[GPAP_WAVE_W];                                                       \
+        __local uint seg_neg[GPAP_WAVE_W];                                                    \
+        gpap_queue_wave_row(prm, st, ab, dec, occ_off, occ_mid, occ_cls, init, ab_init,      \
+                            trail, (volatile __global int *)next, conf, impl, rowsum, sh,    \
+                            seg_s, seg_e, seg_neg, SHIFT);                                   \
+    }
+
+GPAP_QUEUE_KERNEL(gpap_queue_s16_w0, 16)
+GPAP_QUEUE_KERNEL(gpap_queue_s8_w0, 8)
+GPAP_QUEUE_WAVE_KERNEL(gpap_queue_s16_w1, 16)
+GPAP_QUEUE_WAVE_KERNEL(gpap_queue_s8_w1, 8)
+
 /* ------------------------------------------------------------------ support kernels */
 
 /* helpers.py::bcast_rows — dst (K, n_cols) int32 <- src (n_cols,) broadcast over rows.
