@@ -472,3 +472,120 @@ def _bcp_fixpoint_clean_kernel(
                                    B, TRAIL_CAP, SHIFT, WAVE, W)
         _clean_packed(st_row, init_ptr, trail_row, occ_off_ptr, occ_mid_ptr, occ_cls_ptr,
                       tail, M, W)
+
+
+@triton.jit
+def _seed_job(ab_row, trail_row, dec_ptr, job, B):
+    """Assign the literals of job `job` — row `job` of the (N_JOBS, B) int32 matrix, -1 = padding —
+    and queue them: the seeding of _seed_and_propagate, indexed by the job and not by the row.
+    Returns (tail, conflict); the literals assigned ARE the job's decisions. A literal already
+    true is skipped, one already false conflicts the job."""
+    conflict = B * 0
+    tail = B * 0
+    for j in range(0, B):
+        lit = tl.load(dec_ptr + job * B + j)
+        if (lit >= 0) & (conflict == 0):
+            w = tl.load(ab_row + (lit >> 5))        # lit / lit^1 share this word
+            if (w & (1 << ((lit ^ 1) & 31))) != 0:
+                conflict = 1
+            elif (w & (1 << (lit & 31))) == 0:
+                tl.store(ab_row + (lit >> 5), w | (1 << (lit & 31)))
+                tl.store(trail_row + tail, lit)
+                tail += 1
+    return tail, conflict
+
+
+@triton.jit
+def _clean_bitmap(ab_row, ab_init_ptr, trail_row, tail, NW, W: tl.constexpr):
+    """Rewrite every bitmap word this row's job can have set back to the baseline row
+    (`ab_init_ptr` = the post-units-flush bitmap) — the queue's second restore, beside
+    _clean_packed.
+
+    Complete because the baseline is a BCP fixpoint: no clause can force a literal that is false
+    there (the flush already took it out of every count and sum, and a binary edge onto it has
+    made its other end false too). So a bit set during a job is a literal on the job's trail, or
+    the negation of one — the lane that found a contradiction sets its bit before it looks — and
+    a literal shares its word with its negation. Every store writes the baseline value, so lanes
+    writing one word race benignly. A job that assigned more literals than the bitmap has words
+    streams the row instead."""
+    lanes = tl.arange(0, W)
+    if tail >= NW:
+        j = tail * 0
+        while j < NW:
+            jm = j + lanes < NW
+            v = tl.load(ab_init_ptr + j + lanes, mask=jm, other=0)
+            tl.store(ab_row + j + lanes, v, mask=jm)
+            j += W
+    else:
+        t = tail * 0
+        while t < tail:
+            m = t + lanes < tail
+            wd = tl.load(trail_row + t + lanes, mask=m, other=0) >> 5
+            tl.store(ab_row + wd, tl.load(ab_init_ptr + wd, mask=m, other=0), mask=m)
+            t += W
+
+
+@triton.jit
+def _bcp_queue_kernel(
+    st_ptr,        # (R, M)  int32 packed clause state: every row at the baseline, in and out
+    ab_ptr,        # (R, NW) int32 assignment bitmap: likewise
+    dec_ptr,       # (N_JOBS, B) int32 literal indices, -1 = padding: one row per job
+    occ_off_ptr, occ_mid_ptr, occ_cls_ptr,
+    init_ptr,      # (M,)  int32 packed_flushed and (NW,) int32 abits_flushed: the baseline the
+    ab_init_ptr,   #   two restores read
+    trail_ptr,     # (R, TRAIL_CAP) int32 workspace
+    next_ptr,      # (1,) int32 the next job to take; zero at launch
+    conf_ptr,      # (N_JOBS,) int8 out: the job conflicted
+    impl_ptr,      # (N_JOBS,) int32 out: literals BCP implied beyond the job's own
+    rowsum_ptr,    # (R, 3) int64 out: the row's occ entries walked, literals set, decisions
+    M, NW, B, TRAIL_CAP, N_JOBS,
+    SHIFT: tl.constexpr,
+    WAVE: tl.constexpr,
+    W: tl.constexpr,
+):
+    """Entry point 1 as a QUEUE: N_JOBS assumption sets over R rows of state, one launch. A row
+    takes the next job from a shared counter, seeds and propagates it exactly as
+    _bcp_fixpoint_clean_kernel does a row, writes the job's flag and implied count, puts back
+    every word it touched (packed and bitmap), and takes another, until the jobs run out. So no
+    row waits for the launch's deepest job, and nothing is reset between jobs.
+
+    Contract: conf[job] is exact, and impl[job] is the exact fixpoint's on a job that did not
+    conflict (unspecified on one that did), whichever row ran it: a job starts from the
+    baseline and BCP is confluent. Every row is at the baseline when the launch ends. R may
+    exceed what the device runs at once; the rows that start late find no job and write zero
+    sums. The barrier after the restores orders their vector stores before the next job's
+    loads of the same words."""
+    k = tl.program_id(0).to(tl.int64)
+    st_row = st_ptr + k * M
+    ab_row = ab_ptr + k * NW
+    trail_row = trail_ptr + k * TRAIL_CAP
+    sum_ops = k * 0
+    sum_props = k * 0
+    sum_decs = k * 0
+    job = tl.atomic_add(next_ptr, 1).to(tl.int64)
+    while job < N_JOBS:
+        tail, conflict = _seed_job(ab_row, trail_row, dec_ptr, job, B)
+        ndecs = tail
+        head = B * 0
+        nops = B * 0
+        if WAVE:
+            head, tail, conflict, nops = _wave_propagate(
+                st_row, ab_row, trail_row, occ_off_ptr, occ_mid_ptr, occ_cls_ptr,
+                head, tail, conflict, nops, TRAIL_CAP, SHIFT, W)
+        else:
+            head, tail, conflict, nops = _propagate(
+                st_row, ab_row, trail_row, occ_off_ptr, occ_mid_ptr, occ_cls_ptr,
+                head, tail, conflict, nops, TRAIL_CAP, SHIFT)
+        tl.store(conf_ptr + job, (conflict != 0).to(tl.int8))
+        tl.store(impl_ptr + job, tail - ndecs)
+        sum_ops += nops
+        sum_props += tail
+        sum_decs += ndecs
+        _clean_packed(st_row, init_ptr, trail_row, occ_off_ptr, occ_mid_ptr, occ_cls_ptr,
+                      tail, M, W)
+        _clean_bitmap(ab_row, ab_init_ptr, trail_row, tail, NW, W)
+        tl.debug_barrier()
+        job = tl.atomic_add(next_ptr, 1).to(tl.int64)
+    tl.store(rowsum_ptr + k * 3, sum_ops)
+    tl.store(rowsum_ptr + k * 3 + 1, sum_props)
+    tl.store(rowsum_ptr + k * 3 + 2, sum_decs)

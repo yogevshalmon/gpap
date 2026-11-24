@@ -48,6 +48,9 @@ _PTR_I32, _PTR_I8, _PTR_I64 = "*i32:16", "*i8:16", "*i64:16"
 _FIX_PTRS = [_PTR_I32, _PTR_I32, _PTR_I8, _PTR_I8, _PTR_I64] + [_PTR_I32] * 7
 _FIX_CLEAN_PTRS = _FIX_PTRS[:8] + [_PTR_I32] + _FIX_PTRS[8:]   # + init_ptr after occ_cls
 _TRAJ_PTRS = [_PTR_I32, _PTR_I32, _PTR_I8, _PTR_I8] + [_PTR_I32] * 9
+# the queue: st, ab, dec, occ_off, occ_mid, occ_cls, init, ab_init, trail, next, then its three
+# outputs: conf (int8 per job), impl (int32 per job), rowsum (int64, three per row)
+_QUEUE_PTRS = [_PTR_I32] * 10 + [_PTR_I8, _PTR_I32, _PTR_I64]
 
 
 def _require_triton_gather():
@@ -114,6 +117,13 @@ def kernel_specs():
             # so the pre-existing blobs keep their order in the generated file.
             out.append((f"fixpoint_clean.s{shift}.w{wave}", "bcp", "_bcp_fixpoint_clean_kernel",
                         _FIX_CLEAN_PTRS + ["i32"] * 4 + [shift, wave, WAVE_W], 1))
+    for shift in SHIFTS:
+        for wave in (0, 1):
+            # _bcp_queue_kernel(st, ab, dec, occ_off, occ_mid, occ_cls, init, ab_init, trail,
+            # next, conf, impl, rowsum, M, NW, B, TRAIL_CAP, N_JOBS, SHIFT, WAVE, W) — the job
+            # queue (docs/ENGINE.md). Appended after everything else, for the same reason.
+            out.append((f"queue.s{shift}.w{wave}", "bcp", "_bcp_queue_kernel",
+                        _QUEUE_PTRS + ["i32"] * 5 + [shift, wave, WAVE_W], 1))
     return out
 
 
