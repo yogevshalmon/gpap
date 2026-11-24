@@ -8,6 +8,23 @@ change does not.
 
 ## Unreleased
 
+### Engine
+- Probe sweeps (`gpap_probe_*`, `LiteralProbe`, mining) and flags-only assumption checks
+  (`gpap_check_sets` without assignments or sat counts) run on a job queue, on both backends: a
+  few rows of state, each taking set after set and restoring what it touched, so a launch no
+  longer waits for its deepest set. Same results in the same order, 1.8 to 3.8 times the
+  chunked sweep at widths 1 to 3 (geometric means over four benchmark sets;
+  [docs/findings/PROBE_QUEUE_FINDINGS.md](docs/findings/PROBE_QUEUE_FINDINGS.md), issue 58).
+  Mining, which has a time budget, can prove more clauses in it.
+- The queue runs the WAVE kernel unless `GPAP_KERNEL` or `gpap_engine_set_mode` pins one.
+  `GPAP_QUEUE=0`, or `GPAP_CLEAN=0`, runs the sweeps in chunks as before.
+- Changed meanings: `seconds` in `gpap_probe_options` is checked between launches, and `batch`
+  (like `chunk` of `gpap_check_sets`) is the rows of state a launch uses. After a queued call
+  the engine is as after `gpap_engine_reset` to the queue's rows, so a readout reads the
+  baseline rather than the last chunk.
+- Additive ABI, same soname: `gpap_engine_queue_stats` (launches, sets and the kernel the queue
+  ran); in Python, `Engine.queue_stats()` and `queue_mode()`.
+
 ### Evaluation
 - `eval/colab/colab_supervisor.py` drives the VM through `colab ssh` and needs google-colab-cli
   0.8 or later, which removed the `console` it used; it refuses an older CLI at start

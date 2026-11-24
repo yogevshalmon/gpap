@@ -110,7 +110,7 @@ The engine:
   `engine.cpp::traj_key` are one rule (`tests/engine/test_kernel_table.py`). Kernel binaries embed
   line info, so compare their executable sections, not their bytes.
 - Kernel dispatch is decided once, in the core (`gpap_dispatch_wave`), from the clause count —
-  never from the batch alone.
+  never from the batch alone. The queue is the one exception: it runs WAVE.
 - `gpap_trail_cap` is the only definition of the trail bound; keep its slack in step with `WAVE_W`.
 - The batch comes from the memory model in `cpp/src/calibrate.cpp`, never from a runtime memory
   probe. Any change to that model changes the batch: re-validate it as
@@ -118,6 +118,11 @@ The engine:
 - `import gpap` must set `PYTORCH_CUDA_ALLOC_CONF` before torch initializes CUDA.
 - A CLEAN-mode launch restores the words it touched, so anything that reads state after the
   launch (assignments, satisfied-clause readout, selections, `recache_flush`) uses plain `apply`.
+- A queued launch leaves every row at the baseline, so only a sweep that needs a flag or a count
+  per set runs on it. It runs WAVE unless a kernel is pinned. A queued call copies the bitmap at
+  its start and trusts one claim, `packed_clean_rows`, for the packed words, so every engine path
+  that dirties a row drops it; never add a second claim ([ENGINE.md](docs/ENGINE.md) §6b,
+  `tests/engine/test_queue.py`).
 - `max_tuples` is a work budget. A per-width budget must give width 1 an explicit `0`, or the
   fallback silently caps the backbone (`pipeline.STAGE1_MAX_TUPLES`).
 - Application code reads results through the selection API; the tensor accessors are copies for

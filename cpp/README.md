@@ -133,6 +133,11 @@ auto a = engine.check_sets(lits, offsets, /*assignments=*/true, /*sat_count=*/tr
 a.sat_count(0, 4);                       // surviving literals of clause index 4 (0-based)
 ```
 
+The first call, which asks for flags and counts only, runs on the engine's queue when it has
+more sets than the queue has rows: a few rows, each taking set after set
+([`docs/ENGINE.md`](../docs/ENGINE.md) §6b). The second reads each set's row afterwards, so it
+runs one row per set. Probing (`gpap::Prober`) runs on the queue too.
+
 ## Getting answers out: the selection API
 
 `gpap::Sampler` does all of this for you; read it if you drive `gpap::Engine`. A chunk ends with K
