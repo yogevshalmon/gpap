@@ -65,6 +65,9 @@ STAGE2_MAX_TUPLES = {1: 0, 2: 2_000_000, 3: 2_000_000}
 #: Do not raise it: ABC-encoded CNFs are small by construction and mining pays most there
 #: (docs/findings/MINING_FINDINGS.md).
 MINE_MIN_CLAUSES = 500
+#: Rows of the warmup's chunks (at most the sampler's batch): what the sampler holds when mining
+#: starts, and what it holds again when the timed run starts.
+WARMUP_ROWS = 1024
 
 
 def _mine_score(smp, warm) -> float:
@@ -180,12 +183,12 @@ def describe_config(cfg) -> str:
 
 
 def _free_rows_for_mining(smp) -> None:
-    """Mining's engine is built while the sampler holds its warmup rows (up to 1024). Those can
+    """Mining's engine is built while the sampler holds its warmup rows (WARMUP_ROWS). Those can
     fill a memory limit wherever the sampler's batch is about that small (a big formula, a tight
     limit), and mining would then fit no row and be skipped; without a limit, mining would size
     from what the warmup rows leave. Give the rows back first, on every run: mining then sizes
-    from the formula and the card, and the sampler's next chunk takes the rows again, at the same
-    K (GitHub issue 76)."""
+    from the formula and the card, and the warmup's rows are taken again before the timed run
+    (GitHub issue 76)."""
     smp.trim()
 
 
@@ -290,7 +293,7 @@ def sample_clauses(nv, clauses, support, device, *, simplify=True, els=True, n_t
         # read (the best is "best_success", the miner's stuck signal). Restores the RNG after.
         cw = list(configs) if configs else None
         # pinned_batch, not a raw K assignment: the pin bounds the chunk regardless and restores K.
-        with s.pinned_batch(min(s.K, 1024)):
+        with s.pinned_batch(min(s.K, WARMUP_ROWS)):
             w = s.sample(1, configs=cw, decisions_per_round=b, random_var=random_var,
                          max_chunks=len(cw) if cw else 1,
                          collect=False, lookahead=lookahead)
@@ -444,6 +447,12 @@ def sample_clauses(nv, clauses, support, device, *, simplify=True, els=True, n_t
                     _tm = time.perf_counter()
                     _warmup(smp)
                     phases["recheck"] = phases.get("recheck", 0.0) + time.perf_counter() - _tm
+        if smp.engine.K == 0:
+            # Trimmed for mining and not rebuilt since (or mining failed): take the warmup's
+            # rows back here, in mining's time, so the timed run starts where `_warmup` left it.
+            _tm = time.perf_counter()
+            smp.engine.reset(min(smp.K, WARMUP_ROWS))
+            phases["mine"] = phases.get("mine", 0.0) + time.perf_counter() - _tm
     t0 = time.perf_counter()
     # A big-K GPU meets n_time in the bandit cold-start, so `min_measure_chunks` makes the winner
     # run that many back-to-back chunks for a stable, config-consistent rate.
