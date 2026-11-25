@@ -129,6 +129,61 @@ def test_python_sets_the_process_default_or_one_device(monkeypatch):
     assert _core.mem_limit_source(0) == "set_mem_limit" and _core.mem_limit(0) == 1 << 30
 
 
+_CPP_MEMORY_SRC = r"""
+#include <gpap/gpap.hpp>
+#include <cstdio>
+int main() {
+    std::printf("%lld %lld %lld\n", (long long)gpap::parse_mem_limit("8G"),
+                (long long)gpap::parse_mem_limit("75%", 1000),
+                (long long)gpap::parse_mem_limit("none"));
+    try {
+        gpap::parse_mem_limit("8");
+        std::printf("accepted\n");
+    } catch (const gpap::Error &e) {
+        std::printf("refused: %s\n", e.what());
+    }
+    gpap::set_mem_limit("64M");
+    gpap::reset_peak();
+    const gpap::Memory m = gpap::memory();
+    std::printf("%lld %lld %lld\n", (long long)m.limit, (long long)m.held, (long long)m.peak);
+    return 0;
+}
+"""
+
+
+@pytest.mark.core
+def test_the_cpp_faces_parse_set_and_report_a_limit(tmp_path):
+    """The C++ wrapper has the C ABI's whole memory family: parse_mem_limit gives a spec's bytes
+    without setting it (binary units, a share of a given total, "none" as 0) and throws, with the
+    reason, for a bare number; set_mem_limit, reset_peak and memory set and read a device. No
+    engine exists, so GPAP holds nothing and its peak is nothing. Built against cpp/include and
+    the library Python loads; no GPU needed."""
+    import shlex
+    import shutil
+    import subprocess
+    from pathlib import Path
+    cxx = shlex.split(os.environ["CXX"]) if os.environ.get("CXX") else (
+        [c] if (c := shutil.which("c++") or shutil.which("g++")) else None)
+    if not cxx:
+        pytest.skip("no C++ compiler")
+    lib = next((c for c in _core._candidates() if c.exists()), None)
+    if lib is None:
+        pytest.skip("libgpap not built (scripts/build_core.sh)")
+    src, exe = tmp_path / "memory.cpp", tmp_path / "memory"
+    src.write_text(_CPP_MEMORY_SRC)
+    r = subprocess.run([*cxx, "-std=c++17", "-O1",
+                        f"-I{Path(__file__).parents[2] / 'cpp/include'}", str(src), "-o",
+                        str(exe), str(lib), f"-Wl,-rpath,{lib.parent}"],
+                       capture_output=True, text=True, timeout=300)
+    assert r.returncode == 0, r.stderr
+    env = {k: v for k, v in os.environ.items() if k != "GPAP_MEM_LIMIT"}
+    out = subprocess.run([str(exe)], capture_output=True, text=True, timeout=60, env=env,
+                         check=True).stdout.splitlines()
+    assert out[0] == f"{8 << 30} 750 0"
+    assert out[1].startswith("refused: ") and "unit" in out[1]
+    assert out[2] == f"{64 << 20} 0 0"
+
+
 # ---------------------------------------------------------------------------------- the ledger
 
 @pytest.mark.engine
