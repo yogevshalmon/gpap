@@ -13,6 +13,7 @@
 #include <algorithm>
 #include <chrono>
 #include <climits>
+#include <cstdio>
 #include <cstdlib>
 #include <cstring>
 #include <string>
@@ -307,9 +308,11 @@ extern "C" const char *gpap_engine_device_name(const gpap_engine *e) {
 
 /* ------------------------------------------------------------------ reset */
 
-/* Whether the batch is sized against an exact bound, a memory limit or a host's grant, which
- * counts every byte: the default rule's margins do not then cover a row buffer held past what
- * the sizing counted. */
+/* Whether the batch is sized against a memory limit or a host's grant, whose bytes are fixed
+ * between calls: there a row buffer held past what the sizing counted would pass the bound, so a
+ * smaller batch refits the rows. The default budget reads free memory, which moves a little
+ * between calls; a refit there would reallocate the rows at nearly every sizing, and the rows a
+ * smaller batch keeps are already held, outside the free memory the reserve is kept in. */
 static bool exact_sizing(const gpap_engine *e) {
     if (e->mem_source == gpap::GpuMemory::GRANT) return true;
     gpap::MemState acct;
@@ -872,12 +875,15 @@ static void no_row_message(const gpap_engine *e, const SizeRequest &r, const Siz
         return;
     }
     const int64_t fixed = r.fixed;
-    /* The default budget's reserve and fraction are mem_budget's (calibrate.cpp), not repeated
-     * here: say what it is a share of. */
-    const char *memory = e->mem_source == GpuMemory::DEVICE
-                             ? "the default budget, a share of the device's free memory"
-                             : "the default budget, a share of the device's total memory (its "
-                               "free memory cannot be measured)";
+    /* The default budget's rule is mem_budget's (calibrate.cpp): say what it is taken of. */
+    char memory[160], rsv[32];
+    std::snprintf(memory, sizeof memory,
+                  e->mem_source == GpuMemory::DEVICE
+                      ? "the default budget, the device's free memory less the memory reserve of "
+                        "%s,"
+                      : "the default budget, a share of the device's total memory less the "
+                        "memory reserve of %s (its free memory cannot be measured),",
+                  fmt_bytes(acct.reserve, rsv));
     if (s.bound == GPAP_BOUND_LIMIT) {
         char f[32];
         set_error("not even one row fits on %s: a row of this formula needs %s, and the memory "
@@ -893,7 +899,10 @@ static void no_row_message(const gpap_engine *e, const SizeRequest &r, const Siz
               "beside the %s this call takes once%s", dev, fmt_bytes(s.per_row, a),
               s.bound == GPAP_BOUND_GRANT ? "the host's grant" : memory, fmt_bytes(s.left, b),
               fmt_bytes(fixed, c),
-              s.bound == GPAP_BOUND_MEMORY ? " (GPAP_VRAM_BUDGET_MIB caps it, where set)" : "");
+              s.bound == GPAP_BOUND_MEMORY
+                  ? ". Lower the reserve (GPAP_MEM_RESERVE, gpap_set_mem_reserve) or free memory; "
+                    "GPAP_VRAM_BUDGET_MIB caps the budget, where set"
+                  : "");
 }
 
 int32_t engine_batch(gpap_engine *e, int64_t extra_row_bytes, int32_t cap,
@@ -928,7 +937,7 @@ int32_t engine_batch(gpap_engine *e, int64_t extra_row_bytes, int32_t cap,
     r.widest = std::max<int64_t>(
         {4ll * e->num_long, 4ll * e->nw, 4ll * e->trail_cap, extra_row_bytes, 1});
     switch (m.source) {
-        case GpuMemory::DEVICE: r.memory = mem_budget(m.free + own, kMemFraction); break;
+        case GpuMemory::DEVICE: r.memory = mem_budget(m.free + own, acct.reserve, 1); break;
         case GpuMemory::GRANT: r.grant = m.free + own; break;
         default:
             /* A total stands in for free memory, unless a limit does: less what GPAP's other
@@ -938,7 +947,8 @@ int32_t engine_batch(gpap_engine *e, int64_t extra_row_bytes, int32_t cap,
              * function of the formula and the card, as it was. */
             if (r.limit <= 0) {
                 const int64_t others = e->mem.account ? acct.held - e->mem.held() : 0;
-                r.memory = mem_budget(std::max<int64_t>(m.free - others, 0), kMemFraction);
+                r.memory = mem_budget(std::max<int64_t>(m.free - others, 0), acct.reserve,
+                                      kTotalShare);
             }
             break;
     }
@@ -960,12 +970,12 @@ int64_t engine_transient_room(gpap_engine *e, int64_t reuse) {
     GpuMemory m;
     if (e->gpu->memory(&m) != GPAP_OK) return room;
     if (m.source == GpuMemory::GRANT) return std::min(room, std::max<int64_t>(m.free + reuse, 0));
-    /* On a measured device, the default budget of what is free now; an unmeasured total
+    /* On a measured device, what the reserve leaves of free memory now; an unmeasured total
      * (OpenCL) has its share's margin instead. Under GPAP_VRAM_BUDGET_MIB, which caps what a
      * call takes rather than what is free, also the cap less every row-kind buffer the engine
      * holds: the call's rows and what it took since it was sized. */
     if (m.source == GpuMemory::DEVICE)
-        room = std::min(room, std::max<int64_t>(mem_budget(m.free + reuse, kMemFraction), 0));
+        room = std::min(room, std::max<int64_t>(mem_budget(m.free + reuse, acct.reserve, 1), 0));
     if (const int64_t cap = mem_budget_cap())
         room = std::min(room, std::max<int64_t>(cap - e->mem.rows + reuse, 0));
     return room;

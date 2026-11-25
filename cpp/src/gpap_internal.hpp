@@ -19,9 +19,12 @@ namespace gpap {
 void set_error(const char *fmt, ...);
 const char *get_error();
 
-/* Share of free VRAM one batch may occupy — the only proportional headroom in the sizing path,
- * defined once so a formula cannot pick a different batch per entry point. */
-constexpr double kMemFraction = 0.80;
+/* The share of a device's total memory the default rule takes where free memory cannot be
+ * measured (OpenCL): the total stands in for free memory, so this share is the margin for
+ * everything GPAP cannot see there. A measured device takes all of its free memory less the
+ * reserve (memory.hpp) instead. Defined once so a formula cannot pick a different batch per
+ * entry point. */
+constexpr double kTotalShare = 0.80;
 
 /* Guard for packed-derived readouts after a CLEAN launch (engine.cpp; used by readout.cpp). */
 gpap_status engine_reject_if_packed_is_baseline(gpap_engine *e, const char *what);
@@ -88,9 +91,11 @@ struct FormulaBuf : DevBuf {
 };
 inline GpuArg buf(const DevBuf &b, size_t offset = 0) { return buf(b.ptr, offset); }
 
-/* The memory budget one batch may take out of `free_bytes` — the reserve, the fraction and the
- * $GPAP_VRAM_BUDGET_MIB cap of gpap_mem_available, for a caller that already holds a device. */
-int64_t mem_budget(int64_t free_bytes, double fraction);
+/* The memory budget one batch may take out of `free_bytes`: what the reserve leaves, times
+ * `share` (1 on a measured device, kTotalShare on an unmeasured total), under the
+ * $GPAP_VRAM_BUDGET_MIB cap: gpap_mem_available's rule, for a caller that already holds a
+ * device. */
+int64_t mem_budget(int64_t free_bytes, int64_t reserve, double share);
 /* GPAP_VRAM_BUDGET_MIB in bytes, the ceiling mem_budget applies; 0 = none. */
 int64_t mem_budget_cap();
 /* Rows of `per_row` bytes that fit `bytes`, at most `cap` (<= 0: no cap), at least one. */

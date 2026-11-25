@@ -482,7 +482,7 @@ def run_recurrent_once(rival, bench_file, key, T, steps, batch, start_point,
 
 
 def pick_batch(bench_file, T, budget_bytes=None):
-    """The batch this rival is granted: the largest fitting 0.80 of free VRAM (fit_batch)."""
+    """The batch this rival is granted: the largest fitting GPAP's own budget (fit_batch)."""
     n_gates = sum(1 for line in open(bench_file)
                   if "=" in line and "DFF" not in line and not line.lstrip().startswith("#"))
     return fit_batch(max(n_gates, 1) * T, "recurrent", budget_bytes)

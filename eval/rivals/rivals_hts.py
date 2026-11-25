@@ -105,8 +105,8 @@ def main():
                          "specify, see rival_common.RIVAL_STEPS; or an explicit number")
     ap.add_argument("--batch", type=int, nargs="+", default=None,
                     help="explicit HTS batch sizes to try (best reported). Default: the largest "
-                         "that fits in 0.80 of free VRAM — the same share of the card GPAP "
-                         "sizes its own K with. Their scripts' batch 100 is ~1/295 of the rate "
+                         "that fits in the budget GPAP sizes its own K with (free VRAM less "
+                         "the memory reserve). Their scripts' batch 100 is ~1/295 of the rate "
                          "their tool reaches on our instances, so it cannot be the rule.")
     ap.add_argument("--gpap-n", type=int, default=50_000)
     ap.add_argument("--n-cov", type=int, default=1000,
@@ -139,7 +139,7 @@ def main():
     steps, steps_src = resolve_steps("hts", args.steps)
     files = sorted(glob.glob(args.cnfs))
     bdesc = (", ".join(f"{b:,}" for b in args.batch) if args.batch
-             else "fit to 0.80 of free VRAM")
+             else "fit to GPAP's own budget")
     print(f"{len(files)} instances | HTS steps={steps} ({steps_src}) batch={bdesc} | "
           f"GPAP n_time={args.gpap_n:,} | device={device}")
     hdr = (f"{'instance':<24}{'HTS uniq':>10}{'HTS t':>8}{'HTS u/s':>12}"

@@ -356,11 +356,12 @@ class Engine {
     int device_ = 0;
 };
 
-/** The batch-sizing model (cpp/src/calibrate.cpp). mem_available() is free VRAM minus a driver
- *  reserve, and `fraction` — 0.80 on every face — is the only headroom left in the sizing path.
- *  compute_k_safe() is the largest K fitting `bytes` and row_bytes() one row's device cost, both
- *  over `gpap_formula_info::num_long`, NOT num_clauses. default_k_cap() is the `cap` itself. */
-inline std::int64_t mem_available(int device = 0, double fraction = 0.80) {
+/** The batch-sizing model (cpp/src/calibrate.cpp). mem_available() is what a new engine's rows
+ *  are sized against, free VRAM less the memory reserve; `fraction` scales it, 1 (every face's
+ *  default) being the engine's own budget. compute_k_safe() is the largest K fitting `bytes` and
+ *  row_bytes() one row's device cost, both over `gpap_formula_info::num_long`, NOT num_clauses.
+ *  default_k_cap() is the `cap` itself. */
+inline std::int64_t mem_available(int device = 0, double fraction = 1.0) {
     return gpap_mem_available(device, fraction);
 }
 
@@ -383,15 +384,24 @@ inline void set_mem_limit(const std::string &spec, int device = 0) {
           "gpap_set_mem_limit");
 }
 
+/** The memory reserve (gpap_set_mem_reserve): what GPAP leaves free on `device` beside what
+ *  it holds, as "1G", "512M", "5%" or "none"; an empty spec follows GPAP_MEM_RESERVE again.
+ *  Throws gpap::Error, with the reason, for a malformed spec. */
+inline void set_mem_reserve(const std::string &spec, int device = 0) {
+    check(gpap_set_mem_reserve(device, spec.empty() ? nullptr : spec.c_str()),
+          "gpap_set_mem_reserve");
+}
+
 /** One device's memory as GPAP sees it now (docs/ENGINE.md §7). */
 struct Memory {
     std::int64_t limit;         /* bytes, 0 = none */
     gpap_limit_source source;
     std::int64_t held, peak;    /* what GPAP's engines hold there, and their peak */
+    std::int64_t reserve;       /* bytes GPAP leaves free there */
 };
 inline Memory memory(int device = 0) {
     return {gpap_mem_limit(device), gpap_mem_limit_source(device), gpap_mem_held(device),
-            gpap_mem_peak(device)};
+            gpap_mem_peak(device), gpap_mem_reserve(device)};
 }
 /** Start a new peak on `device`: memory(device).peak counts from what GPAP holds now. */
 inline void reset_peak(int device = 0) { gpap_mem_reset_peak(device); }
