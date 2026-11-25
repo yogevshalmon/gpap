@@ -485,7 +485,6 @@ class GPUSampler:
                                  "path; use False or 'soft'")
             return (c[0], max(1, c[1]), "soft" if la in ("soft", "fsoft") else False)
         plan = [_norm(c) for c in configs] if configs else [_norm((random_var, B, lookahead))]
-        K = self.batch_size
         adaptive = configs is not None and len(plan) > 1
         keep_rows = collect or verify_clauses is not None
 
@@ -572,7 +571,7 @@ class GPUSampler:
             "decisions_per_s": (bcp_decs / elapsed) if elapsed > 0 else 0.0,
             "implications_per_s": (bcp_impl / elapsed) if elapsed > 0 else 0.0,
             "bcp_decisions": bcp_decs, "bcp_implications": bcp_impl,
-            "n_chunks": chunk, "K": K, "B": B, "random_var": bool(random_var),
+            "n_chunks": chunk, "K": self.batch_size, "B": B, "random_var": bool(random_var),
             # None = no support declared; 0 = declared and propagation determined all of it.
             "support_size": (None if sup is None else len(sup)),
             "mean_decision_rounds": float(st.rounds_mean),
