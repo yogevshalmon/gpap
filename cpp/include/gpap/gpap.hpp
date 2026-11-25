@@ -469,8 +469,8 @@ struct SampleOptions {
     bool retry_with_lookahead = false;
     /** Trajectories per chunk, and the ceiling when they are auto-sized. k = 0 sizes the batch
      *  to free VRAM, making it a function of live conditions rather than of the seed — pin it
-     *  whenever two runs must be comparable. k_cap: 0 = the library's device-independent batch
-     *  cap, positive = that cap verbatim, negative = no cap. */
+     *  whenever two runs must be comparable. k_cap: 0 = the library's batch cap (per card:
+     *  gpap_default_k_cap), positive = that cap verbatim, negative = no cap. */
     std::int32_t k = 0;
     std::int32_t k_cap = 0;
     /** Re-check on the device that every emitted row really satisfies every clause. Off by
