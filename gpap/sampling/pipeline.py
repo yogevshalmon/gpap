@@ -428,7 +428,8 @@ def sample_clauses(nv, clauses, support, device, *, simplify=True, els=True, n_t
                              "n_ternary": mi.by_width.get(3, 0), "seconds": mi.seconds,
                              "kept": bool(learned),
                              "gain": (score_after / score_before) if score_before else None,
-                             # the score's factors, so a 1.00x says which one did not move
+                             # the score's factors, so a 1.00x says which one did not move; K
+                             # is the batch the warmups ran, and the timed run sizes its own
                              "k_before": k_before, "k_after": k_after,
                              "success_before": w["best_success"],
                              "success_after": success_after,

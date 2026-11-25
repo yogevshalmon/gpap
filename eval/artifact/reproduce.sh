@@ -37,7 +37,10 @@ PY="${PYTHON:-$REPO_ROOT/.venv/bin/python}"
 export PYTHONPATH="${PYTHONPATH:-.}"
 
 # The GPAP-side VRAM budget the published campaign ran under: its rows record 23.45 GB free, and
-# the engine's model is (free - 800 MB reserve) x 0.80. estimate_wall.py re-derives it.
+# the engine's model then was (free - 800 MB reserve) x 0.80. estimate_wall.py re-derives it.
+# That model, and the fixed batch cap of 262,144, are the tag's (tacas27-artifact-rc1): main
+# sizes from free memory less a reserve, with a cap per card, so the campaign's batches are
+# reproduced on the tag (docs/findings/RIVAL_FAIRNESS_FINDINGS.md §17g).
 L4_BUDGET_MIB=17280
 
 VRAM_CAP="l4"
