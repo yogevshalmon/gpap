@@ -219,10 +219,11 @@ def sample_file(path, device, **kw):
     phases = {}
     # One parse (clauses and the `c ind` support), shared by construction, mining and the caller.
     nv0, cls0, sup0 = read_dimacs(path)
-    phases["parse"] = time.perf_counter() - t_start
-    # Wire map (var -> input@cycle) from a .bench conversion; empty for a plain CNF.
+    # Wire map (var -> input@cycle) from a .bench conversion; empty for a plain CNF. Part of the
+    # parse: its first call imports the circuit reader, which no phase would otherwise bill.
     from gpap.circuits.bench import parse_support_labels
     wire_map = parse_support_labels(path)
+    phases["parse"] = time.perf_counter() - t_start
     # No encoder-provenance gate here: mining is worth more on ABC-encoded CNFs than on Tseitin
     # ones (docs/findings/MINING_FINDINGS.md); MINE_SECONDS bounds the cost.
     return sample_clauses(nv0, cls0, sup0, device,
@@ -334,10 +335,11 @@ def sample_clauses(nv, clauses, support, device, *, simplify=True, els=True, n_t
                                       support=support, k_cap=k_cap, seed=seed)
         return smp
 
+    # Construction starts here: the first call into libgpap below loads it, in a fresh process.
+    _tc = time.perf_counter()
     if device.type == "cuda":           # the run's peak, not an earlier run's in this process
         from gpap.engine import _core as _gcore
         _gcore.mem_reset_peak(device.index or 0)
-    _tc = time.perf_counter()
     smp = _new_sampler(clauses)
     phases["construct"] = time.perf_counter() - _tc
     # The shape of the instance is known now, and everything after it (warmup, up to MINE_SECONDS
@@ -480,6 +482,9 @@ def sample_clauses(nv, clauses, support, device, *, simplify=True, els=True, n_t
     # single config has no per-config wall and would otherwise carry it.
     verify_s = float(t.get("verify_sound_s") or 0.0)
     wall = time.perf_counter() - t0 - proj_s - verify_s
+    # The report built below (provenance, memory, rates) is delivery, billed to phases["output"]:
+    # its first call in a process reads the library and the device, which no phase billed.
+    _tr = time.perf_counter()
     # Engine provenance: which packed split, kernel variant, K and build produced the number,
     # captured after any post-mining rebuild and before the coverage pass lowers K.
     engine_info = {"kernel": "triton-packed-sum", "mode": smp.engine.mode,
@@ -516,7 +521,7 @@ def sample_clauses(nv, clauses, support, device, *, simplify=True, els=True, n_t
     # nothing was found (docs/findings/CLI_DELIVERY_FINDINGS.md).
     cols = [v + 1 for v in smp.projection_cols()]
     samples = np.zeros((0, len(cols)), dtype=np.uint8)
-    phases["output"] = proj_s
+    phases["output"] = proj_s + (time.perf_counter() - _tr)
     if out_cap:
         samples = t.get("out_bits", samples)
         cols = t.get("out_cols", cols)

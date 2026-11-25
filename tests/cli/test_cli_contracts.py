@@ -155,10 +155,11 @@ def test_delivery_bound_holds_when_a_valve_other_than_the_clock_stops_the_run(tm
                          ids=["off", "cov", "verify"])
 def test_phases_account_for_the_whole_reported_wall(tmp_path, extra):
     """`phases` sums to `wall_total_s` with and without the opt-in readouts (--n-cov,
-    --verify-sound), which are billed to `phases_diag` instead. The sum is checked to 5% or
-    2 ms, whichever is larger: a fraction of a millisecond between phases is billed to none, and
-    on a run of a few milliseconds host noise alone passed 5%. A readout billed to `phases` as
-    well is caught by name below, whatever its size."""
+    --verify-sound), which are billed to `phases_diag` instead. Each test runs in a fresh process
+    first, where loading the library and the first report cost milliseconds that once went
+    unbilled. The sum is checked to 5% or 2 ms, whichever is larger, so host noise on a run of a
+    few tens of milliseconds cannot fail it; a readout billed to `phases` as well is caught by
+    name below, whatever its size."""
     from gpap.sampling.pipeline import sample_file
     info = sample_file(_cnf(tmp_path, SMALL), torch.device("cuda"), n_time=3000, out_cap=300,
                        k_cap=64, time_limit=30.0, mine=False, **extra)
