@@ -108,6 +108,11 @@ class LiteralProbe:
         self._num_vars = int(formula.info.num_vars)
         self._refresh()
 
+    def trim(self) -> None:
+        """Give the engine's rows back and keep the formula and its units, so another engine on
+        the device sizes as if this one held none; the next sweep takes them again."""
+        self._engine.trim()
+
     def _refresh(self) -> None:
         self.unsat = bool(self._engine.flush_conflict)
         self._free = self._engine.free_literals()

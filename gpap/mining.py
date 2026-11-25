@@ -188,7 +188,12 @@ def mine_entailed(num_vars: int, clauses: list, device, *, pool: list | None = N
                 # unbanked for `finally` to bank once; and the old engine stays alive through the
                 # build, so the GPU context is not torn down and created again in between
                 # (MINING_FINDINGS.md, "Rebuilding the probe engine"). The swap leaves no second
-                # name on the new engine: `del probe` must free it.
+                # name on the new engine: `del probe` must free it. The old engine gives its
+                # rows back first and keeps its context: under a memory limit its last sweep
+                # filled the limit, and the new formula would fit beside nothing (issue 76).
+                # Without a limit nothing changes, since the old engine goes before the new one
+                # sizes a batch.
+                probe.trim()
                 rebuilt = LiteralProbe(num_vars, current, device)
                 res.implications += probe.implications
                 _bank_resets(res, probe)

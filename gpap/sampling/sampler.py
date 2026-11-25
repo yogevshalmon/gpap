@@ -95,6 +95,12 @@ class GPUSampler:
     def K(self, n: int) -> None:
         self._smp.set_k(int(n))
 
+    def trim(self) -> None:
+        """Give the engine's rows back while the sampler is idle, keeping the formula and `K`:
+        a second engine on the device (mining) then sizes as if this one held none. The next
+        chunk takes the rows again, at the same K."""
+        self.engine.trim()
+
     @property
     def batch_size(self) -> int:
         """Trajectories the next chunk will run — the number that sets throughput."""

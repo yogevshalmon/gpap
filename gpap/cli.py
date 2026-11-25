@@ -22,6 +22,27 @@ def _k_cap_arg(v):
     return _bounded(int, 1, "'auto' or a positive integer")(v)
 
 
+def _mem_limit_arg(v):
+    """--mem-limit: checked by the core's one parser at parse time, so a typo fails before any
+    formula is read. Where the core is not built the run fails later anyway, and says why."""
+    try:
+        from gpap.engine import _core
+        _core.parse_mem_limit(v)
+    except ValueError as e:
+        raise argparse.ArgumentTypeError(str(e)) from None
+    except (OSError, RuntimeError):         # no libgpap to ask: the run reports that itself
+        pass
+    return v
+
+
+def _add_mem_limit(parser) -> None:
+    parser.add_argument(
+        "--mem-limit", type=_mem_limit_arg, default=None, metavar="SIZE",
+        help="most GPU memory GPAP may hold: 8G, 512M (binary units), 75%% of the device, or "
+             "none. Sets GPAP_MEM_LIMIT for the run and its child runs. Default: no limit, "
+             "the batch is sized from free memory")
+
+
 def _bounded(kind, lo, what, zero_means=None, exclusive=False):
     """An argparse `type` that REJECTS a value the command cannot act on, at parse time rather
     than as a nonsense run. `zero_means` documents a 0 that is meaningful, not degenerate."""
@@ -662,6 +683,22 @@ def _print_backend_status():
         print(f"GPU backend: {os.environ['GPAP_BACKEND']} — unavailable ({e})")
 
 
+def _print_memory_limit(device: int) -> None:
+    """The memory limit in force and what a new engine's rows would be sized against: the
+    numbers that decide K on a memory-bound formula (docs/ENGINE.md §7)."""
+    try:
+        from gpap.memory import memory
+        mm = memory(device)
+        rows = f"a new engine's rows are sized against {mm['available'] / (1 << 30):.2f} GiB"
+        if mm["limit"]:
+            print(f"memory limit: {mm['limit'] / (1 << 30):.2f} GiB, from "
+                  f"{mm['limit_source']} ({rows})")
+        else:
+            print(f"memory limit: none — --mem-limit or GPAP_MEM_LIMIT sets one ({rows})")
+    except Exception as e:  # noqa: BLE001 — provenance, never fatal
+        print(f"memory limit: unavailable ({e})")
+
+
 def _cmd_info(args):
     # Report a missing torch as a finding, not a traceback: `reproduce.sh check` runs this first
     # on machines (the artifact VM) that only regenerate the tables and never install it.
@@ -680,6 +717,8 @@ def _cmd_info(args):
             print("device: CPU (no CUDA) — the cuda backend CANNOT run (no CPU path); "
                   "GPAP_BACKEND=opencl runs mining and checking on an OpenCL device")
         _print_backend_status()
+        if os.environ.get("GPAP_BACKEND") == "opencl":
+            _print_memory_limit(0)
         _print_abc_status()
         return
     dev = torch.device("cuda")
@@ -698,11 +737,17 @@ def _cmd_info(args):
         cap = vram_budget_cap()
         if cap:
             got = gpu_mem_available(dev)
+            from gpap.engine import _core
+            # Under a memory limit the budget can stop below the cap for that reason, not the card.
+            limited = _core.mem_limit(dev.index or 0) > 0
+            binds = ("the cap binds" if got >= cap else
+                     "the memory limit or the card binds — the cap is inert here" if limited else
+                     "the CARD binds — the cap is inert here")
             print(f"VRAM budget: capped at {cap/(1<<20):,.0f} MiB by GPAP_VRAM_BUDGET_MIB "
-                  f"(engine sizes K against {got/1e9:.1f} GB; "
-                  f"{'the cap binds' if got >= cap else 'the CARD binds — the cap is inert here'})")
+                  f"(engine sizes K against {got/1e9:.1f} GB; {binds})")
     except Exception as e:  # noqa: BLE001 — provenance, never fatal
         print(f"VRAM budget: unavailable ({e})")
+    _print_memory_limit(dev.index or 0)
     try:
         from gpap.engine import _core
         if _core.available():
@@ -815,6 +860,7 @@ def main(argv=None):
                         "counted when it is fully assigned with no clause emptied). Its wall is "
                         "excluded from every rate, and it grows with the formula")
     s.add_argument("--device", default=None)
+    _add_mem_limit(s)
     s.add_argument("--k-cap", type=_k_cap_arg, default="auto",
                    help="ceiling on the per-chunk batch K. 'auto' (default) is the library's "
                         "cap, the same on every GPU; pass an int to fix it explicitly")
@@ -907,6 +953,7 @@ def main(argv=None):
     m.add_argument("--stats", default=None,
                    help="write the mining report JSON here (includes every mined clause)")
     m.add_argument("--device", default=None)
+    _add_mem_limit(m)
     m.add_argument("--seed", type=int, default=5, help="(circuit input) unroll/target seed")
     m.add_argument("--cycles", type=_POS_INT, default=25,
                    help="(circuit input) unroll depth")
@@ -926,6 +973,7 @@ def main(argv=None):
                         "Off by default, as everywhere else: it is a self-test, not part of "
                         "measuring throughput. Its wall is excluded from every rate, but it "
                         "grows with the formula (eval/run_full_eval.sh turns it on)")
+    _add_mem_limit(b)
     b.add_argument("--k-cap", type=_k_cap_arg, default="auto",
                    help="ceiling on the per-chunk batch K. 'auto' (default) is the library's "
                         "cap, the same on every GPU; pass an int to fix it explicitly")
@@ -990,9 +1038,12 @@ def main(argv=None):
 
     i = sub.add_parser("info", help="device, engine core, kernel/encoder availability, VRAM cap, "
                                     "power-limit warning")
+    _add_mem_limit(i)
     i.set_defaults(func=_cmd_info)
 
     args = p.parse_args(argv)
+    if getattr(args, "mem_limit", None):     # the core reads it on every call, as do child runs
+        os.environ["GPAP_MEM_LIMIT"] = args.mem_limit
     try:
         args.func(args)
     except KeyboardInterrupt:
