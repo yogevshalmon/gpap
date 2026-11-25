@@ -301,8 +301,9 @@ extern "C" gpap_status gpap_sampler_run(gpap_sampler *s, int64_t n_target,
 
         /* The batch, sized again from the memory the device has now: the one sized at create
          * read free memory then, and the reserve holds only if each run reads it afresh. A pin
-         * stays. First, so a run that cannot size leaves the last run's results as they were. */
-        if (!s->pinned) {
+         * stays. First, so a run that cannot size leaves the last run's results as they were; not
+         * for a formula whose construction units conflicted, which is UNSAT with no rows. */
+        if (!s->pinned && !gpap_engine_flush_conflict(s->e)) {
             const int32_t k = gpap::engine_batch(s->e, 0, s->k_cap);
             if (k <= 0) return s->e->sizing_status;            /* engine_batch said why */
             s->bound_auto = s->e->bound;
