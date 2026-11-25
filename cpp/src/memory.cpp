@@ -123,6 +123,10 @@ const char *mem_account_name(const MemAccount *a) { return a ? a->name.c_str() :
 
 gpap_status mem_take(MemHolder &h, MemKind kind, int64_t bytes) {
     if (MemAccount *a = h.account) {
+        /* Free memory is read before the lock: a plug's query may call into GPAP. */
+        GpuMemory m;
+        const bool measured =
+            h.gpu && h.gpu->memory(&m) == GPAP_OK && m.source == GpuMemory::DEVICE;
         std::lock_guard<std::mutex> lock(a->mu);
         int64_t limit = 0;
         gpap_limit_source source = GPAP_LIMIT_NONE;
@@ -142,8 +146,7 @@ gpap_status mem_take(MemHolder &h, MemKind kind, int64_t bytes) {
          * sizing cannot see (allocation rounding, kernel code a first launch loads, another
          * process) does not fail a call it fit. Two threads that both pass here before either
          * allocates can still take more. */
-        GpuMemory m;
-        if (h.gpu && h.gpu->memory(&m) == GPAP_OK && m.source == GpuMemory::DEVICE) {
+        if (measured) {
             int64_t reserve = 0;
             GPAP_TRY(resolve_reserve(a, &reserve));
             if (m.free - bytes < reserve / 2) {
