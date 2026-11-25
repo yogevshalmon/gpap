@@ -51,7 +51,7 @@ def gpu_mem_available(device: torch.device, fraction: float = 1.0) -> int:
     if device.type != "cuda" and _core.backend() == "cuda":
         placeholder = int(8e9)               # conservative fallback for a CPU device
         cap = vram_budget_cap()
-        return min(placeholder, cap) if cap else placeholder
+        return int((min(placeholder, cap) if cap else placeholder) * fraction)
     return _core.mem_available(device.index or 0, fraction)
 
 

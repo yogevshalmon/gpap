@@ -46,7 +46,8 @@ again before relying on it, or before calling the direction closed.
   what fits in free memory less 1 GiB, ran at 0.92–1.10 of its rate on a T4 and an A100, and the
   rate plateaus by about 32 times the resident warps. The driver takes a few MiB beyond GPAP's
   count, and a card that fails loudly runs with a few hundred MB free. The default is being
-  changed to a cap per card and all free memory less a reserve (issue 59).
+  changed to a cap per card and all free memory less a reserve (issue 59). *Changed: see the
+  next entry.*
   [MEMORY](MEMORY_FINDINGS.md) §2–§5
 - **The batch cap is 64 rows per resident warp; the default budget is all free memory less a 1
   GiB reserve (2026-11-25).** Rate against batch has no knee on a T4, an A100 or a WSL2 laptop:
