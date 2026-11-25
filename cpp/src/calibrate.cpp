@@ -130,7 +130,8 @@ gpap::MemAccount *account_of(int device, gpap::GpuMemory *m, bool *reported) {
 
 /* The budget a NEW engine's rows would get, before its own formula: the batch rule's bounds
  * (memory.cpp) with nothing reused and one byte a row, so its answer is bytes. Without a limit
- * that is mem_budget alone, as it always was. */
+ * that is mem_budget alone: of measured free memory, or, where the device reports only its
+ * total (OpenCL), of that total less what GPAP's engines hold there. */
 extern "C" int64_t gpap_mem_available(int device, double fraction) {
     gpap::GpuMemory m;
     bool reported = false;
@@ -145,7 +146,7 @@ extern "C" int64_t gpap_mem_available(int device, double fraction) {
     if (m.source == gpap::GpuMemory::GRANT) r.grant = m.free;
     else if (m.source == gpap::GpuMemory::DEVICE)
         r.memory = gpap::mem_budget(m.free, fraction);
-    else if (s.limit <= 0)         /* a total, less what GPAP holds there (engine_batch's rule) */
+    else if (s.limit <= 0)         /* a total, less what GPAP's engines hold (engine_batch's) */
         r.memory = gpap::mem_budget(std::max<int64_t>(m.free - s.held, 0), fraction);
     return gpap::size_rows(r).left;
 }

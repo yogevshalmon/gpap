@@ -930,11 +930,15 @@ int32_t engine_batch(gpap_engine *e, int64_t extra_row_bytes, int32_t cap,
         case GpuMemory::DEVICE: r.memory = mem_budget(m.free + own, kMemFraction); break;
         case GpuMemory::GRANT: r.grant = m.free + own; break;
         default:
-            /* A total stands in for free memory, unless a limit does: less what GPAP holds there
-             * besides the rows this call reuses, which CUDA's measured free memory already
-             * leaves out. Two engines then never both plan on the whole device. */
-            if (r.limit <= 0)
-                r.memory = mem_budget(std::max<int64_t>(m.free - r.held_other, 0), kMemFraction);
+            /* A total stands in for free memory, unless a limit does: less what GPAP's other
+             * engines hold there, which CUDA's measured free memory already leaves out, so two
+             * engines never both plan on the whole device. Not this engine's own buffers: its
+             * staging and selection lists grow with use, and a lone engine's batch stays a
+             * function of the formula and the card, as it was. */
+            if (r.limit <= 0) {
+                const int64_t others = e->mem.account ? acct.held - e->mem.held() : 0;
+                r.memory = mem_budget(std::max<int64_t>(m.free - others, 0), kMemFraction);
+            }
             break;
     }
     const Sizing s = size_rows(r);
