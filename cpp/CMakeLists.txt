@@ -124,6 +124,13 @@ target_link_libraries(gpap_assumptions PRIVATE gpap)
 add_executable(gpap_probe examples/probe.cpp)                # C++, gpap::Prober
 target_link_libraries(gpap_probe PRIVATE gpap)
 
+# ---------------------------------------------------------------- test drivers
+# The batch rule over requests on stdin (tests/engine/test_size_rows.py): it is pure, so its
+# every bound is tested with no device. Not installed.
+add_executable(gpap_test_size_rows tests/size_rows.cpp)
+target_include_directories(gpap_test_size_rows PRIVATE src)
+target_link_libraries(gpap_test_size_rows PRIVATE gpap)
+
 # ---------------------------------------------------------------- install / find_package
 # Downstream projects then just:
 #     find_package(gpap REQUIRED)

@@ -177,6 +177,14 @@ class Engine {
     std::int32_t num_vars() const { return gpap_engine_num_vars(h_); }
     std::int32_t num_clauses() const { return gpap_engine_num_clauses(h_); }
     bool flush_conflict() const { return gpap_engine_flush_conflict(h_) != 0; }
+    /** Device bytes held now, by kind (gpap_mem_kind): FORMULA is built once and kept, ROWS
+     *  grows with a batch or a call. What set the last batch: batch_bound(). */
+    std::int64_t mem_held(gpap_mem_kind kind = GPAP_MEM_ALL) const {
+        return gpap_engine_mem_held(h_, kind);
+    }
+    gpap_bound batch_bound() const { return gpap_engine_batch_bound(h_); }
+    /** Give the rows back and keep the formula; the next call takes them again. */
+    void trim() { check(gpap_engine_trim(h_), "gpap_engine_trim"); }
 
     /** Which kernel a batch of `K` rows runs: a pure query; reset() resolves Auto on its own.
      *  The rule is asked of the backend $GPAP_BACKEND names now: this engine's, unless the
@@ -366,6 +374,25 @@ inline std::int64_t row_bytes(std::int32_t num_long, std::int32_t N,
 }
 
 inline std::int32_t default_k_cap(int device = 0) { return gpap_default_k_cap(device); }
+
+/** The memory limit (gpap_set_mem_limit): the most device memory GPAP's engines hold on
+ *  `device`, as "8G", "512M", "75%" or "none"; an empty spec follows GPAP_MEM_LIMIT again.
+ *  Throws gpap::Error, with the reason, for a malformed spec. */
+inline void set_mem_limit(const std::string &spec, int device = 0) {
+    check(gpap_set_mem_limit(device, spec.empty() ? nullptr : spec.c_str()),
+          "gpap_set_mem_limit");
+}
+
+/** One device's memory as GPAP sees it now (docs/ENGINE.md §7). */
+struct Memory {
+    std::int64_t limit;         /* bytes, 0 = none */
+    gpap_limit_source source;
+    std::int64_t held, peak;    /* what GPAP's engines hold there, and their peak */
+};
+inline Memory memory(int device = 0) {
+    return {gpap_mem_limit(device), gpap_mem_limit_source(device), gpap_mem_held(device),
+            gpap_mem_peak(device)};
+}
 
 inline std::string version() { return gpap_version(); }
 /** Identity of this exact build; key a cache of measurements on this, never on version(). */
@@ -770,11 +797,14 @@ class AssumptionChecker {
         return engine_.check_sets(lits, offsets, assignments, sat_count);
     }
 
-    /** Assumption sets one launch holds — `gpap_check_chunk_size`, the core's one memory model. */
+    /** Assumption sets one launch holds — `gpap_check_chunk_size`, the core's one memory model.
+     *  Throws gpap::Error where not even one set fits, as check() would. */
     std::size_t chunk_size(std::size_t n_sets, std::size_t max_lits) {
-        return static_cast<std::size_t>(
+        const std::int64_t k =
             gpap_check_chunk_size(engine_.handle(), static_cast<std::int64_t>(n_sets),
-                                  static_cast<std::int64_t>(max_lits)));
+                                  static_cast<std::int64_t>(max_lits));
+        if (k <= 0) gpap::check(GPAP_ERR_MEMORY, "gpap_check_chunk_size");
+        return static_cast<std::size_t>(k);
     }
 
     Engine &engine() noexcept { return engine_; }

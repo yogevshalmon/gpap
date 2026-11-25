@@ -132,10 +132,15 @@ const gpap_probe_options kDefaults = {};   /* every field's default IS 0 — see
 
 /* Tuples one chunk holds, which is also the queue's first block: the engine's per-row state
  * plus the (batch, k) decision matrix only this entry point allocates. One model, the shared
- * one. */
+ * one. 0 when not even one tuple fits, the message set. */
 int32_t probe_batch(gpap_engine *e, int32_t k, int64_t n_tuples, int32_t requested) {
-    if (requested > 0) return static_cast<int32_t>(std::min<int64_t>(requested, n_tuples));
+    if (requested > 0) {
+        e->bound = GPAP_BOUND_PIN;
+        return static_cast<int32_t>(std::min<int64_t>(requested, n_tuples));
+    }
     const int32_t b = gpap::engine_batch(e, 8ll * std::max(k, 1), 0);
+    if (b <= 0) return 0;
+    if (n_tuples < b) e->bound = GPAP_BOUND_WORK;
     return static_cast<int32_t>(std::max<int64_t>(1, std::min<int64_t>(b, n_tuples)));
 }
 
@@ -261,6 +266,7 @@ gpap_status run_sweep(gpap_engine *e, int32_t k, int64_t total, const gpap_probe
     }
 
     const int32_t batch = probe_batch(e, k, std::max<int64_t>(limit, 1), o.batch);
+    if (batch <= 0) return e->sizing_status;   /* no tuple fits: engine_batch said why */
     {
         /* On the queue when it engages, else in chunks; `options.batch` pins the rows of
          * either. A queued call ends at this block's close, inside the sweep's time. */

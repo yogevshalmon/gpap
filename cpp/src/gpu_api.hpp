@@ -35,7 +35,7 @@ inline GpuArg buf(GpuMem m, size_t offset = 0) { return {GpuArg::BUF, m, offset,
 inline GpuArg i32(int32_t v) { return {GpuArg::I32, 0, 0, v}; }
 inline GpuArg i64(int64_t v) { return {GpuArg::I64, 0, 0, v}; }
 
-/* What a plug reports about the memory the engine may use on its device (engine_batch
+/* What a plug reports about the memory the engine may use on its device (cpp/src/memory.cpp
  * sizes from this). Each field's zero is what a plug that knows nothing reports: no total, and
  * `source` TOTAL, so GPAP takes `free` for a guess and keeps a share of it. The exception is
  * `max_buffer`, where zero means the device limits no single buffer: a plug whose device does

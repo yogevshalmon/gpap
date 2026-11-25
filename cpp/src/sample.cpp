@@ -85,6 +85,7 @@ struct gpap_sampler {
     int32_t k_cap = 0;
 
     int32_t K_auto = 0;                  /* calibrated at create; K is effective (set_k wins) */
+    gpap_bound bound_auto = GPAP_BOUND_NONE;   /* what set K_auto, reported again when set_k unpins */
     int32_t K = 0;
     int we_pinned_mode = 0;              /* WE resolved the engine's AUTO, not the caller */
     gpap_mode pinned_mode = GPAP_MODE_AUTO;  /* ...and WHICH kernel, so a later caller pin shows */
@@ -170,6 +171,11 @@ extern "C" gpap_status gpap_sampler_create(gpap_engine *e, int64_t seed, int32_t
         s->rng.seed((uint64_t)seed);
         s->bandit_rng.seed((uint64_t)seed ^ kBanditSeedXor);
         s->K_auto = gpap::engine_batch(e, 0, k_cap);   /* the engine's batch, at the caller's cap */
+        if (s->K_auto <= 0) {                          /* no row fits: engine_batch said why */
+            delete s;
+            return e->sizing_status;
+        }
+        s->bound_auto = e->bound;
         s->K = s->K_auto;
         rebuild_phases(s);
         gpap_status st = gpap_pair_mask_create(e, nullptr, 0, &s->mask_all);
@@ -199,6 +205,8 @@ extern "C" int32_t gpap_sampler_k(const gpap_sampler *s) { return s ? s->K : 0; 
 extern "C" gpap_status gpap_sampler_set_k(gpap_sampler *s, int32_t k) {
     if (!s) { set_error("gpap_sampler_set_k: sampler is NULL"); return GPAP_ERR_ARG; }
     s->K = k > 0 ? k : s->K_auto;
+    /* A pin of the calibrated batch is no pin: pinned_batch restores K by value. */
+    s->e->bound = s->K != s->K_auto ? GPAP_BOUND_PIN : s->bound_auto;
     return pin_mode(s);
 }
 
