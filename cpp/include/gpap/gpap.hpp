@@ -630,7 +630,7 @@ class Sampler {
     const std::vector<std::int32_t> &variables() const noexcept { return vars_; }
     std::int32_t num_support() const noexcept { return n_support_; }
     gpap_counters counters() const { return engine_.counters(); }
-    /** Restore the RNG to a known point; set_k pins the batch (k <= 0 = the calibrated one). */
+    /** Restore the RNG to a known point; set_k pins the batch (k <= 0 unpins: each run sizes it). */
     void reseed(std::int64_t seed) { check(gpap_sampler_reseed(h_, seed), "gpap_sampler_reseed"); }
     void set_k(std::int32_t k) { check(gpap_sampler_set_k(h_, k), "gpap_sampler_set_k"); }
 

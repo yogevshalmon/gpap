@@ -440,7 +440,8 @@ void gpap_sampler_free(gpap_sampler *s);
 
 /* The resolved batch (rows per chunk): the last run's, or the pin. */
 int32_t gpap_sampler_k(const gpap_sampler *s);
-/* Pin the batch (the Python face's pin_batch). k <= 0 restores the calibrated value. */
+/* Pin the batch (the Python face's pin_batch): any k > 0 holds K at k for every run. k <= 0
+ * unpins, and the next run sizes the batch again. */
 gpap_status gpap_sampler_set_k(gpap_sampler *s, int32_t k);
 /* Restore the RNG to a known point, as after create with options.seed = seed. */
 gpap_status gpap_sampler_reseed(gpap_sampler *s, int64_t seed);

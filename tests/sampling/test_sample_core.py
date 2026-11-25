@@ -317,6 +317,24 @@ def test_the_sampler_sizes_its_batch_at_every_run(monkeypatch):
     assert s.k == 5000 and st.attempts == 5000
 
 
+def test_a_pin_of_the_sized_batch_is_still_a_pin(monkeypatch):
+    """set_k(k > 0) pins whatever k is, the batch the run would size too, and set_k(0) unpins:
+    the next run sizes again. Before, a pin equal to the sized batch was no pin, so with sizing
+    at every run it was lost at the next one, and a caller that pinned to bound host memory
+    (`pin_batch(smp.K)`) got whatever the free memory gave."""
+    monkeypatch.delenv("GPAP_VRAM_BUDGET_MIB", raising=False)
+    rng = random.Random(43)
+    clauses = random_cnf(rng, 24, 36, kmin=3)
+    s = _sampler(clauses, 24, seed=5, k_cap=100_000)
+    s.set_k(s.k)
+    monkeypatch.setenv("GPAP_VRAM_BUDGET_MIB", "4")
+    st = s.run(10**9, [B8], max_chunks=1)
+    assert s.k == 100_000 and st.attempts == 100_000
+    s.set_k(0)
+    s.run(10**9, [B8], max_chunks=1)
+    assert s.k < 100_000
+
+
 def test_a_guard_reports_its_own_failure_not_the_previous_one():
     """An argument error reports its own message, not the previous call's.
 
