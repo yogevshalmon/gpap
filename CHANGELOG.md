@@ -99,7 +99,9 @@ change does not.
   still passes 0.80 gets four fifths of the new budget, not the engine's. The rival harness
   takes the engine's budget.
 - Additive ABI, same soname: `gpap_set_mem_reserve`, `gpap_mem_reserve`; `gpap::Memory` gains
-  `reserve`.
+  `reserve`. The changed meanings above (`gpap_sampler_set_k`, `gpap_sampler_k`,
+  `gpap_mem_available`'s fraction, `gpap_default_k_cap`) keep every signature; a caller that
+  relied on the old ones needs the changes listed there.
 
 ### Sampling
 - Fixed: a run's `phases` sum to `wall_total_s` in a fresh process too. The wire map is billed

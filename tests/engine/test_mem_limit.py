@@ -216,7 +216,8 @@ def test_an_allocation_that_would_leave_less_than_the_reserve_free_fails():
     f = _formula()
     e = _core.Engine(f)
     e.reset(256)
-    free = _core.mem_available(0) + _core.mem_reserve(0)        # what the device has free now
+    import torch
+    free = torch.cuda.mem_get_info(0)[0]                        # what the device has free now
     _core.set_mem_reserve(2 * (free - 1000 * _row_bytes(e)), 0)  # half of it: 1000 rows left
     with pytest.raises(MemoryError, match="reserve"):
         e.reset(2000)
@@ -240,7 +241,7 @@ def test_a_batch_the_sizing_fit_survives_a_little_drift_into_the_reserve():
         pytest.skip("OpenCL cannot measure free memory: its share of the total is the margin")
     f = _formula()
     e = _core.Engine(f)
-    free = _core.mem_available(0) + _core.mem_reserve(0)
+    free = torch.cuda.mem_get_info(0)[0]
     _core.set_mem_reserve(free - (64 << 20), 0)
     k = e.check_chunk_size(10 ** 9, 2)
     other = torch.empty(32 << 20, dtype=torch.uint8, device="cuda")
