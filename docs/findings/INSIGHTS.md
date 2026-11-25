@@ -48,6 +48,12 @@ again before relying on it, or before calling the direction closed.
   count, and a card that fails loudly runs with a few hundred MB free. The default is being
   changed to a cap per card and all free memory less a reserve (issue 59).
   [MEMORY](MEMORY_FINDINGS.md) §2–§5
+- **The batch cap is 64 rows per resident warp; the default budget is all free memory less a 1
+  GiB reserve (2026-11-25).** Rate against batch has no knee on a T4, an A100 or a WSL2 laptop:
+  64R is within 3–4% of the best on average, and each doubling past 32R buys 1–2%. A native card
+  ran at full rate with 1–21 MiB free; under WSL2 the rate held with 60–80 MiB free and fell to
+  0.81, with no error, at none. The reserve covers what GPAP cannot see and is kept at every
+  allocation on CUDA. [MEMORY](MEMORY_FINDINGS.md) §8–§9
 - **Probe sweeps and flags-only checks run on a queue (2026-11-20; host side 2026-11-24).** A
   row takes set after set and restores what it touched, so no row waits for a launch's deepest
   set: 2.5 / 2.2 / 1.8 times the chunked sweep at widths 1 / 2 / 3 on an L4 and 3.7 / 3.1 / 2.8

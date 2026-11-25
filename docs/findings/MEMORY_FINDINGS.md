@@ -2,19 +2,21 @@
 
 > **Reader:** contributors and researchers — how much of a GPU the default batch takes, what more rows would buy, and what lies outside GPAP's own count. A dated research log, not a user guide.
 >
-> **Status:** open — the default is being changed (GitHub issue 59; the user's decision of
-> 2026-11-25: a batch cap of c times the resident warps, and all free memory less a reserve).
-> Settled here: more rows than today's default buy no rate (§4), and a sampling run gives the
-> sampler's rows back before it mines (issue 76, §6).
-> **Measured:** 2026-11-25 on a Colab T4 (15 GB, driver 580.82) and an Athena A100-SXM4 (40 GB,
-> driver 595.71), the step-2 branch of the memory-limit work, on main 48f4575. Not on a laptop
-> under WSL2, nor on an L4 (§7).
-> **Rule lives in:** `cpp/src/calibrate.cpp` (`mem_budget`, `kBatchCap`), `cpp/src/engine.cpp`
-> (`engine_batch`), `cpp/src/memory.cpp` (`size_rows`), `gpap/sampling/pipeline.py`
+> **Status:** settled for issue 59 on branch mem-default-59 (2026-11-25): the batch cap is 64
+> rows per resident warp (§8), and the default budget is all free memory less a 1 GiB reserve
+> the user can set, kept at every allocation on CUDA (§9). §1–§6 describe the rule before it
+> (0.80 · (free − 800 MB), a fixed cap of 262,144): more rows than that default bought no rate
+> (§4), and a sampling run gives the sampler's rows back before it mines (issue 76, §6).
+> **Measured:** 2026-11-25 on a Colab T4 (15 GB, driver 580.82), an Athena A100-SXM4 (40 GB,
+> driver 595.71) and a 12 GB laptop card under WSL2 (§8, §9 only), on main 48f4575 (§1–§6) and
+> 814d75d (§8, §9). Not on an L4 (§7).
+> **Rule lives in:** `cpp/src/calibrate.cpp` (`mem_budget`, `kBatchRowsPerWarp`),
+> `cpp/src/memory.hpp` (`kDefaultMemReserve`), `cpp/src/memory.cpp` (`size_rows`, `mem_take`),
+> `cpp/src/engine.cpp` (`engine_batch`), `gpap/sampling/pipeline.py`
 > (`_free_rows_for_mining`).
 
 The rule is [ENGINE.md](../ENGINE.md) §7. Data, drivers and logs:
-`$GPAP_RESULTS/memdefault_20261125/`.
+`$GPAP_RESULTS/memdefault_20261125/` (§1–§7) and `$GPAP_RESULTS/memrule_20261125/` (§8, §9).
 
 ## 1. The question
 
@@ -116,7 +118,7 @@ A100 it is smaller than 262,144 (64R is 442k there), it saves memory mostly on s
 whose rows are small anyway (262,144 rows of `27.sk_3_32` hold 2.6 GB), §4's ladder reads 0.95 at
 64R on the T4 for `55.sk_3_46` and 1.00 at 32R, and it makes the default batch differ from card
 to card. The user chose it on 2026-11-25 (issue 59); the multiple comes from a measurement on
-more cards, appended here.
+more cards, appended here. *Measured in §8: 64.*
 
 ## 6. Mining beside the sampler (issue 76)
 
@@ -144,6 +146,7 @@ run, which also keeps it from fitting no row under a tight limit.
 - **A laptop under WSL2**, which pages device memory to the host instead of failing
   ([BENCHMARKING.md](../BENCHMARKING.md) §2): its default is unchanged, so its spill point was
   not needed for this decision. Measure it before any rule that takes more of a WSL2 card.
+  *Measured in §9.*
 - **An L4.** Colab's L4 assignment failed three times in a row on 2026-11-25 (502).
 - **OpenCL** throughput against rows: OpenCL's batch is often set by the device's one-buffer
   limit instead ([OPENCL_FINDINGS.md](OPENCL_FINDINGS.md) §12).
@@ -151,3 +154,80 @@ run, which also keeps it from fitting no row under a tight limit.
   hold off the device's total before the share (`engine_batch`). A lone engine's batch is
   main's, and beside others the batch can only shrink, so it cannot spill where main did not
   ([BENCHMARKING.md](../BENCHMARKING.md) §2). Its rate was not measured.
+
+## 8. The cap's multiple of the resident warps
+
+The sampler, one config (b8), seed 5, nothing leaving the GPU (`keep_cap=0`), pinned to 4R, 8R,
+16R, 24R, 32R, 48R, 64R, 96R and 128R rows (R = the card's resident warps), plus 262,144 and the
+library's own batch, every batch that fits in free memory less 2 GiB. Each ran 3–4 s and at least
+3 chunks, three passes (up, down, up); a batch's rate is its median pass. 16 formulas (the six
+`sk` instances, five sequential circuits unrolled, five EPFL circuits). Over the formulas whose
+ladder reached 128R (the others are memory-bound well below it), attempts per second over the
+best batch's, mean (lowest):
+
+| card | R | formulas | 16R | 32R | 48R | 64R | 96R | 128R | 262,144 is |
+|---|---|---|---|---|---|---|---|---|---|
+| laptop, 12 GB (WSL2) | 2,784 | 7 | 0.89 (0.83) | 0.95 (0.91) | 0.96 (0.93) | 0.96 (0.95) | 0.98 (0.97) | 0.99 (0.97) | 94R |
+| A100 40 GB | 6,912 | 11 | 0.94 (0.89) | 0.96 (0.88) | 0.97 (0.92) | 0.97 (0.88) | 0.99 (0.88) | 0.98 (0.95) | 38R |
+| T4 | 1,280 | 13 | 0.93 (0.91) | 0.96 (0.94) | 0.96 (0.89) | 0.97 (0.93) | 0.97 (0.91) | 0.98 (0.95) | 205R |
+
+- **There is no knee.** Past 32R each doubling buys 1–2% on average, for twice the rows' memory
+  and twice a chunk's wall; one formula (`55.sk_3_46`) swings by ±6% from rung to rung on every
+  card.
+- **64R** is within 3–4% of the best batch on average and within 5–12% on every formula; 128R
+  would buy another 1–2%. The cap is 64 rows per resident warp: 81,920 on the T4, 178,176 on the
+  laptop, 442,368 on the A100. On the T4 the five smallest formulas ran best at 262,144 (205R)
+  and give up 1–2% at 64R; on the A100 the cap rises past 262,144, where 64R read 0.97 against
+  0.96 at 38R.
+- **Where the warp count is unknown** (OpenCL), the cap stays 262,144.
+
+## 9. The reserve
+
+The sampler (as §8) pinned to the rows that leave X free beside what GPAP holds, X from 3 GiB to
+0, one fresh process per X: a warm-up batch at a quarter of the library's measures the real
+bytes of a row, then the batch is reset to the X rows and runs three windows of 6 s. Rate: the
+best window over the 3 GiB run's. Three memory-bound formulas: `hyp` c1 (1.8 MB a row), `b14`
+c10 (1.0 MB), `b18` c5 (5.9 MB). On the laptop the Windows counter of the NVIDIA adapter's
+shared (host) memory was sampled every 2 s, and a run that raised it by 1 GiB would have been
+killed.
+
+| card | formula | 2 GiB | 1 GiB | 512 MiB | 256 MiB | 0 |
+|---|---|---|---|---|---|---|
+| laptop (WSL2) | hyp c1 | 1.00 | 0.99 | 0.95 | 0.96 | 0.94 |
+| laptop (WSL2) | b14 c10 | 1.00 | 1.01 | 1.01 | 1.02 | 0.99 |
+| laptop (WSL2) | b18 c5 | 1.06 | 1.05 | 1.06 | 1.07 | **0.81** |
+| T4 | hyp c1 | 1.00 | 1.00 | 0.99 | 0.99 | 0.99 |
+| T4 | b14 c10 | 1.05 | 1.06 | 1.06 | 1.06 | 1.05 |
+| T4 | b18 c5 | 1.01 | 1.00 | 0.99 | 0.98 | 0.98 |
+| A100 | hyp c1 | 1.00 | 1.01 | 1.01 | 1.01 | 1.01 |
+| A100 | b14 c10 | 0.98 | 0.98 | 0.99 | 0.99 | 0.98 |
+| A100 | b18 c5 | 1.00 | 0.97 | 0.96 | 0.95 | 0.95 |
+
+- **A native card needs no reserve for GPAP itself.** Every run completed, the last with 1–21 MiB
+  free, at the same rate within noise (the A100's `b18` drifts with its batch, from 1 GiB on).
+  §3 found the same with every entry point.
+- **Under WSL2 nothing fails.** The calls after the reset took 200–300 MiB more on the laptop
+  than X (the "256 MiB" runs left 62–76 MiB free, the "0" runs none), and the adapter's shared
+  usage rose by 50–130 MiB in the runs that left under 300 MiB free. `b18` at 0 ran at 0.81: a
+  silent spill, as §7 feared. With 60–80 MiB free every formula held its rate.
+- **So the reserve is for what GPAP cannot see**: the desktop and other processes, the caller's
+  tensors, kernels loaded at a first launch. The default is 1 GiB, several times what GPAP needed
+  anywhere here, and the user sets it (`--mem-reserve`, `GPAP_MEM_RESERVE`). On CUDA every
+  allocation keeps it, so a pinned batch past the card fails as memory instead of paging.
+- **What the new default changes.** Against the old rule (0.80 · (free − 800 MB)), all free
+  memory less 1 GiB gives memory-bound formulas 22–24% more rows (`hyp` c1: 4,865 → 5,922 on the
+  laptop, 6,650 → 8,153 on the T4, 18,601 → 23,093 on the A100). §4 measured 1.23× the default
+  batch at 0.92–1.10 of its rate: the change uses the card, it does not speed it up.
+- **As a user runs it** (`gpap sample`, the library's batch, b8, seed 5, 20 s, mining off, two
+  reps in alternating order, main 814d75d against the branch): on the laptop, 21–22% more rows
+  (GPAP's peak 10.5 GB of 12 instead of 8.6), the adapter's shared usage flat at 100–117 MiB in
+  either arm, attempts per second 0.98–1.01 of main's; on the A100, 24% more rows (peak 38.1 GiB
+  of 40 instead of 30.7), 0.99–1.00 of main's rate; on the T4, 23% more rows (13.5 GiB of 15
+  instead of 11.0) at 1.00 (`hyp`) and 0.97 (`b14`, both reps), and `b18` now at the 64R cap
+  (81,920 rows, 1.00). The no-change gate (BENCHMARKING.md §3: a batch pinned at 20,000, b8,
+  seed 5, mining on) gave identical model counts and mined clauses on six cells on all three
+  cards, and mining's own time is unchanged (locally: i2c c1 153 against 152 ms, b12 c25 1.00 s
+  either way, 15 runs).
+
+Not measured: an L4; OpenCL (whose default keeps its share of the total); two processes sharing a
+card; a desktop under load beside the WSL2 runs.
