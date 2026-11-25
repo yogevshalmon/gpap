@@ -176,7 +176,7 @@ extern "C" gpap_status gpap_check_sets(gpap_engine *e, const int32_t *lits,
     if (!assign_out && !sat_out) {
         /* Flags only: the queue, when it engages (`chunk` > 0 pins its rows). */
         gpap::QueuedCall q(e);
-        GPAP_TRY(q.begin(chunk, n, step));
+        GPAP_TRY(q.begin(chunk, n, max_len, step));
         if (q.engaged())
             return check_on_queue(e, q, lits, offsets, n, conflict_out, propagated_out);
     }

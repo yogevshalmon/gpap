@@ -499,7 +499,7 @@ int main(int, char **argv) {
     if (gpap_engine_create(f, nullptr, &e) != GPAP_OK) return 3;
     {
         gpap::QueuedCall q(e);
-        report("begin", q.begin(4, 1 << 16, 4));
+        report("begin", q.begin(4, 1 << 16, 1, 4));
         std::printf("engaged|%d|\n", q.engaged() ? 1 : 0);
         const int64_t dec[4] = {0, 2, 4, 6};
         const int32_t order[1] = {0};
@@ -511,7 +511,7 @@ int main(int, char **argv) {
         report("recache_flush", gpap_engine_recache_flush(e));
         report("set_mode", gpap_engine_set_mode(e, GPAP_MODE_SCALAR));
         gpap::QueuedCall nested(e);
-        report("nested_begin", nested.begin(4, 1 << 16, 4));
+        report("nested_begin", nested.begin(4, 1 << 16, 1, 4));
         const int32_t jobs[2] = {0, 2};
         int8_t conflict[2];
         int32_t implied[2];
@@ -588,7 +588,7 @@ int main(int, char **argv) {
     if (gpap_engine_create(f, nullptr, &e) != GPAP_OK) return 3;
     {
         gpap::QueuedCall q(e);
-        const gpap_status st = q.begin(4, 1 << 16, 4);
+        const gpap_status st = q.begin(4, 1 << 16, 1, 4);
         std::printf("engaged|%d|\n", st == GPAP_OK && q.engaged() ? 1 : 0);
         const double no_deadline = 1e300;
         std::printf("first|%lld|\n", (long long)q.next_block(no_deadline));
