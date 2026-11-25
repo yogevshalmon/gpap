@@ -42,8 +42,8 @@ def set_mem_reserve(spec, *, device=None) -> None:
     `spec` has `set_mem_limit`'s grammar ("1G", "512M", "5%" of the device, bytes as an int), or
     "none" for no reserve. Without one the library's default applies (`memory()["reserve"]`).
     The default batch is sized from free memory less the reserve, and on CUDA an allocation that
-    would leave less free raises `MemoryError` instead of spilling to host memory, which WSL2
-    would do silently.
+    would leave less than half of it free raises `MemoryError` instead of spilling to host
+    memory, which WSL2 would do silently.
 
     With `device=None` it is the process default, `GPAP_MEM_RESERVE`, which child processes
     inherit; `spec=None` removes it. With a device number it applies to that device of the

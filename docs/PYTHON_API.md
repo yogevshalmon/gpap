@@ -44,7 +44,7 @@ the tier the one-call faces are written on. Tier 3 is private: its surface track
   memory: `gpap.set_mem_limit("8G")` caps what GPAP holds on the GPU, `gpap.set_mem_reserve("2G")`
   sets what it leaves free (1 GiB by default), and `gpap.engine.memory()` reports both
   ([ENGINE.md](ENGINE.md) §7). A batch that fits no row raises `MemoryError`, and so does an
-  allocation that would leave less than the reserve free.
+  allocation that would leave less than half the reserve free.
 - **CUDA + a built `libgpap` are required** (`scripts/build_core.sh`; verify with `gpap info`).
   There is no CPU execution path. `gpap.engine.core_available()` is the programmatic check.
   Under `GPAP_BACKEND=opencl` mining and checking run on an OpenCL device instead, with CPU

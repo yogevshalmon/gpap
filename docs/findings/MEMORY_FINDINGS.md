@@ -212,8 +212,9 @@ killed.
   silent spill, as §7 feared. With 60–80 MiB free every formula held its rate.
 - **So the reserve is for what GPAP cannot see**: the desktop and other processes, the caller's
   tensors, kernels loaded at a first launch. The default is 1 GiB, several times what GPAP needed
-  anywhere here, and the user sets it (`--mem-reserve`, `GPAP_MEM_RESERVE`). On CUDA every
-  allocation keeps it, so a pinned batch past the card fails as memory instead of paging.
+  anywhere here, and the user sets it (`--mem-reserve`, `GPAP_MEM_RESERVE`). The sizing keeps
+  all of it; on CUDA every allocation keeps half of it, so a pinned batch past the card fails as
+  memory instead of paging, and allocation rounding or a first launch's kernel code does not.
 - **What the new default changes.** Against the old rule (0.80 · (free − 800 MB)), all free
   memory less 1 GiB gives memory-bound formulas 22–24% more rows (`hyp` c1: 4,865 → 5,922 on the
   laptop, 6,650 → 8,153 on the T4, 18,601 → 23,093 on the A100). §4 measured 1.23× the default

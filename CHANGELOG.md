@@ -82,8 +82,8 @@ change does not.
   grammar; `gpap_mem_reserve`, `gpap.engine.memory()["reserve"]` and a sampling run's
   `mem_reserve` report it. Under a limit on CUDA the limit is no longer cut to 80% of free
   memory. OpenCL keeps its share of the total, less the reserve.
-- Changed: on CUDA an allocation that would leave less than the reserve free fails with
-  `GPAP_ERR_MEMORY`, so a pinned batch past the card fails instead of paging to host memory,
+- Changed: on CUDA an allocation that would leave less than half the reserve free fails with
+  `GPAP_ERR_MEMORY` (the sizing keeps all of it), so a pinned batch past the card fails instead of paging to host memory,
   which WSL2 did silently.
 - Changed: the batch cap is 64 rows per warp the card keeps resident, instead of 262,144 on
   every card (82k on a T4, 178k on a 12 GB laptop card, 442k on an A100; §8 of the same

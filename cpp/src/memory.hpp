@@ -50,8 +50,8 @@ struct MemHolder {
 /* Count `bytes` of `kind` the holder is about to allocate. Refused with GPAP_ERR_MEMORY, the
  * message set, when that would take its device past the limit in force (checked and added
  * under the account's lock, so two threads cannot both pass), or, where free memory is
- * measured, leave less than the reserve free. GPAP_ERR_ARG for a malformed GPAP_MEM_LIMIT or
- * GPAP_MEM_RESERVE, which are read on every call. */
+ * measured, leave less than half the reserve free (the sizing keeps all of it). GPAP_ERR_ARG
+ * for a malformed GPAP_MEM_LIMIT or GPAP_MEM_RESERVE, which are read on every call. */
 gpap_status mem_take(MemHolder &h, MemKind kind, int64_t bytes);
 /* Uncount bytes the holder freed, or did not get after mem_take. */
 void mem_give(MemHolder &h, MemKind kind, int64_t bytes);
@@ -83,8 +83,8 @@ int64_t mem_spec_bytes(const MemSpec &s, int64_t total);
 /* What GPAP leaves free on a device by default, for what it cannot count: other processes and
  * the desktop, the caller's own tensors, kernel code loaded at a first launch. The default
  * budget is free memory less the reserve, and on a measured device an allocation that would
- * leave less free is refused, because a driver that pages device memory to the host (WSL2) does
- * not refuse it: it slows down instead. The measurement that set it:
+ * leave less than half of it free is refused, because a driver that pages device memory to the
+ * host (WSL2) does not refuse it: it slows down instead. The measurement that set it:
  * docs/findings/MEMORY_FINDINGS.md §9. */
 constexpr int64_t kDefaultMemReserve = 1ll << 30;
 

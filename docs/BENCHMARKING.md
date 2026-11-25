@@ -26,7 +26,7 @@ which are clock-independent (§3); ratios within one sweep.
 ## 2. The box spills, it does not OOM
 
 On WSL2/WDDM an oversized batch migrates to host RAM over PCIe and throughput collapses silently.
-On CUDA the memory reserve is kept at every allocation ([ENGINE.md](ENGINE.md) §7), so a pinned
+On CUDA half the memory reserve is kept at every allocation ([ENGINE.md](ENGINE.md) §7), so a pinned
 batch past the card fails with `MemoryError` instead; `--mem-reserve none` removes that guard,
 and OpenCL has none. Never probe for the largest K that "works"; validate every change to batch
 sizing, and any run with the reserve lowered, under an `nvidia-smi` kill-switch
