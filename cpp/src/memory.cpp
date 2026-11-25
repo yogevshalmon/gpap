@@ -156,12 +156,18 @@ gpap_status mem_take(MemHolder &h, MemKind kind, int64_t bytes) {
             GPAP_TRY(resolve_reserve(a, &reserve));
             if (m.free - bytes < reserve / 2) {
                 char r[32], fr[32], need[32];
-                set_error("GPAP leaves %s free on %s (the memory reserve: GPAP_MEM_RESERVE, "
-                          "gpap_set_mem_reserve): %s is free, and a buffer of %s would leave "
-                          "less than half of that. Use a smaller batch, free an engine, or "
-                          "lower the reserve",
-                          fmt_bytes(reserve, r), a->name.c_str(), fmt_bytes(m.free, fr),
-                          fmt_bytes(bytes, need));
+                if (reserve > 0)
+                    set_error("GPAP leaves %s free on %s (the memory reserve: GPAP_MEM_RESERVE, "
+                              "gpap_set_mem_reserve): %s is free, and a buffer of %s would "
+                              "leave less than half of that. Use a smaller batch, free an "
+                              "engine, or lower the reserve",
+                              fmt_bytes(reserve, r), a->name.c_str(), fmt_bytes(m.free, fr),
+                              fmt_bytes(bytes, need));
+                else                          /* no reserve: still never past free memory */
+                    set_error("a buffer of %s is more than the %s free on %s (with no memory "
+                              "reserve, GPAP still allocates only what is free). Use a smaller "
+                              "batch or free an engine",
+                              fmt_bytes(bytes, need), fmt_bytes(m.free, fr), a->name.c_str());
                 return GPAP_ERR_MEMORY;
             }
         }
