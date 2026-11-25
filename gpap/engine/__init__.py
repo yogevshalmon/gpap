@@ -47,7 +47,7 @@ from gpap.engine.bcp_engine import (
 from gpap.engine.checker import AssumptionChecker
 from gpap.engine.probe import LiteralProbe, ProbeBudget, ProbeResult
 from gpap.engine._triton import kernel_available
-from gpap.memory import memory, reset_peak, set_mem_limit
+from gpap.memory import memory, reset_peak, set_mem_limit, set_mem_reserve
 
 # The GPU memory model (compute_k_safe / gpu_mem_available / default_k_cap / resolve_k_cap) is
 # deliberately not re-exported: batch sizing is the engine's job, and every entry point sizes
@@ -55,7 +55,7 @@ from gpap.memory import memory, reset_peak, set_mem_limit
 __all__ = [
     "CnfFormula", "read_dimacs", "BCPEngine", "make_assumption_tensor", "core_available",
     "AssumptionChecker", "LiteralProbe", "ProbeBudget", "ProbeResult",
-    "kernel_available", "set_mem_limit", "memory", "reset_peak",
+    "kernel_available", "set_mem_limit", "set_mem_reserve", "memory", "reset_peak",
     "packed_envelope", "clauses_envelope",
     "ext_lit_to_lit_index", "lit_index_to_ext_lit", "lit_index_negation",
 ]

@@ -1,4 +1,5 @@
-"""How much device memory GPAP may hold: the memory limit (docs/ENGINE.md §7).
+"""How much device memory GPAP may hold and must leave free: the memory limit and the memory
+reserve (docs/ENGINE.md §7).
 
 The rule, the ledger and the one parser of a limit live in the core (cpp/src/memory.cpp); this
 is the Python face over them. Importing it loads nothing: the core is opened on first use.
@@ -34,17 +35,46 @@ def set_mem_limit(spec, *, device=None) -> None:
     _core.set_mem_limit(spec, int(device))
 
 
+def set_mem_reserve(spec, *, device=None) -> None:
+    """Set the device memory GPAP leaves free beside everything it holds, for what it cannot
+    count: other processes and the desktop, your own tensors on the device.
+
+    `spec` has `set_mem_limit`'s grammar ("1G", "512M", "5%" of the device, bytes as an int), or
+    "none" for no reserve. Without one the library's default applies (`memory()["reserve"]`).
+    The default batch is sized from free memory less the reserve, and on CUDA an allocation that
+    would leave less free raises `MemoryError` instead of spilling to host memory, which WSL2
+    would do silently.
+
+    With `device=None` it is the process default, `GPAP_MEM_RESERVE`, which child processes
+    inherit; `spec=None` removes it. With a device number it applies to that device of the
+    current backend only; `spec=None` hands the device back to the default. Raises ValueError,
+    before anything changes, for a malformed spec.
+    """
+    from gpap.engine import _core
+    if device is None:
+        if spec is None:
+            os.environ.pop("GPAP_MEM_RESERVE", None)
+            return
+        text = _core._spec(spec).decode()
+        _core.parse_mem_limit(text)                 # one grammar: raises before anything changes
+        os.environ["GPAP_MEM_RESERVE"] = text
+        return
+    _core.set_mem_reserve(spec, int(device))
+
+
 def memory(device: int = 0) -> dict:
     """GPAP's view of one device's memory now, on the current backend:
 
     - `limit`: the limit in force, in bytes (0 = none), and `limit_source`: "GPAP_MEM_LIMIT",
       "set_mem_limit" or None;
+    - `reserve`: what GPAP leaves free there, in bytes;
     - `held`: what GPAP's engines hold there, counted buffer by buffer, and `peak`: the most they
       held since `reset_peak`;
     - `available`: what a new engine's rows would be sized against.
     """
     from gpap.engine import _core
     return {"limit": _core.mem_limit(device), "limit_source": _core.mem_limit_source(device),
+            "reserve": _core.mem_reserve(device),
             "held": _core.mem_held(device), "peak": _core.mem_peak(device),
             "available": _core.mem_available(device)}
 
