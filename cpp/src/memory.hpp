@@ -48,9 +48,10 @@ struct MemHolder {
 };
 
 /* Count `bytes` of `kind` the holder is about to allocate. Refused with GPAP_ERR_MEMORY, the
- * message set, when that would take its device past the limit in force: checked and added
- * under the account's lock, so two threads cannot both pass. GPAP_ERR_ARG for a malformed
- * GPAP_MEM_LIMIT, which is read on every call. */
+ * message set, when that would take its device past the limit in force (checked and added
+ * under the account's lock, so two threads cannot both pass), or, where free memory is
+ * measured, leave less than the reserve free. GPAP_ERR_ARG for a malformed GPAP_MEM_LIMIT or
+ * GPAP_MEM_RESERVE, which are read on every call. */
 gpap_status mem_take(MemHolder &h, MemKind kind, int64_t bytes);
 /* Uncount bytes the holder freed, or did not get after mem_take. */
 void mem_give(MemHolder &h, MemKind kind, int64_t bytes);
