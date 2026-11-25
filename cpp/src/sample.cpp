@@ -17,6 +17,7 @@
 #include <chrono>
 #include <cmath>
 #include <cstring>
+#include <string>
 #include <vector>
 
 using gpap::set_error;
@@ -171,9 +172,14 @@ extern "C" gpap_status gpap_sampler_create(gpap_engine *e, int64_t seed, int32_t
         s->k_cap = k_cap;
         s->rng.seed((uint64_t)seed);
         s->bandit_rng.seed((uint64_t)seed ^ kBanditSeedXor);
+        const std::string before = gpap::get_error();
         s->K_auto = gpap::engine_batch(e, 0, k_cap);   /* the engine's batch, at the caller's cap */
-        if (s->K_auto <= 0 && gpap_engine_flush_conflict(e))
-            s->K_auto = 1;                    /* UNSAT at its flush: no run takes a row */
+        if (s->K_auto <= 0 && e->sizing_status == GPAP_ERR_MEMORY &&
+            gpap_engine_flush_conflict(e)) {  /* UNSAT at its flush: no run takes a row */
+            s->K_auto = 1;
+            e->bound = GPAP_BOUND_NONE;
+            set_error("%s", before.c_str());
+        }
         if (s->K_auto <= 0) {                          /* no row fits: engine_batch said why */
             delete s;
             return e->sizing_status;
