@@ -139,17 +139,15 @@ class CudaGpu final : public Gpu {
         return GPAP_OK;
     }
 
-    gpap_status mem_info(int64_t *free_bytes, int64_t *total_bytes) override {
+    gpap_status memory(GpuMemory *out) override {
         size_t free_b = 0, total_b = 0;
         GPAP_CU(g_cu.cuMemGetInfo(&free_b, &total_b));
-        *free_bytes = (int64_t)free_b;
-        *total_bytes = (int64_t)total_b;
+        *out = GpuMemory{};
+        out->total = (int64_t)total_b;
+        out->free = (int64_t)free_b;
+        out->source = GpuMemory::DEVICE;              /* measured; CUDA sets no buffer limit */
         return GPAP_OK;
     }
-
-    bool free_is_measured() const override { return true; }      /* cuMemGetInfo */
-
-    int64_t max_buffer_bytes() const override { return 0; }
 
     gpap_status alloc(size_t bytes, GpuMem *out) override {
         CUdeviceptr p = 0;
@@ -306,7 +304,7 @@ gpap_status cuda_open(int device, Gpu **out) {
     return GPAP_OK;
 }
 
-gpap_status cuda_mem_info(int device, int64_t *free_bytes, int64_t *total_bytes) {
+gpap_status cuda_memory(int device, GpuMemory *out) {
     CUdevice dev;
     CUcontext ctx;
     GPAP_TRY(load_cuda());
@@ -318,8 +316,10 @@ gpap_status cuda_mem_info(int device, int64_t *free_bytes, int64_t *total_bytes)
     CUresult rc = g_cu.cuMemGetInfo(&free_b, &total_b);
     g_cu.cuDevicePrimaryCtxRelease(dev);
     if (rc != CUDA_SUCCESS) return GPAP_ERR_CUDA;
-    *free_bytes = (int64_t)free_b;
-    *total_bytes = (int64_t)total_b;
+    *out = GpuMemory{};
+    out->total = (int64_t)total_b;
+    out->free = (int64_t)free_b;
+    out->source = GpuMemory::DEVICE;
     return GPAP_OK;
 }
 
@@ -336,6 +336,6 @@ int32_t cuda_resident_warps(int device) {
 
 }  // namespace
 
-const GpuDriver kCudaDriver = {"cuda", cuda_open, cuda_mem_info, cuda_resident_warps};
+const GpuDriver kCudaDriver = {"cuda", cuda_open, cuda_memory, cuda_resident_warps};
 
 }  // namespace gpap

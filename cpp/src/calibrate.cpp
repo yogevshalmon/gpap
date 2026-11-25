@@ -115,9 +115,9 @@ int64_t gpap::mem_budget(int64_t free_bytes, double fraction) {
 
 extern "C" int64_t gpap_mem_available(int device, double fraction) {
     const gpap::GpuDriver *driver = gpap::gpu_driver();
-    int64_t free_b = 0, total_b = 0;
-    if (!driver || driver->mem_info(device, &free_b, &total_b) != GPAP_OK) return 0;
-    return gpap::mem_budget(free_b, fraction);
+    gpap::GpuMemory m;
+    if (!driver || driver->memory(device, &m) != GPAP_OK) return 0;
+    return gpap::mem_budget(m.free, fraction);
 }
 
 extern "C" int32_t gpap_default_k_cap(int device) {

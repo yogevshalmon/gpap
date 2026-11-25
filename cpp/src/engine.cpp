@@ -741,14 +741,15 @@ gpap_status engine_require_trajectory(gpap_engine *e) {
 
 int32_t engine_batch(gpap_engine *e, int64_t extra_row_bytes, int32_t cap,
                      int64_t reserve_bytes) {
-    int64_t free_b = 0, total_b = 0;
+    GpuMemory m;
     int64_t budget = 0;
-    if (use_ctx(e) == GPAP_OK && e->gpu->mem_info(&free_b, &total_b) == GPAP_OK) {
+    if (use_ctx(e) == GPAP_OK && e->gpu->memory(&m) == GPAP_OK) {
         /* A measured free figure already excludes the rows this engine holds from its last
          * batch, which the next batch reuses: count them back, or every call after the first
          * sizes itself from what the first left free. The batch is then a function of the
          * formula and the card, not of the engine's call history. */
-        if (e->gpu->free_is_measured()) free_b += row_buffers_held(e);
+        int64_t free_b = m.free;
+        if (m.source != GpuMemory::TOTAL) free_b += row_buffers_held(e);
         budget = std::max<int64_t>(mem_budget(free_b, kMemFraction) - reserve_bytes, 0);
     }
     const int64_t per_row =
@@ -757,7 +758,7 @@ int32_t engine_batch(gpap_engine *e, int64_t extra_row_bytes, int32_t cap,
                              cap == 0 ? gpap_default_k_cap(e->device_ordinal) : cap);
     /* One buffer's size limit (OpenCL): each per-row buffer holds k rows, so the widest one
      * bounds k — the engine's own (packed words, bitmap, trail) or the caller's extra. */
-    const int64_t limit = e->gpu->max_buffer_bytes();
+    const int64_t limit = m.max_buffer;
     if (limit > 0) {
         const int64_t widest = std::max<int64_t>(
             {4ll * e->num_long, 4ll * e->nw, 4ll * e->trail_cap, extra_row_bytes, 1});

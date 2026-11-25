@@ -35,6 +35,32 @@ inline GpuArg buf(GpuMem m, size_t offset = 0) { return {GpuArg::BUF, m, offset,
 inline GpuArg i32(int32_t v) { return {GpuArg::I32, 0, 0, v}; }
 inline GpuArg i64(int64_t v) { return {GpuArg::I64, 0, 0, v}; }
 
+/* What a plug reports about the memory the engine may use on its device (engine_batch
+ * sizes from this). Each field's zero is what a plug that knows nothing reports: no total, and
+ * `source` TOTAL, so GPAP takes `free` for a guess and keeps a share of it. The exception is
+ * `max_buffer`, where zero means the device limits no single buffer: a plug whose device does
+ * must say so, or a buffer past it fails at the allocation. */
+struct GpuMemory {
+    /* What `free` is. */
+    enum Source : int32_t {
+        /* Not a measurement: the device total (OpenCL has no free-memory query), or a guess.
+         * GPAP keeps a share of it, or a limit stands in for it. */
+        TOTAL = 0,
+        /* Measured free device memory (cuMemGetInfo). It already excludes what this device's
+         * allocations hold, the engine's own included, so the engine counts back the rows it
+         * will reuse. GPAP keeps a safety margin under it. */
+        DEVICE = 1,
+        /* A host's own count of what it still lets GPAP allocate, its other GPU work and its
+         * own transients already deducted: exact, so GPAP keeps no margin under it. Like
+         * DEVICE, it excludes what this engine already holds. */
+        GRANT = 2,
+    };
+    int64_t total = 0;          /* device bytes; 0 = unknown */
+    int64_t free = 0;           /* bytes for new allocations, read as `source` says */
+    Source source = TOTAL;
+    int64_t max_buffer = 0;     /* the largest single buffer; 0 = the device sets no limit */
+};
+
 /* One open device. Not thread-safe, like the engine that owns it. Every call that can fail
  * returns a gpap_status and leaves the message in gpap_last_error(). */
 class Gpu {
@@ -45,16 +71,8 @@ class Gpu {
     virtual const char *device_name() const = 0;
     /* Make this device the calling thread's target; every public entry point calls it first. */
     virtual gpap_status make_current() = 0;
-    /* Bytes free for new allocations and the device total. A library with no free-memory query
-     * reports the total as free; the caller's reserve and fraction still apply. */
-    virtual gpap_status mem_info(int64_t *free_bytes, int64_t *total_bytes) = 0;
-    /* True when mem_info's free figure is measured, so it already excludes what this device's
-     * allocations hold; false when it is the total. engine_batch counts the engine's own row
-     * buffers back only in the first case: in the second they were never taken out. */
-    virtual bool free_is_measured() const = 0;
-    /* The largest single buffer the device allows, or 0 if it sets no limit of its own. The
-     * batch must keep the widest per-row buffer under it (engine_batch). */
-    virtual int64_t max_buffer_bytes() const = 0;
+    /* What memory the device can give the engine now (GpuMemory). */
+    virtual gpap_status memory(GpuMemory *out) = 0;
 
     virtual gpap_status alloc(size_t bytes, GpuMem *out) = 0;
     virtual void free(GpuMem m) = 0;
@@ -80,7 +98,8 @@ class Gpu {
 struct GpuDriver {
     const char *name;
     gpap_status (*open)(int device, Gpu **out);
-    gpap_status (*mem_info)(int device, int64_t *free_bytes, int64_t *total_bytes);
+    /* Gpu::memory for a device no engine holds (gpap_mem_available). */
+    gpap_status (*memory)(int device, GpuMemory *out);
     /* Warps the device keeps resident (the WAVE dispatch's small-batch term); 0 = unknown. */
     int32_t (*resident_warps)(int device);
 };
