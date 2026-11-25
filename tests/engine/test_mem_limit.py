@@ -17,16 +17,21 @@ from tests.support import random_cnf
 
 @pytest.fixture(autouse=True)
 def _no_limit(monkeypatch):
-    """Every test starts and ends with no limit: a limit is process state, and a shell's
-    GPAP_MEM_LIMIT or GPAP_VRAM_BUDGET_MIB would size every batch here."""
+    """Every test starts and ends with no limit and the default reserve: both are process state,
+    and a shell's GPAP_MEM_LIMIT, GPAP_MEM_RESERVE or GPAP_VRAM_BUDGET_MIB would size every batch
+    here."""
     monkeypatch.delenv("GPAP_MEM_LIMIT", raising=False)
+    monkeypatch.delenv("GPAP_MEM_RESERVE", raising=False)
     monkeypatch.delenv("GPAP_VRAM_BUDGET_MIB", raising=False)
     yield
     # The CLI's --mem-limit and gpap.set_mem_limit write GPAP_MEM_LIMIT into the environment, for
-    # child runs; monkeypatch restores only what it set, so a limit would outlive the test.
+    # child runs (--mem-reserve likewise); monkeypatch restores only what it set, so a limit
+    # would outlive the test.
     os.environ.pop("GPAP_MEM_LIMIT", None)
+    os.environ.pop("GPAP_MEM_RESERVE", None)
     if _core.available():
         _core.set_mem_limit(None, 0)
+        _core.set_mem_reserve(None, 0)
 
 
 def _formula(nv=600, nc=1800, seed=3):
@@ -74,9 +79,9 @@ def test_every_documented_spelling_parses_to_its_bytes(spec, want):
 
 @pytest.mark.core
 @pytest.mark.parametrize("spec,why", [
-    ("8", "needs its unit"), ("0G", "more than zero"), ("-1G", "not a memory limit"),
+    ("8", "needs its unit"), ("0G", "more than zero"), ("-1G", "not a memory size"),
     ("1e3G", "unit"), ("0x10G", "unit"), ("101%", "at most 100%"), ("0%", "more than 0%"),
-    ("8Q", "unit"), ("8G free", "after the unit"), ("", "not a memory limit"),
+    ("8Q", "unit"), ("8G free", "after the unit"), ("", "not a memory size"),
     ("1.G", "digits after"), ("75% of it", "after the '%'"),
 ])
 def test_a_malformed_spec_is_refused_with_its_reason(spec, why):
@@ -129,6 +134,55 @@ def test_python_sets_the_process_default_or_one_device(monkeypatch):
     assert _core.mem_limit_source(0) == "set_mem_limit" and _core.mem_limit(0) == 1 << 30
 
 
+# ---------------------------------------------------------------------------------- the reserve
+
+@pytest.mark.core
+def test_the_reserve_follows_the_api_then_the_variable_then_the_default(monkeypatch):
+    """The reserve is resolved as the limit is: gpap_set_mem_reserve on its device, else
+    GPAP_MEM_RESERVE (read on every call), else the library's default of 1 GiB; "none" from
+    the API is no reserve despite the variable, and NULL follows the variable again. Its grammar
+    is the limit's, so a bare number is refused with the reason."""
+    assert _core.mem_reserve(0) == 1 << 30
+    monkeypatch.setenv("GPAP_MEM_RESERVE", "2G")
+    assert _core.mem_reserve(0) == 2 << 30
+    _core.set_mem_reserve("512M", 0)
+    assert _core.mem_reserve(0) == 512 << 20
+    _core.set_mem_reserve("none", 0)
+    assert _core.mem_reserve(0) == 0
+    _core.set_mem_reserve(None, 0)
+    monkeypatch.setenv("GPAP_MEM_RESERVE", "3G")
+    assert _core.mem_reserve(0) == 3 << 30
+    with pytest.raises(ValueError, match="unit"):
+        _core.set_mem_reserve("512", 0)
+    monkeypatch.setenv("GPAP_MEM_RESERVE", "512")
+    with pytest.raises(ValueError, match="GPAP_MEM_RESERVE"):
+        _core.mem_reserve(0)
+
+
+@pytest.mark.gpu
+def test_the_default_budget_is_free_memory_less_the_reserve():
+    """Without a limit a new engine's rows are sized against free memory less the reserve, all
+    of it on a device that measures free memory: 256 MiB more reserve is 256 MiB less budget,
+    and with no reserve the budget is the free memory itself, not 80% of it. On OpenCL, which
+    cannot measure free memory, the budget is a share (80%) of the total less what GPAP holds
+    there, and the reserve comes out before the share. Every face defaults to the engine's own
+    budget (fraction 1)."""
+    import torch
+
+    from gpap.engine.calibrate import gpu_mem_available
+    opencl = os.environ.get("GPAP_BACKEND", "cuda") == "opencl"
+    share, slack = (0.8, 1 << 10) if opencl else (1.0, 8 << 20)  # free memory moves a little
+    _core.set_mem_reserve("none", 0)
+    whole = _core.mem_available(0)
+    if not opencl:
+        assert abs(whole - torch.cuda.mem_get_info(0)[0]) <= slack
+    _core.set_mem_reserve("256M", 0)
+    assert abs((whole - _core.mem_available(0)) - share * (256 << 20)) <= slack
+    _core.set_mem_reserve(None, 0)
+    assert abs((whole - _core.mem_available(0)) - share * (1 << 30)) <= slack
+    assert abs(gpu_mem_available(torch.device("cuda", 0)) - _core.mem_available(0, 1.0)) <= slack
+
+
 _CPP_MEMORY_SRC = r"""
 #include <gpap/gpap.hpp>
 #include <cstdio>
@@ -143,9 +197,12 @@ int main() {
         std::printf("refused: %s\n", e.what());
     }
     gpap::set_mem_limit("64M");
+    gpap::set_mem_reserve("256M");
     gpap::reset_peak();
     const gpap::Memory m = gpap::memory();
-    std::printf("%lld %lld %lld\n", (long long)m.limit, (long long)m.held, (long long)m.peak);
+    std::printf("%lld %lld %lld %lld\n", (long long)m.limit, (long long)m.held, (long long)m.peak,
+                (long long)m.reserve);
+    std::printf("%d\n", gpap::mem_available() == gpap::mem_available(0, 1.0) ? 1 : 0);
     return 0;
 }
 """
@@ -155,9 +212,10 @@ int main() {
 def test_the_cpp_faces_parse_set_and_report_a_limit(tmp_path):
     """The C++ wrapper has the C ABI's whole memory family: parse_mem_limit gives a spec's bytes
     without setting it (binary units, a share of a given total, "none" as 0) and throws, with the
-    reason, for a bare number; set_mem_limit, reset_peak and memory set and read a device. No
-    engine exists, so GPAP holds nothing and its peak is nothing. Built against cpp/include and
-    the library Python loads; no GPU needed."""
+    reason, for a bare number; set_mem_limit, set_mem_reserve, reset_peak and memory set and read
+    a device; mem_available defaults to the engine's own budget (fraction 1). No engine exists,
+    so GPAP holds nothing and its peak is nothing. Built against cpp/include and the library
+    Python loads; no GPU needed."""
     import shlex
     import shutil
     import subprocess
@@ -176,12 +234,13 @@ def test_the_cpp_faces_parse_set_and_report_a_limit(tmp_path):
                         str(exe), str(lib), f"-Wl,-rpath,{lib.parent}"],
                        capture_output=True, text=True, timeout=300)
     assert r.returncode == 0, r.stderr
-    env = {k: v for k, v in os.environ.items() if k != "GPAP_MEM_LIMIT"}
+    env = {k: v for k, v in os.environ.items() if k not in ("GPAP_MEM_LIMIT", "GPAP_MEM_RESERVE")}
     out = subprocess.run([str(exe)], capture_output=True, text=True, timeout=60, env=env,
                          check=True).stdout.splitlines()
     assert out[0] == f"{8 << 30} 750 0"
     assert out[1].startswith("refused: ") and "unit" in out[1]
-    assert out[2] == f"{64 << 20} 0 0"
+    assert out[2] == f"{64 << 20} 0 0 {256 << 20}"
+    assert out[3] == "1"
 
 
 # ---------------------------------------------------------------------------------- the ledger

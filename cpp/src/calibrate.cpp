@@ -11,12 +11,6 @@
 #include "gpap_internal.hpp"
 
 namespace {
-/* Absolute slack between what the driver reports free and what we then allocate: `free` is a
- * snapshot of somebody else's bookkeeping, and a paging driver or another process can take memory
- * back underneath us (`fraction` is the proportional margin). Flat on every platform on purpose:
- * making it conditional changes gpap_compute_k_safe's input, i.e. K, unvalidated. */
-constexpr int64_t kFreeVramReserveBytes = 800000000ll;
-
 /* The batch cap: one number, the same on every GPU. A SATURATION limit, not a safety one — the
  * analytic bound in gpap_compute_k_safe protects memory, and at this batch a card is already
  * heavily oversubscribed against its resident warps. Device-independent on purpose, or `--k-cap
@@ -106,11 +100,11 @@ extern "C" int64_t gpap_row_bytes(int32_t num_long, int32_t N, int32_t trail_cap
 
 int64_t gpap::mem_budget_cap() { return env_budget_cap(); }
 
-/* The one budget rule: reserve, fraction, cap. gpap_mem_available applies it to the device named
+/* The one budget rule: reserve, share, cap. gpap_mem_available applies it to the device named
  * by an ordinal; an engine applies it to the device it already holds. */
-int64_t gpap::mem_budget(int64_t free_bytes, double fraction) {
-    const int64_t usable = std::max<int64_t>(0, free_bytes - kFreeVramReserveBytes);
-    const int64_t budget = (int64_t)(usable * fraction);
+int64_t gpap::mem_budget(int64_t free_bytes, int64_t reserve, double share) {
+    const int64_t usable = std::max<int64_t>(0, free_bytes - std::max<int64_t>(reserve, 0));
+    const int64_t budget = share >= 1 ? usable : (int64_t)(usable * share);
     const int64_t cap = env_budget_cap();
     return cap > 0 ? std::min(budget, cap) : budget;
 }
@@ -133,7 +127,8 @@ gpap::MemAccount *account_of(int device, gpap::GpuMemory *m, bool *reported) {
 /* The budget a NEW engine's rows would get, before its own formula: the batch rule's bounds
  * (memory.cpp) with nothing reused and one byte a row, so its answer is bytes. Without a limit
  * that is mem_budget alone: of measured free memory, or, where the device reports only its
- * total (OpenCL), of that total less what GPAP's engines hold there. */
+ * total (OpenCL), of a share of that total less what GPAP's engines hold there. `fraction`
+ * scales the default budget, 1 being the engine's own. */
 extern "C" int64_t gpap_mem_available(int device, double fraction) {
     gpap::GpuMemory m;
     bool reported = false;
@@ -147,9 +142,10 @@ extern "C" int64_t gpap_mem_available(int device, double fraction) {
     r.held_other = s.held;
     if (m.source == gpap::GpuMemory::GRANT) r.grant = m.free;
     else if (m.source == gpap::GpuMemory::DEVICE)
-        r.memory = gpap::mem_budget(m.free, fraction);
+        r.memory = gpap::mem_budget(m.free, s.reserve, fraction);
     else if (s.limit <= 0)         /* a total, less what GPAP's engines hold (engine_batch's) */
-        r.memory = gpap::mem_budget(std::max<int64_t>(m.free - s.held, 0), fraction);
+        r.memory = gpap::mem_budget(std::max<int64_t>(m.free - s.held, 0), s.reserve,
+                                    gpap::kTotalShare * fraction);
     return gpap::size_rows(r).left;
 }
 
@@ -164,6 +160,17 @@ extern "C" gpap_status gpap_set_mem_limit(int device, const char *spec) {
     return GPAP_OK;
 }
 
+extern "C" gpap_status gpap_set_mem_reserve(int device, const char *spec) {
+    gpap::MemSpec s;                                   /* NULL: UNSET, follow GPAP_MEM_RESERVE */
+    if (spec) GPAP_TRY(gpap::parse_mem_spec(spec, "memory reserve ", &s));
+    gpap::GpuMemory m;
+    bool reported = false;
+    gpap::MemAccount *a = account_of(device, &m, &reported);
+    if (!a) return GPAP_ERR_ARG;
+    gpap::mem_set_reserve(a, s);
+    return GPAP_OK;
+}
+
 extern "C" gpap_status gpap_parse_mem_limit(const char *spec, int64_t total_bytes,
                                             int64_t *bytes_out) {
     gpap::MemSpec s;
@@ -173,9 +180,9 @@ extern "C" gpap_status gpap_parse_mem_limit(const char *spec, int64_t total_byte
 }
 
 namespace {
-/* An account's state for the getters below. A limit that cannot be resolved reads -1, never
- * "none": every engine on the device would fail, and the getters must not say otherwise. The
- * counts stand either way. */
+/* An account's state for the getters below. A limit or reserve that cannot be resolved makes
+ * both read -1, never "none": every engine on the device would fail, and the getters must not
+ * say otherwise. The counts stand either way. */
 gpap::MemState state_of(int device) {
     gpap::GpuMemory m;
     bool reported = false;
@@ -184,6 +191,7 @@ gpap::MemState state_of(int device) {
     if (a && gpap::mem_state(a, &s) != GPAP_OK) {
         s.limit = -1;
         s.source = GPAP_LIMIT_NONE;
+        s.reserve = -1;
     }
     return s;
 }
@@ -191,6 +199,7 @@ gpap::MemState state_of(int device) {
 
 extern "C" int64_t gpap_mem_limit(int device) { return state_of(device).limit; }
 extern "C" gpap_limit_source gpap_mem_limit_source(int device) { return state_of(device).source; }
+extern "C" int64_t gpap_mem_reserve(int device) { return state_of(device).reserve; }
 extern "C" int64_t gpap_mem_held(int device) { return state_of(device).held; }
 extern "C" int64_t gpap_mem_peak(int device) { return state_of(device).peak; }
 extern "C" void gpap_mem_reset_peak(int device) {

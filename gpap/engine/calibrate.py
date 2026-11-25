@@ -38,12 +38,12 @@ def row_bytes(num_long: int, N: int) -> int:
     return _core.row_bytes(num_long, N, _core.trail_cap(N))
 
 
-def gpu_mem_available(device: torch.device, fraction: float = 0.80) -> int:
-    """Bytes available for new allocations on `device` (free VRAM minus a driver reserve; on the
-    opencl backend the device total, since OpenCL has no free-memory query).
+def gpu_mem_available(device: torch.device, fraction: float = 1.0) -> int:
+    """Bytes a new engine's rows would be sized against on `device`: free VRAM less the memory
+    reserve (on the opencl backend a share of the device total, since OpenCL has no free-memory
+    query), times `fraction`; 1, the default, is the engine's own budget.
 
-    `fraction` is the only headroom in the sizing path, covering readout transients and whatever
-    else shares the card. `GPAP_VRAM_BUDGET_MIB` caps the answer (see `vram_budget_cap`) on BOTH
+    `GPAP_VRAM_BUDGET_MIB` caps the answer (see `vram_budget_cap`) on BOTH
     branches: the core applies it inside `gpap_mem_available` for a real device, and it is
     applied here for the CPU placeholder, which never reaches the core. A ceiling that holds
     only on the branch a given machine happens to take is not a ceiling."""

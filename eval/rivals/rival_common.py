@@ -343,14 +343,14 @@ def oversize_reason(bench_file, T, limit=MAX_UNROLLED_GATES, avail_bytes=None,
     return None
 
 
-RIVAL_VRAM_FRACTION = 0.80
+RIVAL_VRAM_FRACTION = 1.0                               # the engine's own budget
 RIVAL_VRAM_FALLBACK = 5 << 30                           # no CUDA visible: a sane batch, not zero
 
 
 def rival_vram_budget(fraction: float = None) -> int:
     """Bytes of GPU memory a rival's autograd graph may occupy — THE SAME NUMBER, from the same
-    function, that the engine grants itself: `gpap_mem_available`, i.e. (free - the driver
-    reserve) x fraction, then capped by GPAP_VRAM_BUDGET_MIB.
+    function, that the engine grants itself: `gpap_mem_available`, i.e. free memory less the
+    memory reserve (fraction 1, the engine's own budget), then capped by GPAP_VRAM_BUDGET_MIB.
 
     IT IS ONE BUDGET ON PURPOSE. This used to be a second implementation — `free x 0.80` with no
     reserve — which read 3.4% higher than ours on the same card, so "the same share of the same

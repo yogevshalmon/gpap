@@ -19,6 +19,7 @@ struct MemAccount {
     std::mutex mu;
     int64_t held = 0, peak = 0, total = 0;
     MemSpec api;                /* UNSET: follow GPAP_MEM_LIMIT */
+    MemSpec reserve;            /* UNSET: follow GPAP_MEM_RESERVE, else kDefaultMemReserve */
     std::string name;           /* "cuda device 0" */
 };
 
@@ -72,6 +73,27 @@ gpap_status resolve(MemAccount *a, int64_t *limit, gpap_limit_source *source) {
         return GPAP_ERR_ARG;
     }
     *source = src;
+    return GPAP_OK;
+}
+
+/* The reserve in force, under a->mu. "none" is no reserve. */
+gpap_status resolve_reserve(MemAccount *a, int64_t *reserve) {
+    MemSpec s = a->reserve;
+    if (s.kind == MemSpec::UNSET) {
+        const char *env = std::getenv("GPAP_MEM_RESERVE");
+        if (!env || blank(env)) {
+            *reserve = kDefaultMemReserve;
+            return GPAP_OK;
+        }
+        GPAP_TRY(parse_mem_spec(env, "GPAP_MEM_RESERVE=", &s));
+    }
+    if (s.kind == MemSpec::SHARE && a->total <= 0) {
+        set_error("a memory reserve of %g%% on %s needs the device's total memory, which it does "
+                  "not report: give the reserve in bytes (1G, 512M)", s.percent,
+                  a->name.c_str());
+        return GPAP_ERR_ARG;
+    }
+    *reserve = mem_spec_bytes(s, a->total);
     return GPAP_OK;
 }
 
@@ -152,7 +174,7 @@ gpap_status parse_mem_spec(const char *spec, const char *label, MemSpec *out) {
         return GPAP_OK;
     }
     if (*p < '0' || *p > '9')
-        return fail("not a memory limit: give a size with its unit (8G, 512M), a share of the "
+        return fail("not a memory size: give a size with its unit (8G, 512M), a share of the "
                     "device (75%), or 'none'");
     /* The digits by hand, not strtod: strtod takes exponents, hex and the C locale's decimal
      * point, and none of those is part of the grammar. */
@@ -218,13 +240,20 @@ gpap_status mem_state(MemAccount *a, MemState *out) {
     out->held = a->held;
     out->peak = a->peak;
     out->total = a->total;
-    return resolve(a, &out->limit, &out->source);
+    GPAP_TRY(resolve(a, &out->limit, &out->source));
+    return resolve_reserve(a, &out->reserve);
 }
 
 void mem_set_limit(MemAccount *a, const MemSpec &s) {
     if (!a) return;
     std::lock_guard<std::mutex> lock(a->mu);
     a->api = s;
+}
+
+void mem_set_reserve(MemAccount *a, const MemSpec &s) {
+    if (!a) return;
+    std::lock_guard<std::mutex> lock(a->mu);
+    a->reserve = s;
 }
 
 void mem_reset_peak(MemAccount *a) {

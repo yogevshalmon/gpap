@@ -190,3 +190,15 @@ The tables only; nothing was re-run, and `paper_numbers.json` is unchanged but f
 (`n + C=0 + G=0 + Fail + not counted`) with each cell not counted named; §17b's `excluded` is
 `not counted`. The caveats, the rival calibration and the top-rung check moved to the authors'
 notes, `paper_tables.py --out-notes`, which the artifact does not run.
+
+### 17g. The engine's budget moves; the rivals' follows it (2026-11-25)
+
+GitHub issue 59 changed the engine's default budget on main, from 0.80 · (free − 800 MB) to free
+memory less a reserve (1 GiB by default), with every buffer a call allocates counted
+([MEMORY_FINDINGS.md](MEMORY_FINDINGS.md) §9). `rival_vram_budget` returns the engine's own
+budget by rule, so its fraction went from 0.80 to 1: both sides of a comparison still get the
+same bytes, now about 25% more on a memory-bound formula. Not a protocol change: the paper's
+tag (`tacas27-artifact-rc1`) keeps the old rule on both sides, and `GPAP_RIVAL_VRAM_FRACTION`
+still sets the fraction for reproducing an older sweep. Not measured: whether a rival's autograd
+graph, which the old 20% also covered, fits its batch at the new budget on every cell. A re-run
+of the campaign on main is deferred; the paper reports the tag's.

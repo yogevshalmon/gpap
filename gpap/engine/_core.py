@@ -230,6 +230,8 @@ def _declare(lib: ctypes.CDLL) -> None:
         ("gpap_parse_mem_limit", [c_char_p, c_int64, POINTER(c_int64)], c_int),
         ("gpap_mem_limit", [c_int], c_int64),
         ("gpap_mem_limit_source", [c_int], c_int),
+        ("gpap_set_mem_reserve", [c_int, c_char_p], c_int),
+        ("gpap_mem_reserve", [c_int], c_int64),
         ("gpap_mem_held", [c_int], c_int64),
         ("gpap_mem_peak", [c_int], c_int64),
         ("gpap_mem_reset_peak", [c_int], None),
@@ -326,10 +328,11 @@ def compute_k_safe(num_long: int, N: int, gpu_mem_bytes: float,
 # The three engine-less queries below answer for the backend a NEW engine gets ($GPAP_BACKEND);
 # an engine keeps the backend it was created on.
 
-def mem_available(device: int = 0, fraction: float = 0.80) -> int:
-    """Bytes available for new allocations (free memory minus a driver reserve, times fraction;
-    on opencl the device total, which is all OpenCL reports), and under a memory limit at most
-    the limit less what GPAP holds there."""
+def mem_available(device: int = 0, fraction: float = 1.0) -> int:
+    """Bytes a new engine's rows would be sized against: free memory less the memory reserve,
+    times `fraction` (1, the default, is the engine's own budget; on opencl, which reports only
+    the total, a share of it), and under a memory limit at most the limit less what GPAP holds
+    there."""
     return int(load().gpap_mem_available(int(device), float(fraction)))
 
 
@@ -344,7 +347,7 @@ LIMIT_SOURCES = {0: None, 1: "GPAP_MEM_LIMIT", 2: "set_mem_limit"}
 
 
 def _spec(spec) -> "bytes | None":
-    """A limit for the C parser: an int is bytes, None stays None."""
+    """A limit or reserve for the C parser: an int is bytes, None stays None."""
     if spec is None:
         return None
     if isinstance(spec, bool) or not isinstance(spec, (int, str)):
@@ -354,7 +357,8 @@ def _spec(spec) -> "bytes | None":
 
 
 def _check_spec(status: int) -> None:
-    """A malformed limit is the caller's argument: ValueError, with the core's reason."""
+    """A malformed limit or reserve is the caller's argument: ValueError, with the core's
+    reason."""
     if status == 1:
         raise ValueError(load().gpap_last_error().decode(errors="replace"))
     check(status, "memory limit")
@@ -381,6 +385,21 @@ def mem_limit(device: int = 0) -> int:
     if limit < 0:
         raise ValueError(load().gpap_last_error().decode(errors="replace"))
     return limit
+
+
+def set_mem_reserve(spec, device: int = 0) -> None:
+    """`gpap_set_mem_reserve` on one device of the current backend; None follows
+    GPAP_MEM_RESERVE."""
+    _check_spec(load().gpap_set_mem_reserve(int(device), _spec(spec)))
+
+
+def mem_reserve(device: int = 0) -> int:
+    """The memory reserve in force on `device`, in bytes. ValueError where it cannot be resolved
+    (a malformed GPAP_MEM_RESERVE or GPAP_MEM_LIMIT): engines on the device would fail too."""
+    reserve = int(load().gpap_mem_reserve(int(device)))
+    if reserve < 0:
+        raise ValueError(load().gpap_last_error().decode(errors="replace"))
+    return reserve
 
 
 def mem_limit_source(device: int = 0) -> "str | None":

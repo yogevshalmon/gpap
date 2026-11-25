@@ -180,7 +180,7 @@ def run_demotic(root, bench_file, key, *, steps, batch, circuit_type, T, lr=None
 
 
 def pick_batch(bench_file, T, budget_bytes=None):
-    """The batch DEMOTIC is granted: the largest fitting 0.80 of free VRAM (fit_batch)."""
+    """The batch DEMOTIC is granted: the largest fitting GPAP's own budget (fit_batch)."""
     n_gates = sum(1 for line in open(bench_file)
                   if "=" in line and "DFF" not in line and not line.lstrip().startswith("#"))
     return fit_batch(max(n_gates, 1) * T, "demotic", budget_bytes)

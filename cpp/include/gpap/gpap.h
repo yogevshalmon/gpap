@@ -129,7 +129,7 @@ int32_t gpap_engine_num_long(const gpap_engine *e);      /* packed-word clauses:
 typedef enum {
     GPAP_BOUND_NONE = 0,    /* not sized yet */
     GPAP_BOUND_CAP = 1,     /* the batch cap: more memory would not raise the batch */
-    GPAP_BOUND_MEMORY = 2,  /* the default memory rule: free memory, a reserve and a fraction */
+    GPAP_BOUND_MEMORY = 2,  /* the default memory rule: free memory less the reserve */
     GPAP_BOUND_LIMIT = 3,   /* the memory limit (gpap_set_mem_limit, GPAP_MEM_LIMIT) */
     GPAP_BOUND_GRANT = 4,   /* what a host's own plug grants */
     GPAP_BOUND_BUFFER = 5,  /* the device's one-buffer limit */
@@ -551,12 +551,14 @@ void gpap_counters_reset(gpap_engine *e);
  * limits one buffer's size, which the engine's own sizers (probe, check, sampler) respect and
  * gpap_compute_k_safe does not: size an explicit K for opencl with gpap_check_chunk_size. */
 
-/* Bytes available for new allocations (free memory minus a driver reserve, times `fraction`),
- * capped by GPAP_VRAM_BUDGET_MIB when that is set to a positive integer. The cap is for
- * CROSS-CARD REPRODUCTION — a memory-bound K sizes larger on a larger card — and is a ceiling
- * only: a card with less free memory still reports less. Unset = no cap. Under a memory limit
- * (below), also at most the limit less what GPAP holds on the device, to which `fraction` does
- * not apply; on opencl the limit takes the place of the share of the total. 0 on error. */
+/* Bytes a new engine's rows would be sized against: free memory less the memory reserve
+ * (gpap_set_mem_reserve, below), times `fraction` (1 is the engine's own default budget; on
+ * opencl, a share of the total stands in for free memory), capped by GPAP_VRAM_BUDGET_MIB when
+ * that is set to a positive integer. The cap is for CROSS-CARD REPRODUCTION — a memory-bound K
+ * sizes larger on a larger card — and is a ceiling only: a card with less free memory still
+ * reports less. Unset = no cap. Under a memory limit (below), also at most the limit less what
+ * GPAP holds on the device, to which `fraction` does not apply; on opencl the limit takes the
+ * place of the share of the total. 0 on error. */
 int64_t gpap_mem_available(int device, double fraction);
 
 /* ------------------------------------------------------------------ device memory
@@ -589,6 +591,20 @@ gpap_status gpap_parse_mem_limit(const char *spec, int64_t total_bytes, int64_t 
  * which), and every engine creation on the device then fails as well. And its source. */
 int64_t gpap_mem_limit(int device);
 gpap_limit_source gpap_mem_limit_source(int device);
+/* The memory reserve: what GPAP leaves free on `device` for what it cannot count (other
+ * processes and the desktop, the caller's own tensors, kernel code loaded at a first launch).
+ * The default batch is sized from free memory less the reserve, and where GPAP measures free
+ * memory (cuda) an allocation that would leave less than the reserve free fails with
+ * GPAP_ERR_MEMORY, because a driver that pages device memory to the host (WSL2) would otherwise
+ * slow down instead of failing. Under a limit it still applies: the limit is a ceiling on what
+ * GPAP holds, the reserve what it leaves free. `spec` has the limit's grammar ("1G", "512M",
+ * "5%" of the total); "none" for no reserve even if GPAP_MEM_RESERVE is set; NULL to follow
+ * GPAP_MEM_RESERVE again, and with neither the library's default. GPAP_ERR_ARG, the reason in
+ * gpap_last_error, for a malformed spec. */
+gpap_status gpap_set_mem_reserve(int device, const char *spec);
+/* The reserve in force on `device` now, in bytes; -1 if it cannot be resolved, as for
+ * gpap_mem_limit. */
+int64_t gpap_mem_reserve(int device);
 /* Bytes GPAP's engines hold on `device` now, and the most they held since the last reset. */
 int64_t gpap_mem_held(int device);
 int64_t gpap_mem_peak(int device);
