@@ -142,6 +142,21 @@ class BCPEngine:
         loop resets inside libgpap, so a local mirror would read 0 after a run."""
         return self._core.K
 
+    @property
+    def mem_held(self) -> int:
+        """Device bytes this engine holds now: its formula, its rows and its call buffers."""
+        return self._core.mem_held
+
+    @property
+    def batch_bound(self) -> "str | None":
+        """What set the last batch: "cap", "memory", "limit", "grant", "buffer", "work",
+        "useful" or "pin" (docs/ENGINE.md §7); None before any sizing."""
+        return self._core.batch_bound
+
+    def trim(self) -> None:
+        """Give the rows back and keep the formula: another engine on the device then sizes as
+        if this one held none. The next reset takes them again; `K` reads 0 until then."""
+        self._core.trim()
 
     def reset(self, K: int) -> None:
         """Reset K rows to the cached post-units-flush state (allocations reused when K matches),

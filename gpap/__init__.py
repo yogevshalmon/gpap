@@ -17,7 +17,12 @@ del os                     # not part of the package namespace (`__all__` is the
 __version__ = "0.4.0"
 
 # THE tier-0 contract (docs/PYTHON_API.md: `__all__` is the supported API).
-__all__ = ["sample", "sample_clauses", "sample_circuit", "MAX_SAMPLES", "__version__"]
+__all__ = ["sample", "sample_clauses", "sample_circuit", "set_mem_limit", "MAX_SAMPLES",
+           "__version__"]
+
+# How much GPU memory GPAP may hold (docs/ENGINE.md §7). Imports nothing heavy: the core opens
+# on first use.
+from gpap.memory import set_mem_limit  # noqa: E402
 
 
 # ---------------------------------------------------------------------------- the top-level API

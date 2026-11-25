@@ -179,6 +179,26 @@ def describe_config(cfg) -> str:
                           Lookahead(la or "")).describe()
 
 
+def _free_rows_for_mining(smp, device) -> None:
+    """Mining's engine is built while the sampler holds its warmup rows (up to 1024). Under a
+    memory limit those can fill it, wherever the sampler's batch is about that small (a big
+    formula, a tight limit), and mining would then fit no row and be skipped. Give the rows back
+    first: the next chunk takes them again, at the same K. Without a limit the default rule's
+    margins leave mining room, and trimming would change mining's batch, a change of default
+    that waits for its measurement (GitHub issue 76)."""
+    from gpap.engine import _core
+    if device.type == "cuda" and _core.mem_limit(device.index or 0) > 0:
+        smp.trim()
+
+
+def _memory_info(smp, device) -> dict:
+    """What bounded the batch, and what GPAP held at its peak, for the result row."""
+    from gpap.engine import _core
+    d = device.index or 0
+    return {"batch_bound": smp.engine.batch_bound, "mem_limit": _core.mem_limit(d),
+            "mem_limit_source": _core.mem_limit_source(d), "mem_peak": _core.mem_peak(d)}
+
+
 def _core_provenance() -> str:
     """Which engine build produced a result: "libgpap <build id>". The build id, not the
     version: two rows that disagree on it genuinely came from different libraries."""
@@ -313,6 +333,9 @@ def sample_clauses(nv, clauses, support, device, *, simplify=True, els=True, n_t
                                       support=support, k_cap=k_cap, seed=seed)
         return smp
 
+    if device.type == "cuda":           # the run's peak, not an earlier run's in this process
+        from gpap.engine import _core as _gcore
+        _gcore.mem_reset_peak(device.index or 0)
     _tc = time.perf_counter()
     smp = _new_sampler(clauses)
     phases["construct"] = time.perf_counter() - _tc
@@ -338,6 +361,7 @@ def sample_clauses(nv, clauses, support, device, *, simplify=True, els=True, n_t
                 score_before = _mine_score(smp, w)       # what we have to beat to keep the clauses
                 k_before = smp.K
                 mine_deadline = _tm + MINE_SECONDS      # one budget, shared by both stages
+                _free_rows_for_mining(smp, device)
                 mi = mine_entailed(nv, clauses, device, pool=_support_literals(support),
                                    max_tuples=STAGE1_MAX_TUPLES, seconds=MINE_SECONDS)
                 phases["mine"] = time.perf_counter() - _tm
@@ -355,6 +379,7 @@ def sample_clauses(nv, clauses, support, device, *, simplify=True, els=True, n_t
                 left = mine_deadline - time.perf_counter()
                 if stuck and left > 0.25:               # no floor: an exhausted budget stays spent
                     _tm = time.perf_counter()
+                    _free_rows_for_mining(smp, device)
                     mi2 = mine_entailed(nv, clauses + learned, device, pool=_support_literals(support),
                                         max_tuples=STAGE2_MAX_TUPLES, seconds=left)
                     phases["mine"] += time.perf_counter() - _tm
@@ -459,7 +484,8 @@ def sample_clauses(nv, clauses, support, device, *, simplify=True, els=True, n_t
                    # M_eff = all clauses; m_long = the len>=3 state clauses the K model charges.
                    "N_eff": smp.N, "M_eff": smp.M, "m_long": smp.M_state,
                    "core": _core_provenance(),
-                   "max_clause_len": smp.formula.max_clause_len if smp.M else 0}
+                   "max_clause_len": smp.formula.max_clause_len if smp.M else 0,
+                   **(_memory_info(smp, device) if device.type == "cuda" else {})}
     # Headline throughput = the best-throughput config's steady-state rate (best_rate_sps), not
     # the end-to-end blend, which the bandit's exploration chunks drag; falls back to the blend
     # for a single non-adaptive config.

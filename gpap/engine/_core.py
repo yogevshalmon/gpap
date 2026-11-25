@@ -35,6 +35,11 @@ class EnvelopeError(GpapError, ValueError):
     """The formula is outside both packed splits; also a ValueError, which suite drivers catch."""
 
 
+class GpapMemoryError(GpapError, MemoryError):
+    """An allocation, or a batch, did not fit: the device's memory, GPAP's memory limit
+    (`GPAP_MEM_LIMIT`, `gpap.set_mem_limit`) or a host's grant. Also a MemoryError."""
+
+
 _LIB = None
 
 
@@ -221,6 +226,16 @@ def _declare(lib: ctypes.CDLL) -> None:
         ("gpap_compute_k_safe", [c_int32, c_int32, c_int64, c_int32], c_int32),
         ("gpap_default_k_cap", [c_int], c_int32),
         ("gpap_mem_available", [c_int, ctypes.c_double], c_int64),
+        ("gpap_set_mem_limit", [c_int, c_char_p], c_int),
+        ("gpap_parse_mem_limit", [c_char_p, c_int64, POINTER(c_int64)], c_int),
+        ("gpap_mem_limit", [c_int], c_int64),
+        ("gpap_mem_limit_source", [c_int], c_int),
+        ("gpap_mem_held", [c_int], c_int64),
+        ("gpap_mem_peak", [c_int], c_int64),
+        ("gpap_mem_reset_peak", [c_int], None),
+        ("gpap_engine_mem_held", [c_void_p, c_int], c_int64),
+        ("gpap_engine_batch_bound", [c_void_p], c_int),
+        ("gpap_engine_trim", [c_void_p], c_int),
         ("gpap_resident_warps", [c_int], c_int32),
         ("gpap_dispatch_wave", [c_int32, c_int32, c_int], c_int32),
         ("gpap_probe_combinations",
@@ -260,7 +275,8 @@ def check(status: int, what: str) -> None:
     if status == GPAP_OK:
         return
     detail = load().gpap_last_error().decode(errors="replace")
-    raise (EnvelopeError if status == 3 else GpapError)(status, what, detail)
+    cls = {3: EnvelopeError, 6: GpapMemoryError}.get(status, GpapError)
+    raise cls(status, what, detail)
 
 
 def _p(arr: np.ndarray, ct):
@@ -312,12 +328,75 @@ def compute_k_safe(num_long: int, N: int, gpu_mem_bytes: float,
 
 def mem_available(device: int = 0, fraction: float = 0.80) -> int:
     """Bytes available for new allocations (free memory minus a driver reserve, times fraction;
-    on opencl the device total, which is all OpenCL reports)."""
+    on opencl the device total, which is all OpenCL reports), and under a memory limit at most
+    the limit less what GPAP holds there."""
     return int(load().gpap_mem_available(int(device), float(fraction)))
 
 
 def resident_warps(device: int = 0) -> int:
     return int(load().gpap_resident_warps(int(device)))
+
+
+#: gpap_bound and gpap_limit_source, by name (cpp/include/gpap/gpap.h).
+BOUNDS = {0: None, 1: "cap", 2: "memory", 3: "limit", 4: "grant", 5: "buffer", 6: "work",
+          7: "useful", 8: "pin"}
+LIMIT_SOURCES = {0: None, 1: "GPAP_MEM_LIMIT", 2: "set_mem_limit"}
+
+
+def _spec(spec) -> "bytes | None":
+    """A limit for the C parser: an int is bytes, None stays None."""
+    if spec is None:
+        return None
+    if isinstance(spec, bool) or not isinstance(spec, (int, str)):
+        raise TypeError(f"a memory limit is a string such as '8G' or '75%', or bytes as an int; "
+                        f"got {spec!r}")
+    return (f"{spec}B" if isinstance(spec, int) else spec).encode()
+
+
+def _check_spec(status: int) -> None:
+    """A malformed limit is the caller's argument: ValueError, with the core's reason."""
+    if status == 1:
+        raise ValueError(load().gpap_last_error().decode(errors="replace"))
+    check(status, "memory limit")
+
+
+def parse_mem_limit(spec, total: int = 0) -> int:
+    """Bytes `spec` means on a device of `total` bytes (0 for "none", and for a share when
+    `total` is 0). ValueError, naming what is wrong, for a malformed spec. The one parser is the
+    core's (cpp/src/memory.cpp): nothing here re-reads the grammar."""
+    out = c_int64(0)
+    _check_spec(load().gpap_parse_mem_limit(_spec(spec), int(total), byref(out)))
+    return int(out.value)
+
+
+def set_mem_limit(spec, device: int = 0) -> None:
+    """`gpap_set_mem_limit` on one device of the current backend; None follows GPAP_MEM_LIMIT."""
+    _check_spec(load().gpap_set_mem_limit(int(device), _spec(spec)))
+
+
+def mem_limit(device: int = 0) -> int:
+    """The limit in force on `device`, in bytes (0 = none). ValueError where it cannot be
+    resolved (a malformed GPAP_MEM_LIMIT): engines on the device would fail too."""
+    limit = int(load().gpap_mem_limit(int(device)))
+    if limit < 0:
+        raise ValueError(load().gpap_last_error().decode(errors="replace"))
+    return limit
+
+
+def mem_limit_source(device: int = 0) -> "str | None":
+    return LIMIT_SOURCES.get(int(load().gpap_mem_limit_source(int(device))))
+
+
+def mem_held(device: int = 0) -> int:
+    return int(load().gpap_mem_held(int(device)))
+
+
+def mem_peak(device: int = 0) -> int:
+    return int(load().gpap_mem_peak(int(device)))
+
+
+def mem_reset_peak(device: int = 0) -> None:
+    load().gpap_mem_reset_peak(int(device))
 
 
 def dispatch_wave(num_clauses: int, batch: int, device: int = 0) -> bool:
@@ -655,8 +734,13 @@ class Engine:
         return conflict.astype(bool), prop, assign, sat
 
     def check_chunk_size(self, n_sets: int, max_lits: int = 1) -> int:
-        """Assumption sets one launch holds — `gpap_check_chunk_size`, the core's one model."""
-        return int(load().gpap_check_chunk_size(self._h, int(n_sets), int(max_lits)))
+        """Assumption sets one launch holds — `gpap_check_chunk_size`, the core's one model.
+        Raises GpapMemoryError where not even one set fits, as the check itself would."""
+        k = int(load().gpap_check_chunk_size(self._h, int(n_sets), int(max_lits)))
+        if k <= 0:
+            detail = load().gpap_last_error().decode(errors="replace")
+            raise GpapMemoryError(6, "check chunk size", detail)
+        return k
 
     # Probing (entry point 1b): enumeration, chunking and the budget live in cpp/src/probe.cpp,
     # so both faces get the same candidate order and "exhausted" semantics.
@@ -797,6 +881,32 @@ class Engine:
         check(load().gpap_packed_rows(self._h, _p(r, c_int32), r.size, _p(out, c_int32)),
               "packed rows")
         return out
+
+    @property
+    def mem_held(self) -> int:
+        """Device bytes this engine holds now: formula, rows and call buffers."""
+        return int(load().gpap_engine_mem_held(self._h, 0))
+
+    @property
+    def mem_held_formula(self) -> int:
+        """The FORMULA count: what the engine builds once and keeps, trim included."""
+        return int(load().gpap_engine_mem_held(self._h, 1))
+
+    @property
+    def mem_held_rows(self) -> int:
+        """The ROWS count: what grows with a batch or a call; 0 after a trim."""
+        return int(load().gpap_engine_mem_held(self._h, 2))
+
+    @property
+    def batch_bound(self) -> "str | None":
+        """What set the last batch: "cap", "memory", "limit", "grant", "buffer", "work",
+        "useful", "pin", or None before any sizing (docs/ENGINE.md §7)."""
+        return BOUNDS.get(int(load().gpap_engine_batch_bound(self._h)))
+
+    def trim(self) -> None:
+        """Give the rows back and keep the formula, so another engine on the device sizes as if
+        this one held none; the next reset takes them again."""
+        check(load().gpap_engine_trim(self._h), "trim")
 
     def reset_stats(self) -> "tuple[int, int]":
         """(full broadcasts, lite resets) — the lite count proves CLEAN mode removed broadcasts."""

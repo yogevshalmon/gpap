@@ -889,6 +889,9 @@ def test_no_probe_engine_outlives_mining_after_a_rebuild(monkeypatch):
         def assigned_literals(self):
             return np.empty(0, np.int32)
 
+        def trim(self):        # the rebuild gives the old engine's rows back first
+            pass
+
     at_release = []
 
     def release(device):
