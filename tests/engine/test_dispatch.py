@@ -39,7 +39,7 @@ def test_auto_dispatches_on_the_clause_count():
     wave."""
     from gpap.engine.calibrate import dispatch_mode, resident_warps
     assert resident_warps(DEV) > 0
-    huge = 262_144                                   # the batch cap
+    huge = 262_144                                   # a batch past any card's resident warps
     assert dispatch_mode(50_000, huge, DEV) == "wave", "big M at a huge batch must be wave"
     assert dispatch_mode(6, huge, DEV) == "scalar", "a 6-clause row cannot fill a warp"
     assert dispatch_mode(6, 64, DEV) == "wave", "...unless the batch cannot fill the device"

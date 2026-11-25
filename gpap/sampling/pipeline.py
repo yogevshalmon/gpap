@@ -492,7 +492,8 @@ def sample_clauses(nv, clauses, support, device, *, simplify=True, els=True, n_t
     engine_info = {"kernel": "triton-packed-sum", "mode": smp.engine.mode,
                    "shift": smp.engine.shift,
                    "split": f"{smp.engine.shift}|{32 - smp.engine.shift}",
-                   # k_cap is the resolved ceiling; `batch` is what ran, `K` the calibrated value.
+                   # k_cap is the resolved ceiling; `batch` and `K` are both the batch the
+                   # timed run ran: its own sizing, or the pin.
                    "batch": smp.batch_size,
                    "K": smp.K, "k_cap": k_cap,
                    # M_eff = all clauses; m_long = the len>=3 state clauses the K model charges.
