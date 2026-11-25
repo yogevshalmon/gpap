@@ -202,6 +202,31 @@ def test_the_default_budget_is_free_memory_less_the_reserve():
 
 
 @pytest.mark.gpu
+def test_an_allocation_that_would_leave_less_than_the_reserve_free_fails():
+    """Where GPAP measures free memory (CUDA) the reserve is kept at every allocation, not only
+    at sizing: a pinned batch, which no sizing bounds, fails with MemoryError naming the reserve
+    once it would leave less than the reserve free, the engine keeps no rows, and with the
+    reserve back at its default the same engine runs and answers as a fresh one does. This is
+    what stops a pinned batch past the card on WSL2, which pages device memory to the host
+    instead of failing; before, such a batch was allocated and ran slowly."""
+    if os.environ.get("GPAP_BACKEND", "cuda") == "opencl":
+        pytest.skip("OpenCL cannot measure free memory: its share of the total is the margin")
+    f = _formula()
+    e = _core.Engine(f)
+    e.reset(256)
+    free = _core.mem_available(0) + _core.mem_reserve(0)        # what the device has free now
+    _core.set_mem_reserve(max(free - 1000 * _row_bytes(e), 1), 0)
+    with pytest.raises(MemoryError, match="reserve"):
+        e.reset(2000)
+    assert e.K == 0
+    _core.set_mem_reserve(None, 0)
+    lits, off = _flat(_sets(f.info.num_vars, 300, 2))
+    for x, y in zip(_core.Engine(f).check_sets(lits, off, chunk=100, assignments=True),
+                    e.check_sets(lits, off, chunk=100, assignments=True)):
+        assert np.array_equal(x, y)
+
+
+@pytest.mark.gpu
 def test_the_cli_sets_the_reserve_for_the_run(capsys):
     """--mem-reserve sets GPAP_MEM_RESERVE for the run, and `gpap info` reports it."""
     from gpap.cli import main as cli_main
@@ -602,8 +627,10 @@ def test_a_batch_past_the_device_fails_as_memory_and_the_engine_recovers():
     fresh one does, and freeing it gives every byte back. A runtime that backs a buffer only when
     a command first uses it (NVIDIA's OpenCL) used to create the buffers and fail at the first
     launch with a driver error, leaving the rows with no memory behind them (GitHub issue 79).
-    Not on WSL2, which pages device memory to the host instead of failing."""
-    if _on_wsl2():
+    On CUDA the reserve refuses it before the driver is asked, so it runs on WSL2 too, which
+    would page device memory to the host instead of failing; OpenCL keeps no reserve at
+    allocation and is skipped there."""
+    if _on_wsl2() and os.environ.get("GPAP_BACKEND", "cuda") == "opencl":
         pytest.skip("WSL2 pages device memory to the host instead of failing")
     base = _settled_held()
     _core.set_mem_limit("100%", 0)               # the device's total, as the limit resolves it
