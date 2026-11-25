@@ -1,8 +1,9 @@
 """The batch cap, the `GPAP_VRAM_BUDGET_MIB` ceiling, and the batch-size API.
 
-The cap is one constant on every GPU, so `--k-cap auto` means the same batch on every machine.
-It is a saturation limit, not a memory bound (`compute_k_safe` keeps a chunk inside VRAM), and
-it must not depend on free memory, which is not reproducible.
+The cap is a number of rows per resident warp: a card saturates at a multiple of the warps it
+keeps resident, so the cap follows the card. Where the warp count is unknown (OpenCL, a CPU
+device) it is one fixed number. It is a saturation limit, not a memory bound (`compute_k_safe`
+keeps a chunk inside VRAM), and it must not depend on free memory, which is not reproducible.
 """
 import os
 
@@ -12,9 +13,10 @@ import torch
 from gpap.engine.calibrate import K_CAP, default_k_cap, resolve_k_cap
 from tests.conftest import REPO_ROOT
 
-# Spelled out, not imported, so an edit to K_CAP fails here. Changing it changes every run's
+# Spelled out, not imported, so an edit to either fails here. Changing one changes every run's
 # batch, so recorded sweeps stop being comparable.
-EXPECTED_CAP = 262_144
+EXPECTED_ROWS_PER_WARP = 64
+EXPECTED_CAP = 262_144                  # where the resident warps are unknown
 REPO = REPO_ROOT
 
 
@@ -28,10 +30,22 @@ def test_the_cap_is_the_documented_constant():
     assert K_CAP == EXPECTED_CAP
 
 
-@pytest.mark.parametrize("device", ["cpu", pytest.param("cuda", marks=pytest.mark.gpu)])
-def test_cap_is_device_independent(device):
-    """The same cap on every device; a CPU device answers without touching the driver."""
-    assert default_k_cap(torch.device(device)) == EXPECTED_CAP
+def test_a_cpu_device_gets_the_fixed_cap_without_the_driver():
+    """A CPU device answers without touching the driver."""
+    assert default_k_cap(torch.device("cpu")) == EXPECTED_CAP
+
+
+@pytest.mark.gpu
+def test_the_cap_is_rows_per_resident_warp():
+    """On CUDA the cap is 64 rows per resident warp; on OpenCL, which cannot count resident
+    warps, it is the fixed cap. Before, it was the fixed cap on every card, between about 40 and
+    200 rows per resident warp on the cards measured (MEMORY_FINDINGS.md §8)."""
+    from gpap.engine import _core
+    warps = _core.resident_warps(0)
+    want = EXPECTED_ROWS_PER_WARP * warps if warps > 0 else EXPECTED_CAP
+    if os.environ.get("GPAP_BACKEND", "cuda") != "opencl":
+        assert warps > 0
+    assert default_k_cap(torch.device("cuda")) == _core.default_k_cap(0) == want
 
 
 def test_resolve_passes_explicit_values_through_untouched():
@@ -54,9 +68,11 @@ def test_gpusampler_defaults_to_auto():
 @pytest.mark.core
 def test_core_and_python_caps_agree():
     """calibrate.py and cpp/src/calibrate.cpp give the same cap, so C++ and Python callers size
-    a formula the same way."""
+    a formula the same way; where the core counts no resident warps it is Python's fixed cap."""
     from gpap.engine import _core
     assert _core.default_k_cap(0) == default_k_cap(torch.device("cuda"))
+    if _core.resident_warps(0) <= 0:
+        assert _core.default_k_cap(0) == K_CAP
 
 
 @pytest.mark.gpu

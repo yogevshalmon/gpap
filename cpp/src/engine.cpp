@@ -930,7 +930,7 @@ int32_t engine_batch(gpap_engine *e, int64_t extra_row_bytes, int32_t cap,
     r.per_row = gpap_row_bytes(e->num_long, e->num_vars, e->trail_cap) + extra_row_bytes +
                 later_per_row;
     r.fixed = reserve_bytes + later_fixed;
-    r.cap = cap == 0 ? gpap_default_k_cap(e->device_ordinal) : cap;
+    r.cap = cap == 0 ? default_k_cap(e->driver, e->device_ordinal) : cap;
     r.max_buffer = m.max_buffer;
     /* Each per-row buffer holds the batch's rows, so the widest one meets the device's
      * one-buffer limit first: the engine's own (packed words, bitmap, trail) or the caller's. */
