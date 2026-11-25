@@ -541,6 +541,28 @@ def test_a_smaller_batch_beside_kept_rows_stays_inside_the_default_budget(monkey
 
 
 @pytest.mark.engine
+def test_a_narrow_call_after_a_wide_one_stays_inside_the_default_budget(monkeypatch):
+    """The staging a wide call grew stays held, and only a call that needs it reuses it: a
+    narrow check after a wide one may not size its rows into the wide call's decision matrix.
+    Under an 8 MiB default budget, a check of 300-literal sets and then one of 2-literal sets
+    take no more than the budget together. Before, the narrow check counted the wide matrix as
+    free for its rows, which grew into it, and the two took a quarter more than the budget."""
+    monkeypatch.setenv("GPAP_VRAM_BUDGET_MIB", "8")
+    f = _formula(nv=400, nc=1200, seed=9)
+    e = _core.Engine(f)
+    base = _settled_held()
+    _core.mem_reset_peak(0)
+    wide, wide_off = _flat(_sets(f.info.num_vars, 3000, 300))
+    e.check_sets(wide, wide_off, chunk=0, assignments=True)
+    narrow, narrow_off = _flat(_sets(f.info.num_vars, 3000, 2))
+    e.check_sets(narrow, narrow_off, chunk=0, assignments=True)
+    assert e.batch_bound == "memory"
+    assert _core.mem_peak(0) - base <= 8 << 20
+
+
+
+
+@pytest.mark.engine
 @pytest.mark.parametrize("rows", [1, 3, 40, 1000])
 def test_every_entry_point_stays_under_a_tight_limit(rows):
     """Sizing covers what each call allocates afterwards: under a limit of the device plus a few
