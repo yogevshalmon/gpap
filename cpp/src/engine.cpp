@@ -63,7 +63,7 @@ gpap_status broadcast_rows(gpap_engine *e, DevBuf &dst, DevBuf &src, int32_t n_c
 
 /* Upload `n` bytes into a scratch buffer, growing it as needed. */
 gpap_status stage(gpap_engine *e, DevBuf &dst, const void *host, size_t n) {
-    GPAP_TRY(dst.reserve(e->gpu.get(), n));
+    GPAP_TRY(dst.reserve(e->mem, n));
     if (n) GPAP_TRY(e->gpu->upload(dst.ptr, host, n));
     return GPAP_OK;
 }
@@ -125,11 +125,11 @@ static gpap_status build_flush_cache(gpap_engine *e, const gpap_formula *f) {
     }
     gpap::Gpu *g = e->gpu.get();
     if (e->num_long) {
-        GPAP_TRY(e->packed_flushed.reserve(g, (size_t)e->num_long * sizeof(int32_t)));
+        GPAP_TRY(e->packed_flushed.reserve(e->mem, (size_t)e->num_long * sizeof(int32_t)));
         GPAP_TRY(g->copy(e->packed_flushed.ptr, e->packed.ptr,
                          (size_t)e->num_long * sizeof(int32_t)));
     }
-    GPAP_TRY(e->abits_flushed.reserve(g, (size_t)e->nw * sizeof(int32_t)));
+    GPAP_TRY(e->abits_flushed.reserve(e->mem, (size_t)e->nw * sizeof(int32_t)));
     GPAP_TRY(g->copy(e->abits_flushed.ptr, e->abits.ptr, (size_t)e->nw * sizeof(int32_t)));
     int8_t conflict0 = 0;
     GPAP_TRY(g->download(&conflict0, e->conflict.ptr, 0, 1));
@@ -157,6 +157,8 @@ extern "C" gpap_status gpap_engine_create(const gpap_formula *f, const gpap_engi
     e->gpu.reset(g);
     e->driver = driver;
     e->device_ordinal = device;
+    e->mem.gpu = g;
+    e->mem.account = gpap::mem_account(driver, device);
     gpap_status st = GPAP_OK;
     do {
 
@@ -238,10 +240,10 @@ extern "C" gpap_status gpap_engine_create(const gpap_formula *f, const gpap_engi
         /* Host side of gpap_sat_rows' original-order synthesis (the engine outlives f). */
         e->num_bin = f->num_bin;
         e->sat_src_host = f->sat_src;
-        st = e->acc_ops.reserve(g, 8);
-        if (st == GPAP_OK) st = e->acc_props.reserve(g, 8);
-        if (st == GPAP_OK) st = e->acc_decs.reserve(g, 8);
-        if (st == GPAP_OK) st = e->scratch_i32.reserve(g, 64);
+        st = e->acc_ops.reserve(e->mem, 8);
+        if (st == GPAP_OK) st = e->acc_props.reserve(e->mem, 8);
+        if (st == GPAP_OK) st = e->acc_decs.reserve(e->mem, 8);
+        if (st == GPAP_OK) st = e->scratch_i32.reserve(e->mem, 64);
         if (st != GPAP_OK) break;
         st = build_flush_cache(e, f);
     } while (0);
@@ -301,15 +303,14 @@ static gpap_status ensure_state(gpap_engine *e, int32_t K) {
     /* gpap_trail_cap (calibrate.cpp) is the one definition, shared with the sizing model. */
     const int32_t cap = gpap_trail_cap(e->num_vars);
     if (cap > e->trail_cap) e->trail_cap = cap;
-    gpap::Gpu *g = e->gpu.get();
-    GPAP_TRY(e->packed.reserve(g, (size_t)K * e->num_long * sizeof(int32_t)));
-    GPAP_TRY(e->abits.reserve(g, (size_t)K * e->nw * sizeof(int32_t)));
-    GPAP_TRY(e->active.reserve(g, (size_t)K));
-    GPAP_TRY(e->conflict.reserve(g, (size_t)K));
-    GPAP_TRY(e->trail.reserve(g, (size_t)K * e->trail_cap * sizeof(int32_t)));
+    GPAP_TRY(e->packed.reserve(e->mem, (size_t)K * e->num_long * sizeof(int32_t)));
+    GPAP_TRY(e->abits.reserve(e->mem, (size_t)K * e->nw * sizeof(int32_t)));
+    GPAP_TRY(e->active.reserve(e->mem, (size_t)K));
+    GPAP_TRY(e->conflict.reserve(e->mem, (size_t)K));
+    GPAP_TRY(e->trail.reserve(e->mem, (size_t)K * e->trail_cap * sizeof(int32_t)));
     for (DevBuf *b : {&e->nprops, &e->nops, &e->ndecs, &e->nrounds})
-        GPAP_TRY(b->reserve(g, (size_t)K * sizeof(int32_t)));
-    for (int i = 0; i < GPAP_SLOTS; ++i) GPAP_TRY(e->slots[i].mask.reserve(g, (size_t)K));
+        GPAP_TRY(b->reserve(e->mem, (size_t)K * sizeof(int32_t)));
+    for (int i = 0; i < GPAP_SLOTS; ++i) GPAP_TRY(e->slots[i].mask.reserve(e->mem, (size_t)K));
     return GPAP_OK;
 }
 
@@ -324,6 +325,13 @@ static int64_t row_buffers_held(const gpap_engine *e) {
         n += (int64_t)b->bytes;
     for (const Selection &s : e->slots) n += (int64_t)s.mask.bytes;
     return n;
+}
+
+extern "C" int64_t gpap_engine_mem_held(const gpap_engine *e, gpap_mem_kind kind) {
+    if (!e) return 0;
+    return kind == GPAP_MEM_FORMULA ? e->mem.formula
+           : kind == GPAP_MEM_ROWS  ? e->mem.rows
+                                    : e->mem.held();
 }
 
 extern "C" gpap_status gpap_engine_reset(gpap_engine *e, int32_t K) {
@@ -657,10 +665,10 @@ gpap_status QueuedCall::launch(const int32_t *jobs, int64_t n, int32_t L, int8_t
     const int32_t rows = e->K;
     gpap::Gpu *g = e->gpu.get();
     GPAP_TRY(stage(e, e->queue_dec, jobs, (size_t)n * (size_t)L * sizeof(int32_t)));
-    GPAP_TRY(e->queue_conf.reserve(g, (size_t)n));
-    GPAP_TRY(e->queue_impl.reserve(g, (size_t)n * sizeof(int32_t)));
-    GPAP_TRY(e->queue_sums.reserve(g, (size_t)rows * 3 * sizeof(int64_t)));
-    GPAP_TRY(e->queue_next.reserve(g, 16));
+    GPAP_TRY(e->queue_conf.reserve(e->mem, (size_t)n));
+    GPAP_TRY(e->queue_impl.reserve(e->mem, (size_t)n * sizeof(int32_t)));
+    GPAP_TRY(e->queue_sums.reserve(e->mem, (size_t)rows * 3 * sizeof(int64_t)));
+    GPAP_TRY(e->queue_next.reserve(e->mem, 16));
     GPAP_TRY(e->queue_next.zero());
 
     /* Dirty until the readbacks below show the launch ran to its end: a launch that died

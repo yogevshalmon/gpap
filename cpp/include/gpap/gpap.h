@@ -125,6 +125,11 @@ int32_t gpap_engine_num_vars(const gpap_engine *e);
 int32_t gpap_engine_num_clauses(const gpap_engine *e);   /* TOTAL clauses (unit + bin + long) */
 int32_t gpap_engine_num_long(const gpap_engine *e);      /* packed-word clauses: the row width */
 
+/* Device bytes this engine holds now, by kind: FORMULA is what it builds once and keeps (the
+ * formula, its flush cache, pair masks, counters), ROWS what grows with a batch or a call. */
+typedef enum { GPAP_MEM_ALL = 0, GPAP_MEM_FORMULA = 1, GPAP_MEM_ROWS = 2 } gpap_mem_kind;
+int64_t gpap_engine_mem_held(const gpap_engine *e, gpap_mem_kind kind);
+
 /* The GPU backend. The engine reaches the device through one internal interface with a plug per
  * GPU library: "cuda" (the default, the reference and the fast path) and "opencl" (the fixpoint
  * kernels and the support kernels in OpenCL C: no trajectory, so no sampling, and no `_dev`
@@ -530,6 +535,17 @@ void gpap_counters_reset(gpap_engine *e);
  * CROSS-CARD REPRODUCTION — a memory-bound K sizes larger on a larger card — and is a ceiling
  * only: a card with less free memory still reports less. Unset = no cap. */
 int64_t gpap_mem_available(int device, double fraction);
+
+/* ------------------------------------------------------------------ device memory
+ * What GPAP holds on a device (docs/ENGINE.md §7). `device` is an ordinal of the backend
+ * $GPAP_BACKEND names now, as for gpap_mem_available; the count covers every engine this
+ * process has there. What GPAP holds is counted, buffer by buffer, not estimated. It is not the
+ * driver's own context and kernel code, nor memory the caller owns (`_dev` pointers). */
+
+/* Bytes GPAP's engines hold on `device` now, and the most they held since the last reset. */
+int64_t gpap_mem_held(int device);
+int64_t gpap_mem_peak(int device);
+void gpap_mem_reset_peak(int device);
 /* Trail slots one row needs — THE rule (cpp/src/calibrate.cpp), which the engine's allocator
  * calls too. A function of the variable count ALONE: every push is deduplicated through the
  * assignment bitmap, so a variable contributes at most one entry. Hence there is no ceiling on

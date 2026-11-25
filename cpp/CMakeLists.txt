@@ -86,6 +86,7 @@ add_library(gpap SHARED
   src/engine.cpp
   src/readout.cpp
   src/calibrate.cpp
+  src/memory.cpp
   src/probe.cpp
   src/check.cpp
   src/sample.cpp

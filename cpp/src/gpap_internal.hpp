@@ -12,6 +12,7 @@
 
 #include "gpap/gpap.h"
 #include "gpu_api.hpp"
+#include "memory.hpp"
 
 namespace gpap {
 
@@ -59,21 +60,30 @@ gpap_status guard_entry(const char *what, F &&body) {
     }
 }
 
-/* A device buffer that grows and frees itself. It remembers the plug that allocated it, so it
- * can be released without the engine at hand. */
+/* A device buffer that grows and frees itself: THE way the engine allocates, so every byte it
+ * holds is counted (memory.hpp). It remembers the holder that counted it, and through it the
+ * plug, so it can be released without the engine at hand. */
 struct DevBuf {
-    Gpu *gpu = nullptr;
+    MemHolder *owner = nullptr;
     GpuMem ptr = 0;
     size_t bytes = 0;
+    MemKind kind = MemKind::ROWS;            /* the count it goes on (memory.hpp, MemKind) */
 
-    gpap_status reserve(Gpu *g, size_t n);   /* grows only; keeps the allocation if big enough */
+    /* Grows only; keeps the allocation if big enough. It frees the old buffer before it takes
+     * the new one, so a grow never holds both. */
+    gpap_status reserve(MemHolder &h, size_t n);
     gpap_status zero();
     void release();
     ~DevBuf() { release(); }
 
     DevBuf() = default;
+    explicit DevBuf(MemKind k) : kind(k) {}
     DevBuf(const DevBuf &) = delete;
     DevBuf &operator=(const DevBuf &) = delete;
+};
+/* A buffer the engine builds once and keeps: the formula's side of the ledger. */
+struct FormulaBuf : DevBuf {
+    FormulaBuf() : DevBuf(MemKind::FORMULA) {}
 };
 inline GpuArg buf(const DevBuf &b, size_t offset = 0) { return buf(b.ptr, offset); }
 
@@ -300,10 +310,13 @@ struct gpap_engine {
     std::unique_ptr<gpap::Gpu> gpu;
     const gpap::GpuDriver *driver = nullptr;    /* the library `gpu` was opened from */
     int device_ordinal = 0;
+    /* What this engine's buffers are counted on (memory.hpp). Declared before every DevBuf, as
+     * `gpu` is: a buffer uncounts itself here when it frees. */
+    gpap::MemHolder mem;
 
-    /* formula-resident (never rebuilt) */
-    gpap::DevBuf occ_off, occ_mid, occ_cls, packed_init, packed_flushed, abits_flushed;
-    gpap::DevBuf pair_check;           /* (2*n_pairs) int32 — sound_rows' binary/unit pass */
+    /* formula-resident (never rebuilt): the FORMULA count */
+    gpap::FormulaBuf occ_off, occ_mid, occ_cls, packed_init, packed_flushed, abits_flushed;
+    gpap::FormulaBuf pair_check;       /* (2*n_pairs) int32 — sound_rows' binary/unit pass */
 
     /* Host side of the original-order readout synthesis (the engine drops the formula). */
     std::vector<int32_t> sat_src_host, pair_host;
@@ -312,14 +325,14 @@ struct gpap_engine {
     /* per-chunk row state */
     gpap::DevBuf packed, abits, active, conflict, trail;
     gpap::DevBuf nprops, nops, ndecs, nrounds;
-    gpap::DevBuf acc_ops, acc_props, acc_decs;   /* int64 accumulators, no host sync */
+    gpap::FormulaBuf acc_ops, acc_props, acc_decs;   /* int64 accumulators, no host sync */
     /* one queued launch: the jobs, the shared counter, a flag and an implied count per job,
        three int64 sums per row; released when a queued call ends (~QueuedCall) */
     gpap::DevBuf queue_dec, queue_next, queue_conf, queue_impl, queue_sums;
 
-    gpap::DevBuf scratch_i32;           /* scratch: small results (counts) */
+    gpap::FormulaBuf scratch_i32;       /* scratch: small results (counts) */
     gpap::DevBuf staging_a, staging_b;  /* staging: uploads and readout buffers */
-    std::vector<gpap::DevBuf *> pair_masks;
+    std::vector<gpap::FormulaBuf *> pair_masks;
     Selection slots[GPAP_SLOTS];
 
     ~gpap_engine();

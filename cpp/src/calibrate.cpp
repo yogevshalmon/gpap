@@ -120,6 +120,23 @@ extern "C" int64_t gpap_mem_available(int device, double fraction) {
     return gpap::mem_budget(m.free, fraction);
 }
 
+namespace {
+/* The account of `device` on the backend $GPAP_BACKEND names; empty for an unknown backend. */
+gpap::MemState state_of(int device) {
+    gpap::MemState s;
+    const gpap::GpuDriver *driver = gpap::gpu_driver();
+    if (driver) gpap::mem_state(gpap::mem_account(driver, device), &s);
+    return s;
+}
+}  // namespace
+
+extern "C" int64_t gpap_mem_held(int device) { return state_of(device).held; }
+extern "C" int64_t gpap_mem_peak(int device) { return state_of(device).peak; }
+extern "C" void gpap_mem_reset_peak(int device) {
+    const gpap::GpuDriver *driver = gpap::gpu_driver();
+    if (driver) gpap::mem_reset_peak(gpap::mem_account(driver, device));
+}
+
 extern "C" int32_t gpap_default_k_cap(int device) {
     (void)device;                 /* kept in the signature: the cap is device-independent, and a
                                      caller should not have to care that it became so */
