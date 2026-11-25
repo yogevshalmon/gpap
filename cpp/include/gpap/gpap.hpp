@@ -393,6 +393,16 @@ inline Memory memory(int device = 0) {
     return {gpap_mem_limit(device), gpap_mem_limit_source(device), gpap_mem_held(device),
             gpap_mem_peak(device)};
 }
+/** Start a new peak on `device`: memory(device).peak counts from what GPAP holds now. */
+inline void reset_peak(int device = 0) { gpap_mem_reset_peak(device); }
+/** The bytes a limit spec means on a device of `total_bytes`, without setting it: 0 for
+ *  "none", and for a share when the total is unknown (<= 0). Throws gpap::Error, with the
+ *  reason, for a malformed spec. */
+inline std::int64_t parse_mem_limit(const std::string &spec, std::int64_t total_bytes = 0) {
+    std::int64_t bytes = 0;
+    check(gpap_parse_mem_limit(spec.c_str(), total_bytes, &bytes), "gpap_parse_mem_limit");
+    return bytes;
+}
 
 inline std::string version() { return gpap_version(); }
 /** Identity of this exact build; key a cache of measurements on this, never on version(). */
