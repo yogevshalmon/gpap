@@ -11,12 +11,16 @@
 #include "gpap_internal.hpp"
 
 namespace {
-/* The batch cap: one number, the same on every GPU. A SATURATION limit, not a safety one — the
- * analytic bound in gpap_compute_k_safe protects memory, and at this batch a card is already
- * heavily oversubscribed against its resident warps. Device-independent on purpose, or `--k-cap
- * auto` resolves differently per machine. Revisit only with a measurement showing it bind off
- * the occupancy plateau: docs/findings/CROSS_GPU_FINDINGS.md. */
-constexpr int32_t kBatchCap = 262144;
+/* The batch cap, in rows per resident warp. A SATURATION limit, not a safety one — the memory
+ * bounds protect memory: a card's rate rises with its batch until it holds some multiple of the
+ * warps it keeps resident, and flattens after, so the cap follows the card. Past it the rate
+ * gains a few percent for twice the memory and twice a chunk's wall. The measurement that set it:
+ * docs/findings/MEMORY_FINDINGS.md §8. `--k-cap auto` therefore differs per card: pin the batch
+ * to compare runs across cards. */
+constexpr int32_t kBatchRowsPerWarp = 64;
+/* The cap where the resident warps are unknown (OpenCL, a failed query): the fixed cap this
+ * rule replaced, so such a device's batch is as it was. */
+constexpr int32_t kBatchCapUnknownWarps = 262144;
 
 /* Clause count at or above which the warp-wide WAVE propagate beats the scalar one; measured,
  * docs/findings/KERNEL_AB_FINDINGS.md. See gpap_dispatch_wave for why the variable is M. */
@@ -207,10 +211,15 @@ extern "C" void gpap_mem_reset_peak(int device) {
     if (driver) gpap::mem_reset_peak(gpap::mem_account(driver, device));
 }
 
+int32_t gpap::default_k_cap(const gpap::GpuDriver *driver, int device) {
+    const int64_t warps = driver ? driver->resident_warps(device) : 0;
+    if (warps <= 0) return kBatchCapUnknownWarps;
+    return (int32_t)std::min<int64_t>(warps * kBatchRowsPerWarp, INT32_MAX);
+}
+
+/* The cap for the backend a NEW engine would get ($GPAP_BACKEND). An engine asks its own. */
 extern "C" int32_t gpap_default_k_cap(int device) {
-    (void)device;                 /* kept in the signature: the cap is device-independent, and a
-                                     caller should not have to care that it became so */
-    return kBatchCap;
+    return gpap::default_k_cap(gpap::gpu_driver(), device);
 }
 
 /* Rows of `per_row` bytes that fit `bytes`, at most `cap` (<= 0: no cap), never fewer than one:

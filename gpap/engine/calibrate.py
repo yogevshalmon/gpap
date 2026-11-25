@@ -13,9 +13,9 @@ import torch
 
 from gpap.engine import _core
 
-# The batch cap, spelled out here only so `default_k_cap` can answer for a non-CUDA device
-# without the driver; `gpap_default_k_cap` is authoritative and tests assert the two agree. It is
-# device-independent, so `--k-cap auto` means the same thing on every machine.
+# The batch cap where the resident warps are unknown, spelled out here only so `default_k_cap`
+# can answer for a non-CUDA device without the driver; `gpap_default_k_cap` is authoritative
+# (rows per resident warp on a card that counts them) and tests assert the two agree.
 K_CAP = 262_144
 
 
@@ -90,7 +90,8 @@ def compute_k_safe(num_long: int, N: int, gpu_mem_bytes: float,
 
 
 def default_k_cap(device: torch.device) -> int:
-    """The library's default batch cap — the same number on every device."""
+    """The library's default batch cap: rows per resident warp on a card that counts them, the
+    fixed `K_CAP` where the warp count is unknown (a CPU device, OpenCL)."""
     if device.type != "cuda":
         return K_CAP
     return _core.default_k_cap(device.index or 0)

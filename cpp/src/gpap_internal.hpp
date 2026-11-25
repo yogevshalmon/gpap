@@ -100,6 +100,9 @@ int64_t mem_budget(int64_t free_bytes, int64_t reserve, double share);
 int64_t mem_budget_cap();
 /* Rows of `per_row` bytes that fit `bytes`, at most `cap` (<= 0: no cap), at least one. */
 int32_t rows_fitting(int64_t bytes, int64_t per_row, int32_t cap);
+/* gpap_default_k_cap's rule for one GPU library: rows per resident warp, or the fixed cap where
+ * the library cannot count them. An engine passes its own library. */
+int32_t default_k_cap(const GpuDriver *driver, int device);
 /* gpap_dispatch_wave's rule for one GPU library. An engine passes the library it was created
  * on, never $GPAP_BACKEND, which may have changed since. */
 int32_t dispatch_wave(const GpuDriver *driver, int32_t num_clauses, int32_t batch, int device);
