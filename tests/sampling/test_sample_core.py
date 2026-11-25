@@ -333,6 +333,25 @@ def test_unsat_at_flush_needs_no_rows_at_run_time(monkeypatch):
     assert _core.SAMPLE_STOP[st.stop] == "unsat"
 
 
+def test_a_run_keeps_the_held_batch_when_the_budget_grows_a_little(monkeypatch):
+    """A batch that would grow by less than a thirty-second keeps the one the engine holds, so
+    free memory that moves by a few MB between runs does not reallocate every row buffer (and
+    the runs keep one batch); a budget that grows by a quarter takes the bigger batch. Before,
+    one row more reallocated the rows."""
+    monkeypatch.setenv("GPAP_VRAM_BUDGET_MIB", "64")
+    rng = random.Random(43)
+    clauses = random_cnf(rng, 24, 36, kmin=3)
+    s = _sampler(clauses, 24, seed=5, k_cap=10_000_000)
+    s.run(10**9, [B8], max_chunks=1)
+    held = s.k
+    monkeypatch.setenv("GPAP_VRAM_BUDGET_MIB", "65")             # 1.6% more
+    s.run(10**9, [B8], max_chunks=1)
+    assert s.k == held
+    monkeypatch.setenv("GPAP_VRAM_BUDGET_MIB", "80")             # a quarter more
+    s.run(10**9, [B8], max_chunks=1)
+    assert s.k > held
+
+
 def test_a_pin_of_the_sized_batch_is_still_a_pin(monkeypatch):
     """set_k(k > 0) pins whatever k is, the batch the run would size too, and set_k(0) unpins:
     the next run sizes again. Before, a pin equal to the sized batch was no pin, so with sizing
