@@ -146,11 +146,12 @@ extern "C" int64_t gpap_mem_available(int device, double fraction) {
     r.limit = s.limit;
     r.held_other = s.held;
     if (m.source == gpap::GpuMemory::GRANT) r.grant = m.free;
-    else if (m.source == gpap::GpuMemory::DEVICE)
-        r.memory = gpap::mem_budget(m.free, s.reserve, fraction);
+    else if (m.source == gpap::GpuMemory::DEVICE)  /* the engine's budget, then the fraction */
+        r.memory = (int64_t)((double)gpap::mem_budget(m.free, s.reserve, 1) * fraction);
     else if (s.limit <= 0)         /* a total, less what GPAP's engines hold (engine_batch's) */
-        r.memory = gpap::mem_budget(std::max<int64_t>(m.free - s.held, 0), s.reserve,
-                                    gpap::kTotalShare * fraction);
+        r.memory = (int64_t)((double)gpap::mem_budget(std::max<int64_t>(m.free - s.held, 0),
+                                                      s.reserve, gpap::kTotalShare) *
+                             fraction);
     return gpap::size_rows(r).left;
 }
 

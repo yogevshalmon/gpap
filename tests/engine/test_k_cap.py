@@ -97,13 +97,25 @@ def test_auto_is_stable_across_calls():
 @pytest.mark.gpu
 def test_vram_budget_cap_is_a_ceiling_not_a_floor(monkeypatch):
     from gpap.engine import _core
-    uncapped = _core.mem_available(0, 0.80)
+    uncapped = _core.mem_available(0)
     assert uncapped > 0
     monkeypatch.setenv("GPAP_VRAM_BUDGET_MIB", str(max(1, uncapped // (1 << 20) // 2)))
-    assert _core.mem_available(0, 0.80) == pytest.approx(uncapped / 2, rel=0.01)
+    assert _core.mem_available(0) == pytest.approx(uncapped / 2, rel=0.01)
     # Above what the card has, the card binds: the cap never adds memory.
     monkeypatch.setenv("GPAP_VRAM_BUDGET_MIB", str(uncapped // (1 << 20) * 4))
-    assert _core.mem_available(0, 0.80) == uncapped
+    assert _core.mem_available(0) == pytest.approx(uncapped, rel=0.001)
+
+
+@pytest.mark.gpu
+def test_a_fraction_scales_the_capped_budget(monkeypatch):
+    """`fraction` scales the engine's own budget after GPAP_VRAM_BUDGET_MIB caps it, on the core
+    path as on the CPU placeholder's: 0.8 of a 64 MiB cap is 0.8 of 64 MiB. Before, the core
+    took the fraction first, so wherever the cap bound, 0.8 returned the whole cap (and the
+    checker's results could take all of the engine's budget)."""
+    from gpap.engine.calibrate import gpu_mem_available
+    monkeypatch.setenv("GPAP_VRAM_BUDGET_MIB", "64")
+    assert gpu_mem_available(torch.device("cuda", 0), 0.8) == int(0.8 * (64 << 20))
+    assert gpu_mem_available(torch.device("cpu"), 0.8) == int(0.8 * (64 << 20))
 
 
 @pytest.mark.gpu
