@@ -137,17 +137,21 @@ gpap_status mem_take(MemHolder &h, MemKind kind, int64_t bytes) {
         }
         /* The reserve, kept where free memory is measured: a driver that pages device memory
          * to the host (WSL2) grants an allocation past the card instead of failing it, and the
-         * run slows down with no error. A pinned batch is the one a sizing does not bound. Two
-         * threads that both pass here before either allocates can still take the reserve. */
+         * run slows down with no error. A pinned batch is the one a sizing does not bound. The
+         * sizing keeps all of the reserve; this refuses only past half of it, so what the
+         * sizing cannot see (allocation rounding, kernel code a first launch loads, another
+         * process) does not fail a call it fit. Two threads that both pass here before either
+         * allocates can still take more. */
         GpuMemory m;
         if (h.gpu && h.gpu->memory(&m) == GPAP_OK && m.source == GpuMemory::DEVICE) {
             int64_t reserve = 0;
             GPAP_TRY(resolve_reserve(a, &reserve));
-            if (m.free - bytes < reserve) {
+            if (m.free - bytes < reserve / 2) {
                 char r[32], fr[32], need[32];
                 set_error("GPAP leaves %s free on %s (the memory reserve: GPAP_MEM_RESERVE, "
                           "gpap_set_mem_reserve): %s is free, and a buffer of %s would leave "
-                          "less. Use a smaller batch, free an engine, or lower the reserve",
+                          "less than half of that. Use a smaller batch, free an engine, or "
+                          "lower the reserve",
                           fmt_bytes(reserve, r), a->name.c_str(), fmt_bytes(m.free, fr),
                           fmt_bytes(bytes, need));
                 return GPAP_ERR_MEMORY;

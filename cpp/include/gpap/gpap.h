@@ -596,8 +596,8 @@ gpap_limit_source gpap_mem_limit_source(int device);
 /* The memory reserve: what GPAP leaves free on `device` for what it cannot count (other
  * processes and the desktop, the caller's own tensors, kernel code loaded at a first launch).
  * The default batch is sized from free memory less the reserve, and where GPAP measures free
- * memory (cuda) an allocation that would leave less than the reserve free fails with
- * GPAP_ERR_MEMORY, because a driver that pages device memory to the host (WSL2) would otherwise
+ * memory (cuda) an allocation that would leave less than half the reserve free fails with
+ * GPAP_ERR_MEMORY (the other half is slack for what the sizing cannot see), because a driver that pages device memory to the host (WSL2) would otherwise
  * slow down instead of failing. Under a limit it still applies: the limit is a ceiling on what
  * GPAP holds, the reserve what it leaves free. `spec` has the limit's grammar ("1G", "512M",
  * "5%" of the total); "none" for no reserve even if GPAP_MEM_RESERVE is set; NULL to follow

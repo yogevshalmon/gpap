@@ -205,17 +205,18 @@ def test_the_default_budget_is_free_memory_less_the_reserve():
 def test_an_allocation_that_would_leave_less_than_the_reserve_free_fails():
     """Where GPAP measures free memory (CUDA) the reserve is kept at every allocation, not only
     at sizing: a pinned batch, which no sizing bounds, fails with MemoryError naming the reserve
-    once it would leave less than the reserve free, the engine keeps no rows, and with the
-    reserve back at its default the same engine runs and answers as a fresh one does. This is
-    what stops a pinned batch past the card on WSL2, which pages device memory to the host
-    instead of failing; before, such a batch was allocated and ran slowly."""
+    once it would leave less than half the reserve free (the sizing keeps all of it; the other
+    half is slack for what it cannot see), the engine keeps no rows, and with the reserve back at
+    its default the same engine runs and answers as a fresh one does. This is what stops a
+    pinned batch past the card on WSL2, which pages device memory to the host instead of
+    failing; before, such a batch was allocated and ran slowly."""
     if os.environ.get("GPAP_BACKEND", "cuda") == "opencl":
         pytest.skip("OpenCL cannot measure free memory: its share of the total is the margin")
     f = _formula()
     e = _core.Engine(f)
     e.reset(256)
     free = _core.mem_available(0) + _core.mem_reserve(0)        # what the device has free now
-    _core.set_mem_reserve(max(free - 1000 * _row_bytes(e), 1), 0)
+    _core.set_mem_reserve(2 * (free - 1000 * _row_bytes(e)), 0)  # half of it: 1000 rows left
     with pytest.raises(MemoryError, match="reserve"):
         e.reset(2000)
     assert e.K == 0
@@ -224,6 +225,30 @@ def test_an_allocation_that_would_leave_less_than_the_reserve_free_fails():
     for x, y in zip(_core.Engine(f).check_sets(lits, off, chunk=100, assignments=True),
                     e.check_sets(lits, off, chunk=100, assignments=True)):
         assert np.array_equal(x, y)
+
+
+@pytest.mark.gpu
+def test_a_batch_the_sizing_fit_survives_a_little_drift_into_the_reserve():
+    """The sizing keeps the whole reserve free and the guard refuses only past half of it, so
+    what the sizing cannot see between sizing and allocation (allocation rounding, kernel code a
+    first launch loads, another process) does not fail a batch it fit: with the default budget
+    cut to 64 MiB by the reserve, the sized batch is still allocated after 32 MiB more of the
+    device was taken. Before, the guard refused at the reserve itself."""
+    import torch
+    if os.environ.get("GPAP_BACKEND", "cuda") == "opencl":
+        pytest.skip("OpenCL cannot measure free memory: its share of the total is the margin")
+    f = _formula()
+    e = _core.Engine(f)
+    free = _core.mem_available(0) + _core.mem_reserve(0)
+    _core.set_mem_reserve(free - (64 << 20), 0)
+    k = e.check_chunk_size(10 ** 9, 2)
+    other = torch.empty(32 << 20, dtype=torch.uint8, device="cuda")
+    try:
+        e.reset(k)
+    finally:
+        del other
+        torch.cuda.empty_cache()
+    assert e.K == k
 
 
 @pytest.mark.gpu
