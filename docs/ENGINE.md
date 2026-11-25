@@ -299,6 +299,8 @@ launch. The default batch is sized from free memory less the reserve, all of it:
 later buffers are counted, so no fraction is held back. On CUDA every allocation keeps the
 reserve too, so a pinned batch past the card fails with `GPAP_ERR_MEMORY` and names the reserve
 instead of paging to host memory, which WSL2 does silently (a native card fails loudly anyway).
+Under the default budget a smaller batch keeps the engine's bigger row buffers, and what a
+call allocates beside its rows is sized to fit beside them.
 The default is 1 GiB ([findings/MEMORY_FINDINGS.md](findings/MEMORY_FINDINGS.md) §9); set it as
 the limit is set, with the limit's grammar: `--mem-reserve 2G`, `GPAP_MEM_RESERVE=2G`,
 `gpap.set_mem_reserve("2G")`, `gpap_set_mem_reserve(device, "2G")`, `gpap::set_mem_reserve`;

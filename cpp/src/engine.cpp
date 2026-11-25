@@ -419,7 +419,9 @@ gpap_status gpap::engine_reset_keeping(gpap_engine *e, int32_t K, int32_t keep) 
     /* A grow is a realloc, so the packed rows are gone and no longer the baseline — dropped on
      * FAILURE too, or the next reset takes the lite path over an uninitialized buffer. */
     const size_t packed_cap = e->packed.bytes;
-    const gpap_status alloc = ensure_state(e, K, exact_sizing(e), keep);
+    const bool refit = exact_sizing(e) || e->refit_next;
+    e->refit_next = false;
+    const gpap_status alloc = ensure_state(e, K, refit, keep);
     if (alloc != GPAP_OK || e->packed.bytes != packed_cap) e->packed_clean_rows = 0;
     if (alloc != GPAP_OK) return drop_rows(e, alloc);
     e->K = K;
@@ -714,7 +716,9 @@ gpap_status QueuedCall::begin(int32_t requested, int64_t n_sets, int64_t width,
     GPAP_TRY(use_ctx(e));
     /* A grow is a realloc: those rows are no longer the baseline, on failure too. */
     const size_t packed_cap = e->packed.bytes;
-    const gpap_status alloc = ensure_state(e, (int32_t)rows, exact_sizing(e));
+    const bool refit = exact_sizing(e) || e->refit_next;
+    e->refit_next = false;
+    const gpap_status alloc = ensure_state(e, (int32_t)rows, refit);
     if (alloc != GPAP_OK || e->packed.bytes != packed_cap) e->packed_clean_rows = 0;
     if (alloc != GPAP_OK) return drop_rows(e, alloc);
     for (int i = 0; i < GPAP_SLOTS; ++i) {
@@ -952,7 +956,28 @@ int32_t engine_batch(gpap_engine *e, int64_t extra_row_bytes, int32_t cap,
             }
             break;
     }
-    const Sizing s = size_rows(r);
+    Sizing s = size_rows(r);
+    /* Under the default budget a smaller batch keeps the engine's bigger row buffers (no refit:
+     * exact_sizing), which the budget counts as its own: measured free memory counts them back,
+     * and an unmeasured total never took them out. What the call allocates beside its rows must
+     * then fit beside all of them, not beside the rows it uses, or its own buffers spend the
+     * kept rows' bytes a second time. Where nothing fits beside them, the next reset gives them
+     * back instead. */
+    e->refit_next = false;
+    if (r.memory >= 0 && s.rows > 0 && own > 0 && !exact_sizing(e)) {
+        const int64_t state_row = gpap_row_bytes(e->num_long, e->num_vars, e->trail_cap);
+        if (s.rows * state_row < own) {
+            const int64_t beside = std::max<int64_t>(r.per_row - state_row, 1);
+            const int64_t left = r.memory - own - r.fixed;
+            const int64_t k = left > 0 ? left / beside : 0;
+            if (k <= 0) {
+                e->refit_next = true;
+            } else if (k < s.rows) {
+                s.rows = k;
+                s.bound = GPAP_BOUND_MEMORY;
+            }
+        }
+    }
     e->bound = s.bound;
     if (s.rows <= 0) {
         no_row_message(e, r, s, acct);
