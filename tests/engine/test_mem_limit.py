@@ -342,6 +342,43 @@ def test_a_reset_refused_part_way_leaves_no_rows_and_a_usable_engine():
     assert row > 0
 
 
+def _on_wsl2():
+    try:
+        with open("/proc/version") as f:
+            return "microsoft" in f.read().lower()
+    except OSError:
+        return False
+
+
+@pytest.mark.gpu
+def test_a_batch_past_the_device_fails_as_memory_and_the_engine_recovers():
+    """A pinned batch twice the device's size fails as GPAP_ERR_MEMORY (MemoryError) on every
+    plug, and the engine keeps no rows; the same engine then runs a small batch and answers as a
+    fresh one does, and freeing it gives every byte back. A runtime that backs a buffer only when
+    a command first uses it (NVIDIA's OpenCL) used to create the buffers and fail at the first
+    launch with a driver error, leaving the rows with no memory behind them (GitHub issue 79).
+    Not on WSL2, which pages device memory to the host instead of failing."""
+    if _on_wsl2():
+        pytest.skip("WSL2 pages device memory to the host instead of failing")
+    base = _settled_held()
+    _core.set_mem_limit("100%", 0)               # the device's total, as the limit resolves it
+    total = _core.mem_limit(0)
+    _core.set_mem_limit(None, 0)
+    f = _formula(nv=5000, nc=20000, seed=9)
+    e = _core.Engine(f)
+    with pytest.raises(MemoryError):
+        e.reset(min(2 * total // _row_bytes(e) + 1, 2**31 - 1))
+    assert e.K == 0
+    e.reset(256)
+    lits, off = _flat(_sets(f.info.num_vars, 600, 3))
+    fresh = _core.Engine(f).check_sets(lits, off, chunk=256, assignments=True)
+    again = e.check_sets(lits, off, chunk=256, assignments=True)
+    for x, y in zip(fresh, again):
+        assert np.array_equal(x, y)
+    del e, fresh, again
+    assert _settled_held() == base
+
+
 @pytest.mark.engine
 def test_trim_then_recache_is_refused_cleanly():
     """recache_flush caches row 0; a trimmed engine has none, so it refuses before touching a
