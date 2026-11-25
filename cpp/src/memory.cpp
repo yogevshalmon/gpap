@@ -313,7 +313,7 @@ Sizing size_rows(const SizeRequest &r) {
         consider(GPAP_BOUND_LIMIT, ceiling - r.held_other, r.fixed, r.per_row);
     }
     if (r.grant >= 0) consider(GPAP_BOUND_GRANT, r.grant, r.fixed, r.per_row);
-    if (r.memory >= 0) consider(GPAP_BOUND_MEMORY, r.memory, r.fixed, r.per_row);
+    if (r.memory >= 0) consider(GPAP_BOUND_MEMORY, r.memory, r.fixed + r.memory_fixed, r.per_row);
     if (best.rows == INT64_MAX) return Sizing{};      /* no bound applied: nothing to size from */
     if (r.cap > 0 && best.rows >= r.cap) {
         best.rows = r.cap;

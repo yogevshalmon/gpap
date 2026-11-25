@@ -925,6 +925,11 @@ int32_t engine_batch(gpap_engine *e, int64_t extra_row_bytes, int32_t cap,
      * them out: the batch is then a function of the formula and the card, not of the engine's
      * call history. */
     const int64_t own = row_buffers_held(e);
+    /* Under the default budget nothing is refit, so the engine's other row-kind buffers (its
+     * staging and selection lists) are reused as well: counted back like the rows, so a call
+     * shaped like the last one sizes the batch the last one did. */
+    const bool keeps = !exact_sizing(e);
+    const int64_t staging = keeps ? std::max<int64_t>(e->mem.rows - own, 0) : 0;
     SizeRequest r;
     r.total = m.total;
     r.limit = acct.limit;
@@ -941,7 +946,9 @@ int32_t engine_batch(gpap_engine *e, int64_t extra_row_bytes, int32_t cap,
     r.widest = std::max<int64_t>(
         {4ll * e->num_long, 4ll * e->nw, 4ll * e->trail_cap, extra_row_bytes, 1});
     switch (m.source) {
-        case GpuMemory::DEVICE: r.memory = mem_budget(m.free + own, acct.reserve, 1); break;
+        case GpuMemory::DEVICE:
+            r.memory = mem_budget(m.free + own + staging, acct.reserve, 1);
+            break;
         case GpuMemory::GRANT: r.grant = m.free + own; break;
         default:
             /* A total stands in for free memory, unless a limit does: less what GPAP's other
@@ -956,24 +963,46 @@ int32_t engine_batch(gpap_engine *e, int64_t extra_row_bytes, int32_t cap,
             }
             break;
     }
+    /* A readout slice beside the rows, under the default budget: a sixteenth of it, at most a
+     * whole slice. exact_terms counts a 32-row slice, which a limit's tight room relies on;
+     * under the default budget a batch that fills it would read a (rows, 2N) readout 32 rows at
+     * a time, half as slow again on a large formula (docs/findings/MEMORY_FINDINGS.md §10). */
+    if (r.memory >= 0) {
+        const int64_t slice = std::min<int64_t>(r.memory / 16, (int64_t)kReadoutSliceBytes);
+        r.memory_fixed = std::max<int64_t>(slice - 64ll * e->num_vars, 0);
+    }
     Sizing s = size_rows(r);
-    /* Under the default budget a smaller batch keeps the engine's bigger row buffers (no refit:
-     * exact_sizing), which the budget counts as its own: measured free memory counts them back,
-     * and an unmeasured total never took them out. What the call allocates beside its rows must
-     * then fit beside all of them, not beside the rows it uses, or its own buffers spend the
-     * kept rows' bytes a second time. Where nothing fits beside them, the next reset gives them
-     * back instead. */
-    e->refit_next = false;
-    if (r.memory >= 0 && s.rows > 0 && own > 0 && !exact_sizing(e)) {
-        const int64_t state_row = gpap_row_bytes(e->num_long, e->num_vars, e->trail_cap);
-        if (s.rows * state_row < own) {
-            const int64_t beside = std::max<int64_t>(r.per_row - state_row, 1);
-            const int64_t left = r.memory - own - r.fixed;
-            const int64_t k = left > 0 ? left / beside : 0;
-            if (k <= 0) {
+    /* Under the default budget a smaller batch keeps the engine's bigger buffers, which the
+     * budget counted back. The bytes the call still allocates are what it needs past what each
+     * kind holds, the row state and the rest apart: a batch whose own buffers outgrow what is
+     * held must fit them beside all the rows the engine keeps, or they spend the kept rows'
+     * bytes a second time. That overspend is at most the rows kept past the batch, so a surplus
+     * under a sixteenth of them, or a quarter of the reserve, is left alone: it stays inside the
+     * guard's slack, and a batch that moves by a few rows from call to call does not flip
+     * between sizes. Where nothing fits beside them, the next reset gives the rows back
+     * instead: the flag is only ever set here, and only that reset clears it, so another
+     * sizing in the same call (a queue that then declines) cannot drop it. */
+    const int64_t state_row = gpap_row_bytes(e->num_long, e->num_vars, e->trail_cap);
+    const int64_t surplus = own - s.rows * state_row;
+    if (keeps && r.memory >= 0 && s.rows > 0 &&
+        surplus > std::min(own / 16, std::max<int64_t>(acct.reserve, 0) / 4)) {
+        const int64_t beside_row = std::max<int64_t>(r.per_row - state_row, 0);
+        const int64_t once = r.fixed + r.memory_fixed;
+        const int64_t room = r.memory - own - staging;
+        auto need = [&](int64_t k) {
+            return std::max<int64_t>(k * state_row - own, 0) +
+                   std::max<int64_t>(k * beside_row + once - staging, 0);
+        };
+        if (need(s.rows) > room) {
+            if (need(1) > room) {
                 e->refit_next = true;
-            } else if (k < s.rows) {
-                s.rows = k;
+            } else {
+                int64_t lo = 1, hi = s.rows;                 /* need(lo) fits, need(hi) does not */
+                while (hi - lo > 1) {
+                    const int64_t mid = lo + (hi - lo) / 2;
+                    (need(mid) <= room ? lo : hi) = mid;
+                }
+                s.rows = lo;
                 s.bound = GPAP_BOUND_MEMORY;
             }
         }

@@ -178,9 +178,12 @@ def test_the_vram_cap_actually_moves_the_sampler_batch(monkeypatch):
     narrow = _tiny_sampler(None).K
     assert narrow < wide, f"the cap did not reach K ({narrow} vs {wide} at {mib} MiB)"
     # What a call allocates after it is sized, which every bound counts (exact_terms in
-    # cpp/src/engine.cpp), restated: 17 bytes a row, and 72 N + 8 bitmap words + 4 KiB once.
+    # cpp/src/engine.cpp), restated: 17 bytes a row, and 72 N + 8 bitmap words + 4 KiB once;
+    # and the readout slice the default budget sets aside, a sixteenth of it (engine_batch).
+    budget = mib << 20
     later_fixed = 72 * N + 8 * ((2 * N + 31) // 32) + 4096
-    assert narrow == ((mib << 20) - later_fixed) // (row_bytes(num_long, N) + 17), \
+    slice_aside = max(min(budget // 16, 256 << 20) - 64 * N, 0)
+    assert narrow == (budget - later_fixed - slice_aside) // (row_bytes(num_long, N) + 17), \
         "K under a cap must be the memory model's own answer for exactly that budget"
 
 

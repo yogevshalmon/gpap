@@ -232,3 +232,29 @@ killed.
 
 Not measured: an L4; OpenCL (whose default keeps its share of the total); two processes sharing a
 card; a desktop under load beside the WSL2 runs.
+
+## 10. The readout slice beside a memory-bound batch
+
+`check_sets` with assignments (a (rows, 2N) readout) and flags only, on two random 3-CNFs built
+to be memory-bound, the library's own chunks, the laptop card (WSL2), main 814d75d against the
+branch, median of 5-9 calls after a warm-up (calls on WSL2 vary by up to 40% from run to run):
+
+| formula | main | branch, 32-row slice | branch, slice set aside |
+|---|---|---|---|
+| N = 200,000, M = 700,000, 20,000 sets | 1.17-1.45 s (6 runs) | 1.76 s | 1.30-1.35 s |
+| N = 2,000, M = 1,500,000, 60,000 sets | 1.64-1.66 s (6 runs) | 1.70 s | 1.63-1.64 s |
+
+- **A batch that fills the default budget left the readout its 32-row minimum** (the one slice
+  every bound counts): many small slices instead of main's 256 MiB, 30-50% slower on the large
+  formula. The default budget now sets a slice aside, a sixteenth of it, at most a whole slice;
+  a limit keeps the 32-row minimum its tight room relies on.
+- **The sizing also counts back the staging the engine holds** (its decision matrix, slice and
+  selection lists), as it counts back the rows. Without that, each call sized a few rows smaller
+  than the last, found its own buffers did not fit beside the rows it kept, and gave the rows
+  back: a flags-only check took 284 ms instead of 1-2 ms, and calls alternated between two
+  batch sizes. A kept surplus under a sixteenth of the rows, or a quarter of the reserve, is
+  now left alone.
+- Flags only: 1-2 ms on both trees for the large formula, 1.52 s for the other.
+
+Data: `$GPAP_RESULTS/memrule_20261125/local_4080/readbench.txt` (`scripts/readbench.py`).
+

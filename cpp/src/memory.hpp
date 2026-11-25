@@ -129,6 +129,9 @@ struct SizeRequest {
      * sized (exact_terms in engine.cpp). */
     int64_t per_row = 1;
     int64_t fixed = 0;
+    /* One-off bytes only the MEMORY bound counts: the readout slice the default budget sets
+     * aside (engine_batch). A limit and a grant keep the 32-row minimum `fixed` counts. */
+    int64_t memory_fixed = 0;
     int32_t cap = 0;            /* the batch cap; <= 0: none */
     int64_t max_buffer = 0;     /* the device's one-buffer limit; 0: none */
     int64_t widest = 1;         /* the widest per-row buffer, which max_buffer bounds */
