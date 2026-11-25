@@ -690,10 +690,14 @@ gpap_status QueuedCall::begin(int32_t requested, int64_t n_sets, int64_t width,
      * which need none of them. A declined call keeps the bound its chunk sizing recorded. */
     const gpap_bound chunk_bound = e->bound;
     const bool chunk_refit = e->refit_next;  /* a declined call runs as its chunk sizing said */
+    const gpap_status chunk_status = e->sizing_status;
+    const std::string chunk_error = get_error();
     const int64_t fit = engine_batch(e, kQueueRowBytes, 0, queue_call_bytes(n_sets, width));
-    if (fit <= 0) {
+    if (fit <= 0) {                          /* and says nothing of a queue that does not fit */
         e->bound = chunk_bound;
         e->refit_next = chunk_refit;
+        e->sizing_status = chunk_status;
+        set_error("%s", chunk_error.c_str());
         return GPAP_OK;
     }
     int64_t rows = requested > 0 ? std::min<int64_t>(requested, fit) : fit;
@@ -916,6 +920,7 @@ static void no_row_message(const gpap_engine *e, const SizeRequest &r, const Siz
 int32_t engine_batch(gpap_engine *e, int64_t extra_row_bytes, int32_t cap,
                      int64_t reserve_bytes) {
     e->bound = GPAP_BOUND_NONE;
+    e->refit_next = false;                    /* each sizing decides its own call's refit */
     GpuMemory m;
     e->sizing_status = use_ctx(e);
     if (e->sizing_status == GPAP_OK) e->sizing_status = e->gpu->memory(&m);
@@ -1015,7 +1020,10 @@ int32_t engine_batch(gpap_engine *e, int64_t extra_row_bytes, int32_t cap,
                 }
                 s.rows = lo;                                 /* 0: not even one row fits */
                 s.bound = GPAP_BOUND_MEMORY;
-                if (s.rows == 0) s.left = room + give;
+                if (s.rows == 0) {
+                    s.left = room + give;
+                    e->refit_next = false;                   /* the call fails: no reset */
+                }
             }
         }
     }
@@ -1034,14 +1042,21 @@ int64_t engine_transient_room(gpap_engine *e, int64_t reuse) {
     const bool known = e->mem.account && mem_state(e->mem.account, &acct) == GPAP_OK;
     if (known && acct.limit > 0) room = std::max<int64_t>(acct.limit - acct.held + reuse, 0);
     GpuMemory m;
-    if (e->gpu->memory(&m) != GPAP_OK) return room;
+    const std::string before = get_error();
+    if (e->gpu->memory(&m) != GPAP_OK) {     /* the readout goes on: leave the last error as it was */
+        set_error("%s", before.c_str());
+        return room;
+    }
     if (m.source == GpuMemory::GRANT) return std::min(room, std::max<int64_t>(m.free + reuse, 0));
-    /* On a measured device, what the reserve leaves of free memory now; an unmeasured total
-     * (OpenCL) has its share's margin instead. Under GPAP_VRAM_BUDGET_MIB, which caps what a
-     * call takes rather than what is free, also the cap less every row-kind buffer the engine
-     * holds: the call's rows and what it took since it was sized. */
+    /* On a measured device, what the reserve leaves of free memory now, less the margin
+     * engine_batch's cut may already have taken from it (a sixteenth of what the engine holds,
+     * at most a quarter of the reserve); an unmeasured total (OpenCL) has its share's margin
+     * instead. Under GPAP_VRAM_BUDGET_MIB, which caps what a call takes rather than what is
+     * free, also the cap less every row-kind buffer the engine holds: the call's rows and what
+     * it took since it was sized. */
     if (m.source == GpuMemory::DEVICE) {        /* the reserve unknown: the smallest slice */
-        const int64_t left = known ? mem_budget(m.free + reuse, acct.reserve, 1) : 0;
+        const int64_t slack = std::min(e->mem.rows / 16, std::max<int64_t>(acct.reserve, 0) / 4);
+        const int64_t left = known ? mem_budget(m.free + reuse, acct.reserve - slack, 1) : 0;
         room = std::min(room, std::max<int64_t>(left, 0));
     }
     if (const int64_t cap = mem_budget_cap())

@@ -253,7 +253,8 @@ smallest, then the cap, then the device's one-buffer limit (OpenCL). `gpap_engin
 after it is sized: selected-row lists, soundness flags, the smallest readout slice, pair masks
 (`exact_terms` in `cpp/src/engine.cpp`); a readout slice then grows only into the room the bound
 leaves. Under a limit or a grant, a batch smaller than the engine's last gives the extra rows
-back; under the memory bound they are kept for the next bigger batch. Where not even one row
+back; under the memory bound they are kept for the next bigger batch, unless the call's own
+buffers do not fit beside them. Where not even one row
 fits, the call fails with `GPAP_ERR_MEMORY` (Python `MemoryError`) and says what a row needs: it
 never runs a batch of one row. A buffer the device cannot back fails at its allocation, on
 OpenCL too, where a runtime may back a buffer only at its first use: the plug writes it once

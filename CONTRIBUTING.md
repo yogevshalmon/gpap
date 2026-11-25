@@ -118,7 +118,8 @@ The engine:
 - On every bound, a call's sizing counts everything the call allocates afterwards
   (`exact_terms` in `cpp/src/engine.cpp`). A new buffer goes there, or
   `tests/engine/test_mem_limit.py` fails under a tight limit or a small default budget. Under a
-  limit a smaller batch refits the row state to itself (`ensure_state`'s `fit`), and only a
+  limit a smaller batch refits the row state to itself (`ensure_state`'s `fit`), as it does
+  under the default budget where nothing fits beside the rows it keeps, and only a
   caller that re-initializes every row afterwards may ask for that: a refit under `apply` or a
   trajectory loses the rows.
 - The batch comes from the memory model (`gpap_row_bytes`, `cpp/src/calibrate.cpp`) and the batch
