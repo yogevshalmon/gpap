@@ -209,6 +209,27 @@ def test_the_batch_fits_under_the_limit_and_says_so():
 
 
 @pytest.mark.engine
+def test_under_a_limit_a_smaller_batch_holds_only_its_own_rows():
+    """Row buffers only grow, so a batch smaller than the engine's last keeps the bigger one's
+    buffers. The sizing credits the engine's row state as reused by the next batch, which a
+    smaller batch does not do, so under an exact bound a reset fits the buffers to its own rows:
+    the row state shrinks by exactly the rows it dropped, and the room the sizing counted for the
+    call's later buffers is really there. Without a limit the buffers are kept for the next
+    bigger batch, as before."""
+    f = _formula()
+    e = _core.Engine(f)
+    row = _row_bytes(e)
+    e.reset(2000)
+    big = e.mem_held_rows
+    e.reset(100)
+    assert e.mem_held_rows == big, "without a limit a smaller batch keeps the buffers"
+    _core.set_mem_limit(_settled_held() + (64 << 20), 0)
+    e.reset(2000)
+    e.reset(100)
+    assert big - e.mem_held_rows == 1900 * row
+
+
+@pytest.mark.engine
 def test_a_lowered_limit_applies_at_the_next_sizing():
     """A limit set after an engine sized itself bounds that engine's next batch; nothing is
     freed to meet it, and it holds what it held."""

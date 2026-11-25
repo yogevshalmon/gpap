@@ -307,18 +307,38 @@ extern "C" const char *gpap_engine_device_name(const gpap_engine *e) {
 
 /* ------------------------------------------------------------------ reset */
 
-static gpap_status ensure_state(gpap_engine *e, int32_t K) {
+/* Whether the batch is sized against an exact bound, a memory limit or a host's grant, which
+ * counts every byte: the default rule's margins do not then cover a row buffer held past what
+ * the sizing counted. */
+static bool exact_sizing(const gpap_engine *e) {
+    if (e->mem_source == gpap::GpuMemory::GRANT) return true;
+    gpap::MemState acct;
+    return e->mem.account && gpap::mem_state(e->mem.account, &acct) == GPAP_OK &&
+           acct.limit > 0;
+}
+
+/* The row state for K rows. A buffer only grows, so a smaller batch keeps a bigger one's rows,
+ * except with `fit`: then a buffer bigger than K rows is given back and taken at K's size. The
+ * sizing credits the engine's own row state as reused by the next batch (engine_batch), which
+ * holds for a bigger batch and, under an exact bound, only if a smaller one fits its buffers to
+ * itself. Only a caller that re-initializes every row afterwards may pass `fit` (a reset, a
+ * queued call's start): apply and trajectory run on rows whose contents a refit would lose. */
+static gpap_status ensure_state(gpap_engine *e, int32_t K, bool fit = false) {
     /* gpap_trail_cap (calibrate.cpp) is the one definition, shared with the sizing model. */
     const int32_t cap = gpap_trail_cap(e->num_vars);
     if (cap > e->trail_cap) e->trail_cap = cap;
-    GPAP_TRY(e->packed.reserve(e->mem, (size_t)K * e->num_long * sizeof(int32_t)));
-    GPAP_TRY(e->abits.reserve(e->mem, (size_t)K * e->nw * sizeof(int32_t)));
-    GPAP_TRY(e->active.reserve(e->mem, (size_t)K));
-    GPAP_TRY(e->conflict.reserve(e->mem, (size_t)K));
-    GPAP_TRY(e->trail.reserve(e->mem, (size_t)K * e->trail_cap * sizeof(int32_t)));
+    auto size = [&](DevBuf &b, size_t n) {
+        if (fit && b.bytes > n) b.release();
+        return b.reserve(e->mem, n);
+    };
+    GPAP_TRY(size(e->packed, (size_t)K * e->num_long * sizeof(int32_t)));
+    GPAP_TRY(size(e->abits, (size_t)K * e->nw * sizeof(int32_t)));
+    GPAP_TRY(size(e->active, (size_t)K));
+    GPAP_TRY(size(e->conflict, (size_t)K));
+    GPAP_TRY(size(e->trail, (size_t)K * e->trail_cap * sizeof(int32_t)));
     for (DevBuf *b : {&e->nprops, &e->nops, &e->ndecs, &e->nrounds})
-        GPAP_TRY(b->reserve(e->mem, (size_t)K * sizeof(int32_t)));
-    for (int i = 0; i < GPAP_SLOTS; ++i) GPAP_TRY(e->slots[i].mask.reserve(e->mem, (size_t)K));
+        GPAP_TRY(size(*b, (size_t)K * sizeof(int32_t)));
+    for (int i = 0; i < GPAP_SLOTS; ++i) GPAP_TRY(size(e->slots[i].mask, (size_t)K));
     return GPAP_OK;
 }
 
@@ -340,7 +360,8 @@ static gpap_status drop_rows(gpap_engine *e, gpap_status st) {
 
 /* Bytes the engine holds in the row state ensure_state grows, which its next batch reuses: a
  * buffer grows in place and frees itself before it allocates, so a new batch never needs these
- * bytes and its own at once. Not staging_a: a caller whose matrix is narrower than the last one's
+ * bytes and its own at once, and under an exact bound a smaller batch refits them to itself
+ * (ensure_state's `fit`), so it does not keep them either. Not staging_a: a caller whose matrix is narrower than the last one's
  * leaves part of it held. Keep the list in step with ensure_state. */
 static int64_t row_buffers_held(const gpap_engine *e) {
     int64_t n = 0;
@@ -392,7 +413,7 @@ extern "C" gpap_status gpap_engine_reset(gpap_engine *e, int32_t K) {
     /* A grow is a realloc, so the packed rows are gone and no longer the baseline — dropped on
      * FAILURE too, or the next reset takes the lite path over an uninitialized buffer. */
     const size_t packed_cap = e->packed.bytes;
-    const gpap_status alloc = ensure_state(e, K);
+    const gpap_status alloc = ensure_state(e, K, exact_sizing(e));
     if (alloc != GPAP_OK || e->packed.bytes != packed_cap) e->packed_clean_rows = 0;
     if (alloc != GPAP_OK) return drop_rows(e, alloc);
     e->K = K;
@@ -682,7 +703,7 @@ gpap_status QueuedCall::begin(int32_t requested, int64_t n_sets, int64_t first_b
     GPAP_TRY(use_ctx(e));
     /* A grow is a realloc: those rows are no longer the baseline, on failure too. */
     const size_t packed_cap = e->packed.bytes;
-    const gpap_status alloc = ensure_state(e, (int32_t)rows);
+    const gpap_status alloc = ensure_state(e, (int32_t)rows, exact_sizing(e));
     if (alloc != GPAP_OK || e->packed.bytes != packed_cap) e->packed_clean_rows = 0;
     if (alloc != GPAP_OK) return drop_rows(e, alloc);
     for (int i = 0; i < GPAP_SLOTS; ++i) {

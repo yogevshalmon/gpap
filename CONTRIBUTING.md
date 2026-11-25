@@ -117,7 +117,9 @@ The engine:
   that goes round `DevBuf` is invisible to the memory limit.
 - Under a memory limit, a call's sizing counts everything the call allocates afterwards
   (`exact_terms` in `cpp/src/engine.cpp`). A new buffer goes there, or
-  `tests/engine/test_mem_limit.py` fails under a tight limit.
+  `tests/engine/test_mem_limit.py` fails under a tight limit. There a smaller batch refits the
+  row state to itself (`ensure_state`'s `fit`), and only a caller that re-initializes every row
+  afterwards may ask for that: a refit under `apply` or a trajectory loses the rows.
 - The batch comes from the memory model (`gpap_row_bytes`, `cpp/src/calibrate.cpp`) and the batch
   rule (`size_rows`, `cpp/src/memory.cpp`), never from a runtime memory probe. Any change to that model changes the batch: re-validate it as
   [BENCHMARKING.md](docs/BENCHMARKING.md) §2 describes, and re-check dispatch.
