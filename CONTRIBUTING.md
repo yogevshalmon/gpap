@@ -122,7 +122,9 @@ The engine:
   caller that re-initializes every row afterwards may ask for that: a refit under `apply` or a
   trajectory loses the rows.
 - The batch comes from the memory model (`gpap_row_bytes`, `cpp/src/calibrate.cpp`) and the batch
-  rule (`size_rows`, `cpp/src/memory.cpp`), never from a runtime memory probe. Any change to that model changes the batch: re-validate it as
+  rule (`size_rows`, `cpp/src/memory.cpp`; under the default budget on a measured device,
+  `engine_batch` then cuts it to what fits beside the buffers the engine keeps), never from a
+  runtime memory probe. Any change to that model changes the batch: re-validate it as
   [BENCHMARKING.md](docs/BENCHMARKING.md) §2 describes, and re-check dispatch.
 - `import gpap` must set `PYTORCH_CUDA_ALLOC_CONF` before torch initializes CUDA.
 - A CLEAN-mode launch restores the words it touched, so anything that reads state after the
