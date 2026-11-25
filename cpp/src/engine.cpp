@@ -692,7 +692,8 @@ gpap_status QueuedCall::begin(int32_t requested, int64_t n_sets, int64_t width,
     const bool chunk_refit = e->refit_next;  /* a declined call runs as its chunk sizing said */
     const gpap_status chunk_status = e->sizing_status;
     const std::string chunk_error = get_error();
-    const int64_t fit = engine_batch(e, kQueueRowBytes, 0, queue_call_bytes(n_sets, width));
+    const int64_t fit =
+        engine_batch(e, kQueueRowBytes, 0, queue_call_bytes(n_sets, width), false);
     if (fit <= 0) {                          /* and says nothing of a queue that does not fit */
         e->bound = chunk_bound;
         e->refit_next = chunk_refit;
@@ -927,7 +928,7 @@ static void no_row_message(const gpap_engine *e, const SizeRequest &r, const Siz
 }
 
 int32_t engine_batch(gpap_engine *e, int64_t extra_row_bytes, int32_t cap,
-                     int64_t reserve_bytes) {
+                     int64_t reserve_bytes, bool extra_in_staging) {
     e->bound = GPAP_BOUND_NONE;
     e->refit_next = false;                    /* each sizing decides its own call's refit */
     GpuMemory m;
@@ -1011,12 +1012,16 @@ int32_t engine_batch(gpap_engine *e, int64_t extra_row_bytes, int32_t cap,
                                    : std::min(e->mem.rows / 16,
                                               std::max<int64_t>(acct.reserve, 0) / 4);
         /* Each held buffer counts back only for its own use (exact_terms' parts): staging_a for
-         * the caller's per-row matrix and the column lists, staging_b for the readout slice and
-         * the soundness flags, each slot's list for its rows. The rest is counted in full. */
+         * the caller's per-row matrix (where the caller stages it there; the queue's is its own)
+         * and the column lists, staging_b for the readout slice and the soundness flags, each
+         * slot's list for its rows. The rest is counted in full. */
         const int64_t rest_once = r.fixed - later.slice - later.cols;
+        const int64_t staged_row = extra_in_staging ? extra_row_bytes : 0;
+        const int64_t own_row = extra_row_bytes - staged_row;
         auto beside = [&](int64_t k) {
-            int64_t n = std::max<int64_t>(k * extra_row_bytes + later.cols -
+            int64_t n = std::max<int64_t>(k * staged_row + later.cols -
                                               (int64_t)e->staging_a.bytes, 0) +
+                        k * own_row +
                         std::max<int64_t>(later.slice + r.memory_fixed + k * later.flags_row -
                                               (int64_t)e->staging_b.bytes, 0) +
                         k * later.view_row + rest_once;

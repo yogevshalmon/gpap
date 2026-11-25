@@ -120,7 +120,7 @@ gpap_status engine_require_trajectory(gpap_engine *e);
  * fits, the device cannot report its memory or the limit is malformed: the caller fails with
  * e->sizing_status rather than run one row. */
 int32_t engine_batch(gpap_engine *e, int64_t extra_row_bytes, int32_t cap,
-                     int64_t reserve_bytes = 0);
+                     int64_t reserve_bytes = 0, bool extra_in_staging = true);
 /* Bytes a call's transients may take now on the engine's device: what the limit, or a host's
  * grant, leaves beside everything GPAP holds, and on a measured device what the reserve leaves
  * of free memory (under GPAP_VRAM_BUDGET_MIB, the cap less the engine's row-kind buffers), with
