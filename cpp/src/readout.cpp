@@ -49,7 +49,7 @@ extern "C" gpap_status gpap_pair_mask_create(gpap_engine *e, const int32_t *vars
         }
         bits[(size_t)(v >> 4)] |= 1u << (2 * (v & 15));
     }
-    DevBuf *mask = new DevBuf();
+    gpap::FormulaBuf *mask = new gpap::FormulaBuf();
     gpap_status st = engine_stage(e, *mask, bits.data(), bits.size() * sizeof(uint32_t));
     if (st != GPAP_OK) {
         delete mask;
@@ -66,7 +66,7 @@ extern "C" gpap_status gpap_select_complete(gpap_engine *e, int32_t mask_id, int
         return GPAP_ERR_ARG;
     GPAP_TRY(engine_use_ctx(e));
     Selection &s = e->slots[slot];
-    GPAP_TRY(s.mask.reserve(e->gpu.get(), (size_t)e->K));
+    GPAP_TRY(s.mask.reserve(e->mem, (size_t)e->K));
 
     GPAP_TRY(e->gpu->run("complete_mask", e->K, 1,
                          {buf(e->abits), buf(*e->pair_masks[(size_t)mask_id]), buf(e->active),
@@ -125,7 +125,7 @@ extern "C" gpap_status gpap_check_sound(gpap_engine *e, int32_t slot, int32_t ma
     *n_unsound_out = 0;
     if (n == 0) return GPAP_OK;
 
-    GPAP_TRY(e->staging_b.reserve(e->gpu.get(), (size_t)n));
+    GPAP_TRY(e->staging_b.reserve(e->mem, (size_t)n));
     /* Long clauses against their packed words, binary/unit against the bitmap via the
      * (n_pairs, 2) pair list (helpers.py::sound_rows). */
     const std::string key = "sound_rows.s" + std::to_string(e->shift);
@@ -154,7 +154,7 @@ extern "C" gpap_status gpap_var_bits(gpap_engine *e, int32_t slot, const int32_t
         32, (int64_t)(engine_readout_slice_bytes() / (size_t)std::max<int64_t>(per_row, 1)));
     step = (step / 32) * 32;                 /* keep the row-pointer offset 16-byte aligned */
     if (step <= 0) step = 32;
-    GPAP_TRY(e->staging_b.reserve(e->gpu.get(), (size_t)std::min(step, n_rows) * (size_t)n_cols));
+    GPAP_TRY(e->staging_b.reserve(e->mem, (size_t)std::min(step, n_rows) * (size_t)n_cols));
 
     for (int32_t r0 = 0; r0 < n_rows; r0 += step) {
         const int32_t rows = std::min(step, n_rows - r0);
@@ -184,7 +184,7 @@ extern "C" gpap_status gpap_assignment_rows(gpap_engine *e, int32_t slot, int8_t
     if (step <= 0) step = 32;
     /* No single-buffer check needed: these rows are the batch's, and a row's 2N bytes here are
      * fewer than its trail's 4N, a buffer engine_batch already keeps under the device's limit. */
-    GPAP_TRY(e->staging_b.reserve(e->gpu.get(), (size_t)std::min(step, n_rows) * (size_t)two_n));
+    GPAP_TRY(e->staging_b.reserve(e->mem, (size_t)std::min(step, n_rows) * (size_t)two_n));
 
     for (int32_t r0 = 0; r0 < n_rows; r0 += step) {
         const int32_t rows = std::min(step, n_rows - r0);

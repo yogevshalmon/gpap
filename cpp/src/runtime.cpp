@@ -36,22 +36,34 @@ const GpuDriver *gpu_driver() {
     return nullptr;
 }
 
-gpap_status DevBuf::reserve(Gpu *g, size_t n) {
+/* Counted before the plug is asked, so a refusal costs no allocation, and uncounted if the plug
+ * then fails: the ledger is never ahead of the device for longer than one call. */
+gpap_status DevBuf::reserve(MemHolder &h, size_t n) {
     if (n <= bytes) return GPAP_OK;
     release();
-    GPAP_TRY(g->alloc(n, &ptr));
-    gpu = g;
+    GPAP_TRY(mem_take(h, kind, (int64_t)n));
+    const gpap_status st = h.gpu->alloc(n, &ptr);
+    if (st != GPAP_OK) {
+        mem_give(h, kind, (int64_t)n);
+        ptr = 0;
+        return st;
+    }
+    mem_got(h);
+    owner = &h;
     bytes = n;
     return GPAP_OK;
 }
 
 gpap_status DevBuf::zero() {
-    if (ptr && bytes) return gpu->zero(ptr, bytes);
+    if (ptr && bytes) return owner->gpu->zero(ptr, bytes);
     return GPAP_OK;
 }
 
 void DevBuf::release() {
-    if (ptr) gpu->free(ptr);
+    if (ptr) {
+        owner->gpu->free(ptr);
+        mem_give(*owner, kind, (int64_t)bytes);
+    }
     ptr = 0;
     bytes = 0;
 }
