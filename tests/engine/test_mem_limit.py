@@ -376,10 +376,10 @@ def test_sampling_mines_under_a_limit_as_without_one(tmp_path):
 
 def _queue_call_bytes(n_sets, width):
     """queue_call_bytes (cpp/src/gpap_internal.hpp), restated: the launch buffers of one queued
-    call, a launch being at most 2^20 jobs and 2^24 literals."""
+    call, a launch being at most 2^20 jobs and 2^24 literals (one set, however wide)."""
     w = max(width, 1)
-    jobs = max(1, min(n_sets, 1 << 20, (1 << 24) // w))
-    return jobs * w * 4 + jobs * 5 + 16
+    jobs = max(1, min(n_sets, 1 << 20))
+    return min(jobs * w, max(1 << 24, w)) * 4 + jobs * 5 + 16
 
 
 @pytest.mark.gpu

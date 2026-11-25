@@ -131,16 +131,19 @@ constexpr int64_t kQueueMaxLits = 1 << 24;
 /* Device bytes a queued row needs besides its state: its sums of ops, props and decisions. */
 constexpr int64_t kQueueRowBytes = 3 * sizeof(int64_t);
 /* Device bytes the launches of one call of `n_sets` sets, the widest `width` literals, allocate
- * besides the rows: a launch takes at most min(n_sets, kQueueMaxJobs, kQueueMaxLits / width)
- * jobs (one, however wide), each a row of the job matrix, a flag and an implied count, and the
- * counter. QueuedCall::begin takes them off the memory budget, and the destructor frees them,
- * so a call never pays for another's. Keep in step with the reserves in QueuedCall::launch. */
+ * besides the rows: a launch takes at most min(n_sets, kQueueMaxJobs) jobs, each a flag and an
+ * implied count, a job matrix of at most that many rows of `width` and of kQueueMaxLits
+ * literals (one set, however wide), and the counter. Not kQueueMaxLits / width jobs: a block of
+ * narrower sets is cut by its own width (check_on_queue), so it takes more. QueuedCall::begin
+ * takes them off the memory budget, and the destructor frees them, so a call never pays for
+ * another's. Keep in step with the reserves in QueuedCall::launch. */
 constexpr int64_t queue_call_bytes(int64_t n_sets, int64_t width) {
     const int64_t w = width > 1 ? width : 1;
     int64_t jobs = n_sets < kQueueMaxJobs ? n_sets : kQueueMaxJobs;
-    if (jobs > kQueueMaxLits / w) jobs = kQueueMaxLits / w;
     if (jobs < 1) jobs = 1;
-    return jobs * w * 4 + jobs * 5 + 16;
+    const int64_t cut = kQueueMaxLits > w ? kQueueMaxLits : w;
+    const int64_t lits = jobs * w < cut ? jobs * w : cut;
+    return lits * 4 + jobs * 5 + 16;
 }
 /* Rows of a queue on a device whose library cannot say how many it runs at once (OpenCL). */
 constexpr int32_t kQueueRowsUnknown = 4096;
