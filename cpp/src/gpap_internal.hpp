@@ -351,6 +351,9 @@ struct gpap_engine {
     gpap::MemHolder mem;
     gpap::GpuMemory::Source mem_source = gpap::GpuMemory::TOTAL;   /* what the plug's `free` is */
     gpap_bound bound = GPAP_BOUND_NONE;         /* what set the last batch (engine_batch) */
+    /* The last sizing found no room beside the row buffers a smaller batch would keep, so the
+     * next reset gives them back (ensure_state's `fit`) even under the default budget. */
+    bool refit_next = false;
     /* Why the last engine_batch returned 0: GPAP_ERR_MEMORY when no row fits, or the status of
      * the memory query or the limit that failed. A caller returns it, so a driver error or a
      * malformed limit is not reported as memory. */

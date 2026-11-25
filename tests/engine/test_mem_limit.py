@@ -478,6 +478,25 @@ def test_without_a_limit_a_call_stays_inside_the_default_budget(monkeypatch, cal
 
 
 @pytest.mark.engine
+def test_a_smaller_batch_beside_kept_rows_stays_inside_the_default_budget(monkeypatch):
+    """Without a limit a smaller batch keeps the engine's bigger row buffers, so what the call
+    allocates beside its rows must fit beside all of them, not beside the rows it uses: an
+    engine holding rows for most of a 8 MiB default budget, then a check whose sets add 2.4 KB a
+    row, stays inside the budget. Before, the sizing let the call's own buffers use the kept
+    rows' bytes a second time, and the call took a quarter more than its budget."""
+    monkeypatch.setenv("GPAP_VRAM_BUDGET_MIB", "8")
+    f = _formula(nv=400, nc=1200, seed=9)
+    e = _core.Engine(f)
+    e.reset(int(0.95 * (8 << 20)) // _row_bytes(e))
+    base = _settled_held() - e.mem_held_rows
+    _core.mem_reset_peak(0)
+    lits, off = _flat(_sets(f.info.num_vars, 3000, 300))
+    e.check_sets(lits, off, chunk=0, assignments=True)
+    assert e.batch_bound == "memory"
+    assert _core.mem_peak(0) - base <= 8 << 20
+
+
+@pytest.mark.engine
 @pytest.mark.parametrize("rows", [1, 3, 40, 1000])
 def test_every_entry_point_stays_under_a_tight_limit(rows):
     """Sizing covers what each call allocates afterwards: under a limit of the device plus a few
