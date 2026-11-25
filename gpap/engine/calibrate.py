@@ -39,7 +39,8 @@ def row_bytes(num_long: int, N: int) -> int:
 
 
 def gpu_mem_available(device: torch.device, fraction: float = 1.0) -> int:
-    """Bytes a new engine's rows would be sized against on `device`: free VRAM less the memory
+    """The default budget a new engine's call is sized within on `device` (its rows and what it
+    allocates beside them): free VRAM less the memory
     reserve (on the opencl backend a share of the device total, since OpenCL has no free-memory
     query), times `fraction`; 1, the default, is the engine's own budget.
 

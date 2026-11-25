@@ -159,11 +159,12 @@ Sampling and measurement:
   one without new evidence.
 
 The evaluation:
-- The TACAS 2027 submission's evaluation protocol is frozen
-  ([PROTOCOL.md](docs/papers/tacas-27/PROTOCOL.md)). A change may fix a bug or the prose, never a
-  metric, configuration, screen, budget or set of cells.
-  Proposals are logged in [RIVAL_FAIRNESS_FINDINGS.md](docs/findings/RIVAL_FAIRNESS_FINDINGS.md)
-  §17.
+- The TACAS 2027 submission's evaluation protocol is frozen at the paper's tag,
+  `tacas27-artifact-rc1` ([PROTOCOL.md](docs/papers/tacas-27/PROTOCOL.md)): what the paper
+  reports is that tag's. On main, engine and evaluation changes may move a budget or a batch;
+  each one that does is logged in
+  [RIVAL_FAIRNESS_FINDINGS.md](docs/findings/RIVAL_FAIRNESS_FINDINGS.md) §17, as are proposals
+  to change the protocol itself.
 - The rules that decide which cells a table counts live once, in
   `eval/artifact/paper_tables.py`; every table, figure and gate imports them. One row per
   encoder: never report the better of two encoders.

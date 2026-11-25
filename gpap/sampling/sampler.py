@@ -106,7 +106,8 @@ class GPUSampler:
 
     @property
     def batch_size(self) -> int:
-        """Trajectories the next chunk will run — the number that sets throughput."""
+        """Trajectories a chunk runs — the number that sets throughput: the pin, or the batch
+        the last run sized (the next run sizes it again)."""
         return self.K
 
     def pin_batch(self, n: int) -> int:

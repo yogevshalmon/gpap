@@ -329,7 +329,8 @@ def compute_k_safe(num_long: int, N: int, gpu_mem_bytes: float,
 # an engine keeps the backend it was created on.
 
 def mem_available(device: int = 0, fraction: float = 1.0) -> int:
-    """Bytes a new engine's rows would be sized against: free memory less the memory reserve,
+    """The default budget a new engine's call is sized within (its rows and what it allocates
+    beside them): free memory less the memory reserve,
     times `fraction` (1, the default, is the engine's own budget; on opencl, which reports only
     the total, a share of it), and under a memory limit at most the limit less what GPAP holds
     there."""
@@ -371,6 +372,15 @@ def parse_mem_limit(spec, total: int = 0) -> int:
     out = c_int64(0)
     _check_spec(load().gpap_parse_mem_limit(_spec(spec), int(total), byref(out)))
     return int(out.value)
+
+
+def parse_mem_reserve(spec, total: int = 0) -> int:
+    """parse_mem_limit for a reserve: one grammar, the core's parser, and the reserve's name in
+    the message."""
+    try:
+        return parse_mem_limit(spec, total)
+    except ValueError as e:
+        raise ValueError(str(e).replace("memory limit ", "memory reserve ", 1)) from None
 
 
 def set_mem_limit(spec, device: int = 0) -> None:

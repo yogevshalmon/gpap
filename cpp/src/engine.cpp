@@ -878,7 +878,7 @@ static void no_row_message(const gpap_engine *e, const SizeRequest &r, const Siz
                   fmt_bytes(r.max_buffer, b));
         return;
     }
-    const int64_t fixed = r.fixed;
+    const int64_t fixed = r.fixed + (s.bound == GPAP_BOUND_MEMORY ? r.memory_fixed : 0);
     /* The default budget's rule is mem_budget's (calibrate.cpp): say what it is taken of. */
     char memory[160], rsv[32];
     std::snprintf(memory, sizeof memory,

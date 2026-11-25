@@ -22,12 +22,13 @@ def _k_cap_arg(v):
     return _bounded(int, 1, "'auto' or a positive integer")(v)
 
 
-def _mem_limit_arg(v):
-    """--mem-limit: checked by the core's one parser at parse time, so a typo fails before any
-    formula is read. Where the core is not built the run fails later anyway, and says why."""
+def _mem_limit_arg(v, parse="parse_mem_limit"):
+    """--mem-limit (and --mem-reserve, through `parse`): checked by the core's one parser at
+    parse time, so a typo fails before any formula is read. Where the core is not built the run
+    fails later anyway, and says why."""
     try:
         from gpap.engine import _core
-        _core.parse_mem_limit(v)
+        getattr(_core, parse)(v)
     except ValueError as e:
         raise argparse.ArgumentTypeError(str(e)) from None
     except (OSError, RuntimeError):         # no libgpap to ask: the run reports that itself
@@ -42,7 +43,8 @@ def _add_mem_limit(parser) -> None:
              "none. Sets GPAP_MEM_LIMIT for the run and its child runs. Default: no limit, "
              "the batch is sized from free memory less the reserve")
     parser.add_argument(
-        "--mem-reserve", type=_mem_limit_arg, default=None, metavar="SIZE",
+        "--mem-reserve", type=lambda v: _mem_limit_arg(v, "parse_mem_reserve"), default=None,
+        metavar="SIZE",
         help="GPU memory GPAP leaves free for everything else (the desktop, other processes): "
              "1G, 512M, 5%% of the device, or none. Sets GPAP_MEM_RESERVE for the run and its "
              "child runs. Default: the library's (gpap info prints it)")
@@ -694,7 +696,7 @@ def _print_memory_limit(device: int) -> None:
     try:
         from gpap.memory import memory
         mm = memory(device)
-        rows = (f"a new engine's rows are sized against {mm['available'] / (1 << 30):.2f} GiB, "
+        rows = (f"a new engine's calls are sized within {mm['available'] / (1 << 30):.2f} GiB, "
                 f"{mm['reserve'] / (1 << 30):.2f} GiB left free: --mem-reserve or "
                 f"GPAP_MEM_RESERVE sets that")
         if mm["limit"]:

@@ -89,7 +89,10 @@ change does not.
   every card (82k on a T4, 178k on a 12 GB laptop card, 442k on an A100; §8 of the same
   findings); 262,144 where the warps are unknown (OpenCL). `--k-cap auto` now differs per card.
 - Changed: the sampler sizes its batch at the start of every run, from the memory free then,
-  instead of once at creation; a pinned batch stays.
+  instead of once at creation; a pinned batch stays. `gpap_sampler_set_k(s, k)` (C++
+  `Sampler::set_k`) now pins for any k > 0, the sized batch too, and `k <= 0` unpins: a caller
+  that saves `gpap_sampler_k` and restores it by value leaves the sampler pinned. Python's
+  `pinned_batch` restores the pin state.
 - Changed: `gpap_mem_available`'s `fraction` scales the engine's own budget, and every face
   defaults to 1 (was 0.80): `gpap::mem_available`, `_core.mem_available`,
   `calibrate.gpu_mem_available`. The rival harness takes the same budget.

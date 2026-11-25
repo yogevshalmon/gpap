@@ -113,10 +113,10 @@ const char *fmt_bytes(int64_t bytes, char *buf);
 /* What one call is sized from. Every byte figure is device bytes. */
 struct SizeRequest {
     int64_t total = 0;          /* the device total, 0 = unknown */
-    /* The MEMORY bound's budget: today's rule (mem_budget: free memory less a reserve, times a
-     * fraction, under GPAP_VRAM_BUDGET_MIB), with the rows the call reuses counted back on a
-     * measured device. < 0: the bound does not apply (a host's grant, or a limit standing in
-     * for an unmeasured total). */
+    /* The MEMORY bound's budget: the default rule (mem_budget: free memory less the reserve, or
+     * a share of an unmeasured total, under GPAP_VRAM_BUDGET_MIB), with the buffers the call
+     * reuses counted back on a measured device. < 0: the bound does not apply (a host's grant,
+     * or a limit standing in for an unmeasured total). */
     int64_t memory = -1;
     /* The GRANT bound: what a host's plug still grants, the reused rows counted back. < 0: none. */
     int64_t grant = -1;
