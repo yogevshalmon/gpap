@@ -123,10 +123,15 @@ const char *mem_account_name(const MemAccount *a) { return a ? a->name.c_str() :
 
 gpap_status mem_take(MemHolder &h, MemKind kind, int64_t bytes) {
     if (MemAccount *a = h.account) {
-        /* Free memory is read before the lock: a plug's query may call into GPAP. */
+        /* Free memory is read before the lock: a plug's query may call into GPAP. A query that
+         * fails skips the guard, and leaves the thread's last error as it was. */
         GpuMemory m;
-        const bool measured =
-            h.gpu && h.gpu->memory(&m) == GPAP_OK && m.source == GpuMemory::DEVICE;
+        bool measured = false;
+        if (h.gpu) {
+            const std::string before = get_error();
+            measured = h.gpu->memory(&m) == GPAP_OK && m.source == GpuMemory::DEVICE;
+            if (!measured && before != get_error()) set_error("%s", before.c_str());
+        }
         std::lock_guard<std::mutex> lock(a->mu);
         int64_t limit = 0;
         gpap_limit_source source = GPAP_LIMIT_NONE;
