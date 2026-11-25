@@ -179,16 +179,14 @@ def describe_config(cfg) -> str:
                           Lookahead(la or "")).describe()
 
 
-def _free_rows_for_mining(smp, device) -> None:
-    """Mining's engine is built while the sampler holds its warmup rows (up to 1024). Under a
-    memory limit those can fill it, wherever the sampler's batch is about that small (a big
-    formula, a tight limit), and mining would then fit no row and be skipped. Give the rows back
-    first: the next chunk takes them again, at the same K. Without a limit the default rule's
-    margins leave mining room, and trimming would change mining's batch, a change of default
-    that waits for its measurement (GitHub issue 76)."""
-    from gpap.engine import _core
-    if device.type == "cuda" and _core.mem_limit(device.index or 0) > 0:
-        smp.trim()
+def _free_rows_for_mining(smp) -> None:
+    """Mining's engine is built while the sampler holds its warmup rows (up to 1024). Those can
+    fill a memory limit wherever the sampler's batch is about that small (a big formula, a tight
+    limit), and mining would then fit no row and be skipped; without a limit, mining would size
+    from what the warmup rows leave. Give the rows back first, on every run: mining then sizes
+    from the formula and the card, and the sampler's next chunk takes the rows again, at the same
+    K (GitHub issue 76)."""
+    smp.trim()
 
 
 def _memory_info(smp, device) -> dict:
@@ -361,7 +359,7 @@ def sample_clauses(nv, clauses, support, device, *, simplify=True, els=True, n_t
                 score_before = _mine_score(smp, w)       # what we have to beat to keep the clauses
                 k_before = smp.K
                 mine_deadline = _tm + MINE_SECONDS      # one budget, shared by both stages
-                _free_rows_for_mining(smp, device)
+                _free_rows_for_mining(smp)
                 mi = mine_entailed(nv, clauses, device, pool=_support_literals(support),
                                    max_tuples=STAGE1_MAX_TUPLES, seconds=MINE_SECONDS)
                 phases["mine"] = time.perf_counter() - _tm
@@ -379,7 +377,7 @@ def sample_clauses(nv, clauses, support, device, *, simplify=True, els=True, n_t
                 left = mine_deadline - time.perf_counter()
                 if stuck and left > 0.25:               # no floor: an exhausted budget stays spent
                     _tm = time.perf_counter()
-                    _free_rows_for_mining(smp, device)
+                    _free_rows_for_mining(smp)
                     mi2 = mine_entailed(nv, clauses + learned, device, pool=_support_literals(support),
                                         max_tuples=STAGE2_MAX_TUPLES, seconds=left)
                     phases["mine"] += time.perf_counter() - _tm
