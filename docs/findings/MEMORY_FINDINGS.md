@@ -147,3 +147,7 @@ run, which also keeps it from fitting no row under a tight limit.
 - **An L4.** Colab's L4 assignment failed three times in a row on 2026-11-25 (502).
 - **OpenCL** throughput against rows: OpenCL's batch is often set by the device's one-buffer
   limit instead ([OPENCL_FINDINGS.md](OPENCL_FINDINGS.md) §12).
+- **OpenCL's default share beside other engines.** The branch takes what GPAP's other engines
+  hold off the device's total before the share (`engine_batch`). A lone engine's batch is
+  main's, and beside others the batch can only shrink, so it cannot spill where main did not
+  ([BENCHMARKING.md](../BENCHMARKING.md) §2). Its rate was not measured.
