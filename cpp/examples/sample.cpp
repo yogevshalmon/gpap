@@ -73,14 +73,14 @@ int main(int argc, char **argv) {
         //                                   // it is a self-test, not part of producing samples.
 
         gpap::Sampler sampler(cnf, opts);
-        // What it chose for you, for the record — none of this had to be supplied.
+        const gpap::Solutions sols = sampler.sample(want);
+        // What it chose for you, for the record — none of this had to be supplied. The batch is
+        // the run's: each run sizes it from the memory free then.
         std::printf("%s: %d vars, %d clauses — %d rows/chunk, %s propagate, "
                     "%d variables decided first, %zu reported\n",
                     cnf, sampler.formula().num_vars(), sampler.formula().num_clauses(),
                     sampler.k(), sampler.mode() == gpap::Mode::Wave ? "wave" : "scalar",
                     sampler.num_support(), sampler.variables().size());
-
-        const gpap::Solutions sols = sampler.sample(want);
 
         if (sols.n_configs() > 1) {                 // the bandit's evidence, one line per arm
             for (std::size_t i = 0; i < sols.n_configs(); ++i) {

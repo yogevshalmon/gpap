@@ -341,7 +341,6 @@ extern "C" gpap_status gpap_sampler_run(gpap_sampler *s, int64_t n_target,
         st.best_config = st.dominant_config = 0;
         st.stop = GPAP_SAMPLE_STOP_TARGET;
 
-
         if (gpap_engine_flush_conflict(s->e)) {
             /* The construction units flush conflicted: provably no models, reported as UNSAT. */
             st.stop = GPAP_SAMPLE_STOP_UNSAT;
