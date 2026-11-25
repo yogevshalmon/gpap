@@ -689,9 +689,11 @@ gpap_status QueuedCall::begin(int32_t requested, int64_t n_sets, int64_t width,
      * per-row decision matrix. Where the launch buffers leave no row, the call runs in chunks,
      * which need none of them. A declined call keeps the bound its chunk sizing recorded. */
     const gpap_bound chunk_bound = e->bound;
+    const bool chunk_refit = e->refit_next;  /* a declined call runs as its chunk sizing said */
     const int64_t fit = engine_batch(e, kQueueRowBytes, 0, queue_call_bytes(n_sets, width));
     if (fit <= 0) {
         e->bound = chunk_bound;
+        e->refit_next = chunk_refit;
         return GPAP_OK;
     }
     int64_t rows = requested > 0 ? std::min<int64_t>(requested, fit) : fit;
@@ -700,6 +702,7 @@ gpap_status QueuedCall::begin(int32_t requested, int64_t n_sets, int64_t width,
     rows = std::max<int64_t>(std::min<int64_t>(rows, resident), 1);
     if (n_sets <= rows) {
         e->bound = chunk_bound;
+        e->refit_next = chunk_refit;
         return GPAP_OK;
     }
     /* WAVE unless pinned: the rows are counted in warps, and a WAVE row is one warp on both
@@ -710,6 +713,7 @@ gpap_status QueuedCall::begin(int32_t requested, int64_t n_sets, int64_t width,
                                                            : GPAP_MODE_WAVE;
     if (!e->gpu->has_kernel(queue_key(e->shift, mode == GPAP_MODE_WAVE ? 1 : 0).c_str())) {
         e->bound = chunk_bound;
+        e->refit_next = chunk_refit;
         return GPAP_OK;
     }
 
@@ -1002,14 +1006,16 @@ int32_t engine_batch(gpap_engine *e, int64_t extra_row_bytes, int32_t cap,
             if (refit) e->refit_next = true;
             const int64_t give = refit ? own : 0;        /* what the refit frees for the call */
             auto fits = [&](int64_t k) { return (refit ? need_refit(k) : need(k)) <= room + give; };
-            int64_t lo = 0, hi = s.rows;                     /* fits(lo), and not fits(hi) */
-            while (hi - lo > 1) {
-                const int64_t mid = lo + (hi - lo) / 2;
-                (fits(mid) ? lo : hi) = mid;
+            if (!fits(s.rows)) {                     /* after a refit the batch usually fits */
+                int64_t lo = 0, hi = s.rows;         /* fits(lo) or lo == 0, and not fits(hi) */
+                while (hi - lo > 1) {
+                    const int64_t mid = lo + (hi - lo) / 2;
+                    (fits(mid) ? lo : hi) = mid;
+                }
+                s.rows = lo;                                 /* 0: not even one row fits */
+                s.bound = GPAP_BOUND_MEMORY;
+                if (s.rows == 0) s.left = room + give;
             }
-            s.rows = fits(1) ? lo : 0;                       /* 0: not even one row fits */
-            s.bound = GPAP_BOUND_MEMORY;
-            if (s.rows == 0) s.left = room + give;
         }
     }
     e->bound = s.bound;

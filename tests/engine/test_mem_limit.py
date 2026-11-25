@@ -561,6 +561,21 @@ def test_a_narrow_call_after_a_wide_one_stays_inside_the_default_budget(monkeypa
     assert _core.mem_peak(0) - base <= 8 << 20
 
 
+@pytest.mark.engine
+def test_an_engine_that_gives_its_rows_back_sizes_as_a_fresh_one(monkeypatch):
+    """Where a call's own buffers do not fit beside the rows an engine keeps, the next reset
+    gives the rows back, and the batch is then what a fresh engine sizes for the same call: an
+    engine holding rows for 95% of an 8 MiB default budget, asked for a check of 300-literal
+    sets, sizes the fresh engine's batch, one row past it fails. Before, the batch came out one
+    row short (and none at all where one row was the whole batch)."""
+    monkeypatch.setenv("GPAP_VRAM_BUDGET_MIB", "8")
+    f = _formula(nv=400, nc=1200, seed=9)
+    held = _core.Engine(f)
+    held.reset(int(0.95 * (8 << 20)) // _row_bytes(held))
+    fresh = _core.Engine(f)
+    assert held.check_chunk_size(10 ** 6, 300) == fresh.check_chunk_size(10 ** 6, 300)
+
+
 @pytest.mark.gpu
 def test_the_checkers_results_leave_the_engine_a_fifth_of_the_budget(monkeypatch):
     """On cuda the checker's result arrays may take four fifths of the engine's default budget,
