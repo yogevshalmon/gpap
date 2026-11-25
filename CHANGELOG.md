@@ -25,6 +25,37 @@ change does not.
 - Additive ABI, same soname: `gpap_engine_queue_stats` (launches, sets and the kernel the queue
   ran); in Python, `Engine.queue_stats()` and `queue_mode()`.
 
+### Memory
+- A memory limit: the most GPU memory GPAP's engines hold on a device, summed over engines
+  (issues 59 and 72). `--mem-limit 8G` on `gpap sample`, `mine`, `bench` and `info`;
+  `GPAP_MEM_LIMIT` for every face; `gpap.set_mem_limit` and `gpap.engine.memory` in Python;
+  `gpap::set_mem_limit` / `gpap::memory` in C++; `gpap_set_mem_limit`, `gpap_parse_mem_limit`,
+  `gpap_mem_limit`, `gpap_mem_limit_source`, `gpap_mem_held`, `gpap_mem_peak` and
+  `gpap_mem_reset_peak` in C. Sizes take binary units (`8G`, `512M`) or a share of the device
+  (`75%`); a malformed limit is an error. Every batch is sized under it, and an allocation past
+  it fails with `GPAP_ERR_MEMORY` instead of spilling. On OpenCL the limit takes the place of the
+  default share of the device's total. Without a limit the batch is the one it was.
+- What GPAP holds is counted buffer by buffer, as formula bytes and row bytes:
+  `gpap_engine_mem_held`, Python `Engine.mem_held`. `gpap_engine_batch_bound` (Python
+  `batch_bound`) says what set the last batch: the cap, free memory, the limit, a host's grant,
+  the device's one-buffer limit, the work, the rows the device runs at once, or a pin. A
+  sampling run's stats carry `batch_bound`, `mem_limit` and `mem_peak`.
+- Changed: where not even one row fits, a call fails with `GPAP_ERR_MEMORY` (Python
+  `MemoryError`, as `GpapMemoryError`) and says what a row needs, instead of running a batch of
+  one row. `gpap_check_chunk_size` returns 0 then, and the C++ `AssumptionChecker::chunk_size`
+  throws. The job queue declines where its launch buffers leave no row, and the call runs in
+  chunks, where it used to run one queued row.
+- A reset that the device, or the limit, refuses part-way leaves the engine with no rows (K
+  reads 0) rather than with rows whose buffers were freed; the next reset that fits takes rows
+  again.
+- `gpap_engine_trim` (Python `.trim()`) gives an idle engine's rows back and keeps its formula.
+  Under a limit, a sampling run trims its sampler before mining, so mining fits beside it
+  (issue 76).
+- The GPU interface reports memory in one call, `Gpu::memory`, which says whether free memory
+  is measured (CUDA), the device's total (OpenCL) or a host's exact grant.
+- Additive ABI, same soname: the functions above, `gpap_bound`, `gpap_limit_source` and
+  `gpap_mem_kind`.
+
 ### Evaluation
 - `eval/colab/colab_supervisor.py` drives the VM through `colab ssh` and needs google-colab-cli
   0.8 or later, which removed the `console` it used; it refuses an older CLI at start

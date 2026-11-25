@@ -93,9 +93,11 @@ runs on.
 
 Two sizing rules differ from CUDA, because OpenCL cannot answer the questions CUDA can:
 
-- **Free memory.** OpenCL has no free-memory query, so the budget starts from the device's
-  total memory. On a card that something else uses — another process, or another engine or
-  torch in the same one — cap it with `GPAP_VRAM_BUDGET_MIB` or pass an explicit batch.
+- **Free memory.** OpenCL has no free-memory query, so without a limit the budget starts from
+  the device's total memory. On a card that something else uses — another process, or torch in
+  the same one — say how much GPAP may hold with `--mem-limit` / `GPAP_MEM_LIMIT`
+  ([ENGINE.md](ENGINE.md) §7): on OpenCL the limit takes the place of the share of the total.
+  GPAP's own engines on the device are counted under a limit, whatever the backend.
 - **One buffer's size.** A device limits a single allocation (`CL_DEVICE_MAX_MEM_ALLOC_SIZE`),
   so the batch is also bounded by the widest per-row buffer (`engine_batch` in
   `cpp/src/engine.cpp`). An explicit batch is not clamped; one that is too large fails at the
@@ -107,8 +109,8 @@ Two sizing rules differ from CUDA, because OpenCL cannot answer the questions CU
 
 **On a CPU** (PoCL's CPU driver, which `scripts/setup_opencl.sh` installs) the backend gives the
 same answers, and two settings matter. Pin `GPAP_KERNEL=scalar`: the automatic choice is made
-for GPUs and takes WAVE on all but small formulas, the slower kernel on a CPU. Cap
-`GPAP_VRAM_BUDGET_MIB`: the device's memory is the host's RAM, the budget would take most of
+for GPUs and takes WAVE on all but small formulas, the slower kernel on a CPU. Set a memory
+limit (`GPAP_MEM_LIMIT`): the device's memory is the host's RAM, the budget would take most of
 it, and a CPU gains little from a large batch
 ([findings/OPENCL_FINDINGS.md](findings/OPENCL_FINDINGS.md) §13).
 
