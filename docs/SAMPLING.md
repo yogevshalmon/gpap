@@ -37,7 +37,7 @@ A sample is **projected** onto the formula's support:
 | `--time-limit` | 60 s | wall cap on the sampling loop; `0` means no cap |
 | `--give-up-chunks` | off | stop early when nothing has been found |
 | `--seed` | 5 | the random seed |
-| `--k-cap` | `auto` | ceiling on the batch of trajectories per launch; `auto` is 64 per warp the GPU keeps resident, so it differs from card to card |
+| `--k-cap` | `auto` | ceiling on the batch of trajectories per launch; `auto` is a number of rows per warp the GPU keeps resident ([ENGINE.md](ENGINE.md) §7), so it differs from card to card |
 | `--mem-limit` | no limit | most GPU memory GPAP may hold: `8G`, `512M`, `75%` of the device ([ENGINE.md](ENGINE.md) §7) |
 | `--mem-reserve` | 1 GiB | GPU memory GPAP leaves free for everything else: `2G`, `512M`, `5%`, `none` ([ENGINE.md](ENGINE.md) §7) |
 | `--device` | the current CUDA device | which GPU to run on |

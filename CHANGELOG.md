@@ -93,9 +93,11 @@ change does not.
   `Sampler::set_k`) now pins for any k > 0, the sized batch too, and `k <= 0` unpins: a caller
   that saves `gpap_sampler_k` and restores it by value leaves the sampler pinned. Python's
   `pinned_batch` restores the pin state.
-- Changed: `gpap_mem_available`'s `fraction` scales the engine's own budget, and every face
-  defaults to 1 (was 0.80): `gpap::mem_available`, `_core.mem_available`,
-  `calibrate.gpu_mem_available`. The rival harness takes the same budget.
+- Changed: `gpap_mem_available`'s `fraction` scales the engine's own budget (after
+  `GPAP_VRAM_BUDGET_MIB` caps it), and every face defaults to 1 (was 0.80):
+  `gpap::mem_available`, `_core.mem_available`, `calibrate.gpu_mem_available`. A caller that
+  still passes 0.80 gets four fifths of the new budget, not the engine's. The rival harness
+  takes the engine's budget.
 - Additive ABI, same soname: `gpap_set_mem_reserve`, `gpap_mem_reserve`; `gpap::Memory` gains
   `reserve`.
 
