@@ -108,12 +108,11 @@ struct SizeRequest {
     /* What GPAP holds on the device besides the rows this call reuses: the formula, other
      * buffers, other engines. The LIMIT bound subtracts it. */
     int64_t held_other = 0;
-    int64_t per_row = 1;        /* row state plus the caller's per-row buffers */
-    int64_t fixed = 0;          /* the caller's one-off buffers (the job queue's) */
-    /* What an exact bound (LIMIT, GRANT) also counts, per row and once: what a call may
-     * allocate after it is sized, which the MEMORY bound's margins cover instead. */
-    int64_t exact_per_row = 0;
-    int64_t exact_fixed = 0;
+    /* Everything the call allocates, per row and once, on every bound: the row state, the
+     * caller's own buffers (the job queue's), and what the call may still allocate once it is
+     * sized (exact_terms in engine.cpp). */
+    int64_t per_row = 1;
+    int64_t fixed = 0;
     int32_t cap = 0;            /* the batch cap; <= 0: none */
     int64_t max_buffer = 0;     /* the device's one-buffer limit; 0: none */
     int64_t widest = 1;         /* the widest per-row buffer, which max_buffer bounds */

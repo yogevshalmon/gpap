@@ -256,14 +256,12 @@ Sizing size_rows(const SizeRequest &r) {
         const int64_t rows = left / per_row;
         if (rows < best.rows) best = {rows, bound, left, per_row};
     };
-    const int64_t exact_row = r.per_row + r.exact_per_row;
-    const int64_t exact_fixed = r.fixed + r.exact_fixed;
     if (r.limit > 0) {
         /* A limit above the device is the device: an unknown total is the limit alone. */
         const int64_t ceiling = r.total > 0 ? std::min(r.limit, r.total) : r.limit;
-        consider(GPAP_BOUND_LIMIT, ceiling - r.held_other, exact_fixed, exact_row);
+        consider(GPAP_BOUND_LIMIT, ceiling - r.held_other, r.fixed, r.per_row);
     }
-    if (r.grant >= 0) consider(GPAP_BOUND_GRANT, r.grant, exact_fixed, exact_row);
+    if (r.grant >= 0) consider(GPAP_BOUND_GRANT, r.grant, r.fixed, r.per_row);
     if (r.memory >= 0) consider(GPAP_BOUND_MEMORY, r.memory, r.fixed, r.per_row);
     if (best.rows == INT64_MAX) return Sizing{};      /* no bound applied: nothing to size from */
     if (r.cap > 0 && best.rows >= r.cap) {
