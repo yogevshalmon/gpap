@@ -113,7 +113,7 @@ class GPUSampler:
     def pin_batch(self, n: int) -> int:
         """Force every chunk to exactly `n` rows, and return it — whenever a bound is required
         rather than merely intended, above all when rows are reconstructed to host RAM. Pinning
-        above the calibrated value overrides the memory model; on CUDA an allocation that would
+        past the batch a run would size overrides the memory model; on CUDA an allocation that would
         leave less than half the memory reserve free still raises MemoryError, and on OpenCL a
         platform that spills to host RAM degrades silently (docs/BENCHMARKING.md §2). A pin
         holds across runs; without one, every run sizes the batch again."""

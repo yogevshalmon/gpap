@@ -434,7 +434,8 @@ def dispatch_wave(num_clauses: int, batch: int, device: int = 0) -> bool:
 
 
 def default_k_cap(device: int = 0) -> int:
-    """The core's default batch cap — one constant on every device (`device` is ignored)."""
+    """The core's default batch cap for `device`: 64 rows per resident warp, or a fixed cap
+    where the backend cannot count them (opencl)."""
     return int(load().gpap_default_k_cap(int(device)))
 
 

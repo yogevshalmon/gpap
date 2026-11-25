@@ -607,6 +607,19 @@ def test_a_sizing_that_asked_for_a_refit_does_not_bind_a_later_call(monkeypatch)
     assert e.reset_stats()[0] == full, "the narrow check gave the rows back"
 
 
+@pytest.mark.core
+def test_an_unknown_backend_reports_no_limit_and_no_reserve(monkeypatch):
+    """Where the backend is unknown neither the limit nor the reserve can be resolved, and the
+    getters say so (ValueError), as every engine creation fails; they used to read 0, which
+    means no limit and no reserve."""
+    with monkeypatch.context() as m:
+        m.setenv("GPAP_BACKEND", "opnecl")
+        with pytest.raises(ValueError, match="opencl"):
+            _core.mem_reserve(0)
+        with pytest.raises(ValueError, match="opencl"):
+            _core.mem_limit(0)
+
+
 @pytest.mark.gpu
 def test_the_checkers_results_leave_the_engine_a_fifth_of_the_budget(monkeypatch):
     """On cuda the checker's result arrays may take four fifths of the engine's default budget,

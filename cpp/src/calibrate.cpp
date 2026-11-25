@@ -193,7 +193,7 @@ gpap::MemState state_of(int device) {
     bool reported = false;
     gpap::MemState s;
     gpap::MemAccount *a = account_of(device, &m, &reported);
-    if (a && gpap::mem_state(a, &s) != GPAP_OK) {
+    if (!a || gpap::mem_state(a, &s) != GPAP_OK) {     /* no account: an unknown backend */
         s.limit = -1;
         s.source = GPAP_LIMIT_NONE;
         s.reserve = -1;
