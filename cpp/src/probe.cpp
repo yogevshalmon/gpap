@@ -157,14 +157,15 @@ void append_conflicts(const std::vector<int64_t> &tuples, const std::vector<int8
     }
 }
 
-/* Run one chunk of materialized tuples, appending conflicts to `out`. */
+/* Run one chunk of materialized tuples, appending conflicts to `out`. `keep` is the rows of the
+ * sweep's first chunk, which a short last chunk keeps (gpap::engine_reset_keeping). */
 gpap_status probe_chunk(gpap_engine *e, const std::vector<int64_t> &tuples, int32_t k,
-                        std::vector<int8_t> &flags, gpap_probe *out) {
+                        int32_t keep, std::vector<int8_t> &flags, gpap_probe *out) {
     const int32_t rows = static_cast<int32_t>(tuples.size() / static_cast<size_t>(k));
     if (rows == 0) return GPAP_OK;
-    GPAP_TRY(gpap_engine_reset(e, rows));       /* reset-LITE after chunk 1: the CLEAN launch
-                                                 * restores its own rows, so only abits and flags
-                                                 * are rebuilt (CLEAN_MODE_FINDINGS.md) */
+    /* reset-LITE after chunk 1: the CLEAN launch restores its own rows, so only abits and flags
+     * are rebuilt (CLEAN_MODE_FINDINGS.md) */
+    GPAP_TRY(gpap::engine_reset_keeping(e, rows, keep));
     GPAP_TRY(gpap_engine_apply_clean(e, tuples.data(), k));
     flags.resize(static_cast<size_t>(rows));
     GPAP_TRY(gpap_flags(e, nullptr, flags.data(), rows));
@@ -190,6 +191,7 @@ gpap_status sweep_in_chunks(gpap_engine *e, int32_t k, int64_t limit, int32_t ba
                             gpap_probe *out) {
     std::vector<int64_t> chunk;
     std::vector<int8_t> flags;
+    const int32_t keep = static_cast<int32_t>(std::min<int64_t>(batch, limit));
     while (out->stats.probed < limit) {
         /* Checked BETWEEN chunks: abandoning one mid-flight leaves row state half-written. */
         if (o.seconds > 0.0 && clock.seconds() > o.seconds) {
@@ -199,7 +201,7 @@ gpap_status sweep_in_chunks(gpap_engine *e, int32_t k, int64_t limit, int32_t ba
         const int64_t want = std::min<int64_t>(batch, limit - out->stats.probed);
         const int64_t got = next(chunk, want);
         if (got == 0) break;
-        GPAP_TRY(probe_chunk(e, chunk, k, flags, out));
+        GPAP_TRY(probe_chunk(e, chunk, k, keep, flags, out));
         out->stats.probed += got;
     }
     return GPAP_OK;
@@ -350,8 +352,9 @@ extern "C" gpap_status gpap_assume_units(gpap_engine *e, const int32_t *lits, in
         }
     }
     /* reset(1) + apply + recache: propagate the units on top of the current cache and make the
-     * result the new baseline — the fixpoint a rebuilt formula's flush would reach. */
-    GPAP_TRY(gpap_engine_reset(e, 1));
+     * result the new baseline — the fixpoint a rebuilt formula's flush would reach. The engine's
+     * rows are kept for its next call, which no sizing of this one could have counted. */
+    GPAP_TRY(gpap::engine_reset_keeping(e, 1, e->K));
     GPAP_TRY(gpap_engine_apply(e, row.data(), n));
     return gpap_engine_recache_flush(e);
 }

@@ -113,8 +113,9 @@ gpap_status check_in_chunks(gpap_engine *e, const int32_t *lits, const int64_t *
                           static_cast<size_t>(j - offsets[i])] =
                     lit_index_from_dimacs(lits[j], e->num_vars);
 
-        GPAP_TRY(gpap_engine_reset(e, K));   /* the LAST chunk is short: reset to its own size
-                                              * (this is also where GPAP_MODE_AUTO resolves) */
+        /* The LAST chunk is short: reset to its own size (this is also where GPAP_MODE_AUTO
+         * resolves), keeping the first chunk's rows, which the call's sizing counted. */
+        GPAP_TRY(gpap::engine_reset_keeping(e, K, static_cast<int32_t>(std::min(step, n))));
         /* The CLEAN kernel restores the packed words its launch touched, so the next reset skips
          * the broadcast, and keeps the bitmap at the fixpoint: flags, counts and the assignment
          * readout (a bitmap readout) are exact after it. Sat counts read the packed words, so a

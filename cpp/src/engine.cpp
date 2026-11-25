@@ -322,23 +322,26 @@ static bool exact_sizing(const gpap_engine *e) {
  * sizing credits the engine's own row state as reused by the next batch (engine_batch), which
  * holds for a bigger batch and, under an exact bound, only if a smaller one fits its buffers to
  * itself. Only a caller that re-initializes every row afterwards may pass `fit` (a reset, a
- * queued call's start): apply and trajectory run on rows whose contents a refit would lose. */
-static gpap_status ensure_state(gpap_engine *e, int32_t K, bool fit = false) {
+ * queued call's start): apply and trajectory run on rows whose contents a refit would lose.
+ * `keep` (> K) spares buffers of up to that many rows: a chunk loop's short last chunk keeps
+ * the rows its first chunk took, which the call's sizing already counted (engine_reset_keeping). */
+static gpap_status ensure_state(gpap_engine *e, int32_t K, bool fit = false, int32_t keep = 0) {
     /* gpap_trail_cap (calibrate.cpp) is the one definition, shared with the sizing model. */
     const int32_t cap = gpap_trail_cap(e->num_vars);
     if (cap > e->trail_cap) e->trail_cap = cap;
-    auto size = [&](DevBuf &b, size_t n) {
-        if (fit && b.bytes > n) b.release();
-        return b.reserve(e->mem, n);
+    const size_t keep_rows = (size_t)std::max(K, keep);
+    auto size = [&](DevBuf &b, size_t row_bytes) {
+        if (fit && b.bytes > keep_rows * row_bytes) b.release();
+        return b.reserve(e->mem, (size_t)K * row_bytes);
     };
-    GPAP_TRY(size(e->packed, (size_t)K * e->num_long * sizeof(int32_t)));
-    GPAP_TRY(size(e->abits, (size_t)K * e->nw * sizeof(int32_t)));
-    GPAP_TRY(size(e->active, (size_t)K));
-    GPAP_TRY(size(e->conflict, (size_t)K));
-    GPAP_TRY(size(e->trail, (size_t)K * e->trail_cap * sizeof(int32_t)));
+    GPAP_TRY(size(e->packed, (size_t)e->num_long * sizeof(int32_t)));
+    GPAP_TRY(size(e->abits, (size_t)e->nw * sizeof(int32_t)));
+    GPAP_TRY(size(e->active, 1));
+    GPAP_TRY(size(e->conflict, 1));
+    GPAP_TRY(size(e->trail, (size_t)e->trail_cap * sizeof(int32_t)));
     for (DevBuf *b : {&e->nprops, &e->nops, &e->ndecs, &e->nrounds})
-        GPAP_TRY(size(*b, (size_t)K * sizeof(int32_t)));
-    for (int i = 0; i < GPAP_SLOTS; ++i) GPAP_TRY(size(e->slots[i].mask, (size_t)K));
+        GPAP_TRY(size(*b, sizeof(int32_t)));
+    for (int i = 0; i < GPAP_SLOTS; ++i) GPAP_TRY(size(e->slots[i].mask, 1));
     return GPAP_OK;
 }
 
@@ -406,14 +409,14 @@ extern "C" gpap_bound gpap_engine_batch_bound(const gpap_engine *e) {
     return e ? e->bound : GPAP_BOUND_NONE;
 }
 
-extern "C" gpap_status gpap_engine_reset(gpap_engine *e, int32_t K) {
+gpap_status gpap::engine_reset_keeping(gpap_engine *e, int32_t K, int32_t keep) {
     if (!e || K <= 0) return GPAP_ERR_ARG;
     GPAP_TRY(refuse_while_queued(e, "gpap_engine_reset"));
     GPAP_TRY(use_ctx(e));
     /* A grow is a realloc, so the packed rows are gone and no longer the baseline — dropped on
      * FAILURE too, or the next reset takes the lite path over an uninitialized buffer. */
     const size_t packed_cap = e->packed.bytes;
-    const gpap_status alloc = ensure_state(e, K, exact_sizing(e));
+    const gpap_status alloc = ensure_state(e, K, exact_sizing(e), keep);
     if (alloc != GPAP_OK || e->packed.bytes != packed_cap) e->packed_clean_rows = 0;
     if (alloc != GPAP_OK) return drop_rows(e, alloc);
     e->K = K;
@@ -441,6 +444,10 @@ extern "C" gpap_status gpap_engine_reset(gpap_engine *e, int32_t K) {
     GPAP_TRY(fill_flags(e, e->active, e->flush_conflict ? 0 : 1, K));
     GPAP_TRY(fill_flags(e, e->conflict, e->flush_conflict ? 1 : 0, K));
     return GPAP_OK;
+}
+
+extern "C" gpap_status gpap_engine_reset(gpap_engine *e, int32_t K) {
+    return gpap::engine_reset_keeping(e, K, K);
 }
 
 extern "C" gpap_status gpap_engine_recache_flush(gpap_engine *e) {

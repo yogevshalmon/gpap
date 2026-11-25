@@ -115,6 +115,12 @@ int32_t engine_batch(gpap_engine *e, int64_t extra_row_bytes, int32_t cap,
  * grant, leaves beside everything GPAP holds, with `reuse` bytes the transient frees before it
  * grows counted back. INT64_MAX where neither applies. readout.cpp sizes its slices from it. */
 int64_t engine_transient_room(gpap_engine *e, int64_t reuse);
+/* gpap_engine_reset(e, K) for a caller that will take `keep` rows again (keep > K): under an
+ * exact bound a reset gives back row buffers bigger than its own K (ensure_state's `fit`), and
+ * this spares those of up to `keep` rows. A chunk loop passes the rows of its first chunk, which
+ * its sizing counted, so its short last chunk does not give them back for the next call to take
+ * again. gpap_engine_reset is this with keep = K. */
+gpap_status engine_reset_keeping(gpap_engine *e, int32_t K, int32_t keep);
 
 /* ---- The job queue (engine.cpp): entry point 1 for many sets on few rows. A row takes the next
  * set as it finishes one and puts back the words it touched, so a launch does not wait for its
