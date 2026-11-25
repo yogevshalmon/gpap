@@ -155,14 +155,21 @@ def test_delivery_bound_holds_when_a_valve_other_than_the_clock_stops_the_run(tm
                          ids=["off", "cov", "verify"])
 def test_phases_account_for_the_whole_reported_wall(tmp_path, extra):
     """`phases` sums to `wall_total_s` with and without the opt-in readouts (--n-cov,
-    --verify-sound), which are billed to `phases_diag` instead."""
+    --verify-sound), which are billed to `phases_diag` instead. The sum is checked to 5% or
+    2 ms, whichever is larger: a fraction of a millisecond between phases is billed to none, and
+    on a run of a few milliseconds host noise alone passed 5%. A readout billed to `phases` as
+    well is caught by name below, whatever its size."""
     from gpap.sampling.pipeline import sample_file
-    info = sample_file(_cnf(tmp_path, SMALL), torch.device("cuda"), n_time=300, out_cap=300,
+    info = sample_file(_cnf(tmp_path, SMALL), torch.device("cuda"), n_time=3000, out_cap=300,
                        k_cap=64, time_limit=30.0, mine=False, **extra)
-    assert sum(info["phases"].values()) == pytest.approx(info["wall_total_s"], rel=0.05)
+    assert sum(info["phases"].values()) == pytest.approx(info["wall_total_s"], rel=0.05,
+                                                         abs=2e-3)
+    assert not {"verify_sound", "coverage"} & set(info["phases"])
     # The readout must show up in phases_diag: billing it nowhere would also pass the sum above.
     if extra.get("verify_sound"):
         assert info["phases_diag"]["verify_sound"] == pytest.approx(info["verify_sound_s"])
+    if extra.get("n_cov"):
+        assert info["phases_diag"]["coverage"] > 0
 
 
 @pytest.mark.gpu
