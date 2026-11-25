@@ -972,30 +972,30 @@ int32_t engine_batch(gpap_engine *e, int64_t extra_row_bytes, int32_t cap,
         r.memory_fixed = std::max<int64_t>(slice - 64ll * e->num_vars, 0);
     }
     Sizing s = size_rows(r);
-    /* Under the default budget a smaller batch keeps the engine's bigger buffers, which the
-     * budget counted back. The bytes the call still allocates are what it needs past what each
-     * kind holds, the row state and the rest apart: a batch whose own buffers outgrow what is
-     * held must fit them beside all the rows the engine keeps, or they spend the kept rows'
-     * bytes a second time. That overspend is at most the rows kept past the batch, so a surplus
-     * under a sixteenth of them, or a quarter of the reserve, is left alone: it stays inside the
-     * guard's slack, and a batch that moves by a few rows from call to call does not flip
-     * between sizes. Where nothing fits beside them, the next reset gives the rows back
-     * instead: the flag is only ever set here, and only that reset clears it, so another
-     * sizing in the same call (a queue that then declines) cannot drop it. */
-    const int64_t state_row = gpap_row_bytes(e->num_long, e->num_vars, e->trail_cap);
-    const int64_t surplus = own - s.rows * state_row;
-    if (keeps && r.memory >= 0 && s.rows > 0 &&
-        surplus > std::min(own / 16, std::max<int64_t>(acct.reserve, 0) / 4)) {
+    /* Under the default budget nothing is refit, so the engine keeps every buffer it holds,
+     * and the budget counted them all back. The bytes the call still allocates are what it
+     * needs past what each kind holds, the row state and the rest apart: rows cannot grow into
+     * a staging buffer a wider call left, and a smaller batch's own buffers cannot spend the
+     * rows it keeps. Where that passes the room left, the batch is cut until it fits. A margin
+     * under a sixteenth of what the engine holds, or a quarter of the reserve, is left alone:
+     * the sizing counts some buffers a call never takes, it stays inside the guard's slack, and
+     * a batch that moves by a few rows from call to call does not flip between sizes. Where not
+     * even one row fits beside what is held, the next reset gives the kept rows back instead:
+     * the flag is only ever set here, and only that reset clears it, so another sizing in the
+     * same call (a queue that then declines) cannot drop it. */
+    if (keeps && r.memory >= 0 && s.rows > 0 && e->mem.rows > 0) {
+        const int64_t state_row = gpap_row_bytes(e->num_long, e->num_vars, e->trail_cap);
         const int64_t beside_row = std::max<int64_t>(r.per_row - state_row, 0);
         const int64_t once = r.fixed + r.memory_fixed;
         const int64_t room = r.memory - own - staging;
+        const int64_t margin = std::min(e->mem.rows / 16, std::max<int64_t>(acct.reserve, 0) / 4);
         auto need = [&](int64_t k) {
             return std::max<int64_t>(k * state_row - own, 0) +
                    std::max<int64_t>(k * beside_row + once - staging, 0);
         };
-        if (need(s.rows) > room) {
+        if (need(s.rows) > room + margin) {
             if (need(1) > room) {
-                e->refit_next = true;
+                if (own > state_row) e->refit_next = true;
             } else {
                 int64_t lo = 1, hi = s.rows;                 /* need(lo) fits, need(hi) does not */
                 while (hi - lo > 1) {
