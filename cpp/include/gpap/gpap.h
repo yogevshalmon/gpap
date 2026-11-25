@@ -125,10 +125,29 @@ int32_t gpap_engine_num_vars(const gpap_engine *e);
 int32_t gpap_engine_num_clauses(const gpap_engine *e);   /* TOTAL clauses (unit + bin + long) */
 int32_t gpap_engine_num_long(const gpap_engine *e);      /* packed-word clauses: the row width */
 
+/* What set an engine's last batch: the bound its sizing hit (docs/ENGINE.md §7). */
+typedef enum {
+    GPAP_BOUND_NONE = 0,    /* not sized yet */
+    GPAP_BOUND_CAP = 1,     /* the batch cap: more memory would not raise the batch */
+    GPAP_BOUND_MEMORY = 2,  /* the default memory rule: free memory, a reserve and a fraction */
+    GPAP_BOUND_LIMIT = 3,   /* the memory limit (gpap_set_mem_limit, GPAP_MEM_LIMIT) */
+    GPAP_BOUND_GRANT = 4,   /* what a host's own plug grants */
+    GPAP_BOUND_BUFFER = 5,  /* the device's one-buffer limit */
+    GPAP_BOUND_WORK = 6,    /* the call had fewer sets than the batch has rows */
+    GPAP_BOUND_USEFUL = 7,  /* the rows the device runs at once (the job queue) */
+    GPAP_BOUND_PIN = 8      /* the caller pinned the batch (a chunk, a probe batch, set_k) */
+} gpap_bound;
+gpap_bound gpap_engine_batch_bound(const gpap_engine *e);
 /* Device bytes this engine holds now, by kind: FORMULA is what it builds once and keeps (the
  * formula, its flush cache, pair masks, counters), ROWS what grows with a batch or a call. */
 typedef enum { GPAP_MEM_ALL = 0, GPAP_MEM_FORMULA = 1, GPAP_MEM_ROWS = 2 } gpap_mem_kind;
 int64_t gpap_engine_mem_held(const gpap_engine *e, gpap_mem_kind kind);
+/* Give an idle engine's rows back and keep its formula: afterwards it holds 0 ROWS bytes and
+ * the FORMULA bytes it held before, and K reads 0 until a reset takes rows again (every check,
+ * probe sweep and sampling chunk resets first). For a second engine on the same device to size
+ * as if this one held no rows: a live sampler while mining runs. GPAP_ERR_ARG during a queued
+ * call. A refused reset leaves an engine in the same state. */
+gpap_status gpap_engine_trim(gpap_engine *e);
 
 /* The GPU backend. The engine reaches the device through one internal interface with a plug per
  * GPU library: "cuda" (the default, the reference and the fast path) and "opencl" (the fixpoint
@@ -228,7 +247,9 @@ gpap_status gpap_check_sets(gpap_engine *e, const int32_t *lits, const int64_t *
 /* Assumption sets one chunked launch holds (a call that reads row state; a flags-only call runs
  * on the queue, which sizes its own rows): the engine's per-row state (gpap_row_bytes) plus
  * the (chunk, max_lits) int64 decision matrix this entry point allocates, read against LIVE
- * free memory, capped by gpap_default_k_cap and never larger than n_sets. */
+ * free memory and the memory limit, capped by gpap_default_k_cap and never larger than n_sets.
+ * 0 when not even one set fits, gpap_last_error saying why: gpap_check_sets then fails with
+ * GPAP_ERR_MEMORY rather than run a one-row batch. */
 int64_t gpap_check_chunk_size(gpap_engine *e, int64_t n_sets, int64_t max_lits);
 
 /* ------------------------------------------------------------------ probing
@@ -533,15 +554,41 @@ void gpap_counters_reset(gpap_engine *e);
 /* Bytes available for new allocations (free memory minus a driver reserve, times `fraction`),
  * capped by GPAP_VRAM_BUDGET_MIB when that is set to a positive integer. The cap is for
  * CROSS-CARD REPRODUCTION — a memory-bound K sizes larger on a larger card — and is a ceiling
- * only: a card with less free memory still reports less. Unset = no cap. */
+ * only: a card with less free memory still reports less. Unset = no cap. Under a memory limit
+ * (below), also at most the limit less what GPAP holds on the device, to which `fraction` does
+ * not apply; on opencl the limit takes the place of the share of the total. 0 on error. */
 int64_t gpap_mem_available(int device, double fraction);
 
 /* ------------------------------------------------------------------ device memory
- * What GPAP holds on a device (docs/ENGINE.md §7). `device` is an ordinal of the backend
- * $GPAP_BACKEND names now, as for gpap_mem_available; the count covers every engine this
- * process has there. What GPAP holds is counted, buffer by buffer, not estimated. It is not the
- * driver's own context and kernel code, nor memory the caller owns (`_dev` pointers). */
+ * What GPAP holds on a device, and a limit on it (docs/ENGINE.md §7). `device` is an ordinal of
+ * the backend $GPAP_BACKEND names now, as for gpap_mem_available; the count covers every engine
+ * this process has there. What GPAP holds is counted, buffer by buffer, not estimated. It is
+ * not the driver's own context and kernel code, nor memory the caller owns (`_dev` pointers). */
 
+/* Where the limit in force came from. */
+typedef enum {
+    GPAP_LIMIT_NONE = 0,    /* no limit */
+    GPAP_LIMIT_ENV = 1,     /* $GPAP_MEM_LIMIT, read on every call */
+    GPAP_LIMIT_API = 2      /* gpap_set_mem_limit, which overrides the variable */
+} gpap_limit_source;
+
+/* Cap what GPAP's engines hold on `device`, summed over engines: "8G", "512M", "1.5G", "8GiB",
+ * "8GB", "100000B" (binary units: 1G = 1024^3 bytes; case is ignored) or "75%" of the device's
+ * total; "none" for no limit even if GPAP_MEM_LIMIT is set; NULL to follow GPAP_MEM_LIMIT again.
+ * The limit is a ceiling: where GPAP measures free memory (cuda) it also stays inside that, and
+ * where it cannot (opencl) the limit takes the place of the default share of the total. An
+ * allocation that would pass it fails with GPAP_ERR_MEMORY; a batch that fits no row under it
+ * fails when it is sized. It applies from each engine's next allocation and sizing: nothing is
+ * freed to meet it. GPAP_ERR_ARG, the reason in gpap_last_error, for a malformed spec. */
+gpap_status gpap_set_mem_limit(int device, const char *spec);
+/* Check a spec without setting it: *bytes_out (may be NULL) gets its bytes on a device of
+ * `total_bytes`, 0 for "none" and for a share when total_bytes <= 0. */
+gpap_status gpap_parse_mem_limit(const char *spec, int64_t total_bytes, int64_t *bytes_out);
+/* The limit in force on `device` now, in bytes: 0 = none, -1 = it cannot be resolved (a
+ * malformed GPAP_MEM_LIMIT, or a share of a device whose total is unknown; gpap_last_error says
+ * which), and every engine creation on the device then fails as well. And its source. */
+int64_t gpap_mem_limit(int device);
+gpap_limit_source gpap_mem_limit_source(int device);
 /* Bytes GPAP's engines hold on `device` now, and the most they held since the last reset. */
 int64_t gpap_mem_held(int device);
 int64_t gpap_mem_peak(int device);

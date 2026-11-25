@@ -26,6 +26,21 @@ using gpap::engine_use_ctx;
 
 namespace {
 
+/* Rows one readout slice takes, for `per_row` bytes a row: the slice's bytes, or what a memory
+ * limit or a host's grant leaves beside everything GPAP holds where that is less (staging_b's
+ * own bytes count back: a grow frees it first). Never under 32, which keeps the row-pointer
+ * offset 16-byte aligned; the exact bounds set that much aside when they size the batch
+ * (engine.cpp, exact_terms). */
+int32_t slice_rows(gpap_engine *e, int64_t per_row) {
+    const int64_t bytes = std::min<int64_t>(
+        (int64_t)engine_readout_slice_bytes(),
+        gpap::engine_transient_room(e, (int64_t)e->staging_b.bytes));
+    int64_t step = std::max<int64_t>(32, bytes / std::max<int64_t>(per_row, 1));
+    step = std::min<int64_t>(step, INT32_MAX);
+    step = (step / 32) * 32;
+    return step > 0 ? (int32_t)step : 32;
+}
+
 /* Reduce an (n,) int8 flag array into e->scratch_i32[0] and read it back (one sync). */
 gpap_status reduce_flags(gpap_engine *e, DevBuf &flags, int32_t n, int32_t *out) {
     GPAP_TRY(e->gpu->run("sum_i8_to", 1, 1, {buf(flags), i32(n), buf(e->scratch_i32)}));
@@ -149,11 +164,7 @@ extern "C" gpap_status gpap_var_bits(gpap_engine *e, int32_t slot, const int32_t
 
     GPAP_TRY(engine_stage(e, e->staging_a, cols, (size_t)n_cols * sizeof(int32_t)));
     /* Slice the rows so the (rows, n_cols) transient stays bounded. */
-    const int64_t per_row = n_cols;
-    int32_t step = (int32_t)std::max<int64_t>(
-        32, (int64_t)(engine_readout_slice_bytes() / (size_t)std::max<int64_t>(per_row, 1)));
-    step = (step / 32) * 32;                 /* keep the row-pointer offset 16-byte aligned */
-    if (step <= 0) step = 32;
+    const int32_t step = slice_rows(e, n_cols);
     GPAP_TRY(e->staging_b.reserve(e->mem, (size_t)std::min(step, n_rows) * (size_t)n_cols));
 
     for (int32_t r0 = 0; r0 < n_rows; r0 += step) {
@@ -178,10 +189,7 @@ extern "C" gpap_status gpap_assignment_rows(gpap_engine *e, int32_t slot, int8_t
     const int32_t n_rows = std::min(max_rows, s.count);
     if (n_rows == 0 || two_n == 0) return GPAP_OK;
     if (!out_host) return GPAP_ERR_ARG;
-    int32_t step = (int32_t)std::max<int64_t>(
-        32, (int64_t)(engine_readout_slice_bytes() / (size_t)std::max(two_n, 1)));
-    step = (step / 32) * 32;
-    if (step <= 0) step = 32;
+    const int32_t step = slice_rows(e, two_n);
     /* No single-buffer check needed: these rows are the batch's, and a row's 2N bytes here are
      * fewer than its trail's 4N, a buffer engine_batch already keeps under the device's limit. */
     GPAP_TRY(e->staging_b.reserve(e->mem, (size_t)std::min(step, n_rows) * (size_t)two_n));

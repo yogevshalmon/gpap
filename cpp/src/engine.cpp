@@ -161,6 +161,14 @@ extern "C" gpap_status gpap_engine_create(const gpap_formula *f, const gpap_engi
     e->mem.account = gpap::mem_account(driver, device);
     gpap_status st = GPAP_OK;
     do {
+        /* The device's total first: a limit given as a share of it applies from the first
+         * buffer, which is this formula's. */
+        gpap::GpuMemory m;
+        st = use_ctx(e);
+        if (st == GPAP_OK) st = g->memory(&m);
+        if (st != GPAP_OK) break;
+        gpap::mem_note_total(e->mem.account, m.total);
+        e->mem_source = m.source;
 
         if (f->shift == 0) {   /* formula shape fits no packed split (see gpap_packed_envelope) */
             gpap_packed_envelope(f->num_vars, f->max_clause_len, nullptr);   /* sets the message */
@@ -314,6 +322,22 @@ static gpap_status ensure_state(gpap_engine *e, int32_t K) {
     return GPAP_OK;
 }
 
+/* After a refused grow: ensure_state frees each buffer before it grows it, so a refusal part-way
+ * (a memory limit, the device) leaves some of the old rows' buffers gone. Holding K rows over
+ * them would send the next launch or readout through freed memory, and on CUDA an illegal
+ * address loses the context: the engine holds no rows instead, as after a trim, until a reset
+ * succeeds. Returns `st`. */
+static gpap_status drop_rows(gpap_engine *e, gpap_status st) {
+    e->K = 0;
+    e->packed_clean_rows = 0;
+    for (Selection &s : e->slots) {
+        s.rows_valid = false;
+        s.count = 0;
+        s.selected = false;
+    }
+    return st;
+}
+
 /* Bytes the engine holds in the row state ensure_state grows, which its next batch reuses: a
  * buffer grows in place and frees itself before it allocates, so a new batch never needs these
  * bytes and its own at once. Not staging_a: a caller whose matrix is narrower than the last one's
@@ -327,11 +351,38 @@ static int64_t row_buffers_held(const gpap_engine *e) {
     return n;
 }
 
+/* The row state (ensure_state's list) and the call buffers that grow with a batch go; the
+ * formula, its flush cache and the pair masks stay. The next reset grows the rows back from
+ * nothing, so it broadcasts the baseline in full (packed_clean_rows is dropped here). */
+extern "C" gpap_status gpap_engine_trim(gpap_engine *e) {
+    if (!e) return GPAP_ERR_ARG;
+    GPAP_TRY(refuse_while_queued(e, "gpap_engine_trim"));
+    GPAP_TRY(use_ctx(e));
+    for (DevBuf *b : {&e->packed, &e->abits, &e->active, &e->conflict, &e->trail, &e->nprops,
+                      &e->nops, &e->ndecs, &e->nrounds, &e->staging_a, &e->staging_b})
+        b->release();
+    for (Selection &s : e->slots) {
+        s.mask.release();
+        s.rows.release();
+        s.host_rows.clear();
+        s.count = 0;
+        s.rows_valid = false;
+        s.selected = false;
+    }
+    e->K = 0;
+    e->packed_clean_rows = 0;
+    e->abits_diverged = 0;
+    return GPAP_OK;
+}
+
 extern "C" int64_t gpap_engine_mem_held(const gpap_engine *e, gpap_mem_kind kind) {
     if (!e) return 0;
     return kind == GPAP_MEM_FORMULA ? e->mem.formula
            : kind == GPAP_MEM_ROWS  ? e->mem.rows
                                     : e->mem.held();
+}
+extern "C" gpap_bound gpap_engine_batch_bound(const gpap_engine *e) {
+    return e ? e->bound : GPAP_BOUND_NONE;
 }
 
 extern "C" gpap_status gpap_engine_reset(gpap_engine *e, int32_t K) {
@@ -343,7 +394,7 @@ extern "C" gpap_status gpap_engine_reset(gpap_engine *e, int32_t K) {
     const size_t packed_cap = e->packed.bytes;
     const gpap_status alloc = ensure_state(e, K);
     if (alloc != GPAP_OK || e->packed.bytes != packed_cap) e->packed_clean_rows = 0;
-    if (alloc != GPAP_OK) return alloc;
+    if (alloc != GPAP_OK) return drop_rows(e, alloc);
     e->K = K;
     /* Resolve the kernel for THIS K: cheap, and the one place every entry point passes through. */
     if (e->auto_mode) e->mode = resolve_mode(e, K);
@@ -374,6 +425,11 @@ extern "C" gpap_status gpap_engine_reset(gpap_engine *e, int32_t K) {
 extern "C" gpap_status gpap_engine_recache_flush(gpap_engine *e) {
     if (!e) return GPAP_ERR_ARG;
     GPAP_TRY(refuse_while_queued(e, "gpap_engine_recache_flush"));
+    if (e->K <= 0) {     /* trimmed, or a grow was refused: row 0 is not there to cache */
+        set_error("gpap_engine_recache_flush: the engine holds no rows (after gpap_engine_trim, or "
+                  "a refused reset): reset it and apply what you want cached first");
+        return GPAP_ERR_ARG;
+    }
     if (e->abits_diverged) {
         /* Refused, not silently wrong: after a CLEAN launch packed holds the baseline and abits
          * the fixpoint, so caching that pair yields a baseline whose abits claim literals true
@@ -595,26 +651,40 @@ gpap_status QueuedCall::begin(int32_t requested, int64_t n_sets, int64_t first_b
     if (resident <= 0) resident = kQueueRowsUnknown;
     /* The rows that fit with the launch buffers taken out of the budget. In bytes, not rows: the
      * batch is capped by gpap_default_k_cap, so rows taken off it say nothing of memory. A pin
-     * is held to it too. A queued row is the engine's state alone: no per-row decision matrix. */
+     * is held to it too. A queued row is the engine's state alone: no per-row decision matrix.
+     * Where the launch buffers leave no row, the call runs in chunks, which need none of them.
+     * A declined call keeps the bound its chunk sizing recorded. */
+    const gpap_bound chunk_bound = e->bound;
     const int64_t fit = engine_batch(e, 0, 0, kQueueBufferBytes);
+    if (fit <= 0) {
+        e->bound = chunk_bound;
+        return GPAP_OK;
+    }
     int64_t rows = requested > 0 ? std::min<int64_t>(requested, fit) : fit;
+    if (requested > 0 && requested <= fit) e->bound = GPAP_BOUND_PIN;
+    if (rows > resident) e->bound = GPAP_BOUND_USEFUL;   /* rows past it would take no job */
     rows = std::max<int64_t>(std::min<int64_t>(rows, resident), 1);
-    if (n_sets <= rows) return GPAP_OK;
+    if (n_sets <= rows) {
+        e->bound = chunk_bound;
+        return GPAP_OK;
+    }
     /* WAVE unless pinned: the rows are counted in warps, and a WAVE row is one warp on both
      * backends. A SCALAR row is a warp with one working lane (CUDA) or one work item, so a
      * thirty-second of a warp (OpenCL). */
     const gpap_mode mode = !e->auto_mode                     ? e->mode
                            : e->env_mode != GPAP_MODE_AUTO ? e->env_mode
                                                            : GPAP_MODE_WAVE;
-    if (!e->gpu->has_kernel(queue_key(e->shift, mode == GPAP_MODE_WAVE ? 1 : 0).c_str()))
+    if (!e->gpu->has_kernel(queue_key(e->shift, mode == GPAP_MODE_WAVE ? 1 : 0).c_str())) {
+        e->bound = chunk_bound;
         return GPAP_OK;
+    }
 
     GPAP_TRY(use_ctx(e));
     /* A grow is a realloc: those rows are no longer the baseline, on failure too. */
     const size_t packed_cap = e->packed.bytes;
     const gpap_status alloc = ensure_state(e, (int32_t)rows);
     if (alloc != GPAP_OK || e->packed.bytes != packed_cap) e->packed_clean_rows = 0;
-    if (alloc != GPAP_OK) return alloc;
+    if (alloc != GPAP_OK) return drop_rows(e, alloc);
     for (int i = 0; i < GPAP_SLOTS; ++i) {
         e->slots[i].rows_valid = false;
         e->slots[i].count = 0;
@@ -747,32 +817,111 @@ gpap_status engine_require_trajectory(gpap_engine *e) {
     return GPAP_ERR_KERNEL;
 }
 
+/* What an exact bound (a limit, a host's grant) counts besides the rows and the caller's own
+ * buffers: what a call may still allocate once it is sized, which the MEMORY bound's margins
+ * cover instead (so its batch is unchanged). Keep in step with what readout.cpp, the sampler and
+ * the plugs grow after sizing: tests/engine/test_mem_limit.py runs every entry point under a
+ * limit just above one row and fails on a byte this misses. */
+static void exact_terms(const gpap_engine *e, int64_t *per_row, int64_t *fixed) {
+    *per_row = 4ll * GPAP_SLOTS        /* each slot's selected-row list (Selection::rows) */
+               + 1                     /* soundness flags (gpap_check_sound, staging_b) */
+               + 4;                    /* an OpenCL plug's copy of a row list from an offset */
+    *fixed = 32ll * 2 * e->num_vars    /* the smallest readout slice, 32 rows of 2N (staging_b) */
+             + 8ll * e->num_vars       /* column lists and the trajectory order (staging_a) */
+             + 2ll * 4 * e->nw         /* the sampler's two pair masks */
+             + 4096;                   /* an OpenCL plug's parameter blocks */
+}
+
+/* Why no row fits, in the terms of the bound that left none. */
+static void no_row_message(const gpap_engine *e, const SizeRequest &r, const Sizing &s,
+                           const MemState &acct) {
+    char a[32], b[32], c[32], d[32];
+    const char *dev = mem_account_name(e->mem.account);
+    if (s.bound == GPAP_BOUND_BUFFER) {
+        set_error("not even one row fits on %s: one row's widest buffer is %s, past the %s the "
+                  "device allows in one buffer", dev, fmt_bytes(r.widest, a),
+                  fmt_bytes(r.max_buffer, b));
+        return;
+    }
+    const int64_t fixed = s.bound == GPAP_BOUND_MEMORY ? r.fixed : r.fixed + r.exact_fixed;
+    /* The default budget's reserve and fraction are mem_budget's (calibrate.cpp), not repeated
+     * here: say what it is a share of. */
+    const char *memory = e->mem_source == GpuMemory::DEVICE
+                             ? "the default budget, a share of the device's free memory"
+                             : "the default budget, a share of the device's total memory (its "
+                               "free memory cannot be measured)";
+    if (s.bound == GPAP_BOUND_LIMIT) {
+        char f[32];
+        set_error("not even one row fits on %s: a row of this formula needs %s, and the memory "
+                  "limit of %s (%s) leaves %s beside the %s GPAP holds there and the %s this "
+                  "call takes once. Raise the limit, or trim or free another engine",
+                  dev, fmt_bytes(s.per_row, a), fmt_bytes(acct.limit, b),
+                  acct.source == GPAP_LIMIT_ENV ? "GPAP_MEM_LIMIT" : "gpap_set_mem_limit",
+                  fmt_bytes(s.left, c), fmt_bytes(std::max<int64_t>(r.held_other, 0), d),
+                  fmt_bytes(fixed, f));
+        return;
+    }
+    set_error("not even one row fits on %s: a row of this formula needs %s, and %s leaves %s "
+              "beside the %s this call takes once%s", dev, fmt_bytes(s.per_row, a),
+              s.bound == GPAP_BOUND_GRANT ? "the host's grant" : memory, fmt_bytes(s.left, b),
+              fmt_bytes(fixed, c),
+              s.bound == GPAP_BOUND_MEMORY ? " (GPAP_VRAM_BUDGET_MIB caps it, where set)" : "");
+}
+
 int32_t engine_batch(gpap_engine *e, int64_t extra_row_bytes, int32_t cap,
                      int64_t reserve_bytes) {
+    e->bound = GPAP_BOUND_NONE;
     GpuMemory m;
-    int64_t budget = 0;
-    if (use_ctx(e) == GPAP_OK && e->gpu->memory(&m) == GPAP_OK) {
-        /* A measured free figure already excludes the rows this engine holds from its last
-         * batch, which the next batch reuses: count them back, or every call after the first
-         * sizes itself from what the first left free. The batch is then a function of the
-         * formula and the card, not of the engine's call history. */
-        int64_t free_b = m.free;
-        if (m.source != GpuMemory::TOTAL) free_b += row_buffers_held(e);
-        budget = std::max<int64_t>(mem_budget(free_b, kMemFraction) - reserve_bytes, 0);
+    e->sizing_status = use_ctx(e);
+    if (e->sizing_status == GPAP_OK) e->sizing_status = e->gpu->memory(&m);
+    if (e->sizing_status != GPAP_OK) return 0;                   /* the plug said why */
+    MemState acct;
+    e->sizing_status = mem_state(e->mem.account, &acct);
+    if (e->sizing_status != GPAP_OK) return 0;                   /* a malformed limit */
+    /* The rows this call reuses: a grow frees them before it allocates, so a new batch never
+     * needs these bytes and its own at once. Counted back where `free` excludes them (DEVICE,
+     * GRANT) and against the ledger for a limit, never on an unmeasured total, which never took
+     * them out: the batch is then a function of the formula and the card, not of the engine's
+     * call history. */
+    const int64_t own = row_buffers_held(e);
+    SizeRequest r;
+    r.total = m.total;
+    r.limit = acct.limit;
+    r.held_other = (e->mem.account ? acct.held : e->mem.held()) - own;
+    r.per_row = gpap_row_bytes(e->num_long, e->num_vars, e->trail_cap) + extra_row_bytes;
+    r.fixed = reserve_bytes;
+    exact_terms(e, &r.exact_per_row, &r.exact_fixed);
+    r.cap = cap == 0 ? gpap_default_k_cap(e->device_ordinal) : cap;
+    r.max_buffer = m.max_buffer;
+    /* Each per-row buffer holds the batch's rows, so the widest one meets the device's
+     * one-buffer limit first: the engine's own (packed words, bitmap, trail) or the caller's. */
+    r.widest = std::max<int64_t>(
+        {4ll * e->num_long, 4ll * e->nw, 4ll * e->trail_cap, extra_row_bytes, 1});
+    switch (m.source) {
+        case GpuMemory::DEVICE: r.memory = mem_budget(m.free + own, kMemFraction); break;
+        case GpuMemory::GRANT: r.grant = m.free + own; break;
+        default:                /* a total stands in for free memory, unless a limit does */
+            if (r.limit <= 0) r.memory = mem_budget(m.free, kMemFraction);
+            break;
     }
-    const int64_t per_row =
-        gpap_row_bytes(e->num_long, e->num_vars, e->trail_cap) + extra_row_bytes;
-    int32_t k = rows_fitting(budget, per_row,
-                             cap == 0 ? gpap_default_k_cap(e->device_ordinal) : cap);
-    /* One buffer's size limit (OpenCL): each per-row buffer holds k rows, so the widest one
-     * bounds k — the engine's own (packed words, bitmap, trail) or the caller's extra. */
-    const int64_t limit = m.max_buffer;
-    if (limit > 0) {
-        const int64_t widest = std::max<int64_t>(
-            {4ll * e->num_long, 4ll * e->nw, 4ll * e->trail_cap, extra_row_bytes, 1});
-        k = (int32_t)std::min<int64_t>(k, std::max<int64_t>(limit / widest, 1));
+    const Sizing s = size_rows(r);
+    e->bound = s.bound;
+    if (s.rows <= 0) {
+        no_row_message(e, r, s, acct);
+        e->sizing_status = GPAP_ERR_MEMORY;
+        return 0;
     }
-    return k;
+    return (int32_t)s.rows;
+}
+
+int64_t engine_transient_room(gpap_engine *e, int64_t reuse) {
+    MemState acct;
+    if (e->mem.account && mem_state(e->mem.account, &acct) == GPAP_OK && acct.limit > 0)
+        return std::max<int64_t>(acct.limit - acct.held + reuse, 0);
+    GpuMemory m;
+    if (e->mem_source == GpuMemory::GRANT && e->gpu->memory(&m) == GPAP_OK)
+        return std::max<int64_t>(m.free + reuse, 0);
+    return INT64_MAX;
 }
 
 /* Refuse a packed-derived readout after a CLEAN launch: it would answer from the restored

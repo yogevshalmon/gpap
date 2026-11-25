@@ -113,23 +113,79 @@ int64_t gpap::mem_budget(int64_t free_bytes, double fraction) {
     return cap > 0 ? std::min(budget, cap) : budget;
 }
 
-extern "C" int64_t gpap_mem_available(int device, double fraction) {
+namespace {
+/* The account of `device` on the backend $GPAP_BACKEND names, the device's total noted for a
+ * share; NULL, the error set, for an unknown backend. `m` gets the device's report, or stays
+ * empty (source TOTAL, total 0) where the device cannot be asked. */
+gpap::MemAccount *account_of(int device, gpap::GpuMemory *m, bool *reported) {
     const gpap::GpuDriver *driver = gpap::gpu_driver();
+    if (!driver) return nullptr;
+    gpap::MemAccount *a = gpap::mem_account(driver, device);
+    *m = gpap::GpuMemory{};
+    *reported = driver->memory(device, m) == GPAP_OK;
+    if (*reported) gpap::mem_note_total(a, m->total);
+    return a;
+}
+}  // namespace
+
+/* The budget a NEW engine's rows would get, before its own formula: the batch rule's bounds
+ * (memory.cpp) with nothing reused and one byte a row, so its answer is bytes. Without a limit
+ * that is mem_budget alone, as it always was. */
+extern "C" int64_t gpap_mem_available(int device, double fraction) {
     gpap::GpuMemory m;
-    if (!driver || driver->memory(device, &m) != GPAP_OK) return 0;
-    return gpap::mem_budget(m.free, fraction);
+    bool reported = false;
+    gpap::MemAccount *a = account_of(device, &m, &reported);
+    if (!a || !reported) return 0;
+    gpap::MemState s;
+    if (gpap::mem_state(a, &s) != GPAP_OK) return 0;
+    gpap::SizeRequest r;
+    r.total = m.total;
+    r.limit = s.limit;
+    r.held_other = s.held;
+    if (m.source == gpap::GpuMemory::GRANT) r.grant = m.free;
+    else if (m.source == gpap::GpuMemory::DEVICE || s.limit <= 0)
+        r.memory = gpap::mem_budget(m.free, fraction);
+    return gpap::size_rows(r).left;
+}
+
+extern "C" gpap_status gpap_set_mem_limit(int device, const char *spec) {
+    gpap::MemSpec s;                                   /* NULL: UNSET, follow GPAP_MEM_LIMIT */
+    if (spec) GPAP_TRY(gpap::parse_mem_spec(spec, "memory limit ", &s));
+    gpap::GpuMemory m;
+    bool reported = false;
+    gpap::MemAccount *a = account_of(device, &m, &reported);
+    if (!a) return GPAP_ERR_ARG;
+    gpap::mem_set_limit(a, s);
+    return GPAP_OK;
+}
+
+extern "C" gpap_status gpap_parse_mem_limit(const char *spec, int64_t total_bytes,
+                                            int64_t *bytes_out) {
+    gpap::MemSpec s;
+    GPAP_TRY(gpap::parse_mem_spec(spec, "memory limit ", &s));
+    if (bytes_out) *bytes_out = gpap::mem_spec_bytes(s, total_bytes);
+    return GPAP_OK;
 }
 
 namespace {
-/* The account of `device` on the backend $GPAP_BACKEND names; empty for an unknown backend. */
+/* An account's state for the getters below. A limit that cannot be resolved reads -1, never
+ * "none": every engine on the device would fail, and the getters must not say otherwise. The
+ * counts stand either way. */
 gpap::MemState state_of(int device) {
+    gpap::GpuMemory m;
+    bool reported = false;
     gpap::MemState s;
-    const gpap::GpuDriver *driver = gpap::gpu_driver();
-    if (driver) gpap::mem_state(gpap::mem_account(driver, device), &s);
+    gpap::MemAccount *a = account_of(device, &m, &reported);
+    if (a && gpap::mem_state(a, &s) != GPAP_OK) {
+        s.limit = -1;
+        s.source = GPAP_LIMIT_NONE;
+    }
     return s;
 }
 }  // namespace
 
+extern "C" int64_t gpap_mem_limit(int device) { return state_of(device).limit; }
+extern "C" gpap_limit_source gpap_mem_limit_source(int device) { return state_of(device).source; }
 extern "C" int64_t gpap_mem_held(int device) { return state_of(device).held; }
 extern "C" int64_t gpap_mem_peak(int device) { return state_of(device).peak; }
 extern "C" void gpap_mem_reset_peak(int device) {
@@ -143,8 +199,9 @@ extern "C" int32_t gpap_default_k_cap(int device) {
     return kBatchCap;
 }
 
-/* The division every batch size makes: rows of `per_row` bytes that fit `bytes`, at most `cap`
- * (<= 0: no cap), never fewer than one. gpap_compute_k_safe and gpap::engine_batch share it. */
+/* Rows of `per_row` bytes that fit `bytes`, at most `cap` (<= 0: no cap), never fewer than one:
+ * gpap_compute_k_safe's division, for a caller sizing an explicit K. An engine's own batch is
+ * size_rows (memory.cpp), which reports 0 where no row fits instead. */
 int32_t gpap::rows_fitting(int64_t bytes, int64_t per_row, int32_t cap) {
     int64_t k = bytes > 0 ? bytes / std::max<int64_t>(per_row, 1) : 0;
     if (cap > 0) k = std::min<int64_t>(k, cap);

@@ -150,6 +150,8 @@ extern "C" int64_t gpap_check_chunk_size(gpap_engine *e, int64_t n_sets, int64_t
     if (n_sets <= 0) return 1;      /* the documented floor: a launch always holds >= 1 set */
     /* The engine's batch, with the (chunk, L) decision matrix only this entry point allocates. */
     const int32_t k = gpap::engine_batch(e, 8ll * std::max<int64_t>(max_lits, 1), 0);
+    if (k <= 0) return 0;           /* not even one set fits: engine_batch set the message */
+    if (n_sets < k) e->bound = GPAP_BOUND_WORK;
     return std::min<int64_t>(k, n_sets);
 }
 
@@ -168,8 +170,9 @@ extern "C" gpap_status gpap_check_sets(gpap_engine *e, const int32_t *lits,
     GPAP_TRY(validate_sets(e, lits, offsets, n, conflict_out, propagated_out, &max_len));
 
     /* The sets one chunk takes: the chunk loop's step, and the queue's first block. */
-    int64_t step = chunk > 0 ? chunk : gpap_check_chunk_size(e, n, max_len);
-    step = std::max<int64_t>(step, 1);
+    const int64_t step = chunk > 0 ? chunk : gpap_check_chunk_size(e, n, max_len);
+    if (step <= 0) return e->sizing_status;   /* no set fits: gpap_check_chunk_size said why */
+    if (chunk > 0) e->bound = GPAP_BOUND_PIN;
     if (!assign_out && !sat_out) {
         /* Flags only: the queue, when it engages (`chunk` > 0 pins its rows). */
         gpap::QueuedCall q(e);

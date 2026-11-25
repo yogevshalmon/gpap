@@ -70,7 +70,8 @@ struct DevBuf {
     MemKind kind = MemKind::ROWS;            /* the count it goes on (memory.hpp, MemKind) */
 
     /* Grows only; keeps the allocation if big enough. It frees the old buffer before it takes
-     * the new one, so a grow never holds both. */
+     * the new one, so a grow never holds both. GPAP_ERR_MEMORY when the device's limit, or the
+     * device, has no room. */
     gpap_status reserve(MemHolder &h, size_t n);
     gpap_status zero();
     void release();
@@ -81,7 +82,7 @@ struct DevBuf {
     DevBuf(const DevBuf &) = delete;
     DevBuf &operator=(const DevBuf &) = delete;
 };
-/* A buffer the engine builds once and keeps: the formula's side of the ledger. */
+/* A buffer the engine builds once and trim keeps: the formula's side of the ledger. */
 struct FormulaBuf : DevBuf {
     FormulaBuf() : DevBuf(MemKind::FORMULA) {}
 };
@@ -102,13 +103,18 @@ gpap_mode dispatch_mode(gpap_engine *e, int32_t K);
  * sampler refuses at creation rather than at its first launch. */
 gpap_status engine_require_trajectory(gpap_engine *e);
 /* THE batch an engine sizes for itself — probing, checking and the sampler all call this, so
- * none can skip a bound: the rows whose state, plus `extra_row_bytes` the caller allocates per
- * row, fit mem_budget on the engine's own device (free memory on CUDA, the total on OpenCL; 0
- * if the device cannot say) less `reserve_bytes` the caller allocates once (the queue's launch
- * buffers); at most `cap` (0 = gpap_default_k_cap, < 0 = none); within one buffer's size limit
- * where the plug has one; and at least one. */
+ * none can skip a bound: size_rows (memory.cpp) over the engine's device, for rows whose state
+ * plus `extra_row_bytes` the caller allocates per row fit beside `reserve_bytes` it allocates
+ * once (the queue's launch buffers); at most `cap` (0 = gpap_default_k_cap, < 0 = none). It
+ * records the bound that set the batch (e->bound). 0, the message set, when not even one row
+ * fits, the device cannot report its memory or the limit is malformed: the caller fails with
+ * e->sizing_status rather than run one row. */
 int32_t engine_batch(gpap_engine *e, int64_t extra_row_bytes, int32_t cap,
                      int64_t reserve_bytes = 0);
+/* Bytes a call's transients may take now on the engine's device: what the limit, or a host's
+ * grant, leaves beside everything GPAP holds, with `reuse` bytes the transient frees before it
+ * grows counted back. INT64_MAX where neither applies. readout.cpp sizes its slices from it. */
+int64_t engine_transient_room(gpap_engine *e, int64_t reuse);
 
 /* ---- The job queue (engine.cpp): entry point 1 for many sets on few rows. A row takes the next
  * set as it finishes one and puts back the words it touched, so a launch does not wait for its
@@ -313,8 +319,14 @@ struct gpap_engine {
     /* What this engine's buffers are counted on (memory.hpp). Declared before every DevBuf, as
      * `gpu` is: a buffer uncounts itself here when it frees. */
     gpap::MemHolder mem;
+    gpap::GpuMemory::Source mem_source = gpap::GpuMemory::TOTAL;   /* what the plug's `free` is */
+    gpap_bound bound = GPAP_BOUND_NONE;         /* what set the last batch (engine_batch) */
+    /* Why the last engine_batch returned 0: GPAP_ERR_MEMORY when no row fits, or the status of
+     * the memory query or the limit that failed. A caller returns it, so a driver error or a
+     * malformed limit is not reported as memory. */
+    gpap_status sizing_status = GPAP_OK;
 
-    /* formula-resident (never rebuilt): the FORMULA count */
+    /* formula-resident (never rebuilt): the FORMULA count, which trim keeps */
     gpap::FormulaBuf occ_off, occ_mid, occ_cls, packed_init, packed_flushed, abits_flushed;
     gpap::FormulaBuf pair_check;       /* (2*n_pairs) int32 — sound_rows' binary/unit pass */
 
