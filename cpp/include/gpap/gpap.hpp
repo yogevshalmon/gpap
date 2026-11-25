@@ -624,13 +624,15 @@ class Sampler {
         return out;
     }
 
-    /** What construction chose: K, propagate variant, solution columns, support size, work. */
+    /** K (the last run's batch, or the pin: each unpinned run sizes it again), propagate variant,
+     *  solution columns, support size, work. */
     std::int32_t k() const noexcept { return gpap_sampler_k(h_); }
     Mode mode() const { return engine_.mode(); }
     const std::vector<std::int32_t> &variables() const noexcept { return vars_; }
     std::int32_t num_support() const noexcept { return n_support_; }
     gpap_counters counters() const { return engine_.counters(); }
-    /** Restore the RNG to a known point; set_k pins the batch (k <= 0 unpins: each run sizes it). */
+    /** Restore the RNG to a known point; set_k pins the batch (k <= 0 unpins: each run sizes
+     *  it again). */
     void reseed(std::int64_t seed) { check(gpap_sampler_reseed(h_, seed), "gpap_sampler_reseed"); }
     void set_k(std::int32_t k) { check(gpap_sampler_set_k(h_, k), "gpap_sampler_set_k"); }
 

@@ -357,12 +357,12 @@ def _spec(spec) -> "bytes | None":
     return (f"{spec}B" if isinstance(spec, int) else spec).encode()
 
 
-def _check_spec(status: int) -> None:
+def _check_spec(status: int, what: str = "memory limit") -> None:
     """A malformed limit or reserve is the caller's argument: ValueError, with the core's
     reason."""
     if status == 1:
         raise ValueError(load().gpap_last_error().decode(errors="replace"))
-    check(status, "memory limit")
+    check(status, what)
 
 
 def parse_mem_limit(spec, total: int = 0) -> int:
@@ -400,7 +400,7 @@ def mem_limit(device: int = 0) -> int:
 def set_mem_reserve(spec, device: int = 0) -> None:
     """`gpap_set_mem_reserve` on one device of the current backend; None follows
     GPAP_MEM_RESERVE."""
-    _check_spec(load().gpap_set_mem_reserve(int(device), _spec(spec)))
+    _check_spec(load().gpap_set_mem_reserve(int(device), _spec(spec)), "memory reserve")
 
 
 def mem_reserve(device: int = 0) -> int:
