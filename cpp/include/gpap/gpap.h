@@ -624,9 +624,10 @@ int64_t gpap_row_bytes(int32_t num_long, int32_t N, int32_t trail_cap);
 /* Largest K fitting `bytes` for a formula shape. `cap` <= 0 means uncapped.
  * `num_long` as above — gpap_formula_info.num_long, not num_clauses. */
 int32_t gpap_compute_k_safe(int32_t num_long, int32_t N, int64_t bytes, int32_t cap);
-/* THE default batch cap — the `cap` above for a caller who does not want to think about K. One
- * constant, the same on every device (`device` is accepted and ignored). A saturation limit,
- * not a memory bound: gpap_compute_k_safe is what keeps a chunk inside VRAM. */
+/* THE default batch cap — the `cap` above for a caller who does not want to think about K: a
+ * number of rows per warp `device` keeps resident, so it differs from card to card, and a fixed
+ * number where the resident warps are unknown (opencl). A saturation limit, not a memory bound:
+ * gpap_compute_k_safe is what keeps a chunk inside VRAM. Pin K to compare runs across cards. */
 int32_t gpap_default_k_cap(int device);
 /* Resident-warp count of the device (SMs x warps per SM) — the ceiling on rows a SCALAR launch
  * can have in flight at once, and so the small-batch term of the dispatch rule below. 0 under

@@ -19,7 +19,8 @@ namespace {
  * to compare runs across cards. */
 constexpr int32_t kBatchRowsPerWarp = 64;
 /* The cap where the resident warps are unknown (OpenCL, a failed query): the fixed cap this
- * rule replaced, so such a device's batch is as it was. */
+ * rule replaced, so such a device's cap is as it was (its memory-bound batch moved with the
+ * default budget). */
 constexpr int32_t kBatchCapUnknownWarps = 262144;
 
 /* Clause count at or above which the warp-wide WAVE propagate beats the scalar one; measured,

@@ -275,7 +275,7 @@ def sample_clauses(nv, clauses, support, device, *, simplify=True, els=True, n_t
     to the winner); None runs the single fixed (`random_var`, `b`) config. The winner is reused
     for the coverage run, whose batch is `min(cov_k_cap, cov_batch(nv))` so reconstructing
     models to host RAM stays bounded.
-    `k_cap="auto"` is the library's cap, the same on every GPU; an int forces it.
+    `k_cap="auto"` is the library's cap, which differs per GPU; an int forces it.
     `verify_sound` (default off) re-checks every emitted model on the GPU and reports
     `sound_check` ("ok" / "UNSOUND" / "off") plus `unsound_rows`; its wall is in no rate.
     `progress(event, data)` is called as the run reaches each of them — "formula" once the
