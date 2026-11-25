@@ -38,8 +38,8 @@ def test_a_cpu_device_gets_the_fixed_cap_without_the_driver():
 @pytest.mark.gpu
 def test_the_cap_is_rows_per_resident_warp():
     """On CUDA the cap is 64 rows per resident warp; on OpenCL, which cannot count resident
-    warps, it is the fixed cap. Before, it was the fixed cap on every card, between about 40 and
-    200 rows per resident warp on the cards measured (MEMORY_FINDINGS.md §8)."""
+    warps, it is the fixed cap. Before, it was the fixed cap on every card, a different number
+    of rows per resident warp on each (MEMORY_FINDINGS.md §8)."""
     from gpap.engine import _core
     warps = _core.resident_warps(0)
     want = EXPECTED_ROWS_PER_WARP * warps if warps > 0 else EXPECTED_CAP

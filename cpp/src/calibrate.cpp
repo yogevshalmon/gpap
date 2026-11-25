@@ -108,7 +108,7 @@ int64_t gpap::mem_budget_cap() { return env_budget_cap(); }
  * by an ordinal; an engine applies it to the device it already holds. */
 int64_t gpap::mem_budget(int64_t free_bytes, int64_t reserve, double share) {
     const int64_t usable = std::max<int64_t>(0, free_bytes - std::max<int64_t>(reserve, 0));
-    const int64_t budget = share >= 1 ? usable : (int64_t)(usable * share);
+    const int64_t budget = share == 1 ? usable : (int64_t)((double)usable * share);
     const int64_t cap = env_budget_cap();
     return cap > 0 ? std::min(budget, cap) : budget;
 }
