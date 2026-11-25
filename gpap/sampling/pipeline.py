@@ -429,7 +429,8 @@ def sample_clauses(nv, clauses, support, device, *, simplify=True, els=True, n_t
                              "kept": bool(learned),
                              "gain": (score_after / score_before) if score_before else None,
                              # the score's factors, so a 1.00x says which one did not move; K
-                             # is the batch the warmups ran, and the timed run sizes its own
+                             # is the sampler's last sized batch (the warmups run pinned below
+                             # it), and the timed run sizes its own
                              "k_before": k_before, "k_after": k_after,
                              "success_before": w["best_success"],
                              "success_after": success_after,

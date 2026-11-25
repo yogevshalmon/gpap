@@ -200,7 +200,8 @@ budget by rule, so its fraction went from 0.80 to 1: both sides of a comparison 
 same bytes, now about 25% more on a memory-bound formula. Not a protocol change: the paper's
 tag (`tacas27-artifact-rc1`) keeps the old rule on both sides. On main,
 `GPAP_RIVAL_VRAM_FRACTION=0.8` with `GPAP_MEM_RESERVE=800000000B` gives a rival its old budget
-(the fraction now applies after the reserve), but GPAP's own engine has no fraction: an older
+where `GPAP_VRAM_BUDGET_MIB` is not set (the fraction now applies after the reserve and the
+cap), but GPAP's own engine has no fraction: an older
 comparison is reproduced on the tag, or with GPAP's batch pinned to the recorded one. Not measured: whether a rival's autograd
 graph, which the old 20% also covered, fits its batch at the new budget on every cell. A re-run
 of the campaign on main is deferred; the paper reports the tag's.
