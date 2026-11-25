@@ -50,6 +50,7 @@ typedef struct _cl_kernel *cl_kernel;
 typedef struct _cl_event *cl_event;
 
 constexpr cl_int CL_SUCCESS = 0;
+constexpr cl_int CL_MEM_OBJECT_ALLOCATION_FAILURE = -4;
 constexpr cl_bool CL_TRUE = 1;
 constexpr cl_bitfield CL_DEVICE_TYPE_GPU = 1u << 2;
 constexpr cl_bitfield CL_DEVICE_TYPE_ALL = 0xFFFFFFFFu;
@@ -130,9 +131,15 @@ const char *cl_error_name(cl_int rc) {
     }
 }
 
+/* A failed call's status: memory the device could not back is GPAP_ERR_MEMORY, as on CUDA;
+ * anything else is GPAP_ERR_CUDA, the status for "a GPU driver call failed". */
+gpap_status cl_status(cl_int rc) {
+    return rc == CL_MEM_OBJECT_ALLOCATION_FAILURE ? GPAP_ERR_MEMORY : GPAP_ERR_CUDA;
+}
+
 gpap_status cl_fail(const char *what, cl_int rc) {
     set_error("OpenCL: %s failed with %d (%s)", what, (int)rc, cl_error_name(rc));
-    return GPAP_ERR_CUDA;               /* the status for "a GPU driver call failed" */
+    return cl_status(rc);
 }
 
 #define GPAP_CL(call)                                                                    \
@@ -385,6 +392,20 @@ class OpenClGpu final : public Gpu {
                       bytes, (int)rc, cl_error_name(rc), (long long)d_->max_alloc);
             return GPAP_ERR_MEMORY;
         }
+        /* A runtime may back a buffer only when a command first uses it (NVIDIA's does), so a
+         * buffer past the card is created here and fails later, at a launch, leaving rows with
+         * no memory behind them. Writing one byte now, and waiting, backs it here instead: an
+         * allocation the device cannot back fails in alloc, as on CUDA, where the ledger gives
+         * its bytes back and the engine keeps no rows (GitHub issue 79). */
+        const unsigned char z = 0;
+        rc = g_cl.clEnqueueWriteBuffer(queue_, m, CL_TRUE, 0, 1, &z, 0, nullptr, nullptr);
+        if (rc != CL_SUCCESS) {
+            g_cl.clReleaseMemObject(m);
+            set_error("OpenCL: the device could not back a buffer of %zu bytes: its first write "
+                      "failed with %d (%s). Use a smaller batch",
+                      bytes, (int)rc, cl_error_name(rc));
+            return cl_status(rc);
+        }
         *out = (GpuMem)m;
         return GPAP_OK;
     }
@@ -485,7 +506,7 @@ class OpenClGpu final : public Gpu {
             if (rc != CL_SUCCESS) {
                 set_error("OpenCL: launching kernel '%s' failed with %d (%s)", key, (int)rc,
                           cl_error_name(rc));
-                st = GPAP_ERR_CUDA;
+                st = cl_status(rc);
             }
         }
         /* The queued launch keeps its own reference to every buffer it was given. */
