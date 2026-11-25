@@ -223,12 +223,30 @@ def test_pin_batch_is_exact_and_idempotent(n):
 
 
 @pytest.mark.gpu
-def test_pinned_batch_restores():
-    smp = _tiny_sampler(1024)
+def test_pinned_batch_restores(monkeypatch):
+    """The block holds its pin, the sized batch too, and then what was there comes back: no pin
+    (the next run sizes the batch again, here under a smaller budget), or the caller's own pin.
+    Before, a pin of the sized batch was no pin, so a run inside the block re-sized it, and the
+    block then put the old batch back by value, which pinned the sampler at a stale batch."""
+    smp = _tiny_sampler(100_000)
     before = (smp.K, smp.batch_size)
     with smp.pinned_batch(16):
         assert smp.batch_size == 16
     assert (smp.K, smp.batch_size) == before
+    run = lambda: smp._smp.run(10**9, [(True, 8, False)], max_chunks=1, keep_cap=0)  # noqa: E731
+    monkeypatch.setenv("GPAP_VRAM_BUDGET_MIB", "1")
+    with smp.pinned_batch(smp.K):                # the batch the run would size, before the cut
+        run()
+        assert smp.K == 100_000, "a pin of the sized batch was not held"
+    run()
+    assert smp.K < 100_000, "the block left the sampler pinned"
+    monkeypatch.delenv("GPAP_VRAM_BUDGET_MIB")
+    smp.pin_batch(64)
+    with smp.pinned_batch(16):
+        assert smp.batch_size == 16
+    monkeypatch.setenv("GPAP_VRAM_BUDGET_MIB", "1")
+    run()
+    assert smp.K == 64, "the caller's own pin did not come back"
 
 
 @pytest.mark.core

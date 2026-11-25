@@ -991,7 +991,7 @@ class Sampler:
         return int(load().gpap_sampler_k(self._h))
 
     def set_k(self, k: int) -> None:
-        """Pin the batch (the pin_batch primitive); k <= 0 restores the calibrated value."""
+        """Pin the batch (the pin_batch primitive); k <= 0 unpins, and each run sizes it."""
         check(load().gpap_sampler_set_k(self._h, int(k)), "sampler set_k")
 
     def reseed(self, seed: int) -> None:

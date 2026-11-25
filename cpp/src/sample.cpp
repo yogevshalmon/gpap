@@ -205,9 +205,10 @@ extern "C" int32_t gpap_sampler_k(const gpap_sampler *s) { return s ? s->K : 0; 
 
 extern "C" gpap_status gpap_sampler_set_k(gpap_sampler *s, int32_t k) {
     if (!s) { set_error("gpap_sampler_set_k: sampler is NULL"); return GPAP_ERR_ARG; }
-    s->K = k > 0 ? k : s->K_auto;
-    /* A pin of the calibrated batch is no pin: pinned_batch restores K by value. */
-    s->pinned = s->K != s->K_auto;
+    /* Any k > 0 pins, the sized batch too: every run sizes again, so a pin judged by its value
+     * would be lost at the next run. k <= 0 unpins, and the next run sizes the batch. */
+    s->pinned = k > 0;
+    s->K = s->pinned ? k : s->K_auto;
     s->e->bound = s->pinned ? GPAP_BOUND_PIN : s->bound_auto;
     return pin_mode(s);
 }

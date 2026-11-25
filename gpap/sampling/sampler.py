@@ -83,6 +83,7 @@ class GPUSampler:
         self._smp = _gcore.Sampler(self.engine._core, seed=(seed if seed is not None else 0),
                                    k_cap=(-1 if k_cap is None else int(k_cap)))
         self._sup_pushed = "unset"     # last support handed to the core (see _push_support)
+        self._pin = None               # the pinned batch, or None: each run sizes its own
 
     # Read `batch_size`, set it with pin_batch() / pinned_batch(); assigning `K` routes to
     # gpap_sampler_set_k, so a pin binds the actual chunk loop.
@@ -93,7 +94,9 @@ class GPUSampler:
 
     @K.setter
     def K(self, n: int) -> None:
+        """A pin (n > 0), or none (n <= 0): the next run sizes the batch again."""
         self._smp.set_k(int(n))
+        self._pin = int(n) if int(n) > 0 else None
 
     def trim(self) -> None:
         """Give the engine's rows back while the sampler is idle, keeping the formula and `K`:
@@ -118,13 +121,14 @@ class GPUSampler:
 
     @contextlib.contextmanager
     def pinned_batch(self, n: int):
-        """`pin_batch(n)` for the duration of the block, restoring the calibrated value after."""
-        k = self.K
+        """`pin_batch(n)` for the duration of the block, then what was there before: the
+        caller's own pin, or no pin (the next run sizes the batch)."""
+        before = self._pin
         self.pin_batch(n)
         try:
             yield self
         finally:
-            self.K = k
+            self.K = before if before is not None else 0
 
     @classmethod
     def from_cnf_file(cls, path: str, device: torch.device, *, simplify: bool = False,
