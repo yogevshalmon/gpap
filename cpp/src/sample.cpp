@@ -312,8 +312,18 @@ extern "C" gpap_status gpap_sampler_run(gpap_sampler *s, int64_t n_target,
          * stays. First, so a run that cannot size leaves the last run's results as they were; not
          * for a formula whose construction units conflicted, which is UNSAT with no rows. */
         if (!s->pinned && !gpap_engine_flush_conflict(s->e)) {
-            const int32_t k = gpap::engine_batch(s->e, 0, s->k_cap);
-            if (k <= 0) return s->e->sizing_status;            /* engine_batch said why */
+            const gpap_bound held_bound = s->e->bound;
+            int32_t k = gpap::engine_batch(s->e, 0, s->k_cap);
+            if (k <= 0) {                                      /* engine_batch said why */
+                s->e->bound = held_bound;      /* the sampler keeps the batch it holds */
+                return s->e->sizing_status;
+            }
+            /* A batch a thirty-second bigger or less keeps the one held: free memory moves by
+             * a few MB from run to run, and a bigger batch reallocates every row buffer. */
+            if (k > s->K_auto && k - s->K_auto <= s->K_auto / 32) {
+                k = s->K_auto;
+                s->e->bound = s->bound_auto;
+            }
             s->bound_auto = s->e->bound;
             if (k != s->K_auto) {
                 s->K_auto = s->K = k;
