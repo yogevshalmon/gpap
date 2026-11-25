@@ -240,18 +240,22 @@ K         = min( rows the memory bounds leave ,  cap )          cap = 262,144
 
 | memory bound | where it applies | bytes it leaves for the call |
 |---|---|---|
-| memory | CUDA always; OpenCL unless a limit is set | 0.80 · (free − 800 MB), under `GPAP_VRAM_BUDGET_MIB`; OpenCL, which cannot measure free memory, reads its total |
+| memory | CUDA always; OpenCL unless a limit is set | 0.80 · (free − 800 MB), under `GPAP_VRAM_BUDGET_MIB`; OpenCL, which cannot measure free memory, reads its total less what GPAP's other engines hold there |
 | limit | a memory limit is set (below) | the limit, at most the device, less what GPAP holds there |
 | grant | a host's own plug | what the host still grants GPAP, as it is |
 
-Each bound's bytes, less what the call allocates once (the queue's launch buffers), divided by
-the bytes of a row, gives its rows; the batch is the smallest, then the cap, then the device's
-one-buffer limit (OpenCL). `gpap_engine_batch_bound` (Python `batch_bound`) says which one set
-it. A limit and a grant are exact, so they also count what a call allocates after it is sized,
-which the memory bound's margins cover instead: selected-row lists, soundness flags, the
-smallest readout slice, pair masks (`exact_terms` in `cpp/src/engine.cpp`). Where not even one
-row fits, the call fails with `GPAP_ERR_MEMORY` (Python `MemoryError`) and says what a row
-needs: it never runs a batch of one row.
+Each bound's bytes, less what the call allocates once (a queued call's launch buffers, for its
+own sets and its widest set), divided by the bytes of a row, gives its rows; the batch is the
+smallest, then the cap, then the device's one-buffer limit (OpenCL). `gpap_engine_batch_bound`
+(Python `batch_bound`) says which one set it. A limit and a grant are exact, so they also count
+what a call allocates after it is sized, which the memory bound's margins cover instead:
+selected-row lists, soundness flags, the smallest readout slice, pair masks (`exact_terms` in
+`cpp/src/engine.cpp`); and under one, a batch smaller than the engine's last gives the extra
+rows back, where without one they are kept for the next bigger batch. Where not even one row
+fits, the call fails with `GPAP_ERR_MEMORY` (Python `MemoryError`) and says what a row needs: it
+never runs a batch of one row. A buffer the device cannot back fails at its allocation, on
+OpenCL too, where a runtime may back a buffer only at its first use: the plug writes it once
+when it allocates it.
 
 `trail_cap = N + 32` is a proof, not a tuning knob: every trail push is deduplicated against the
 bitmap and `l`/`¬l` share a word, so a variable enters a row's trail at most once — the bound is
@@ -294,9 +298,9 @@ owns: `_dev` pointers, and the tensors the Python face returns (GitHub issue 75)
 the driver's context when you choose a limit.
 
 An idle engine can give its rows back and keep its formula (`gpap_engine_trim`, `.trim()`), so a
-second engine on the device sizes as if the first held none. A sampling run does that before it
-mines when a limit is set: the sampler's warmup rows could otherwise fill the limit and leave
-mining no row (GitHub issue 76).
+second engine on the device sizes as if the first held none. A sampling run does that before
+every mining call, so mining sizes from the formula and the card rather than from what the
+sampler's warmup rows leave, which under a tight limit would be no row at all (GitHub issue 76).
 
 ## 8. Knobs
 

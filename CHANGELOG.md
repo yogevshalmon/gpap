@@ -55,6 +55,23 @@ change does not.
   is measured (CUDA), the device's total (OpenCL) or a host's exact grant.
 - Additive ABI, same soname: the functions above, `gpap_bound`, `gpap_limit_source` and
   `gpap_mem_kind`.
+- The job queue takes off the budget what a call's own launches can allocate, for its sets and
+  its widest set, not a fixed worst case of about 70 MB, so a tight limit or a small grant keeps
+  it (issue 72).
+- Under a limit or a grant, a batch smaller than the engine's last gives the extra rows back, so
+  the room its sizing counted for the call's later buffers is there; without one the buffers
+  are kept for the next bigger batch, as before.
+- Fixed: on OpenCL, a buffer the device cannot back now fails when it is allocated, with
+  `GPAP_ERR_MEMORY`, as on CUDA. NVIDIA's runtime backs a buffer only at its first use, so a
+  batch pinned past the card failed at the first launch as a driver error and left the engine
+  unusable (issue 79).
+- On OpenCL, which cannot measure free memory, the default share of the device's total is taken
+  after what GPAP's other engines hold there, as CUDA's measured free memory already is: a second
+  engine beside a big one sizes to what is left instead of planning on the whole device.
+- A sampling run gives the sampler's rows back before every mining call, with no limit too, so
+  mining sizes from the formula and the card rather than from what the warmup rows leave
+  (issue 76).
+- C++: `gpap::reset_peak` and `gpap::parse_mem_limit`, the C ABI's last two memory functions.
 
 ### Evaluation
 - `eval/colab/colab_supervisor.py` drives the VM through `colab ssh` and needs google-colab-cli
