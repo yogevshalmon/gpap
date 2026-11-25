@@ -197,7 +197,8 @@ def _memory_info(smp, device) -> dict:
     from gpap.engine import _core
     d = device.index or 0
     return {"batch_bound": smp.engine.batch_bound, "mem_limit": _core.mem_limit(d),
-            "mem_limit_source": _core.mem_limit_source(d), "mem_peak": _core.mem_peak(d)}
+            "mem_limit_source": _core.mem_limit_source(d), "mem_reserve": _core.mem_reserve(d),
+            "mem_peak": _core.mem_peak(d)}
 
 
 def _core_provenance() -> str:

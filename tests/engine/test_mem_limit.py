@@ -159,6 +159,24 @@ def test_the_reserve_follows_the_api_then_the_variable_then_the_default(monkeypa
         _core.mem_reserve(0)
 
 
+@pytest.mark.core
+def test_python_sets_the_process_reserve_or_one_device(monkeypatch):
+    """gpap.set_mem_reserve with no device writes GPAP_MEM_RESERVE, which child runs inherit,
+    and refuses a bad spec before anything changes; with a device it is that device's API
+    reserve. gpap.engine.memory() reports it."""
+    import gpap
+    from gpap.engine import memory
+    gpap.set_mem_reserve("2G")
+    assert os.environ["GPAP_MEM_RESERVE"] == "2G" and memory()["reserve"] == 2 << 30
+    with pytest.raises(ValueError):
+        gpap.set_mem_reserve("2")
+    assert os.environ["GPAP_MEM_RESERVE"] == "2G"
+    gpap.set_mem_reserve(None)
+    assert "GPAP_MEM_RESERVE" not in os.environ and memory()["reserve"] == 1 << 30
+    gpap.set_mem_reserve(256 << 20, device=0)
+    assert _core.mem_reserve(0) == 256 << 20
+
+
 @pytest.mark.gpu
 def test_the_default_budget_is_free_memory_less_the_reserve():
     """Without a limit a new engine's rows are sized against free memory less the reserve, all
@@ -181,6 +199,15 @@ def test_the_default_budget_is_free_memory_less_the_reserve():
     _core.set_mem_reserve(None, 0)
     assert abs((whole - _core.mem_available(0)) - share * (1 << 30)) <= slack
     assert abs(gpu_mem_available(torch.device("cuda", 0)) - _core.mem_available(0, 1.0)) <= slack
+
+
+@pytest.mark.gpu
+def test_the_cli_sets_the_reserve_for_the_run(capsys):
+    """--mem-reserve sets GPAP_MEM_RESERVE for the run, and `gpap info` reports it."""
+    from gpap.cli import main as cli_main
+    cli_main(["info", "--mem-reserve", "2G"])
+    assert os.environ["GPAP_MEM_RESERVE"] == "2G"
+    assert "2.00 GiB left free" in capsys.readouterr().out
 
 
 _CPP_MEMORY_SRC = r"""
