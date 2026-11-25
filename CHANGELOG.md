@@ -73,6 +73,11 @@ change does not.
   (issue 76).
 - C++: `gpap::reset_peak` and `gpap::parse_mem_limit`, the C ABI's last two memory functions.
 
+### Sampling
+- Fixed: a run's `phases` sum to `wall_total_s` in a fresh process too. The wire map is billed
+  to `parse`, the library's first load to `construct`, and the run's report (provenance, memory,
+  rates) to `output`; on an A100 node they had left about 15 ms of the first run unbilled.
+
 ### Evaluation
 - `eval/colab/colab_supervisor.py` drives the VM through `colab ssh` and needs google-colab-cli
   0.8 or later, which removed the `console` it used; it refuses an older CLI at start
