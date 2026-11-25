@@ -553,7 +553,8 @@ void gpap_counters_reset(gpap_engine *e);
  * limits one buffer's size, which the engine's own sizers (probe, check, sampler) respect and
  * gpap_compute_k_safe does not: size an explicit K for opencl with gpap_check_chunk_size. */
 
-/* Bytes a new engine's rows would be sized against: free memory less the memory reserve
+/* The default budget a new engine's call is sized within, its rows and what the call allocates
+ * beside them (a readout slice, its row lists): free memory less the memory reserve
  * (gpap_set_mem_reserve, below), times `fraction` (1 is the engine's own default budget; on
  * opencl, a share of the total stands in for free memory), capped by GPAP_VRAM_BUDGET_MIB when
  * that is set to a positive integer. The cap is for CROSS-CARD REPRODUCTION — a memory-bound K

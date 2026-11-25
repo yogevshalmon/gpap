@@ -56,7 +56,7 @@ def set_mem_reserve(spec, *, device=None) -> None:
             os.environ.pop("GPAP_MEM_RESERVE", None)
             return
         text = _core._spec(spec).decode()
-        _core.parse_mem_limit(text)                 # one grammar: raises before anything changes
+        _core.parse_mem_reserve(text)               # one grammar: raises before anything changes
         os.environ["GPAP_MEM_RESERVE"] = text
         return
     _core.set_mem_reserve(spec, int(device))
@@ -70,7 +70,8 @@ def memory(device: int = 0) -> dict:
     - `reserve`: what GPAP leaves free there, in bytes;
     - `held`: what GPAP's engines hold there, counted buffer by buffer, and `peak`: the most they
       held since `reset_peak`;
-    - `available`: what a new engine's rows would be sized against.
+    - `available`: the default budget a new engine's call is sized within, its rows and what it
+      allocates beside them.
     """
     from gpap.engine import _core
     return {"limit": _core.mem_limit(device), "limit_source": _core.mem_limit_source(device),

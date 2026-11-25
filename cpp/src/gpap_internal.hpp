@@ -122,8 +122,10 @@ gpap_status engine_require_trajectory(gpap_engine *e);
 int32_t engine_batch(gpap_engine *e, int64_t extra_row_bytes, int32_t cap,
                      int64_t reserve_bytes = 0);
 /* Bytes a call's transients may take now on the engine's device: what the limit, or a host's
- * grant, leaves beside everything GPAP holds, with `reuse` bytes the transient frees before it
- * grows counted back. INT64_MAX where neither applies. readout.cpp sizes its slices from it. */
+ * grant, leaves beside everything GPAP holds, and on a measured device what the reserve leaves
+ * of free memory (under GPAP_VRAM_BUDGET_MIB, the cap less the engine's row-kind buffers), with
+ * `reuse` bytes the transient frees before it grows counted back. INT64_MAX where none applies
+ * (an unmeasured total without a limit). readout.cpp sizes its slices from it. */
 int64_t engine_transient_room(gpap_engine *e, int64_t reuse);
 /* gpap_engine_reset(e, K) for a caller that will take `keep` rows again (keep > K): under an
  * exact bound a reset gives back row buffers bigger than its own K (ensure_state's `fit`), and

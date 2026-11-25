@@ -163,12 +163,13 @@ def test_the_reserve_follows_the_api_then_the_variable_then_the_default(monkeypa
 def test_python_sets_the_process_reserve_or_one_device(monkeypatch):
     """gpap.set_mem_reserve with no device writes GPAP_MEM_RESERVE, which child runs inherit,
     and refuses a bad spec before anything changes; with a device it is that device's API
-    reserve. gpap.engine.memory() reports it."""
+    reserve. gpap.engine.memory() reports it. A malformed reserve is named as one, not as a
+    limit."""
     import gpap
     from gpap.engine import memory
     gpap.set_mem_reserve("2G")
     assert os.environ["GPAP_MEM_RESERVE"] == "2G" and memory()["reserve"] == 2 << 30
-    with pytest.raises(ValueError):
+    with pytest.raises(ValueError, match="memory reserve '2'"):
         gpap.set_mem_reserve("2")
     assert os.environ["GPAP_MEM_RESERVE"] == "2G"
     gpap.set_mem_reserve(None)
@@ -179,7 +180,7 @@ def test_python_sets_the_process_reserve_or_one_device(monkeypatch):
 
 @pytest.mark.gpu
 def test_the_default_budget_is_free_memory_less_the_reserve():
-    """Without a limit a new engine's rows are sized against free memory less the reserve, all
+    """Without a limit a new engine's call is sized within free memory less the reserve, all
     of it on a device that measures free memory: 256 MiB more reserve is 256 MiB less budget,
     and with no reserve the budget is the free memory itself, not 80% of it. On OpenCL, which
     cannot measure free memory, the budget is a share (80%) of the total less what GPAP holds
