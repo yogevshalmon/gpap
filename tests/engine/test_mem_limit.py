@@ -319,23 +319,36 @@ def test_sampling_mines_under_a_limit_as_without_one(tmp_path):
     assert capped["engine"]["mem_peak"] <= capped["engine"]["mem_limit"] == 32 << 20
 
 
+def _queue_call_bytes(n_sets, width):
+    """queue_call_bytes (cpp/src/gpap_internal.hpp), restated: the launch buffers of one queued
+    call, a launch being at most 2^20 jobs and 2^24 literals."""
+    w = max(width, 1)
+    jobs = max(1, min(n_sets, 1 << 20, (1 << 24) // w))
+    return jobs * w * 4 + jobs * 5 + 16
+
+
 @pytest.mark.engine
-def test_the_queue_runs_under_a_limit_that_holds_its_buffers():
-    """Under a limit of the device plus the queue's launch buffers plus a few rows, flags-only
-    checks and probe sweeps run on the queue (its launch count says so), and GPAP's peak never
-    passes the limit: the queue's buffers are sized for, not just tolerated."""
+def test_the_queue_runs_under_a_limit_that_holds_only_what_its_calls_take():
+    """The queue takes off the budget what a call's launches can allocate, for its own sets and
+    its widest set, not a fixed worst case of about 70 MB (GitHub issue 72). Under a limit of
+    the device plus a few rows plus those buffers, flags-only checks and probe sweeps both run on
+    the queue (each adds launches to its count), and GPAP's peak never passes the limit: the
+    buffers are sized for, not just tolerated."""
     f = _formula(nv=400, nc=1200, seed=9)
     e = _core.Engine(f)
     nv = f.info.num_vars
-    queue_buffers = 70 << 20                     # kQueueBufferBytes, cpp/src/gpap_internal.hpp
-    _core.set_mem_limit(_settled_held() + queue_buffers + 16 * (_row_bytes(e) + 64) + 40 * nv
+    calls = max(_queue_call_bytes(3000, 3), _queue_call_bytes(20_000, 2))
+    _core.set_mem_limit(_settled_held() + calls + 16 * (_row_bytes(e) + 24 + 64) + 40 * nv
                         + (1 << 20), 0)
     _core.mem_reset_peak(0)
     limit = _core.mem_limit(0)
     lits, off = _flat(_sets(nv, 3000, 3))
+    before = e.queue_stats()[0]
     e.check_sets(lits, off, chunk=0)
+    after_check = e.queue_stats()[0]
+    assert after_check > before, "the flags-only check did not run on the queue"
     e.probe_combinations(None, 2, max_tuples=20_000).conflicts()
-    assert e.queue_stats()[0] > 0, "the queue did not engage"
+    assert e.queue_stats()[0] > after_check, "the probe sweep did not run on the queue"
     assert _core.mem_peak(0) <= limit
 
 

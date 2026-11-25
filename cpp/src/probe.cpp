@@ -271,7 +271,7 @@ gpap_status run_sweep(gpap_engine *e, int32_t k, int64_t total, const gpap_probe
         /* On the queue when it engages, else in chunks; `options.batch` pins the rows of
          * either. A queued call ends at this block's close, inside the sweep's time. */
         gpap::QueuedCall q(e);
-        GPAP_TRY(q.begin(o.batch, limit, batch));
+        GPAP_TRY(q.begin(o.batch, limit, k, batch));
         if (q.engaged())
             GPAP_TRY(sweep_on_queue(q, k, limit, o, clock, next, out));
         else

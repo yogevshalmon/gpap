@@ -128,10 +128,20 @@ int64_t engine_transient_room(gpap_engine *e, int64_t reuse);
 constexpr int64_t kQueueMaxJobs = 1 << 20;
 /* Literals one queued launch may take, padding included: bounds the job matrix of wide sets. */
 constexpr int64_t kQueueMaxLits = 1 << 24;
-/* Device bytes of one launch's buffers at those bounds: the job matrix, a flag and a count per
- * job, and a megabyte for the counter and the per-row sums. QueuedCall::begin takes them off
- * the memory budget. Keep in step with the reserves in QueuedCall::launch. */
-constexpr int64_t kQueueBufferBytes = kQueueMaxLits * 4 + kQueueMaxJobs * 5 + (1 << 20);
+/* Device bytes a queued row needs besides its state: its sums of ops, props and decisions. */
+constexpr int64_t kQueueRowBytes = 3 * sizeof(int64_t);
+/* Device bytes the launches of one call of `n_sets` sets, the widest `width` literals, allocate
+ * besides the rows: a launch takes at most min(n_sets, kQueueMaxJobs, kQueueMaxLits / width)
+ * jobs (one, however wide), each a row of the job matrix, a flag and an implied count, and the
+ * counter. QueuedCall::begin takes them off the memory budget, and the destructor frees them,
+ * so a call never pays for another's. Keep in step with the reserves in QueuedCall::launch. */
+constexpr int64_t queue_call_bytes(int64_t n_sets, int64_t width) {
+    const int64_t w = width > 1 ? width : 1;
+    int64_t jobs = n_sets < kQueueMaxJobs ? n_sets : kQueueMaxJobs;
+    if (jobs > kQueueMaxLits / w) jobs = kQueueMaxLits / w;
+    if (jobs < 1) jobs = 1;
+    return jobs * w * 4 + jobs * 5 + 16;
+}
 /* Rows of a queue on a device whose library cannot say how many it runs at once (OpenCL). */
 constexpr int32_t kQueueRowsUnknown = 4096;
 
@@ -152,11 +162,12 @@ class QueuedCall {
      * formula's own units conflict (no baseline to restore to), the engine's plug has no queue
      * kernel, or the call has no more sets than the queue has rows — every row would then take
      * one set, which is a chunk with more bookkeeping. Otherwise the call is engaged on R rows,
-     * all at the baseline. `first_block` is the sets the caller's chunk loop gives one launch.
-     * ROWS: `requested` if > 0 (a caller's pin), else all that fit: engine_batch() with the
-     * launch buffers (kQueueBufferBytes) taken out of the budget, which bounds a pin too; never
-     * more than the device runs at once (a row it is not running takes no job and only costs
-     * memory; kQueueRowsUnknown where its library cannot say).
+     * all at the baseline. `first_block` is the sets the caller's chunk loop gives one launch,
+     * `width` the literals of its widest set.
+     * ROWS: `requested` if > 0 (a caller's pin), else all that fit: engine_batch() with this
+     * call's launch buffers (queue_call_bytes) taken out of the budget, which bounds a pin too;
+     * never more than the device runs at once (a row it is not running takes no job and only
+     * costs memory; kQueueRowsUnknown where its library cannot say).
      * COPY: the packed words where packed_clean_rows does not cover the R rows; the bitmap
      * always, since no claim covers it (a CLEAN launch leaves it at its fixpoint). That one copy
      * per call is the price of keeping no second claim that every launch path would have to
@@ -165,7 +176,7 @@ class QueuedCall {
      * rows are counted in warps, and only a WAVE row fills one on both backends. Not the
      * dispatch rule, which chooses for a chunk; the call's end gives the engine that rule's
      * kernel back. */
-    gpap_status begin(int32_t requested, int64_t n_sets, int64_t first_block);
+    gpap_status begin(int32_t requested, int64_t n_sets, int64_t width, int64_t first_block);
     /* Whether begin started a call: the caller then launches, else it runs its chunk loop. */
     bool engaged() const { return rows_ > 0; }
     /* Sets the next launch takes, with `seconds_left` of the call's deadline (infinity without

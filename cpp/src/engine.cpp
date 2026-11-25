@@ -656,7 +656,8 @@ std::string queue_key(int32_t shift, int wave) {
 
 namespace gpap {
 
-gpap_status QueuedCall::begin(int32_t requested, int64_t n_sets, int64_t first_block) {
+gpap_status QueuedCall::begin(int32_t requested, int64_t n_sets, int64_t width,
+                              int64_t first_block) {
     gpap_engine *e = e_;
     if (!e || rows_ > 0) {
         set_error("QueuedCall::begin: %s", !e ? "engine must not be NULL" : "already begun");
@@ -670,13 +671,13 @@ gpap_status QueuedCall::begin(int32_t requested, int64_t n_sets, int64_t first_b
     if (e->flush_conflict || e->has_empty_clause) return GPAP_OK;
     int32_t resident = e->driver->resident_warps(e->device_ordinal);
     if (resident <= 0) resident = kQueueRowsUnknown;
-    /* The rows that fit with the launch buffers taken out of the budget. In bytes, not rows: the
-     * batch is capped by gpap_default_k_cap, so rows taken off it say nothing of memory. A pin
-     * is held to it too. A queued row is the engine's state alone: no per-row decision matrix.
-     * Where the launch buffers leave no row, the call runs in chunks, which need none of them.
-     * A declined call keeps the bound its chunk sizing recorded. */
+    /* The rows that fit with this call's launch buffers taken out of the budget. In bytes, not
+     * rows: the batch is capped by gpap_default_k_cap, so rows taken off it say nothing of
+     * memory. A pin is held to it too. A queued row is the engine's state and its sums: no
+     * per-row decision matrix. Where the launch buffers leave no row, the call runs in chunks,
+     * which need none of them. A declined call keeps the bound its chunk sizing recorded. */
     const gpap_bound chunk_bound = e->bound;
-    const int64_t fit = engine_batch(e, 0, 0, kQueueBufferBytes);
+    const int64_t fit = engine_batch(e, kQueueRowBytes, 0, queue_call_bytes(n_sets, width));
     if (fit <= 0) {
         e->bound = chunk_bound;
         return GPAP_OK;
@@ -758,7 +759,7 @@ gpap_status QueuedCall::launch(const int32_t *jobs, int64_t n, int32_t L, int8_t
     GPAP_TRY(stage(e, e->queue_dec, jobs, (size_t)n * (size_t)L * sizeof(int32_t)));
     GPAP_TRY(e->queue_conf.reserve(e->mem, (size_t)n));
     GPAP_TRY(e->queue_impl.reserve(e->mem, (size_t)n * sizeof(int32_t)));
-    GPAP_TRY(e->queue_sums.reserve(e->mem, (size_t)rows * 3 * sizeof(int64_t)));
+    GPAP_TRY(e->queue_sums.reserve(e->mem, (size_t)rows * kQueueRowBytes));
     GPAP_TRY(e->queue_next.reserve(e->mem, 16));
     GPAP_TRY(e->queue_next.zero());
 
