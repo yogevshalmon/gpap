@@ -51,6 +51,7 @@ typedef struct _cl_event *cl_event;
 
 constexpr cl_int CL_SUCCESS = 0;
 constexpr cl_int CL_MEM_OBJECT_ALLOCATION_FAILURE = -4;
+constexpr cl_int CL_OUT_OF_RESOURCES = -5;
 constexpr cl_bool CL_TRUE = 1;
 constexpr cl_bitfield CL_DEVICE_TYPE_GPU = 1u << 2;
 constexpr cl_bitfield CL_DEVICE_TYPE_ALL = 0xFFFFFFFFu;
@@ -104,7 +105,8 @@ constexpr cl_uint CL_PROGRAM_BUILD_LOG = 0x1183;
        cl_event *))                                                                            \
     X(cl_int, clEnqueueFillBuffer,                                                             \
       (cl_command_queue, cl_mem, const void *, size_t, size_t, size_t, cl_uint,                \
-       const cl_event *, cl_event *))
+       const cl_event *, cl_event *))                                                          \
+    X(cl_int, clFinish, (cl_command_queue))
 
 struct ClApi {
 #define X(ret, name, args) ret (*name) args = nullptr;
@@ -384,6 +386,9 @@ class OpenClGpu final : public Gpu {
     gpap_status memory(GpuMemory *out) override { return report(*d_, out); }
 
     gpap_status alloc(size_t bytes, GpuMem *out) override {
+        /* The first write below waits on the in-order queue: drain it first, so an earlier
+         * launch's error is reported as itself, not as this buffer's. */
+        GPAP_CL(g_cl.clFinish(queue_));
         cl_int rc = CL_SUCCESS;
         cl_mem m = g_cl.clCreateBuffer(d_->ctx, CL_MEM_READ_WRITE, bytes, nullptr, &rc);
         if (rc != CL_SUCCESS || !m) {
@@ -396,7 +401,8 @@ class OpenClGpu final : public Gpu {
          * buffer past the card is created here and fails later, at a launch, leaving rows with
          * no memory behind them. Writing one byte now, and waiting, backs it here instead: an
          * allocation the device cannot back fails in alloc, as on CUDA, where the ledger gives
-         * its bytes back and the engine keeps no rows (GitHub issue 79). */
+         * its bytes back and the engine keeps no rows (GitHub issue 79). A runtime may say so as
+         * "out of resources" (NVIDIA's does) rather than an allocation failure: both are memory. */
         const unsigned char z = 0;
         rc = g_cl.clEnqueueWriteBuffer(queue_, m, CL_TRUE, 0, 1, &z, 0, nullptr, nullptr);
         if (rc != CL_SUCCESS) {
@@ -404,7 +410,7 @@ class OpenClGpu final : public Gpu {
             set_error("OpenCL: the device could not back a buffer of %zu bytes: its first write "
                       "failed with %d (%s). Use a smaller batch",
                       bytes, (int)rc, cl_error_name(rc));
-            return cl_status(rc);
+            return rc == CL_OUT_OF_RESOURCES ? GPAP_ERR_MEMORY : cl_status(rc);
         }
         *out = (GpuMem)m;
         return GPAP_OK;
