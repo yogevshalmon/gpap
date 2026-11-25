@@ -382,6 +382,34 @@ def _queue_call_bytes(n_sets, width):
     return jobs * w * 4 + jobs * 5 + 16
 
 
+@pytest.mark.gpu
+def test_sampling_gives_the_samplers_rows_back_before_it_mines(monkeypatch):
+    """Mining sizes from the formula and the card, not from what the sampler's warmup rows
+    leave: a sampling run trims the sampler before every mining call, with no limit too (GitHub
+    issue 76), and the run still delivers. The spies call through to the real methods."""
+    import gpap.sampling.pipeline as pipeline
+    from gpap.cli import main as cli_main
+    from gpap.sampling.sampler import GPUSampler
+    from tests.conftest import REPO_ROOT
+    events = []
+    trim, mine = GPUSampler.trim, pipeline.mine_entailed
+
+    def spy_trim(self):
+        events.append("trim")
+        return trim(self)
+
+    def spy_mine(*a, **kw):
+        events.append("mine")
+        return mine(*a, **kw)
+    monkeypatch.setattr(GPUSampler, "trim", spy_trim)
+    monkeypatch.setattr(pipeline, "mine_entailed", spy_mine)
+    cnf = os.path.join(REPO_ROOT, "benchmarks", "sampling", "71.sk_3_65.cnf")
+    cli_main(["sample", cnf, "-n", "300", "--portfolio", "b8", "--mine", "on"])
+    assert "mine" in events, "precondition: the run mined"
+    assert all(i > 0 and events[i - 1] == "trim" for i, ev in enumerate(events) if ev == "mine"), \
+        events
+
+
 @pytest.mark.engine
 def test_the_queue_runs_under_a_limit_that_holds_only_what_its_calls_take():
     """The queue takes off the budget what a call's launches can allocate, for its own sets and
@@ -588,6 +616,28 @@ def test_mining_rebuilds_its_probe_under_a_limit():
     assert free_by.get(2, 0) > 0, "precondition: width 2 found binaries, so mining rebuilt"
     assert cap_by == free_by and -1 not in cap_skipped, cap_skipped
     assert cap_peak <= 16 << 20
+
+
+@pytest.mark.gpu
+def test_mining_hands_back_every_byte_it_took():
+    """Mining frees its probe engines before it returns, also when the device refuses the first
+    one: GPAP then holds what it held before, with no collector run in between. A probe engine
+    kept alive past the call (a reference cycle, a traceback) would hold its rows, and under a
+    limit the next component would size against them."""
+    import torch
+
+    from gpap.mining import mine_entailed
+    nv, clauses, pool = _binary_rich_formula()
+    before = _settled_held()
+    res = mine_entailed(nv, clauses, torch.device("cuda"), pool=pool, widths=(1, 2, 3),
+                        max_tuples={1: 0, 2: 1_000_000, 3: 40_000}, seconds=60)
+    assert res.by_width.get(2, 0) > 0, "precondition: width 2 found binaries, so mining rebuilt"
+    assert _core.mem_held(0) == before
+    _core.set_mem_limit(before + (64 << 10), 0)          # below the formula's own buffers
+    with pytest.raises(MemoryError):
+        mine_entailed(nv, clauses, torch.device("cuda"), pool=pool, widths=(1, 2),
+                      max_tuples={1: 0, 2: 1000}, seconds=10)
+    assert _core.mem_held(0) == before
 
 
 @pytest.mark.gpu
