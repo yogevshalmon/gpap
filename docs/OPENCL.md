@@ -97,7 +97,8 @@ Two sizing rules differ from CUDA, because OpenCL cannot answer the questions CU
   the device's total memory. On a card that something else uses — another process, or torch in
   the same one — say how much GPAP may hold with `--mem-limit` / `GPAP_MEM_LIMIT`
   ([ENGINE.md](ENGINE.md) §7): on OpenCL the limit takes the place of the share of the total.
-  GPAP's own engines on the device are counted under a limit, whatever the backend.
+  GPAP's own engines on the device are counted either way: what the others hold comes out of
+  the total before the share is taken, so two engines never both plan on the whole device.
 - **One buffer's size.** A device limits a single allocation (`CL_DEVICE_MAX_MEM_ALLOC_SIZE`),
   so the batch is also bounded by the widest per-row buffer (`engine_batch` in
   `cpp/src/engine.cpp`). An explicit batch is not clamped; one that is too large fails at the

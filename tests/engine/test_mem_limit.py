@@ -413,6 +413,41 @@ def test_a_batch_past_the_device_fails_as_memory_and_the_engine_recovers():
     assert _settled_held() == base
 
 
+@pytest.mark.gpu
+def test_on_an_unmeasured_device_a_second_engine_sizes_from_what_the_first_leaves():
+    """OpenCL cannot measure free memory, so the default rule sizes against a share of the
+    device's total; what GPAP's other engines hold there comes out of it first, as it does out
+    of CUDA's measured free memory. Beside engines that hold most of the device, one more sizes
+    to what is left and runs, answering as the others do; before, every engine planned on the
+    whole device and the last could not allocate. Not on WSL2, which pages device memory to the
+    host instead of failing."""
+    if os.environ.get("GPAP_BACKEND", "cuda") != "opencl":
+        pytest.skip("CUDA measures free memory; this is the rule for a device that cannot")
+    if _on_wsl2():
+        pytest.skip("WSL2 pages device memory to the host instead of failing")
+    _core.set_mem_limit("100%", 0)               # the device's total, as the limit resolves it
+    total = _core.mem_limit(0)
+    _core.set_mem_limit(None, 0)
+    f = _formula(nv=4000, nc=60000, seed=11)     # rows of ~180 KB
+    # A device that caps one buffer (NVIDIA's OpenCL: a quarter of the card) sets a lone
+    # engine's batch by that cap, not by the share; engines at that batch fill the device first.
+    held, k0 = [], None
+    while _core.mem_held(0) < 0.6 * total and len(held) < 8:
+        e = _core.Engine(f)
+        k = e.check_chunk_size(1 << 40, 3)
+        k0 = k if k0 is None else k0
+        e.reset(k)
+        held.append(e)
+    last = _core.Engine(f)
+    k = last.check_chunk_size(1 << 40, 3)
+    assert 0 < k < k0, (k0, k, len(held))
+    last.reset(k)
+    lits, off = _flat(_sets(f.info.num_vars, 300, 3))
+    for x, y in zip(held[0].check_sets(lits, off, chunk=100, assignments=True),
+                    last.check_sets(lits, off, chunk=100, assignments=True)):
+        assert np.array_equal(x, y)
+
+
 @pytest.mark.engine
 def test_trim_then_recache_is_refused_cleanly():
     """recache_flush caches row 0; a trimmed engine has none, so it refuses before touching a

@@ -922,8 +922,12 @@ int32_t engine_batch(gpap_engine *e, int64_t extra_row_bytes, int32_t cap,
     switch (m.source) {
         case GpuMemory::DEVICE: r.memory = mem_budget(m.free + own, kMemFraction); break;
         case GpuMemory::GRANT: r.grant = m.free + own; break;
-        default:                /* a total stands in for free memory, unless a limit does */
-            if (r.limit <= 0) r.memory = mem_budget(m.free, kMemFraction);
+        default:
+            /* A total stands in for free memory, unless a limit does: less what GPAP holds there
+             * besides the rows this call reuses, which CUDA's measured free memory already
+             * leaves out. Two engines then never both plan on the whole device. */
+            if (r.limit <= 0)
+                r.memory = mem_budget(std::max<int64_t>(m.free - r.held_other, 0), kMemFraction);
             break;
     }
     const Sizing s = size_rows(r);
