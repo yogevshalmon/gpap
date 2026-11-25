@@ -293,6 +293,30 @@ def test_set_k_pins_the_batch():
     assert s.k == auto
 
 
+def test_the_sampler_sizes_its_batch_at_every_run(monkeypatch):
+    """The batch is sized at every run, from the memory the device has then, not once at
+    creation: a default budget cut after creation (GPAP_VRAM_BUDGET_MIB) gives the next run a
+    smaller, memory-bound batch, the budget restored gives the cap back, and a pinned batch is
+    kept through both. Before, every run reset to the batch sized at creation, from a reading of
+    free memory that could be minutes old."""
+    monkeypatch.delenv("GPAP_VRAM_BUDGET_MIB", raising=False)
+    rng = random.Random(43)
+    clauses = random_cnf(rng, 24, 36, kmin=3)
+    e = _core.Engine(_core.Formula.from_clauses(24, clauses))
+    s = _core.Sampler(e, seed=5, k_cap=100_000)
+    assert s.k == 100_000, "fixture: the cap binds at creation"
+    monkeypatch.setenv("GPAP_VRAM_BUDGET_MIB", "4")
+    st = s.run(10**9, [B8], max_chunks=1)
+    assert s.k < 100_000 and st.attempts == s.k and e.batch_bound == "memory"
+    monkeypatch.delenv("GPAP_VRAM_BUDGET_MIB")
+    s.run(10**9, [B8], max_chunks=1)
+    assert s.k == 100_000
+    s.set_k(5000)
+    monkeypatch.setenv("GPAP_VRAM_BUDGET_MIB", "1")
+    st = s.run(10**9, [B8], max_chunks=1)
+    assert s.k == 5000 and st.attempts == 5000
+
+
 def test_a_guard_reports_its_own_failure_not_the_previous_one():
     """An argument error reports its own message, not the previous call's.
 

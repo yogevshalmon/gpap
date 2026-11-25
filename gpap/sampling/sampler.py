@@ -111,7 +111,8 @@ class GPUSampler:
         rather than merely intended, above all when rows are reconstructed to host RAM. Pinning
         above the calibrated value overrides the memory model; on CUDA an allocation that would
         leave less than the memory reserve free still raises MemoryError, and on OpenCL a
-        platform that spills to host RAM degrades silently (docs/BENCHMARKING.md §2)."""
+        platform that spills to host RAM degrades silently (docs/BENCHMARKING.md §2). A pin
+        holds across runs; without one, every run sizes the batch again."""
         self.K = max(1, int(n))
         return self.K
 

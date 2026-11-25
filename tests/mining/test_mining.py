@@ -683,10 +683,11 @@ def test_the_mined_report_carries_both_factors_of_the_score(monkeypatch):
     """`gain` alone cannot tell a batch that did not move from a completion rate that did not, or
     a cap-bound K from a saturated rate: the report carries K and the best completion rate on
     both sides of the decision, and they multiply to the gain. A mined unit is always kept, so
-    the timed run is the sampler the `after` factors describe."""
+    the timed run is the sampler the `after` factors describe; it sizes its batch again from the
+    memory free then, so its K is the score's to within the few rows free memory moves."""
     info = _gate_run(monkeypatch, learned=[[1]])
     mi = info["mined"]
-    assert mi["kept"] and mi["k_after"] == info["engine"]["K"]
+    assert mi["kept"] and mi["k_after"] == pytest.approx(info["engine"]["K"], rel=0.01)
     assert mi["gain"] == pytest.approx(mi["k_after"] * mi["success_after"]
                                        / (mi["k_before"] * mi["success_before"]))
 

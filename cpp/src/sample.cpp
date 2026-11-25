@@ -84,9 +84,10 @@ struct gpap_sampler {
     gpap_sampler_options opt{};          /* the current run's knobs */
     int32_t k_cap = 0;
 
-    int32_t K_auto = 0;                  /* calibrated at create; K is effective (set_k wins) */
+    int32_t K_auto = 0;                  /* sized at create and at every run; K is effective */
     gpap_bound bound_auto = GPAP_BOUND_NONE;   /* what set K_auto, reported again when set_k unpins */
     int32_t K = 0;
+    int pinned = 0;                      /* set_k holds K: no run re-sizes it */
     int we_pinned_mode = 0;              /* WE resolved the engine's AUTO, not the caller */
     gpap_mode pinned_mode = GPAP_MODE_AUTO;  /* ...and WHICH kernel, so a later caller pin shows */
 
@@ -206,7 +207,8 @@ extern "C" gpap_status gpap_sampler_set_k(gpap_sampler *s, int32_t k) {
     if (!s) { set_error("gpap_sampler_set_k: sampler is NULL"); return GPAP_ERR_ARG; }
     s->K = k > 0 ? k : s->K_auto;
     /* A pin of the calibrated batch is no pin: pinned_batch restores K by value. */
-    s->e->bound = s->K != s->K_auto ? GPAP_BOUND_PIN : s->bound_auto;
+    s->pinned = s->K != s->K_auto;
+    s->e->bound = s->pinned ? GPAP_BOUND_PIN : s->bound_auto;
     return pin_mode(s);
 }
 
@@ -323,6 +325,19 @@ extern "C" gpap_status gpap_sampler_run(gpap_sampler *s, int64_t n_target,
         gpap_sample_stats &st = s->stats;
         st.best_config = st.dominant_config = 0;
         st.stop = GPAP_SAMPLE_STOP_TARGET;
+
+        /* The batch, sized again from the memory the device has now: the one sized at create
+         * read free memory then, and the reserve holds only if each run reads it afresh. A pin
+         * stays. */
+        if (!s->pinned) {
+            const int32_t k = gpap::engine_batch(s->e, 0, s->k_cap);
+            if (k <= 0) return s->e->sizing_status;            /* engine_batch said why */
+            s->bound_auto = s->e->bound;
+            if (k != s->K_auto) {
+                s->K_auto = s->K = k;
+                GPAP_TRY(pin_mode(s));
+            }
+        }
 
         if (gpap_engine_flush_conflict(s->e)) {
             /* The construction units flush conflicted: provably no models, reported as UNSAT. */
