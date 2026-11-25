@@ -319,14 +319,17 @@ def test_the_sampler_sizes_its_batch_at_every_run(monkeypatch):
 
 def test_unsat_at_flush_needs_no_rows_at_run_time(monkeypatch):
     """A formula whose construction units conflict is UNSAT at every run, whatever memory is
-    left: the run reports it before it sizes a batch. Before, the per-run sizing came first, and
-    a budget too small for one row turned the proof into a MemoryError."""
+    left: the run reports it before it sizes a batch, and a sampler is created for it even where
+    no row fits. Before, the per-run sizing came first, and a budget too small for one row turned
+    the proof into a MemoryError, at the run or at the sampler's creation."""
     monkeypatch.delenv("GPAP_VRAM_BUDGET_MIB", raising=False)
     rng = random.Random(5)
     clauses = [[1], [-1]] + random_cnf(rng, 400, 300_000, kmin=3, kmax=3)   # rows of 1.2 MB
     s = _sampler(clauses, 400)
     monkeypatch.setenv("GPAP_VRAM_BUDGET_MIB", "1")             # less than one row of these
     st = s.run(100, [B8])
+    assert _core.SAMPLE_STOP[st.stop] == "unsat"
+    st = _sampler(clauses, 400).run(100, [B8])                  # created under that budget too
     assert _core.SAMPLE_STOP[st.stop] == "unsat"
 
 
