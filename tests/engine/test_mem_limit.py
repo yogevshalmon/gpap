@@ -285,6 +285,23 @@ def test_under_a_limit_a_smaller_batch_holds_only_its_own_rows():
 
 
 @pytest.mark.engine
+def test_under_a_limit_a_chunk_loops_short_last_chunk_keeps_the_first_chunks_rows():
+    """The refit is per call, not per chunk: a chunk loop's short last chunk keeps the rows of
+    its first, which the call's sizing counted, rather than give them back for the next call to
+    take again. Under a limit, a check of 150 sets in chunks of 100 ends holding what a check of
+    one chunk of 100 holds, not a last chunk of 50."""
+    f = _formula()
+    lits, off = _flat(_sets(f.info.num_vars, 150, 3))
+    _core.set_mem_limit(_settled_held() + (64 << 20), 0)
+    one = _core.Engine(f)
+    one.check_sets(lits[:off[100]], off[:101], chunk=100, assignments=True)
+    loop = _core.Engine(f)
+    loop.check_sets(lits, off, chunk=100, assignments=True)
+    assert loop.K == 50, "precondition: the last chunk was short"
+    assert loop.mem_held_rows == one.mem_held_rows
+
+
+@pytest.mark.engine
 def test_a_lowered_limit_applies_at_the_next_sizing():
     """A limit set after an engine sized itself bounds that engine's next batch; nothing is
     freed to meet it, and it holds what it held."""
