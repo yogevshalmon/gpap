@@ -16,6 +16,7 @@ again before relying on it, or before calling the direction closed.
 
 | topic | file |
 |---|---|
+| what the default batch takes of a GPU (2026-11-25) | [MEMORY_FINDINGS.md](MEMORY_FINDINGS.md) |
 | the job queue: many sets on few rows (2026-11-20) | [PROBE_QUEUE_FINDINGS.md](PROBE_QUEUE_FINDINGS.md) |
 | the OpenCL backend and the GPU socket (2026-11-13) | [OPENCL_FINDINGS.md](OPENCL_FINDINGS.md) |
 | binary clauses as edges (2026-08-27) | [BINARY_OCC_FINDINGS.md](BINARY_OCC_FINDINGS.md) |
@@ -41,6 +42,12 @@ again before relying on it, or before calling the direction closed.
 
 ## Engine & memory model
 
+- **More rows than the default batch buy no rate (2026-11-25).** 1.23 times the default batch,
+  what fits in free memory less 1 GiB, ran at 0.92–1.10 of its rate on a T4 and an A100, and the
+  rate plateaus by about 32 times the resident warps. The driver takes a few MiB beyond GPAP's
+  count, and a card that fails loudly runs with a few hundred MB free. The default is being
+  changed to a cap per card and all free memory less a reserve (issue 59).
+  [MEMORY](MEMORY_FINDINGS.md) §2–§5
 - **Probe sweeps and flags-only checks run on a queue (2026-11-20; host side 2026-11-24).** A
   row takes set after set and restores what it touched, so no row waits for a launch's deepest
   set: 2.5 / 2.2 / 1.8 times the chunked sweep at widths 1 / 2 / 3 on an L4 and 3.7 / 3.1 / 2.8
