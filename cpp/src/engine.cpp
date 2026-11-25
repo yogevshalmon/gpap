@@ -865,14 +865,23 @@ gpap_status engine_require_trajectory(gpap_engine *e) {
  * allocate once it is sized. Keep in step with what readout.cpp, the sampler and the plugs grow
  * after sizing: tests/engine/test_mem_limit.py runs every entry point under a limit just above
  * one row, and under a small default budget, and fails on a byte this misses. */
-static void exact_terms(const gpap_engine *e, int64_t *per_row, int64_t *fixed) {
-    *per_row = 4ll * GPAP_SLOTS        /* each slot's selected-row list (Selection::rows) */
-               + 1                     /* soundness flags (gpap_check_sound, staging_b) */
-               + 4;                    /* an OpenCL plug's copy of a row list from an offset */
-    *fixed = 32ll * 2 * e->num_vars    /* the smallest readout slice, 32 rows of 2N (staging_b) */
-             + 8ll * e->num_vars       /* column lists and the trajectory order (staging_a) */
-             + 2ll * 4 * e->nw         /* the sampler's two pair masks */
-             + 4096;                   /* an OpenCL plug's parameter blocks */
+struct LaterBytes {
+    int64_t list_row = 4;              /* each slot's selected-row list (Selection::rows) */
+    int64_t flags_row = 1;             /* soundness flags (gpap_check_sound, staging_b) */
+    int64_t view_row = 4;              /* an OpenCL plug's copy of a row list from an offset */
+    int64_t slice = 0;                 /* the smallest readout slice, 32 rows of 2N (staging_b) */
+    int64_t cols = 0;                  /* column lists and the trajectory order (staging_a) */
+    int64_t masks = 0;                 /* the sampler's two pair masks */
+    int64_t params = 4096;             /* an OpenCL plug's parameter blocks */
+    int64_t per_row() const { return list_row * GPAP_SLOTS + flags_row + view_row; }
+    int64_t once() const { return slice + cols + masks + params; }
+};
+static LaterBytes exact_terms(const gpap_engine *e) {
+    LaterBytes t;
+    t.slice = 32ll * 2 * e->num_vars;
+    t.cols = 8ll * e->num_vars;
+    t.masks = 2ll * 4 * e->nw;
+    return t;
 }
 
 /* Why no row fits, in the terms of the bound that left none. */
@@ -943,11 +952,10 @@ int32_t engine_batch(gpap_engine *e, int64_t extra_row_bytes, int32_t cap,
     r.total = m.total;
     r.limit = acct.limit;
     r.held_other = (e->mem.account ? acct.held : e->mem.held()) - own;
-    int64_t later_per_row = 0, later_fixed = 0;
-    exact_terms(e, &later_per_row, &later_fixed);
+    const LaterBytes later = exact_terms(e);
     r.per_row = gpap_row_bytes(e->num_long, e->num_vars, e->trail_cap) + extra_row_bytes +
-                later_per_row;
-    r.fixed = reserve_bytes + later_fixed;
+                later.per_row();
+    r.fixed = reserve_bytes + later.once();
     r.cap = cap == 0 ? default_k_cap(e->driver, e->device_ordinal) : cap;
     r.max_buffer = m.max_buffer;
     /* Each per-row buffer holds the batch's rows, so the widest one meets the device's
@@ -978,7 +986,7 @@ int32_t engine_batch(gpap_engine *e, int64_t extra_row_bytes, int32_t cap,
      * a time, half as slow again on a large formula (docs/findings/MEMORY_FINDINGS.md §10). */
     if (r.memory >= 0) {
         const int64_t slice = std::min<int64_t>(r.memory / 16, (int64_t)kReadoutSliceBytes);
-        r.memory_fixed = std::max<int64_t>(slice - 64ll * e->num_vars, 0);
+        r.memory_fixed = std::max<int64_t>(slice - later.slice, 0);
     }
     Sizing s = size_rows(r);
     /* Under the default budget nothing is refit, so the engine keeps every buffer it holds,
@@ -995,18 +1003,31 @@ int32_t engine_batch(gpap_engine *e, int64_t extra_row_bytes, int32_t cap,
      * the formula and the card, and the share's margin covers what a call keeps. */
     if (keeps && m.source == GpuMemory::DEVICE && s.rows > 0 && e->mem.rows > 0) {
         const int64_t state_row = gpap_row_bytes(e->num_long, e->num_vars, e->trail_cap);
-        const int64_t beside_row = std::max<int64_t>(r.per_row - state_row, 0);
-        const int64_t once = r.fixed + r.memory_fixed;
         const int64_t room = r.memory - own - staging;
-        const int64_t margin = std::min(e->mem.rows / 16, std::max<int64_t>(acct.reserve, 0) / 4);
-        auto need = [&](int64_t k) {
-            return std::max<int64_t>(k * state_row - own, 0) +
-                   std::max<int64_t>(k * beside_row + once - staging, 0);
+        /* No margin where GPAP_VRAM_BUDGET_MIB set the budget: the cap is a ceiling. */
+        const int64_t vram_cap = mem_budget_cap();
+        const int64_t margin = vram_cap > 0 && r.memory >= vram_cap
+                                   ? 0
+                                   : std::min(e->mem.rows / 16,
+                                              std::max<int64_t>(acct.reserve, 0) / 4);
+        /* Each held buffer counts back only for its own use (exact_terms' parts): staging_a for
+         * the caller's per-row matrix and the column lists, staging_b for the readout slice and
+         * the soundness flags, each slot's list for its rows. The rest is counted in full. */
+        const int64_t rest_once = r.fixed - later.slice - later.cols;
+        auto beside = [&](int64_t k) {
+            int64_t n = std::max<int64_t>(k * extra_row_bytes + later.cols -
+                                              (int64_t)e->staging_a.bytes, 0) +
+                        std::max<int64_t>(later.slice + r.memory_fixed + k * later.flags_row -
+                                              (int64_t)e->staging_b.bytes, 0) +
+                        k * later.view_row + rest_once;
+            for (const Selection &sel : e->slots)
+                n += std::max<int64_t>(k * later.list_row - (int64_t)sel.rows.bytes, 0);
+            return n;
         };
+        auto need = [&](int64_t k) { return std::max<int64_t>(k * state_row - own, 0) + beside(k); };
         /* After a refit the rows the engine keeps come back, and only the staging stays. */
-        auto need_refit = [&](int64_t k) {
-            return k * state_row + std::max<int64_t>(k * beside_row + once - staging, 0);
-        };
+        auto need_refit = [&](int64_t k) { return k * state_row + beside(k); };
+        const int64_t once = r.fixed + r.memory_fixed;
         if (need(s.rows) > room + margin) {
             const bool refit = need(1) > room;
             if (refit) e->refit_next = true;
@@ -1021,7 +1042,7 @@ int32_t engine_batch(gpap_engine *e, int64_t extra_row_bytes, int32_t cap,
                 s.rows = lo;                                 /* 0: not even one row fits */
                 s.bound = GPAP_BOUND_MEMORY;
                 if (s.rows == 0) {
-                    s.left = room + give;
+                    s.left = std::max<int64_t>(room + give - once, 0);
                     e->refit_next = false;                   /* the call fails: no reset */
                 }
             }
