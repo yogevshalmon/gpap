@@ -6,7 +6,8 @@
 > **Measured:** 2026-08-03 on three cards — RTX 4080 Laptop (12 GB, 58 SM, the reference box),
 > Colab L4 (24 GB, 58 SM, sm_89), Colab A100-SXM4 (40 GB, 108 SM, sm_80).
 > **Rule lives in:** `gpap/sampling/pipeline.py` (`SINGLE_PORTFOLIOS`), `cpp/src/calibrate.cpp`
-> (the occupancy plateau), `eval/artifact/compare_campaign.py`.
+> (the occupancy plateau), `eval/artifact/compare_campaign.py`. *2026-11-25: the cap is now 64
+> rows per resident warp, measured on three cards in [MEMORY_FINDINGS](MEMORY_FINDINGS.md) §8.*
 > **Record only:** §4, b12's unexplained 2× success cliff on the A100 — open.
 
 An A100 is worth ~1.8×, an L4 ~0.85×. Two measurement traps (§3) each gave a plausible wrong
@@ -36,13 +37,13 @@ a lower clock and ~300 GB/s vs ~432 GB/s, and measures slower than the laptop. A
 
 ## 2. Where the speedup comes from
 
-Not from the batch: on one A100 and one formula, the batch 262,144 → 1,048,576 (4×) with
-everything else fixed bought +2.8%, at 8.8 GB of 41 GB used; 262,144 rows over ~6,912 resident
-warps is already ~38× oversubscribed. Not from VRAM: `--k-cap` is `min(analytic, cap)` and the
-analytic bound drops below the cap once M ≳ 20k (M=100k: 9,696 on the 4080, 37,440 on the A100),
-so on every real circuit unroll the cap never binds and the analytic bound already scales with
-free VRAM; where the cap does bind the GPU is saturated. The cap is hygiene, not a throughput
-lever.
+Not from the batch: on one A100 and one formula, the batch 262,144 → 1,048,576 (4×) with everything
+else fixed bought +2.8%, at 8.8 GB of 41 GB used; 262,144 rows over ~6,912 resident warps is
+already ~38× oversubscribed. Not from VRAM: `--k-cap` is `min(analytic, cap)` and the analytic
+bound drops below the cap once M ≳ 20k (M=100k: 9,696 on the 4080, 37,440 on the A100), so on every
+real circuit unroll the cap never binds and the analytic bound already scales with free VRAM; where
+the cap does bind the GPU is saturated. The cap is hygiene, not a throughput lever. *2026-11-25:
+the fixed cap is replaced by 64 rows per resident warp; [MEMORY_FINDINGS](MEMORY_FINDINGS.md) §8.*
 
 From the hardware, flatly: the work rate (assigns/s) is flat in M — sk_ 1.58–2.02, b03 1.90,
 s1196 1.71–2.31, b12 1.91–2.05 — and lands on the A100's 1.86× SM-count ratio rather than its
