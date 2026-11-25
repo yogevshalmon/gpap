@@ -282,7 +282,7 @@ def _build_argparser():
                          "success barely drops; B>=16 over-constrains and collapses success)")
     ap.add_argument("--k-cap", type=_k_cap_arg, default="auto",
                     help="ceiling on the per-chunk batch K. 'auto' (default) is the library's "
-                         "cap, 64 rows per resident warp, so it differs per GPU (it binds only "
+                         "per-card cap (rows per resident warp), so it differs per GPU (it binds only "
                          "for small M; above that the memory bound is lower). Pass an int to "
                          "FIX it, e.g. to compare across cards or reproduce a recorded sweep")
     ap.add_argument("--no-simplify", dest="simplify", action="store_false", default=True)

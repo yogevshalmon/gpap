@@ -872,8 +872,8 @@ def main(argv=None):
     _add_mem_limit(s)
     s.add_argument("--k-cap", type=_k_cap_arg, default="auto",
                    help="ceiling on the per-chunk batch K. 'auto' (default) is the library's "
-                        "cap, 64 rows per resident warp, so it differs per GPU; pass an int to "
-                        "fix it explicitly")
+                        "per-card cap (rows per resident warp), so it differs per GPU; pass an "
+                        "int to fix it explicitly")
     s.add_argument("--portfolio", choices=["circuit", "default", "b8", "b1", "s1"],
                    default="circuit",
                    help="single-config choices (b8/b1/s1) pin ONE config and disable the bandit — use them for any cross-GPU or before/after MEASUREMENT, since the bandit can otherwise pick differently per machine and confound the comparison")
@@ -986,8 +986,8 @@ def main(argv=None):
     _add_mem_limit(b)
     b.add_argument("--k-cap", type=_k_cap_arg, default="auto",
                    help="ceiling on the per-chunk batch K. 'auto' (default) is the library's "
-                        "cap, 64 rows per resident warp, so it differs per GPU; pass an int to "
-                        "fix it explicitly")
+                        "per-card cap (rows per resident warp), so it differs per GPU; pass an "
+                        "int to fix it explicitly")
     b.add_argument("--cmsgen", default=None,
                    help="path to a cmsgen binary (enables the comparison). Prefer the one built "
                         "by scripts/build_cmsgen.sh — its --nowrite gives the emission-free, "
