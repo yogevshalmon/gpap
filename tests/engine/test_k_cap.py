@@ -153,7 +153,7 @@ def test_the_vram_cap_actually_moves_the_sampler_batch(monkeypatch):
 
     With no batch cap, the budget is set low enough that the memory bound decides K, and two
     budgets are compared."""
-    from gpap.engine.calibrate import compute_k_safe, row_bytes
+    from gpap.engine.calibrate import row_bytes
     smp = _tiny_sampler(None)                    # k_cap None: the memory bound decides
     wide, N, num_long = smp.K, smp.engine.num_vars, smp.engine.num_long
     # a budget admitting an eighth of what the uncapped card does
@@ -161,7 +161,10 @@ def test_the_vram_cap_actually_moves_the_sampler_batch(monkeypatch):
     monkeypatch.setenv("GPAP_VRAM_BUDGET_MIB", str(mib))
     narrow = _tiny_sampler(None).K
     assert narrow < wide, f"the cap did not reach K ({narrow} vs {wide} at {mib} MiB)"
-    assert narrow == compute_k_safe(num_long, N, mib << 20, None), \
+    # What a call allocates after it is sized, which every bound counts (exact_terms in
+    # cpp/src/engine.cpp), restated: 17 bytes a row, and 72 N + 8 bitmap words + 4 KiB once.
+    later_fixed = 72 * N + 8 * ((2 * N + 31) // 32) + 4096
+    assert narrow == ((mib << 20) - later_fixed) // (row_bytes(num_long, N) + 17), \
         "K under a cap must be the memory model's own answer for exactly that budget"
 
 

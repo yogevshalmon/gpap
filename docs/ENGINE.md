@@ -247,11 +247,11 @@ K         = min( rows the memory bounds leave ,  cap )          cap = 262,144
 Each bound's bytes, less what the call allocates once (a queued call's launch buffers, for its
 own sets and its widest set), divided by the bytes of a row, gives its rows; the batch is the
 smallest, then the cap, then the device's one-buffer limit (OpenCL). `gpap_engine_batch_bound`
-(Python `batch_bound`) says which one set it. A limit and a grant are exact, so they also count
-what a call allocates after it is sized, which the memory bound's margins cover instead:
-selected-row lists, soundness flags, the smallest readout slice, pair masks (`exact_terms` in
-`cpp/src/engine.cpp`); and under one, a batch smaller than the engine's last gives the extra
-rows back, where without one they are kept for the next bigger batch. Where not even one row
+(Python `batch_bound`) says which one set it. Every bound also counts what a call allocates
+after it is sized: selected-row lists, soundness flags, the smallest readout slice, pair masks
+(`exact_terms` in `cpp/src/engine.cpp`); a readout slice then grows only into the room the bound
+leaves. Under a limit or a grant, a batch smaller than the engine's last gives the extra rows
+back; under the memory bound they are kept for the next bigger batch. Where not even one row
 fits, the call fails with `GPAP_ERR_MEMORY` (Python `MemoryError`) and says what a row needs: it
 never runs a batch of one row. A buffer the device cannot back fails at its allocation, on
 OpenCL too, where a runtime may back a buffer only at its first use: the plug writes it once

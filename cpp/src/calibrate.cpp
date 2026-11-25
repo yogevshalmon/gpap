@@ -104,6 +104,8 @@ extern "C" int64_t gpap_row_bytes(int32_t num_long, int32_t N, int32_t trail_cap
            + GPAP_SLOTS;                                /* one selection mask per slot      */
 }
 
+int64_t gpap::mem_budget_cap() { return env_budget_cap(); }
+
 /* The one budget rule: reserve, fraction, cap. gpap_mem_available applies it to the device named
  * by an ordinal; an engine applies it to the device it already holds. */
 int64_t gpap::mem_budget(int64_t free_bytes, double fraction) {

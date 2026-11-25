@@ -26,10 +26,10 @@ using gpap::engine_use_ctx;
 
 namespace {
 
-/* Rows one readout slice takes, for `per_row` bytes a row: the slice's bytes, or what a memory
- * limit or a host's grant leaves beside everything GPAP holds where that is less (staging_b's
- * own bytes count back: a grow frees it first). Never under 32, which keeps the row-pointer
- * offset 16-byte aligned; the exact bounds set that much aside when they size the batch
+/* Rows one readout slice takes, for `per_row` bytes a row: the slice's bytes, or what the bound
+ * in force leaves where that is less (a memory limit, a host's grant, the default budget;
+ * staging_b's own bytes count back: a grow frees it first). Never under 32, which keeps the
+ * row-pointer offset 16-byte aligned; every bound sets that much aside when it sizes the batch
  * (engine.cpp, exact_terms). */
 int32_t slice_rows(gpap_engine *e, int64_t per_row) {
     const int64_t bytes = std::min<int64_t>(

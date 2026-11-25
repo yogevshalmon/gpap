@@ -342,6 +342,31 @@ def test_no_row_fits_is_an_error_without_a_limit_too(monkeypatch):
 
 
 @pytest.mark.engine
+@pytest.mark.parametrize("call", ["assignments", "flags", "probe1", "probe2"])
+def test_without_a_limit_a_call_stays_inside_the_default_budget(monkeypatch, call):
+    """The default rule counts what a call allocates after it is sized, as a limit does: under
+    a default budget of 2 MiB (GPAP_VRAM_BUDGET_MIB caps it), a fresh engine's call takes no more
+    than that beside what GPAP held before: checking with assignments and sat counts, flags-only
+    checking, probe sweeps of width 1 and 2. Before, the default rule left a call's readout
+    slices (up to 256 MiB) and selection lists to its 20% margin, and the check with assignments
+    took 15% more than its budget."""
+    monkeypatch.setenv("GPAP_VRAM_BUDGET_MIB", "2")
+    f = _formula(nv=400, nc=1200, seed=9)
+    e = _core.Engine(f)
+    base = _settled_held()
+    _core.mem_reset_peak(0)
+    lits, off = _flat(_sets(f.info.num_vars, 3000, 3))
+    if call == "assignments":
+        e.check_sets(lits, off, chunk=0, assignments=True, sat_count=True)
+    elif call == "flags":
+        e.check_sets(lits, off, chunk=0)
+    else:
+        e.probe_combinations(None, int(call[-1]), max_tuples=20_000).conflicts()
+    assert e.batch_bound == "memory"
+    assert _core.mem_peak(0) - base <= 2 << 20
+
+
+@pytest.mark.engine
 @pytest.mark.parametrize("rows", [1, 3, 40, 1000])
 def test_every_entry_point_stays_under_a_tight_limit(rows):
     """Sizing covers what each call allocates afterwards: under a limit of the device plus a few

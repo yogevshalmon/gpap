@@ -846,11 +846,10 @@ gpap_status engine_require_trajectory(gpap_engine *e) {
     return GPAP_ERR_KERNEL;
 }
 
-/* What an exact bound (a limit, a host's grant) counts besides the rows and the caller's own
- * buffers: what a call may still allocate once it is sized, which the MEMORY bound's margins
- * cover instead (so its batch is unchanged). Keep in step with what readout.cpp, the sampler and
- * the plugs grow after sizing: tests/engine/test_mem_limit.py runs every entry point under a
- * limit just above one row and fails on a byte this misses. */
+/* What every bound counts besides the rows and the caller's own buffers: what a call may still
+ * allocate once it is sized. Keep in step with what readout.cpp, the sampler and the plugs grow
+ * after sizing: tests/engine/test_mem_limit.py runs every entry point under a limit just above
+ * one row, and under a small default budget, and fails on a byte this misses. */
 static void exact_terms(const gpap_engine *e, int64_t *per_row, int64_t *fixed) {
     *per_row = 4ll * GPAP_SLOTS        /* each slot's selected-row list (Selection::rows) */
                + 1                     /* soundness flags (gpap_check_sound, staging_b) */
@@ -872,7 +871,7 @@ static void no_row_message(const gpap_engine *e, const SizeRequest &r, const Siz
                   fmt_bytes(r.max_buffer, b));
         return;
     }
-    const int64_t fixed = s.bound == GPAP_BOUND_MEMORY ? r.fixed : r.fixed + r.exact_fixed;
+    const int64_t fixed = r.fixed;
     /* The default budget's reserve and fraction are mem_budget's (calibrate.cpp), not repeated
      * here: say what it is a share of. */
     const char *memory = e->mem_source == GpuMemory::DEVICE
@@ -917,9 +916,11 @@ int32_t engine_batch(gpap_engine *e, int64_t extra_row_bytes, int32_t cap,
     r.total = m.total;
     r.limit = acct.limit;
     r.held_other = (e->mem.account ? acct.held : e->mem.held()) - own;
-    r.per_row = gpap_row_bytes(e->num_long, e->num_vars, e->trail_cap) + extra_row_bytes;
-    r.fixed = reserve_bytes;
-    exact_terms(e, &r.exact_per_row, &r.exact_fixed);
+    int64_t later_per_row = 0, later_fixed = 0;
+    exact_terms(e, &later_per_row, &later_fixed);
+    r.per_row = gpap_row_bytes(e->num_long, e->num_vars, e->trail_cap) + extra_row_bytes +
+                later_per_row;
+    r.fixed = reserve_bytes + later_fixed;
     r.cap = cap == 0 ? gpap_default_k_cap(e->device_ordinal) : cap;
     r.max_buffer = m.max_buffer;
     /* Each per-row buffer holds the batch's rows, so the widest one meets the device's
@@ -952,13 +953,22 @@ int32_t engine_batch(gpap_engine *e, int64_t extra_row_bytes, int32_t cap,
 }
 
 int64_t engine_transient_room(gpap_engine *e, int64_t reuse) {
+    int64_t room = INT64_MAX;
     MemState acct;
     if (e->mem.account && mem_state(e->mem.account, &acct) == GPAP_OK && acct.limit > 0)
-        return std::max<int64_t>(acct.limit - acct.held + reuse, 0);
+        room = std::max<int64_t>(acct.limit - acct.held + reuse, 0);
     GpuMemory m;
-    if (e->mem_source == GpuMemory::GRANT && e->gpu->memory(&m) == GPAP_OK)
-        return std::max<int64_t>(m.free + reuse, 0);
-    return INT64_MAX;
+    if (e->gpu->memory(&m) != GPAP_OK) return room;
+    if (m.source == GpuMemory::GRANT) return std::min(room, std::max<int64_t>(m.free + reuse, 0));
+    /* On a measured device, the default budget of what is free now; an unmeasured total
+     * (OpenCL) has its share's margin instead. Under GPAP_VRAM_BUDGET_MIB, which caps what a
+     * call takes rather than what is free, also the cap less every row-kind buffer the engine
+     * holds: the call's rows and what it took since it was sized. */
+    if (m.source == GpuMemory::DEVICE)
+        room = std::min(room, std::max<int64_t>(mem_budget(m.free + reuse, kMemFraction), 0));
+    if (const int64_t cap = mem_budget_cap())
+        room = std::min(room, std::max<int64_t>(cap - e->mem.rows + reuse, 0));
+    return room;
 }
 
 /* Refuse a packed-derived readout after a CLEAN launch: it would answer from the restored

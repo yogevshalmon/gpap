@@ -21,11 +21,10 @@ def _rule(*requests):
     """size_rows on each request (a dict of SizeRequest's fields), as (rows, bound, left,
     per_row) tuples."""
     need_binary(DRIVER)
-    order = ("total", "memory", "grant", "limit", "held_other", "per_row", "fixed",
-             "exact_per_row", "exact_fixed", "cap", "max_buffer", "widest")
+    order = ("total", "memory", "grant", "limit", "held_other", "per_row", "fixed", "cap",
+             "max_buffer", "widest")
     base = {"total": 0, "memory": -1, "grant": -1, "limit": 0, "held_other": 0, "per_row": 1,
-            "fixed": 0, "exact_per_row": 0, "exact_fixed": 0, "cap": 0, "max_buffer": 0,
-            "widest": 1}
+            "fixed": 0, "cap": 0, "max_buffer": 0, "widest": 1}
     lines = [" ".join(str({**base, **r}[k]) for k in order) for r in requests]
     out = subprocess.run([str(DRIVER)], input="\n".join(lines) + "\n", capture_output=True,
                          text=True, check=True).stdout.split("\n")
@@ -72,10 +71,9 @@ def test_without_a_limit_the_batch_is_the_old_one_wherever_a_row_fits():
 
 def test_a_host_grant_is_used_as_it_is():
     """Issue 72: a 1 GiB share sized as a device left 219 MB to rows; as a grant it leaves the
-    whole GiB less what the call takes once, with the exact bound's own terms counted."""
-    (rows, bound, left, per_row), = _rule({"grant": 1 << 30, "per_row": 1 << 20,
-                                           "fixed": 1 << 22, "exact_per_row": 17,
-                                           "exact_fixed": 1 << 20})
+    whole GiB less what the call takes once."""
+    (rows, bound, left, per_row), = _rule({"grant": 1 << 30, "per_row": (1 << 20) + 17,
+                                           "fixed": (1 << 22) + (1 << 20)})
     assert bound == GRANT and per_row == (1 << 20) + 17
     assert left == (1 << 30) - (1 << 22) - (1 << 20)
     assert rows == left // per_row
@@ -91,8 +89,7 @@ def test_a_grant_too_small_for_a_row_fits_none():
 def test_a_limit_counts_what_gpap_holds_and_stops_at_the_device():
     """The LIMIT bound is the limit, at most the device, less what GPAP holds besides the rows
     the call reuses; a limit past the device is the device."""
-    common = {"held_other": 100, "per_row": 10, "fixed": 50, "exact_per_row": 0,
-              "exact_fixed": 0}
+    common = {"held_other": 100, "per_row": 10, "fixed": 50}
     (r1, b1, l1, _), (r2, b2, l2, _) = _rule({**common, "total": 0, "limit": 10_150},
                                              {**common, "total": 5_150, "limit": 10_150})
     assert (r1, b1, l1) == (1000, LIMIT, 10_000)

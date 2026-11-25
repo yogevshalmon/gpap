@@ -91,6 +91,8 @@ inline GpuArg buf(const DevBuf &b, size_t offset = 0) { return buf(b.ptr, offset
 /* The memory budget one batch may take out of `free_bytes` — the reserve, the fraction and the
  * $GPAP_VRAM_BUDGET_MIB cap of gpap_mem_available, for a caller that already holds a device. */
 int64_t mem_budget(int64_t free_bytes, double fraction);
+/* GPAP_VRAM_BUDGET_MIB in bytes, the ceiling mem_budget applies; 0 = none. */
+int64_t mem_budget_cap();
 /* Rows of `per_row` bytes that fit `bytes`, at most `cap` (<= 0: no cap), at least one. */
 int32_t rows_fitting(int64_t bytes, int64_t per_row, int32_t cap);
 /* gpap_dispatch_wave's rule for one GPU library. An engine passes the library it was created
