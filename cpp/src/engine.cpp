@@ -993,18 +993,23 @@ int32_t engine_batch(gpap_engine *e, int64_t extra_row_bytes, int32_t cap,
             return std::max<int64_t>(k * state_row - own, 0) +
                    std::max<int64_t>(k * beside_row + once - staging, 0);
         };
+        /* After a refit the rows the engine keeps come back, and only the staging stays. */
+        auto need_refit = [&](int64_t k) {
+            return k * state_row + std::max<int64_t>(k * beside_row + once - staging, 0);
+        };
         if (need(s.rows) > room + margin) {
-            if (need(1) > room) {
-                if (own > state_row) e->refit_next = true;
-            } else {
-                int64_t lo = 1, hi = s.rows;                 /* need(lo) fits, need(hi) does not */
-                while (hi - lo > 1) {
-                    const int64_t mid = lo + (hi - lo) / 2;
-                    (need(mid) <= room ? lo : hi) = mid;
-                }
-                s.rows = lo;
-                s.bound = GPAP_BOUND_MEMORY;
+            const bool refit = need(1) > room;
+            if (refit) e->refit_next = true;
+            const int64_t give = refit ? own : 0;        /* what the refit frees for the call */
+            auto fits = [&](int64_t k) { return (refit ? need_refit(k) : need(k)) <= room + give; };
+            int64_t lo = 0, hi = s.rows;                     /* fits(lo), and not fits(hi) */
+            while (hi - lo > 1) {
+                const int64_t mid = lo + (hi - lo) / 2;
+                (fits(mid) ? lo : hi) = mid;
             }
+            s.rows = fits(1) ? lo : 0;                       /* 0: not even one row fits */
+            s.bound = GPAP_BOUND_MEMORY;
+            if (s.rows == 0) s.left = room + give;
         }
     }
     e->bound = s.bound;
@@ -1019,8 +1024,8 @@ int32_t engine_batch(gpap_engine *e, int64_t extra_row_bytes, int32_t cap,
 int64_t engine_transient_room(gpap_engine *e, int64_t reuse) {
     int64_t room = INT64_MAX;
     MemState acct;
-    if (e->mem.account && mem_state(e->mem.account, &acct) == GPAP_OK && acct.limit > 0)
-        room = std::max<int64_t>(acct.limit - acct.held + reuse, 0);
+    const bool known = e->mem.account && mem_state(e->mem.account, &acct) == GPAP_OK;
+    if (known && acct.limit > 0) room = std::max<int64_t>(acct.limit - acct.held + reuse, 0);
     GpuMemory m;
     if (e->gpu->memory(&m) != GPAP_OK) return room;
     if (m.source == GpuMemory::GRANT) return std::min(room, std::max<int64_t>(m.free + reuse, 0));
@@ -1028,8 +1033,10 @@ int64_t engine_transient_room(gpap_engine *e, int64_t reuse) {
      * (OpenCL) has its share's margin instead. Under GPAP_VRAM_BUDGET_MIB, which caps what a
      * call takes rather than what is free, also the cap less every row-kind buffer the engine
      * holds: the call's rows and what it took since it was sized. */
-    if (m.source == GpuMemory::DEVICE)
-        room = std::min(room, std::max<int64_t>(mem_budget(m.free + reuse, acct.reserve, 1), 0));
+    if (m.source == GpuMemory::DEVICE) {        /* the reserve unknown: the smallest slice */
+        const int64_t left = known ? mem_budget(m.free + reuse, acct.reserve, 1) : 0;
+        room = std::min(room, std::max<int64_t>(left, 0));
+    }
     if (const int64_t cap = mem_budget_cap())
         room = std::min(room, std::max<int64_t>(cap - e->mem.rows + reuse, 0));
     return room;
