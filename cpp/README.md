@@ -102,11 +102,13 @@ batches under it ([docs/ENGINE.md](../docs/ENGINE.md) §7):
 
 ```cpp
 gpap::set_mem_limit("6G");                           // or "75%", "none"; or GPAP_MEM_LIMIT=6G
-gpap::Memory m = gpap::memory();                     // m.limit, m.held, m.peak on device 0
+gpap::set_mem_reserve("2G");                         // left free; default 1G; or GPAP_MEM_RESERVE
+gpap::Memory m = gpap::memory();                     // m.limit, m.reserve, m.held, m.peak
 ```
 
 A batch that fits no row under it throws `gpap::Error` (`GPAP_ERR_MEMORY`), saying what a row
-needs. The C ABI is `gpap_set_mem_limit`, `gpap_mem_limit`, `gpap_mem_held`, `gpap_mem_peak`;
+needs. The C ABI is `gpap_set_mem_limit`, `gpap_mem_limit`, `gpap_set_mem_reserve`,
+`gpap_mem_reserve`, `gpap_mem_held`, `gpap_mem_peak`;
 per engine, `gpap_engine_mem_held` by kind, `gpap_engine_batch_bound` and `gpap_engine_trim`.
 
 ## Tier 2 — driving the engine yourself

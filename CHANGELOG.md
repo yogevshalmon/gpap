@@ -72,6 +72,29 @@ change does not.
   mining sizes from the formula and the card rather than from what the warmup rows leave
   (issue 76).
 - C++: `gpap::reset_peak` and `gpap::parse_mem_limit`, the C ABI's last two memory functions.
+- Changed (issue 59): without a limit, the batch is sized from all free memory less a memory
+  reserve, 1 GiB by default, instead of 0.80 · (free − 800 MB); every bound now counts what a
+  call allocates after it is sized, so no fraction is held back, and a readout slice grows only
+  into the room the budget leaves. Memory-bound formulas get about a quarter more rows
+  ([docs/findings/MEMORY_FINDINGS.md](docs/findings/MEMORY_FINDINGS.md) §9). Set the reserve
+  with `--mem-reserve` (`sample`, `mine`, `bench`, `info`), `GPAP_MEM_RESERVE`,
+  `gpap.set_mem_reserve`, `gpap::set_mem_reserve` or `gpap_set_mem_reserve`, in the limit's
+  grammar; `gpap_mem_reserve`, `gpap.engine.memory()["reserve"]` and a sampling run's
+  `mem_reserve` report it. Under a limit on CUDA the limit is no longer cut to 80% of free
+  memory. OpenCL keeps its share of the total, less the reserve.
+- Changed: on CUDA an allocation that would leave less than the reserve free fails with
+  `GPAP_ERR_MEMORY`, so a pinned batch past the card fails instead of paging to host memory,
+  which WSL2 did silently.
+- Changed: the batch cap is 64 rows per warp the card keeps resident, instead of 262,144 on
+  every card (82k on a T4, 178k on a 12 GB laptop card, 442k on an A100; §8 of the same
+  findings); 262,144 where the warps are unknown (OpenCL). `--k-cap auto` now differs per card.
+- Changed: the sampler sizes its batch at the start of every run, from the memory free then,
+  instead of once at creation; a pinned batch stays.
+- Changed: `gpap_mem_available`'s `fraction` scales the engine's own budget, and every face
+  defaults to 1 (was 0.80): `gpap::mem_available`, `_core.mem_available`,
+  `calibrate.gpu_mem_available`. The rival harness takes the same budget.
+- Additive ABI, same soname: `gpap_set_mem_reserve`, `gpap_mem_reserve`; `gpap::Memory` gains
+  `reserve`.
 
 ### Sampling
 - Fixed: a run's `phases` sum to `wall_total_s` in a fresh process too. The wire map is billed
