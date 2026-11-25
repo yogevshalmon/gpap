@@ -355,7 +355,8 @@ struct gpap_engine {
     gpap_bound bound = GPAP_BOUND_NONE;         /* what set the last batch (engine_batch) */
     /* A sizing found no room beside the row buffers a smaller batch would keep, so the next
      * reset gives them back (ensure_state's `fit`) even under the default budget. Set by
-     * engine_batch, cleared only by the reset that refits. */
+     * engine_batch and cleared by the reset that refits; a queue that declines puts it back as
+     * its call's chunk sizing left it. */
     bool refit_next = false;
     /* Why the last engine_batch returned 0: GPAP_ERR_MEMORY when no row fits, or the status of
      * the memory query or the limit that failed. A caller returns it, so a driver error or a

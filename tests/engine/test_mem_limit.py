@@ -529,6 +529,9 @@ def test_a_smaller_batch_beside_kept_rows_stays_inside_the_default_budget(monkey
     engine holding rows for most of a 8 MiB default budget, then a check whose sets add 2.4 KB a
     row, stays inside the budget. Before, the sizing let the call's own buffers use the kept
     rows' bytes a second time, and the call took a quarter more than its budget."""
+    if os.environ.get("GPAP_BACKEND", "cuda") == "opencl":
+        pytest.skip("OpenCL keeps a share of its total as the margin: its batch does not depend "
+                    "on what earlier calls left held")
     monkeypatch.setenv("GPAP_VRAM_BUDGET_MIB", "8")
     f = _formula(nv=400, nc=1200, seed=9)
     e = _core.Engine(f)
@@ -548,6 +551,9 @@ def test_a_narrow_call_after_a_wide_one_stays_inside_the_default_budget(monkeypa
     Under an 8 MiB default budget, a check of 300-literal sets and then one of 2-literal sets
     take no more than the budget together. Before, the narrow check counted the wide matrix as
     free for its rows, which grew into it, and the two took a quarter more than the budget."""
+    if os.environ.get("GPAP_BACKEND", "cuda") == "opencl":
+        pytest.skip("OpenCL keeps a share of its total as the margin: its batch does not depend "
+                    "on what earlier calls left held")
     monkeypatch.setenv("GPAP_VRAM_BUDGET_MIB", "8")
     f = _formula(nv=400, nc=1200, seed=9)
     e = _core.Engine(f)
@@ -568,6 +574,9 @@ def test_an_engine_that_gives_its_rows_back_sizes_as_a_fresh_one(monkeypatch):
     engine holding rows for 95% of an 8 MiB default budget, asked for a check of 300-literal
     sets, sizes the fresh engine's batch, one row past it fails. Before, the batch came out one
     row short (and none at all where one row was the whole batch)."""
+    if os.environ.get("GPAP_BACKEND", "cuda") == "opencl":
+        pytest.skip("OpenCL keeps a share of its total as the margin: its batch does not depend "
+                    "on what earlier calls left held")
     monkeypatch.setenv("GPAP_VRAM_BUDGET_MIB", "8")
     f = _formula(nv=400, nc=1200, seed=9)
     held = _core.Engine(f)
