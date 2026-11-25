@@ -428,8 +428,9 @@ typedef struct {
 } gpap_sample_stats;
 
 /* Create a sampler over `e` (which must outlive it; nothing else drives it meanwhile). K = the
- * rows that fit the engine's memory budget, at most k_cap, unless pinned by set_k; `k_cap` 0 =
- * gpap_default_k_cap, > 0 verbatim, < 0 uncapped. `seed` seeds the RNG once; runs continue it. */
+ * rows that fit the engine's memory budget, at most k_cap, unless pinned by set_k, sized here
+ * and again at the start of every run; `k_cap` 0 = gpap_default_k_cap, > 0 verbatim, < 0
+ * uncapped. `seed` seeds the RNG once; runs continue it. */
 gpap_status gpap_sampler_create(gpap_engine *e, int64_t seed, int32_t k_cap,
                                 gpap_sampler **out);
 /* Frees the sampler and NOTHING ELSE — it never touches the borrowed engine, so it is safe from
@@ -437,7 +438,7 @@ gpap_status gpap_sampler_create(gpap_engine *e, int64_t seed, int32_t k_cap,
  * (a pure launch flag); gpap_engine_set_mode(e, GPAP_MODE_AUTO) restores per-reset dispatch. */
 void gpap_sampler_free(gpap_sampler *s);
 
-/* The resolved batch (rows per chunk). */
+/* The resolved batch (rows per chunk): the last run's, or the pin. */
 int32_t gpap_sampler_k(const gpap_sampler *s);
 /* Pin the batch (the Python face's pin_batch). k <= 0 restores the calibrated value. */
 gpap_status gpap_sampler_set_k(gpap_sampler *s, int32_t k);
