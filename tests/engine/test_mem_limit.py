@@ -585,6 +585,28 @@ def test_an_engine_that_gives_its_rows_back_sizes_as_a_fresh_one(monkeypatch):
     assert held.check_chunk_size(10 ** 6, 300) == fresh.check_chunk_size(10 ** 6, 300)
 
 
+@pytest.mark.engine
+def test_a_sizing_that_asked_for_a_refit_does_not_bind_a_later_call(monkeypatch):
+    """Each sizing decides whether its call's reset gives the kept rows back: a query that would
+    need a refit (a check of 300-literal sets beside rows for 95% of an 8 MiB budget), followed
+    by a flags-only check of 2-literal sets that fits beside the rows, keeps them: its resets
+    reuse the baseline rows (lite), with no full reset. Before, the first sizing's request stood
+    until some reset used it, and the narrow check gave back and reallocated every row."""
+    if os.environ.get("GPAP_BACKEND", "cuda") == "opencl":
+        pytest.skip("OpenCL keeps a share of its total as the margin: its batch does not depend "
+                    "on what earlier calls left held")
+    monkeypatch.setenv("GPAP_VRAM_BUDGET_MIB", "8")
+    monkeypatch.setenv("GPAP_QUEUE", "0")             # the chunks, which reset on CLEAN rows
+    f = _formula(nv=400, nc=1200, seed=9)
+    e = _core.Engine(f)
+    e.reset(int(0.95 * (8 << 20)) // _row_bytes(e))
+    e.check_chunk_size(10 ** 6, 300)                  # would need the rows back
+    full = e.reset_stats()[0]
+    lits, off = _flat(_sets(f.info.num_vars, 3000, 2))
+    e.check_sets(lits, off, chunk=0)
+    assert e.reset_stats()[0] == full, "the narrow check gave the rows back"
+
+
 @pytest.mark.gpu
 def test_the_checkers_results_leave_the_engine_a_fifth_of_the_budget(monkeypatch):
     """On cuda the checker's result arrays may take four fifths of the engine's default budget,

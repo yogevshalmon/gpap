@@ -128,7 +128,8 @@ int32_t engine_batch(gpap_engine *e, int64_t extra_row_bytes, int32_t cap,
  * (an unmeasured total without a limit). readout.cpp sizes its slices from it. */
 int64_t engine_transient_room(gpap_engine *e, int64_t reuse);
 /* gpap_engine_reset(e, K) for a caller that will take `keep` rows again (keep > K): under an
- * exact bound a reset gives back row buffers bigger than its own K (ensure_state's `fit`), and
+ * exact bound, or where the last sizing found no room beside the kept rows (refit_next), a
+ * reset gives back row buffers bigger than its own K (ensure_state's `fit`), and
  * this spares those of up to `keep` rows. A chunk loop passes the rows of its first chunk, which
  * its sizing counted, so its short last chunk does not give them back for the next call to take
  * again. gpap_engine_reset is this with keep = K. */
@@ -354,9 +355,9 @@ struct gpap_engine {
     gpap::GpuMemory::Source mem_source = gpap::GpuMemory::TOTAL;   /* what the plug's `free` is */
     gpap_bound bound = GPAP_BOUND_NONE;         /* what set the last batch (engine_batch) */
     /* A sizing found no room beside the row buffers a smaller batch would keep, so the next
-     * reset gives them back (ensure_state's `fit`) even under the default budget. Set by
-     * engine_batch and cleared by the reset that refits; a queue that declines puts it back as
-     * its call's chunk sizing left it. */
+     * reset gives them back (ensure_state's `fit`) even under the default budget. Each sizing
+     * sets it afresh (engine_batch), the reset that refits clears it, and a queue that declines
+     * puts back what its call's chunk sizing left. */
     bool refit_next = false;
     /* Why the last engine_batch returned 0: GPAP_ERR_MEMORY when no row fits, or the status of
      * the memory query or the limit that failed. A caller returns it, so a driver error or a
