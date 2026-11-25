@@ -40,7 +40,9 @@ the tier the one-call faces are written on. Tier 3 is private: its surface track
   `apply_and_propagate`, where it is documented.
 - **Nobody names K.** Every face sizes its batches from the formula and the GPU
   (`gpap.engine.calibrate`, binding the model in `cpp/src/calibrate.cpp`). Overrides exist for
-  measurement (`k_cap`, `pin_batch`, `chunk`), not for normal use.
+  measurement (`k_cap`, `pin_batch`, `chunk`), not for normal use. The one knob for normal use is
+  memory: `gpap.set_mem_limit("8G")` caps what GPAP holds on the GPU, and `gpap.engine.memory()`
+  reports it ([ENGINE.md](ENGINE.md) §7). A batch that fits no row raises `MemoryError`.
 - **CUDA + a built `libgpap` are required** (`scripts/build_core.sh`; verify with `gpap info`).
   There is no CPU execution path. `gpap.engine.core_available()` is the programmatic check.
   Under `GPAP_BACKEND=opencl` mining and checking run on an OpenCL device instead, with CPU

@@ -38,6 +38,7 @@ A sample is **projected** onto the formula's support:
 | `--give-up-chunks` | off | stop early when nothing has been found |
 | `--seed` | 5 | the random seed |
 | `--k-cap` | `auto` | ceiling on the batch of trajectories per launch; `auto` is the same constant on every GPU |
+| `--mem-limit` | no limit | most GPU memory GPAP may hold: `8G`, `512M`, `75%` of the device ([ENGINE.md](ENGINE.md) §7) |
 | `--device` | the current CUDA device | which GPU to run on |
 | `--n-cov` | 0 (off) | after the run, collect this many full models to count distinct ones and verify them on the CPU; a self-check, kept out of every rate |
 

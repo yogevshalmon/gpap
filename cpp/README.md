@@ -97,6 +97,18 @@ back in input order. Only the conflict flags and implication counts come back un
 `assignments=true`, as in the Python face: the per-row assignment is `n x 2N` bytes, which
 chunking cannot shrink.
 
+To cap the GPU memory GPAP holds, set a limit before the first engine; every face sizes its
+batches under it ([docs/ENGINE.md](../docs/ENGINE.md) §7):
+
+```cpp
+gpap::set_mem_limit("6G");                           // or "75%", "none"; or GPAP_MEM_LIMIT=6G
+gpap::Memory m = gpap::memory();                     // m.limit, m.held, m.peak on device 0
+```
+
+A batch that fits no row under it throws `gpap::Error` (`GPAP_ERR_MEMORY`), saying what a row
+needs. The C ABI is `gpap_set_mem_limit`, `gpap_mem_limit`, `gpap_mem_held`, `gpap_mem_peak`;
+per engine, `gpap_engine_mem_held` by kind, `gpap_engine_batch_bound` and `gpap_engine_trim`.
+
 ## Tier 2 — driving the engine yourself
 
 `gpap::Formula` and `gpap::Engine` are a thin RAII/exception wrapper over the C ABI, for callers owning

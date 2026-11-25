@@ -112,8 +112,14 @@ The engine:
 - Kernel dispatch is decided once, in the core (`gpap_dispatch_wave`), from the clause count —
   never from the batch alone. The queue is the one exception: it runs WAVE.
 - `gpap_trail_cap` is the only definition of the trail bound; keep its slack in step with `WAVE_W`.
-- The batch comes from the memory model in `cpp/src/calibrate.cpp`, never from a runtime memory
-  probe. Any change to that model changes the batch: re-validate it as
+- Every device buffer the engine allocates is a `DevBuf`, which counts it on the ledger
+  (`cpp/src/memory.hpp`) as formula or rows; a buffer a trim keeps is a `FormulaBuf`. A buffer
+  that goes round `DevBuf` is invisible to the memory limit.
+- Under a memory limit, a call's sizing counts everything the call allocates afterwards
+  (`exact_terms` in `cpp/src/engine.cpp`). A new buffer goes there, or
+  `tests/engine/test_mem_limit.py` fails under a tight limit.
+- The batch comes from the memory model (`gpap_row_bytes`, `cpp/src/calibrate.cpp`) and the batch
+  rule (`size_rows`, `cpp/src/memory.cpp`), never from a runtime memory probe. Any change to that model changes the batch: re-validate it as
   [BENCHMARKING.md](docs/BENCHMARKING.md) §2 describes, and re-check dispatch.
 - `import gpap` must set `PYTORCH_CUDA_ALLOC_CONF` before torch initializes CUDA.
 - A CLEAN-mode launch restores the words it touched, so anything that reads state after the

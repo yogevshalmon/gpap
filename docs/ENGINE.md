@@ -230,12 +230,28 @@ Measurements: [findings/PROBE_QUEUE_FINDINGS.md](findings/PROBE_QUEUE_FINDINGS.m
 
 ## 7. Batch size
 
-Nobody names K. Every face sizes it from the formula and the GPU (`cpp/src/calibrate.cpp`):
+Nobody names K. Every face sizes it from the formula and the GPU, by one rule
+(`size_rows` in `cpp/src/memory.cpp`):
 
 ```
 row_bytes = 4·M_long  +  4·⌈2N/32⌉  +  4·trail_cap  +  flags and counters
-K         = min( 0.80 · free VRAM / row_bytes ,  cap )          cap = 262,144
+K         = min( rows the memory bounds leave ,  cap )          cap = 262,144
 ```
+
+| memory bound | where it applies | bytes it leaves for the call |
+|---|---|---|
+| memory | CUDA always; OpenCL unless a limit is set | 0.80 · (free − 800 MB), under `GPAP_VRAM_BUDGET_MIB`; OpenCL, which cannot measure free memory, reads its total |
+| limit | a memory limit is set (below) | the limit, at most the device, less what GPAP holds there |
+| grant | a host's own plug | what the host still grants GPAP, as it is |
+
+Each bound's bytes, less what the call allocates once (the queue's launch buffers), divided by
+the bytes of a row, gives its rows; the batch is the smallest, then the cap, then the device's
+one-buffer limit (OpenCL). `gpap_engine_batch_bound` (Python `batch_bound`) says which one set
+it. A limit and a grant are exact, so they also count what a call allocates after it is sized,
+which the memory bound's margins cover instead: selected-row lists, soundness flags, the
+smallest readout slice, pair masks (`exact_terms` in `cpp/src/engine.cpp`). Where not even one
+row fits, the call fails with `GPAP_ERR_MEMORY` (Python `MemoryError`) and says what a row
+needs: it never runs a batch of one row.
 
 `trail_cap = N + 32` is a proof, not a tuning knob: every trail push is deduplicated against the
 bitmap and `l`/`¬l` share a word, so a variable enters a row's trail at most once — the bound is
@@ -256,6 +272,32 @@ later call on one engine sizes the batch the first one did, not what the first l
 ([findings/CPP_BACKEND_FINDINGS.md](findings/CPP_BACKEND_FINDINGS.md) §7). Other engines and
 other processes still count as used.
 
+**The memory limit** caps the device memory GPAP's engines hold, summed over engines:
+`--mem-limit 8G` on the CLI, `GPAP_MEM_LIMIT=8G` for every face (read on every call, inherited
+by child processes), `gpap.set_mem_limit("8G")` in Python, `gpap_set_mem_limit(device, "8G")` in
+C, `gpap::set_mem_limit` in C++. A limit is a size in binary units (`8G`, `512M`, `1.5G`: 1G is
+1024³ bytes), a share of the device's total (`75%`), or `none`; the API's setting overrides the
+variable on its device. It is a ceiling: on CUDA GPAP also stays inside free memory, and on
+OpenCL it takes the place of the default share of the total. An allocation that would pass it
+fails with `GPAP_ERR_MEMORY` and names the limit, so nothing spills to host memory and nothing
+aborts. A lowered limit applies from each engine's next sizing; nothing is freed to meet it.
+Engines that size at the same moment in two threads share the room the limit leaves, and the
+one that allocates second can be refused.
+
+What GPAP holds is counted, buffer by buffer, where it allocates (`DevBuf`, `cpp/src/memory.hpp`),
+in two kinds: the formula, which an engine builds once and keeps, and rows, which grow with a
+batch or a call. `gpap info` prints the limit in force and what a new engine's rows would be
+sized against; `gpap_mem_held` / `gpap_mem_peak` (Python `gpap.engine.memory()`) report what
+GPAP holds on a device, and a sampling run's stats carry `batch_bound`, `mem_limit` and
+`mem_peak`. The count is not the driver's own context and kernel code, nor memory the caller
+owns: `_dev` pointers, and the tensors the Python face returns (GitHub issue 75). Leave room for
+the driver's context when you choose a limit.
+
+An idle engine can give its rows back and keep its formula (`gpap_engine_trim`, `.trim()`), so a
+second engine on the device sizes as if the first held none. A sampling run does that before it
+mines when a limit is set: the sampler's warmup rows could otherwise fill the limit and leave
+mining no row (GitHub issue 76).
+
 ## 8. Knobs
 
 | | effect | default |
@@ -265,7 +307,8 @@ other processes still count as used.
 | `GPAP_QUEUE=0` | run probe sweeps and flags-only checks in chunks, one set per row per launch (§6b) | on |
 | `vscan = -1` in `gpap_engine_options` | disable the warp-wide decision scan | on in WAVE |
 | `GPAP_LIB=/path/libgpap.so` | which library the Python face loads | `$GPAP_BUILD_DIR`, `build/`, `cpp/build/`, then the installed copy |
-| `GPAP_VRAM_BUDGET_MIB=<MiB>` | caps the memory the batch is sized from, for every caller of `gpap_mem_available` (C, C++ and Python alike). A ceiling only: it lets a larger card reproduce a smaller card's batch, and changes nothing on a card with less free memory | unset (no cap) |
+| `GPAP_MEM_LIMIT=<size>` | the most device memory GPAP's engines hold: `8G`, `512M`, `75%`, `none` (§7). A malformed value is an error, never "no limit" | unset (no limit) |
+| `GPAP_VRAM_BUDGET_MIB=<MiB>` | caps the memory bound the batch is sized from, for every caller of `gpap_mem_available` (C, C++ and Python alike). For reproduction: it lets a larger card reproduce a smaller card's batch, and changes nothing on a card with less free memory. To limit memory, use `GPAP_MEM_LIMIT` | unset (no cap) |
 | `PYTORCH_CUDA_ALLOC_CONF` | `import gpap` sets `expandable_segments:True` unless you set the variable yourself: the sampler's temporaries vary in size, and the default caching allocator fragments on them and loses batch size | set on import |
 | `WAVE_W` in `cpp/tools/build_kernels.py` | lane width, a power of two, baked at build time | 32 (both ways of raising it measured out) |
 
