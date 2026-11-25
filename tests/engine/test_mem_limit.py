@@ -560,6 +560,21 @@ def test_a_narrow_call_after_a_wide_one_stays_inside_the_default_budget(monkeypa
     assert _core.mem_peak(0) - base <= 8 << 20
 
 
+@pytest.mark.gpu
+def test_the_checkers_results_leave_the_engine_a_fifth_of_the_budget(monkeypatch):
+    """On cuda the checker's result arrays may take four fifths of the engine's default budget,
+    not all of it: they are allocated before the engine sizes its rows, which need the rest.
+    Before, results that filled the budget passed the guard, took the memory, and then left the
+    engine no row (GitHub issue 75)."""
+    import torch
+
+    from gpap.engine import checker
+    if os.environ.get("GPAP_BACKEND", "cuda") == "opencl":
+        pytest.skip("on opencl the results live on torch's device, not the engine's")
+    monkeypatch.setattr(checker, "gpu_mem_available",
+                        lambda dev, fraction=1.0: int((100 << 20) * fraction))
+    ck = checker.AssumptionChecker(device=torch.device("cuda"))
+    assert ck._result_budget() == 80 << 20
 
 
 @pytest.mark.engine
