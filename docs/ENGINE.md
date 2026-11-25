@@ -3,8 +3,9 @@
 > **Reader:** library users and contributors who want to know how the engine works — its data layout, kernels and batch sizing, and what it guarantees.
 
 GPAP's engine runs Boolean Constraint Propagation (BCP) over K independent partial assignments
-at once, entirely on the GPU. K ranges from a few thousand rows on the largest formulas to
-262,144; each row is its own assumption set over the same formula, propagated to its own
+at once, entirely on the GPU. K ranges from a few thousand rows on the largest formulas to 64
+rows per warp the card keeps resident; each row is its own assumption set over the same
+formula, propagated to its own
 fixpoint, and no clause is ever scanned. The solution sampler, entailed-clause mining and
 batched assumption checking are all consumers of this one primitive.
 
@@ -235,12 +236,13 @@ Nobody names K. Every face sizes it from the formula and the GPU, by one rule
 
 ```
 row_bytes = 4·M_long  +  4·⌈2N/32⌉  +  4·trail_cap  +  flags and counters
-K         = min( rows the memory bounds leave ,  cap )          cap = 262,144
+K         = min( rows the memory bounds leave ,  cap )
+cap       = 64 · resident warps                   (262,144 where they are unknown: OpenCL)
 ```
 
 | memory bound | where it applies | bytes it leaves for the call |
 |---|---|---|
-| memory | CUDA always; OpenCL unless a limit is set | 0.80 · (free − 800 MB), under `GPAP_VRAM_BUDGET_MIB`; OpenCL, which cannot measure free memory, reads its total less what GPAP's other engines hold there |
+| memory | CUDA always; OpenCL unless a limit is set | free memory less the reserve (below), under `GPAP_VRAM_BUDGET_MIB`; OpenCL, which cannot measure free memory, takes 0.80 of its total less what GPAP's other engines hold there and the reserve |
 | limit | a memory limit is set (below) | the limit, at most the device, less what GPAP holds there |
 | grant | a host's own plug | what the host still grants GPAP, as it is |
 
@@ -262,38 +264,54 @@ bitmap and `l`/`¬l` share a word, so a variable enters a row's trail at most on
 exactly `N`, whatever the decision batch `B` or the assumption width. The `+32` is one
 wavefront: the vectorised append writes at `tail + prefix_sum` with no bound test, so a wavefront
 is the granularity a broken invariant would overshoot by. There is deliberately no `B` term (one
-used to charge callers for a trail that was never allocated), and the cap is one constant on
-every GPU (a per-card cap made `auto` mean a different batch per machine). The model is verified
-against measured VRAM (1.00–1.04×). Because `K × M_long` is roughly the memory budget however
+used to charge callers for a trail that was never allocated). The model is verified against
+measured VRAM (1.00–1.04×). Because `K × M_long` is roughly the memory budget however
 large the formula, a chunk's wall is roughly constant, and models per chunk = K × success is the
 throughput proxy the sampling pipeline uses to decide whether mined clauses paid.
 
-The cap is a saturation limit, not a safety one: on the cards measured, 4× the batch bought
-~3%. Overrides exist for measurement (`k_cap`, `pin_batch`) — pin them for any A/B.
+The cap is a saturation limit, not a safety one: a card's rate rises with its batch up to some
+multiple of the warps it keeps resident and only creeps after it, so the cap follows the card
+and `--k-cap auto` means a different batch on each card
+([findings/MEMORY_FINDINGS.md](findings/MEMORY_FINDINGS.md) §8). Overrides exist for measurement
+(`k_cap`, `pin_batch`) — pin them for any A/B, and for any comparison across cards.
 
 Free VRAM counts the rows the engine already holds: its next batch reuses those buffers, so a
 later call on one engine sizes the batch the first one did, not what the first left free
 ([findings/CPP_BACKEND_FINDINGS.md](findings/CPP_BACKEND_FINDINGS.md) §7). Other engines and
-other processes still count as used.
+other processes still count as used. The sampler sizes its batch again at the start of every
+run, from the memory free then; a pinned batch stays.
 
 **The memory limit** caps the device memory GPAP's engines hold, summed over engines:
 `--mem-limit 8G` on the CLI, `GPAP_MEM_LIMIT=8G` for every face (read on every call, inherited
 by child processes), `gpap.set_mem_limit("8G")` in Python, `gpap_set_mem_limit(device, "8G")` in
 C, `gpap::set_mem_limit` in C++. A limit is a size in binary units (`8G`, `512M`, `1.5G`: 1G is
 1024³ bytes), a share of the device's total (`75%`), or `none`; the API's setting overrides the
-variable on its device. It is a ceiling: on CUDA GPAP also stays inside free memory, and on
-OpenCL it takes the place of the default share of the total. An allocation that would pass it
+variable on its device. It is a ceiling: on CUDA GPAP also stays inside free memory less the
+reserve, and on OpenCL it takes the place of the default share of the total. An allocation that would pass it
 fails with `GPAP_ERR_MEMORY` and names the limit, so nothing spills to host memory and nothing
 aborts. A lowered limit applies from each engine's next sizing; nothing is freed to meet it.
 Engines that size at the same moment in two threads share the room the limit leaves, and the
 one that allocates second can be refused.
 
+**The memory reserve** is what GPAP leaves free beside everything it holds, for what it cannot
+count: other processes and the desktop, the caller's own tensors, kernel code loaded at a first
+launch. The default batch is sized from free memory less the reserve, all of it: the call's
+later buffers are counted, so no fraction is held back. On CUDA every allocation keeps the
+reserve too, so a pinned batch past the card fails with `GPAP_ERR_MEMORY` and names the reserve
+instead of paging to host memory, which WSL2 does silently (a native card fails loudly anyway).
+The default is 1 GiB ([findings/MEMORY_FINDINGS.md](findings/MEMORY_FINDINGS.md) §9); set it as
+the limit is set, with the limit's grammar: `--mem-reserve 2G`, `GPAP_MEM_RESERVE=2G`,
+`gpap.set_mem_reserve("2G")`, `gpap_set_mem_reserve(device, "2G")`, `gpap::set_mem_reserve`;
+`none` leaves nothing. Under a limit it still applies: the limit caps what GPAP holds, the reserve
+what it leaves free. On OpenCL it comes off the total before the share. Engines that allocate at
+the same moment in two threads can both pass the check before either allocates.
+
 What GPAP holds is counted, buffer by buffer, where it allocates (`DevBuf`, `cpp/src/memory.hpp`),
 in two kinds: the formula, which an engine builds once and keeps, and rows, which grow with a
 batch or a call. `gpap info` prints the limit in force and what a new engine's rows would be
-sized against; `gpap_mem_held` / `gpap_mem_peak` (Python `gpap.engine.memory()`) report what
-GPAP holds on a device, and a sampling run's stats carry `batch_bound`, `mem_limit` and
-`mem_peak`. The count is not the driver's own context and kernel code, nor memory the caller
+sized against and the reserve; `gpap_mem_held` / `gpap_mem_peak` (Python `gpap.engine.memory()`)
+report what GPAP holds on a device, and a sampling run's stats carry `batch_bound`, `mem_limit`,
+`mem_reserve` and `mem_peak`. The count is not the driver's own context and kernel code, nor memory the caller
 owns: `_dev` pointers, and the tensors the Python face returns (GitHub issue 75). Leave room for
 the driver's context when you choose a limit.
 

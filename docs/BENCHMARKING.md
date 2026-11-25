@@ -26,9 +26,11 @@ which are clock-independent (§3); ratios within one sweep.
 ## 2. The box spills, it does not OOM
 
 On WSL2/WDDM an oversized batch migrates to host RAM over PCIe and throughput collapses silently.
-Never probe for the largest K that "works"; validate every change to batch sizing under an
-`nvidia-smi` kill-switch (`used > ~11 GB of 12 → pkill`). If it trips, the sizing is wrong:
-revert.
+On CUDA the memory reserve is kept at every allocation ([ENGINE.md](ENGINE.md) §7), so a pinned
+batch past the card fails with `MemoryError` instead; `--mem-reserve none` removes that guard,
+and OpenCL has none. Never probe for the largest K that "works"; validate every change to batch
+sizing, and any run with the reserve lowered, under an `nvidia-smi` kill-switch
+(`used > ~11 GB of 12 → pkill`). If it trips, the sizing is wrong: revert.
 
 ## 3. The no-change gate, and what counts as a verdict
 
@@ -115,7 +117,7 @@ our unrolls share flip-flop variables).
 ## 6. `--n-time` is a delivery target — quote the delivered count
 
 The batch is the unit of work, so a run overshoots to the end of a chunk (a small formula at the
-262,144 cap returns ~10⁶ models for `-n 100`) and can fall short when `--time-limit` or the
+batch cap returns ~10⁶ models for `-n 100`) and can fall short when `--time-limit` or the
 zero-progress stop fires (marked `<` after the count, `chunk_capped` in the JSON).
 `samples_per_s` is the best config's steady-state rate; `sps_e2e_total` includes setup. `--out`
 never extends the run — the file holds `min(-n, --max-samples, delivered)` rows
