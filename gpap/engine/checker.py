@@ -161,9 +161,10 @@ class AssumptionChecker:
 
     def _result_budget(self) -> int:
         """Bytes the result arrays may take where they live: torch's device. On the cuda backend
-        that is the engine's own device, under the one budget rule; on opencl the engine runs
-        elsewhere, so a CUDA device is asked through torch and the CPU through the host's
-        available memory, at the same 0.8 fraction."""
+        that is the engine's own device and its whole default budget (free memory less the
+        reserve), which the engine's rows then share (GitHub issue 75); on opencl the engine
+        runs elsewhere, so a CUDA device is asked through torch and the CPU through the host's
+        available memory, at 0.8 of either."""
         if _core.backend() == "cuda":
             return gpu_mem_available(self._device)
         if self._device.type == "cuda":

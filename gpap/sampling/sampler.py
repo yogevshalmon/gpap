@@ -99,9 +99,9 @@ class GPUSampler:
         self._pin = int(n) if int(n) > 0 else None
 
     def trim(self) -> None:
-        """Give the engine's rows back while the sampler is idle, keeping the formula and `K`:
-        a second engine on the device (mining) then sizes as if this one held none. The next
-        chunk takes the rows again, at the same K."""
+        """Give the engine's rows back while the sampler is idle, keeping the formula: a second
+        engine on the device (mining) then sizes as if this one held none. The next run takes
+        the rows again, at its pin or at the batch it sizes then."""
         self.engine.trim()
 
     @property
