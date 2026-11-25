@@ -202,6 +202,16 @@ struct ClDevice {
     cl_program program = nullptr;
 };
 
+/* OpenCL has no free-memory query: the report is the device total, and its one-buffer limit. */
+gpap_status report(const ClDevice &d, GpuMemory *out) {
+    *out = GpuMemory{};
+    out->total = d.total_mem;
+    out->free = d.total_mem;
+    out->source = GpuMemory::TOTAL;
+    out->max_buffer = d.max_alloc;
+    return GPAP_OK;
+}
+
 std::mutex g_mu;                         /* guards everything below */
 ClApi g_cl;
 bool g_loaded = false;
@@ -364,15 +374,7 @@ class OpenClGpu final : public Gpu {
     const char *device_name() const override { return d_->name.c_str(); }
     gpap_status make_current() override { return GPAP_OK; }     /* OpenCL has no current device */
 
-    gpap_status mem_info(int64_t *free_bytes, int64_t *total_bytes) override {
-        *free_bytes = d_->total_mem;         /* OpenCL has no free-memory query */
-        *total_bytes = d_->total_mem;
-        return GPAP_OK;
-    }
-
-    bool free_is_measured() const override { return false; }     /* mem_info reports the total */
-
-    int64_t max_buffer_bytes() const override { return d_->max_alloc; }
+    gpap_status memory(GpuMemory *out) override { return report(*d_, out); }
 
     gpap_status alloc(size_t bytes, GpuMem *out) override {
         cl_int rc = CL_SUCCESS;
@@ -609,13 +611,11 @@ gpap_status opencl_open(int device, Gpu **out) {
     return GPAP_OK;
 }
 
-gpap_status opencl_mem_info(int device, int64_t *free_bytes, int64_t *total_bytes) {
+gpap_status opencl_memory(int device, GpuMemory *out) {
     std::lock_guard<std::mutex> lock(g_mu);
     ClDevice *d = nullptr;
     GPAP_TRY(device_at(device, &d));
-    *free_bytes = d->total_mem;             /* OpenCL has no free-memory query */
-    *total_bytes = d->total_mem;
-    return GPAP_OK;
+    return report(*d, out);
 }
 
 /* OpenCL cannot say how many warps a device keeps resident. The WAVE dispatch reads this for
@@ -624,6 +624,6 @@ int32_t opencl_resident_warps(int) { return 0; }
 
 }  // namespace
 
-const GpuDriver kOpenClDriver = {"opencl", opencl_open, opencl_mem_info, opencl_resident_warps};
+const GpuDriver kOpenClDriver = {"opencl", opencl_open, opencl_memory, opencl_resident_warps};
 
 }  // namespace gpap
