@@ -252,6 +252,19 @@ def test_pinned_batch_restores(monkeypatch):
     assert smp.K == 64, "the caller's own pin did not come back"
 
 
+@pytest.mark.gpu
+def test_a_runs_result_reports_the_batch_it_ran(monkeypatch):
+    """sample() reports the batch its run used, which the run sizes at its start: after the
+    budget is cut, the result's K is the new, smaller batch, and the attempts are K per chunk.
+    Before, the result carried the batch read before the run."""
+    smp = _tiny_sampler(100_000)
+    assert smp.K == 100_000
+    monkeypatch.setenv("GPAP_VRAM_BUDGET_MIB", "1")
+    out = smp.sample(10**9, configs=[(True, 8, False)], max_chunks=1, collect=False)
+    assert out["K"] == smp.K < 100_000
+    assert out["n_chunks"] == 1
+
+
 @pytest.mark.core
 def test_row_bytes_matches_the_engine_allocation_list():
     """The per-row model is the allocation list, restated here so that a buffer added to
