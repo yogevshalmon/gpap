@@ -503,6 +503,25 @@ def test_without_a_limit_a_call_stays_inside_the_default_budget(monkeypatch, cal
 
 
 @pytest.mark.engine
+def test_a_memory_bound_readout_gets_a_slice_of_the_default_budget(monkeypatch):
+    """The default budget sets a readout slice aside, a sixteenth of it (at most a full slice),
+    so a batch that fills the budget still reads its (rows, 2N) assignments in large slices:
+    under a 64 MiB budget, after a check with assignments, the engine's row-kind buffers beyond
+    its row state hold at least that slice. Before, a memory-bound batch left the readout its
+    32-row minimum (1.3 MB here), and a check with assignments on a large formula took half as
+    long again."""
+    monkeypatch.setenv("GPAP_VRAM_BUDGET_MIB", "64")
+    nv = 20_000
+    rng = random.Random(4)
+    e = _core.Engine(_core.Formula.from_clauses(nv, random_cnf(rng, nv, 40_000, kmin=3, kmax=3)))
+    lits, off = _flat(_sets(nv, 4000, 2))
+    e.check_sets(lits, off, chunk=0, assignments=True)
+    assert e.batch_bound == "memory"
+    beside_rows = e.mem_held_rows - e.K * _row_bytes(e)
+    assert beside_rows >= (64 << 20) // 16 * 0.9, beside_rows
+
+
+@pytest.mark.engine
 def test_a_smaller_batch_beside_kept_rows_stays_inside_the_default_budget(monkeypatch):
     """Without a limit a smaller batch keeps the engine's bigger row buffers, so what the call
     allocates beside its rows must fit beside all of them, not beside the rows it uses: an

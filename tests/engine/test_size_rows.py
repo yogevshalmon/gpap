@@ -22,9 +22,9 @@ def _rule(*requests):
     per_row) tuples."""
     need_binary(DRIVER)
     order = ("total", "memory", "grant", "limit", "held_other", "per_row", "fixed", "cap",
-             "max_buffer", "widest")
+             "max_buffer", "widest", "memory_fixed")
     base = {"total": 0, "memory": -1, "grant": -1, "limit": 0, "held_other": 0, "per_row": 1,
-            "fixed": 0, "cap": 0, "max_buffer": 0, "widest": 1}
+            "fixed": 0, "cap": 0, "max_buffer": 0, "widest": 1, "memory_fixed": 0}
     lines = [" ".join(str({**base, **r}[k]) for k in order) for r in requests]
     out = subprocess.run([str(DRIVER)], input="\n".join(lines) + "\n", capture_output=True,
                          text=True, check=True).stdout.split("\n")
@@ -107,6 +107,18 @@ def test_the_smallest_bound_wins_and_a_tie_goes_cap_limit_grant_memory():
                 {"per_row": 10, "memory": 1000, "max_buffer": 40, "widest": 10})
     assert [(r, b) for r, b, _, _ in out] == [(100, LIMIT), (100, CAP), (50, MEMORY),
                                              (100, GRANT), (4, BUFFER)]
+
+
+def test_the_default_budgets_slice_is_counted_by_that_bound_only():
+    """`memory_fixed` (the readout slice the default budget sets aside) comes off the memory
+    bound alone: a limit of the same bytes beside it keeps its rows."""
+    (rm, bm, _, _), (rl, bl, _, _) = _rule({"memory": 10_000, "per_row": 10, "memory_fixed": 2_000},
+                                           {"memory": 10_000, "limit": 9_000, "per_row": 10,
+                                            "memory_fixed": 2_000})
+    assert (rm, bm) == (800, MEMORY)
+    assert (rl, bl) == (800, MEMORY)
+    (rl2, bl2, _, _), = _rule({"memory": 10_000, "limit": 7_000, "per_row": 10, "memory_fixed": 2_000})
+    assert (rl2, bl2) == (700, LIMIT)
 
 
 def test_no_bound_is_no_batch():
