@@ -83,6 +83,7 @@ add_custom_command(
 add_library(gpap SHARED
   src/runtime.cpp
   src/formula.cpp
+  src/formula_state.cpp
   src/engine.cpp
   src/readout.cpp
   src/calibrate.cpp

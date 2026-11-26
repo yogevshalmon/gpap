@@ -52,10 +52,10 @@ gpap_status validate_sets(gpap_engine *e, const int32_t *lits, const int64_t *of
         return GPAP_ERR_ARG;
     }
     for (int64_t i = 0; i < total; ++i) {
-        if (lit_index_from_dimacs(lits[i], e->num_vars) < 0) {
+        if (lit_index_from_dimacs(lits[i], e->fs->num_vars) < 0) {
             set_error("assumption literal %d out of range (formula has %d variables; literals "
                       "are DIMACS, 1..%d or -1..-%d, never 0)",
-                      lits[i], e->num_vars, e->num_vars, e->num_vars);
+                      lits[i], e->fs->num_vars, e->fs->num_vars, e->fs->num_vars);
             return GPAP_ERR_ARG;
         }
     }
@@ -85,7 +85,7 @@ gpap_status check_on_queue(gpap_engine *e, gpap::QueuedCall &q, const int32_t *l
             for (int64_t j = offsets[i]; j < offsets[i + 1]; ++j)
                 jobs[static_cast<size_t>(i - a) * static_cast<size_t>(L) +
                      static_cast<size_t>(j - offsets[i])] =
-                    static_cast<int32_t>(lit_index_from_dimacs(lits[j], e->num_vars));
+                    static_cast<int32_t>(lit_index_from_dimacs(lits[j], e->fs->num_vars));
         GPAP_TRY(q.launch(jobs.data(), b - a, static_cast<int32_t>(L), conflict_out + a,
                           propagated_out + a));
         a = b;
@@ -97,7 +97,7 @@ gpap_status check_on_queue(gpap_engine *e, gpap::QueuedCall &q, const int32_t *l
 gpap_status check_in_chunks(gpap_engine *e, const int32_t *lits, const int64_t *offsets,
                             int64_t n, int64_t step, int8_t *conflict_out,
                             int32_t *propagated_out, int8_t *assign_out, int32_t *sat_out) {
-    const size_t row_lits = 2 * static_cast<size_t>(e->num_vars);
+    const size_t row_lits = 2 * static_cast<size_t>(e->fs->num_vars);
     std::vector<int64_t> decisions;
     std::vector<int32_t> rows;
     for (int64_t a = 0; a < n; a += step) {
@@ -111,7 +111,7 @@ gpap_status check_in_chunks(gpap_engine *e, const int32_t *lits, const int64_t *
             for (int64_t j = offsets[i]; j < offsets[i + 1]; ++j)
                 decisions[static_cast<size_t>(i - a) * static_cast<size_t>(L) +
                           static_cast<size_t>(j - offsets[i])] =
-                    lit_index_from_dimacs(lits[j], e->num_vars);
+                    lit_index_from_dimacs(lits[j], e->fs->num_vars);
 
         /* The LAST chunk is short: reset to its own size (this is also where GPAP_MODE_AUTO
          * resolves), keeping the first chunk's rows, which the call's sizing counted. */
@@ -139,7 +139,7 @@ gpap_status check_in_chunks(gpap_engine *e, const int32_t *lits, const int64_t *
         if (sat_out)
             GPAP_TRY(gpap_sat_rows(e, rows.data(), K,
                                    sat_out + static_cast<size_t>(a) *
-                                                 static_cast<size_t>(e->num_clauses)));
+                                                 static_cast<size_t>(e->fs->num_clauses)));
     }
     return GPAP_OK;
 }

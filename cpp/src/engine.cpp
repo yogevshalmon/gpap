@@ -113,29 +113,30 @@ gpap_engine::~gpap_engine() {
 
 static gpap_status build_flush_cache(gpap_engine *e, const gpap_formula *f) {
     /* One K=1 fixpoint launch over the formula's own units, cached and broadcast-restored by
-     * every reset(K); contradictory units conflict the flush itself. */
+     * every reset(K); contradictory units conflict the flush itself. It runs on the engine's own
+     * row 0, and the baseline it leaves goes on the formula's holder. */
+    gpap::FormulaState &F = *e->fs;
     GPAP_TRY(gpap_engine_reset(e, 1));
-    GPAP_TRY(broadcast_rows(e, e->packed, e->packed_init, e->num_long, 1));
+    GPAP_TRY(broadcast_rows(e, e->packed, F.packed_init, F.num_long, 1));
     GPAP_TRY(e->abits.zero());
-    GPAP_TRY(fill_flags(e, e->active, e->has_empty_clause ? 0 : 1, 1));
-    GPAP_TRY(fill_flags(e, e->conflict, e->has_empty_clause ? 1 : 0, 1));
+    GPAP_TRY(fill_flags(e, e->active, F.has_empty_clause ? 0 : 1, 1));
+    GPAP_TRY(fill_flags(e, e->conflict, F.has_empty_clause ? 1 : 0, 1));
 
-    if (!e->has_empty_clause && !f->unit_lits.empty()) {
+    if (!F.has_empty_clause && !f->unit_lits.empty()) {
         std::vector<int64_t> units(f->unit_lits.begin(), f->unit_lits.end());
         GPAP_TRY(gpap_engine_apply(e, units.data(), (int32_t)units.size()));
     }
-    gpap::Gpu *g = e->gpu.get();
-    if (e->num_long) {
-        GPAP_TRY(e->packed_flushed.reserve(e->mem, (size_t)e->num_long * sizeof(int32_t)));
-        GPAP_TRY(g->copy(e->packed_flushed.ptr, e->packed.ptr,
-                         (size_t)e->num_long * sizeof(int32_t)));
+    gpap::Gpu *g = e->gpu;
+    if (F.num_long) {
+        GPAP_TRY(F.packed_flushed.reserve(F.mem, (size_t)F.num_long * sizeof(int32_t)));
+        GPAP_TRY(g->copy(F.packed_flushed.ptr, e->packed.ptr, (size_t)F.num_long * sizeof(int32_t)));
     }
-    GPAP_TRY(e->abits_flushed.reserve(e->mem, (size_t)e->nw * sizeof(int32_t)));
-    GPAP_TRY(g->copy(e->abits_flushed.ptr, e->abits.ptr, (size_t)e->nw * sizeof(int32_t)));
+    GPAP_TRY(F.abits_flushed.reserve(F.mem, (size_t)F.nw * sizeof(int32_t)));
+    GPAP_TRY(g->copy(F.abits_flushed.ptr, e->abits.ptr, (size_t)F.nw * sizeof(int32_t)));
     int8_t conflict0 = 0;
     GPAP_TRY(g->download(&conflict0, e->conflict.ptr, 0, 1));
-    e->flush_conflict = conflict0 ? 1 : 0;
-    e->flush_ready = 1;
+    F.flush_conflict = conflict0 ? 1 : 0;
+    F.flush_ready = 1;
 
     gpap_counters_reset(e);
     return GPAP_OK;
@@ -155,11 +156,15 @@ extern "C" gpap_status gpap_engine_create(const gpap_formula *f, const gpap_engi
     gpap::Gpu *g = nullptr;
     GPAP_TRY(driver->open(device, &g));
     gpap_engine *e = new gpap_engine();
-    e->gpu.reset(g);
-    e->driver = driver;
-    e->device_ordinal = device;
+    /* A device of its own: one plug per engine. */
+    e->dev = std::make_shared<gpap::Device>();
+    e->dev->gpu.reset(g);
+    e->dev->driver = driver;
+    e->dev->ordinal = device;
+    e->dev->account = gpap::mem_account(driver, device);
+    e->gpu = g;
     e->mem.gpu = g;
-    e->mem.account = gpap::mem_account(driver, device);
+    e->mem.account = e->dev->account;
     gpap_status st = GPAP_OK;
     do {
         /* The device's total first: a limit given as a share of it applies from the first
@@ -168,8 +173,8 @@ extern "C" gpap_status gpap_engine_create(const gpap_formula *f, const gpap_engi
         st = use_ctx(e);
         if (st == GPAP_OK) st = g->memory(&m);
         if (st != GPAP_OK) break;
-        gpap::mem_note_total(e->mem.account, m.total);
-        e->mem_source = m.source;
+        gpap::mem_note_total(e->dev->account, m.total);
+        e->dev->mem_source = m.source;
 
         if (f->shift == 0) {   /* formula shape fits no packed split (see gpap_packed_envelope) */
             gpap_packed_envelope(f->num_vars, f->max_clause_len, nullptr);   /* sets the message */
@@ -188,13 +193,6 @@ extern "C" gpap_status gpap_engine_create(const gpap_formula *f, const gpap_engi
                 break;
             }
         }
-        e->num_vars = f->num_vars;
-        e->num_clauses = f->num_clauses;
-        e->num_long = f->num_long;
-        e->shift = o.force_shift ? o.force_shift : f->shift;
-        e->total_lits = f->total_lits;
-        e->max_clause_len = f->max_clause_len;
-        e->has_empty_clause = f->has_empty_clause;
         /* AUTO is an input value only: reset(K) re-resolves `mode` before any launch. */
         e->auto_mode = (o.mode == GPAP_MODE_AUTO) ? 1 : 0;
         e->mode = e->auto_mode ? GPAP_MODE_SCALAR : o.mode;
@@ -212,43 +210,13 @@ extern "C" gpap_status gpap_engine_create(const gpap_formula *f, const gpap_engi
         e->env_mode = (ke && std::strcmp(ke, "scalar") == 0)  ? GPAP_MODE_SCALAR
                       : (ke && std::strcmp(ke, "wave") == 0)  ? GPAP_MODE_WAVE
                                                               : GPAP_MODE_AUTO;
-        e->nw = std::max(1, (2 * f->num_vars + 31) / 32);
         e->trail_cap = gpap_trail_cap(f->num_vars);   /* THE rule, in calibrate.cpp */
 
-        st = stage(e, e->occ_off, f->occ_offsets.data(),
-                   f->occ_offsets.size() * sizeof(int32_t));
+        /* The formula first, then the engine's counters and scratch, then the flush on the
+         * engine's row 0: the order every engine has allocated in, so the batch is unchanged. */
+        st = gpap::formula_state_upload(e->dev, f, o.force_shift ? o.force_shift : f->shift,
+                                        /*with_init=*/true, &e->fs);
         if (st != GPAP_OK) break;
-        st = stage(e, e->occ_mid, f->occ_mid.data(), f->occ_mid.size() * sizeof(int32_t));
-        if (st != GPAP_OK) break;
-        st = stage(e, e->occ_cls, f->occ_clauses.data(),
-                   f->occ_clauses.size() * sizeof(int32_t));
-        if (st != GPAP_OK) break;
-        if (e->shift == f->shift) {
-            st = stage(e, e->packed_init, f->packed_init.data(),
-                       f->packed_init.size() * sizeof(int32_t));
-        } else {   /* pinned to the other split: re-pack the LONG clauses from sizes + sums */
-            std::vector<int32_t> pk;
-            gpap::pack_long_init(f, e->shift, pk);
-            st = stage(e, e->packed_init, pk.data(), pk.size() * sizeof(int32_t));
-        }
-        if (st != GPAP_OK) break;
-        /* Soundness pairs: binaries plus every unit u as (u, u), since none carries a word. */
-        {
-            std::vector<int32_t> pairs;
-            pairs.reserve(f->bin_pairs.size() + 2 * f->unit_lits.size());
-            pairs.insert(pairs.end(), f->bin_pairs.begin(), f->bin_pairs.end());
-            for (int32_t u : f->unit_lits) {
-                pairs.push_back(u);
-                pairs.push_back(u);
-            }
-            e->n_pairs = (int32_t)(pairs.size() / 2);
-            st = stage(e, e->pair_check, pairs.data(), pairs.size() * sizeof(int32_t));
-            if (st != GPAP_OK) break;
-            e->pair_host = std::move(pairs);   /* the SAME list, not a second copy */
-        }
-        /* Host side of gpap_sat_rows' original-order synthesis (the engine outlives f). */
-        e->num_bin = f->num_bin;
-        e->sat_src_host = f->sat_src;
         st = e->acc_ops.reserve(e->mem, 8);
         if (st == GPAP_OK) st = e->acc_props.reserve(e->mem, 8);
         if (st == GPAP_OK) st = e->acc_decs.reserve(e->mem, 8);
@@ -285,15 +253,15 @@ extern "C" int32_t gpap_engine_auto(const gpap_engine *e) {
     /* auto_mode alone is not the answer: $GPAP_KERNEL pins through it. */
     return (e && e->auto_mode && e->env_mode == GPAP_MODE_AUTO) ? 1 : 0;
 }
-extern "C" int32_t gpap_engine_shift(const gpap_engine *e) { return e ? e->shift : 0; }
+extern "C" int32_t gpap_engine_shift(const gpap_engine *e) { return e ? e->fs->shift : 0; }
 extern "C" int32_t gpap_engine_k(const gpap_engine *e) { return e ? e->K : 0; }
-extern "C" int32_t gpap_engine_num_vars(const gpap_engine *e) { return e ? e->num_vars : 0; }
+extern "C" int32_t gpap_engine_num_vars(const gpap_engine *e) { return e ? e->fs->num_vars : 0; }
 extern "C" int32_t gpap_engine_num_clauses(const gpap_engine *e) {
-    return e ? e->num_clauses : 0;
+    return e ? e->fs->num_clauses : 0;
 }
 /* Engine-side: it copies what it needs at create time, so a C consumer may free the formula. */
-extern "C" int32_t gpap_engine_num_long(const gpap_engine *e) { return e ? e->num_long : 0; }
-extern "C" int gpap_engine_flush_conflict(const gpap_engine *e) { return e ? e->flush_conflict : 0; }
+extern "C" int32_t gpap_engine_num_long(const gpap_engine *e) { return e ? e->fs->num_long : 0; }
+extern "C" int gpap_engine_flush_conflict(const gpap_engine *e) { return e ? e->fs->flush_conflict : 0; }
 
 extern "C" const char *gpap_backend(void) {
     const gpap::GpuDriver *d = gpap::gpu_driver();
@@ -314,7 +282,7 @@ extern "C" const char *gpap_engine_device_name(const gpap_engine *e) {
  * between calls; a refit there would reallocate the rows at nearly every sizing, and the rows a
  * smaller batch keeps are already held, outside the free memory the reserve is kept in. */
 static bool exact_sizing(const gpap_engine *e) {
-    if (e->mem_source == gpap::GpuMemory::GRANT) return true;
+    if (e->dev->mem_source == gpap::GpuMemory::GRANT) return true;
     gpap::MemState acct;
     return e->mem.account && gpap::mem_state(e->mem.account, &acct) == GPAP_OK &&
            acct.limit > 0;
@@ -330,15 +298,15 @@ static bool exact_sizing(const gpap_engine *e) {
  * the rows its first chunk took, which the call's sizing already counted (engine_reset_keeping). */
 static gpap_status ensure_state(gpap_engine *e, int32_t K, bool fit = false, int32_t keep = 0) {
     /* gpap_trail_cap (calibrate.cpp) is the one definition, shared with the sizing model. */
-    const int32_t cap = gpap_trail_cap(e->num_vars);
+    const int32_t cap = gpap_trail_cap(e->fs->num_vars);
     if (cap > e->trail_cap) e->trail_cap = cap;
     const size_t keep_rows = (size_t)std::max(K, keep);
     auto size = [&](DevBuf &b, size_t row_bytes) {
         if (fit && b.bytes > keep_rows * row_bytes) b.release();
         return b.reserve(e->mem, (size_t)K * row_bytes);
     };
-    GPAP_TRY(size(e->packed, (size_t)e->num_long * sizeof(int32_t)));
-    GPAP_TRY(size(e->abits, (size_t)e->nw * sizeof(int32_t)));
+    GPAP_TRY(size(e->packed, (size_t)e->fs->num_long * sizeof(int32_t)));
+    GPAP_TRY(size(e->abits, (size_t)e->fs->nw * sizeof(int32_t)));
     GPAP_TRY(size(e->active, 1));
     GPAP_TRY(size(e->conflict, 1));
     GPAP_TRY(size(e->trail, (size_t)e->trail_cap * sizeof(int32_t)));
@@ -404,9 +372,12 @@ extern "C" gpap_status gpap_engine_trim(gpap_engine *e) {
 
 extern "C" int64_t gpap_engine_mem_held(const gpap_engine *e, gpap_mem_kind kind) {
     if (!e) return 0;
-    return kind == GPAP_MEM_FORMULA ? e->mem.formula
+    /* The formula's holder counts FORMULA bytes only: with the engine's kept buffers it is
+     * what a trim keeps (GPAP_MEM_FORMULA). */
+    const int64_t formula = e->mem.formula + (e->fs ? e->fs->mem.held() : 0);
+    return kind == GPAP_MEM_FORMULA ? formula
            : kind == GPAP_MEM_ROWS  ? e->mem.rows
-                                    : e->mem.held();
+                                    : formula + e->mem.rows;
 }
 extern "C" gpap_bound gpap_engine_batch_bound(const gpap_engine *e) {
     return e ? e->bound : GPAP_BOUND_NONE;
@@ -432,7 +403,7 @@ gpap_status gpap::engine_reset_keeping(gpap_engine *e, int32_t K, int32_t keep) 
         e->slots[i].count = 0;
         e->slots[i].selected = false;    /* a new chunk selects nothing until asked to */
     }
-    if (!e->flush_ready) return GPAP_OK;                 /* construction path: caller seeds */
+    if (!e->fs->flush_ready) return GPAP_OK;                 /* construction path: caller seeds */
     if (e->clean_enabled && e->packed_clean_rows >= K) {
         /* RESET-LITE: the previous launch was CLEAN-mode (or nothing dirtied since the last
          * broadcast), so the packed rows already ARE the baseline and the K*M broadcast — most
@@ -440,14 +411,14 @@ gpap_status gpap::engine_reset_keeping(gpap_engine *e, int32_t K, int32_t keep) 
          * legacy behaviour (docs/findings/CLEAN_MODE_FINDINGS.md). */
         e->resets_lite++;
     } else {
-        GPAP_TRY(broadcast_rows(e, e->packed, e->packed_flushed, e->num_long, K));
+        GPAP_TRY(broadcast_rows(e, e->packed, e->fs->packed_flushed, e->fs->num_long, K));
         if (K > e->packed_clean_rows) e->packed_clean_rows = K;
         e->resets_full++;
     }
-    GPAP_TRY(broadcast_rows(e, e->abits, e->abits_flushed, e->nw, K));
+    GPAP_TRY(broadcast_rows(e, e->abits, e->fs->abits_flushed, e->fs->nw, K));
     e->abits_diverged = 0;            /* abits are the baseline again, same as packed */
-    GPAP_TRY(fill_flags(e, e->active, e->flush_conflict ? 0 : 1, K));
-    GPAP_TRY(fill_flags(e, e->conflict, e->flush_conflict ? 1 : 0, K));
+    GPAP_TRY(fill_flags(e, e->active, e->fs->flush_conflict ? 0 : 1, K));
+    GPAP_TRY(fill_flags(e, e->conflict, e->fs->flush_conflict ? 1 : 0, K));
     return GPAP_OK;
 }
 
@@ -477,13 +448,13 @@ extern "C" gpap_status gpap_engine_recache_flush(gpap_engine *e) {
     /* Not atomic: two device copies update the two cached buffers, so a failure between them
      * leaves an inconsistent pair. On anything but GPAP_OK, DISCARD THE ENGINE. */
     e->packed_clean_rows = 0;                       /* the baseline itself is moving */
-    if (e->num_long)
-        GPAP_TRY(e->gpu->copy(e->packed_flushed.ptr, e->packed.ptr,
-                              (size_t)e->num_long * sizeof(int32_t)));
-    GPAP_TRY(e->gpu->copy(e->abits_flushed.ptr, e->abits.ptr, (size_t)e->nw * sizeof(int32_t)));
+    if (e->fs->num_long)
+        GPAP_TRY(e->gpu->copy(e->fs->packed_flushed.ptr, e->packed.ptr,
+                              (size_t)e->fs->num_long * sizeof(int32_t)));
+    GPAP_TRY(e->gpu->copy(e->fs->abits_flushed.ptr, e->abits.ptr, (size_t)e->fs->nw * sizeof(int32_t)));
     int8_t c0 = 0;
     GPAP_TRY(e->gpu->download(&c0, e->conflict.ptr, 0, 1));
-    e->flush_conflict = c0 ? 1 : 0;
+    e->fs->flush_conflict = c0 ? 1 : 0;
     return GPAP_OK;
 }
 
@@ -510,19 +481,19 @@ static gpap_status apply_common(gpap_engine *e, gpap::GpuMem decisions, int32_t 
     const int32_t clean_rows_prev = e->packed_clean_rows;
     e->packed_clean_rows = 0;
 
-    const std::string key = fixpoint_key(clean ? "fixpoint_clean" : "fixpoint", e->shift,
+    const std::string key = fixpoint_key(clean ? "fixpoint_clean" : "fixpoint", e->fs->shift,
                                          e->mode == GPAP_MODE_WAVE ? 1 : 0);
-    const int32_t M = e->num_long, NW = e->nw, B = L, cap = e->trail_cap;
+    const int32_t M = e->fs->num_long, NW = e->fs->nw, B = L, cap = e->trail_cap;
     if (clean)        /* init_ptr (packed_flushed) is what the tail restores */
         GPAP_TRY(e->gpu->run(key.c_str(), e->K, 1,
                              {buf(e->packed), buf(e->abits), buf(e->active), buf(e->conflict),
-                              buf(decisions), buf(e->occ_off), buf(e->occ_mid), buf(e->occ_cls),
-                              buf(e->packed_flushed), buf(e->trail), buf(e->nprops), buf(e->nops),
+                              buf(decisions), buf(e->fs->occ_off), buf(e->fs->occ_mid), buf(e->fs->occ_cls),
+                              buf(e->fs->packed_flushed), buf(e->trail), buf(e->nprops), buf(e->nops),
                               buf(e->ndecs), i32(M), i32(NW), i32(B), i32(cap)}));
     else
         GPAP_TRY(e->gpu->run(key.c_str(), e->K, 1,
                              {buf(e->packed), buf(e->abits), buf(e->active), buf(e->conflict),
-                              buf(decisions), buf(e->occ_off), buf(e->occ_mid), buf(e->occ_cls),
+                              buf(decisions), buf(e->fs->occ_off), buf(e->fs->occ_mid), buf(e->fs->occ_cls),
                               buf(e->trail), buf(e->nprops), buf(e->nops), buf(e->ndecs), i32(M),
                               i32(NW), i32(B), i32(cap)}));
     e->launches++;
@@ -602,12 +573,12 @@ static gpap_status trajectory_common(gpap_engine *e, gpap::GpuMem order, int32_t
     e->packed_clean_rows = 0;       /* a trajectory dirties without a restorable record */
     e->abits_diverged = 0;          /* ...but it leaves packed and abits CONSISTENT */
 
-    const std::string key = traj_key(e->shift, e->mode == GPAP_MODE_WAVE ? 1 : 0,
+    const std::string key = traj_key(e->fs->shift, e->mode == GPAP_MODE_WAVE ? 1 : 0,
                                      e->vscan ? 1 : 0, soft ? 1 : 0);
-    const int32_t M = e->num_long, NW = e->nw, cap = e->trail_cap, max_rounds = 1 << 30;
+    const int32_t M = e->fs->num_long, NW = e->fs->nw, cap = e->trail_cap, max_rounds = 1 << 30;
     GPAP_TRY(e->gpu->run(key.c_str(), e->K, 1,
                          {buf(e->packed), buf(e->abits), buf(e->active), buf(e->conflict),
-                          buf(order), buf(e->occ_off), buf(e->occ_mid), buf(e->occ_cls),
+                          buf(order), buf(e->fs->occ_off), buf(e->fs->occ_mid), buf(e->fs->occ_cls),
                           buf(e->trail), buf(e->nrounds), buf(e->nops), buf(e->nprops),
                           buf(e->ndecs), i32(M), i32(NW), i32(P), i32(n_support), i32(B), i32(cap),
                           i32(max_rounds), i64(seed)}));
@@ -646,9 +617,9 @@ extern "C" gpap_status gpap_engine_trajectory(gpap_engine *e, const int32_t *ord
     /* Range-check the order here, where the array is host-side and walked anyway: a v past N
      * writes into a LATER ROW's bitmap, so row A's bad input changes row B's answer. */
     for (int32_t i = 0; i < P; ++i)
-        if (order_host[i] < 0 || order_host[i] >= e->num_vars) {
+        if (order_host[i] < 0 || order_host[i] >= e->fs->num_vars) {
             set_error("gpap_engine_trajectory: order[%d] = %d is not a variable index in "
-                      "[0, %d)", i, order_host[i], e->num_vars);
+                      "[0, %d)", i, order_host[i], e->fs->num_vars);
             return GPAP_ERR_ARG;
         }
     GPAP_TRY(use_ctx(e));
@@ -679,9 +650,9 @@ gpap_status QueuedCall::begin(int32_t requested, int64_t n_sets, int64_t width,
     first_ = std::min<int64_t>(std::max<int64_t>(first_block, 1), kQueueMaxJobs);
     /* A queued row restores itself with CLEAN mode's restore, so $GPAP_CLEAN=0, the escape
      * hatch from that restore, keeps the calls in chunks on the plain kernel too. */
-    if (!e->queue_enabled || !e->clean_enabled || !e->flush_ready) return GPAP_OK;
-    if (e->flush_conflict || e->has_empty_clause) return GPAP_OK;
-    int32_t resident = e->driver->resident_warps(e->device_ordinal);
+    if (!e->queue_enabled || !e->clean_enabled || !e->fs->flush_ready) return GPAP_OK;
+    if (e->fs->flush_conflict || e->fs->has_empty_clause) return GPAP_OK;
+    int32_t resident = e->dev->driver->resident_warps(e->dev->ordinal);
     if (resident <= 0) resident = kQueueRowsUnknown;
     /* The rows that fit with this call's launch buffers taken out of the budget. In bytes, not
      * rows: the batch is capped by gpap_default_k_cap, so rows taken off it say nothing of
@@ -716,7 +687,7 @@ gpap_status QueuedCall::begin(int32_t requested, int64_t n_sets, int64_t width,
     const gpap_mode mode = !e->auto_mode                     ? e->mode
                            : e->env_mode != GPAP_MODE_AUTO ? e->env_mode
                                                            : GPAP_MODE_WAVE;
-    if (!e->gpu->has_kernel(queue_key(e->shift, mode == GPAP_MODE_WAVE ? 1 : 0).c_str())) {
+    if (!e->gpu->has_kernel(queue_key(e->fs->shift, mode == GPAP_MODE_WAVE ? 1 : 0).c_str())) {
         e->bound = chunk_bound;
         e->refit_next = chunk_refit;
         return GPAP_OK;
@@ -738,13 +709,13 @@ gpap_status QueuedCall::begin(int32_t requested, int64_t n_sets, int64_t width,
     /* Every row at the baseline, as a reset leaves it: the packed words unless the claim
      * already covers these rows, the bitmap always. */
     if (e->packed_clean_rows < rows) {
-        GPAP_TRY(broadcast_rows(e, e->packed, e->packed_flushed, e->num_long, (int32_t)rows));
+        GPAP_TRY(broadcast_rows(e, e->packed, e->fs->packed_flushed, e->fs->num_long, (int32_t)rows));
         e->packed_clean_rows = (int32_t)rows;
         e->resets_full++;
     } else {
         e->resets_lite++;
     }
-    GPAP_TRY(broadcast_rows(e, e->abits, e->abits_flushed, e->nw, (int32_t)rows));
+    GPAP_TRY(broadcast_rows(e, e->abits, e->fs->abits_flushed, e->fs->nw, (int32_t)rows));
     e->abits_diverged = 0;
     /* The rows' flags and per-row counters describe no job: leave them as a reset does. */
     GPAP_TRY(fill_flags(e, e->active, 1, (int32_t)rows));
@@ -778,7 +749,7 @@ gpap_status QueuedCall::launch(const int32_t *jobs, int64_t n, int32_t L, int8_t
     const auto t0 = std::chrono::steady_clock::now();
     GPAP_TRY(use_ctx(e));
     const int32_t rows = e->K;
-    gpap::Gpu *g = e->gpu.get();
+    gpap::Gpu *g = e->gpu;
     GPAP_TRY(stage(e, e->queue_dec, jobs, (size_t)n * (size_t)L * sizeof(int32_t)));
     GPAP_TRY(e->queue_conf.reserve(e->mem, (size_t)n));
     GPAP_TRY(e->queue_impl.reserve(e->mem, (size_t)n * sizeof(int32_t)));
@@ -792,12 +763,12 @@ gpap_status QueuedCall::launch(const int32_t *jobs, int64_t n, int32_t L, int8_t
     const int32_t clean_prev = e->packed_clean_rows;
     e->packed_clean_rows = 0;
     e->abits_diverged = 1;
-    const std::string key = queue_key(e->shift, e->mode == GPAP_MODE_WAVE ? 1 : 0);
-    const int32_t M = e->num_long, NW = e->nw, cap = e->trail_cap;
+    const std::string key = queue_key(e->fs->shift, e->mode == GPAP_MODE_WAVE ? 1 : 0);
+    const int32_t M = e->fs->num_long, NW = e->fs->nw, cap = e->trail_cap;
     GPAP_TRY(g->run(key.c_str(), rows, 1,
-                    {buf(e->packed), buf(e->abits), buf(e->queue_dec), buf(e->occ_off),
-                     buf(e->occ_mid), buf(e->occ_cls), buf(e->packed_flushed),
-                     buf(e->abits_flushed), buf(e->trail), buf(e->queue_next),
+                    {buf(e->packed), buf(e->abits), buf(e->queue_dec), buf(e->fs->occ_off),
+                     buf(e->fs->occ_mid), buf(e->fs->occ_cls), buf(e->fs->packed_flushed),
+                     buf(e->fs->abits_flushed), buf(e->trail), buf(e->queue_next),
                      buf(e->queue_conf), buf(e->queue_impl), buf(e->queue_sums), i32(M),
                      i32(NW), i32(L), i32(cap), i32((int32_t)n)}));
     e->launches++;
@@ -849,17 +820,24 @@ gpap_status engine_use_ctx(gpap_engine *e) { return use_ctx(e); }
 gpap_mode dispatch_mode(gpap_engine *e, int32_t K) {
     /* A device that cannot form a WAVE work group runs SCALAR; a pin is honoured instead, and
      * fails at the launch with a message that says so. */
-    if (!e->gpu->has_kernel(fixpoint_key("fixpoint", e->shift, 1).c_str())) return GPAP_MODE_SCALAR;
-    return dispatch_wave(e->driver, e->num_clauses, K, e->device_ordinal) ? GPAP_MODE_WAVE
+    if (!e->gpu->has_kernel(fixpoint_key("fixpoint", e->fs->shift, 1).c_str())) return GPAP_MODE_SCALAR;
+    return dispatch_wave(e->dev->driver, e->fs->num_clauses, K, e->dev->ordinal) ? GPAP_MODE_WAVE
                                                                           : GPAP_MODE_SCALAR;
 }
 
 gpap_status engine_require_trajectory(gpap_engine *e) {
-    const std::string key = traj_key(e->shift, 0, 0, 0);
+    const std::string key = traj_key(e->fs->shift, 0, 0, 0);
     if (e->gpu->has_kernel(key.c_str())) return GPAP_OK;
     set_error("kernel '%s' is not part of the %s backend, which cannot sample. Use "
               "GPAP_BACKEND=cuda for it", key.c_str(), e->gpu->backend());
     return GPAP_ERR_KERNEL;
+}
+
+/* Device bytes this engine holds: its own buffers and its formula's, which is its alone while
+ * no other engine runs on it (one formula per engine today). Where a formula is ever shared, the
+ * "others" below must count it once, on the account, not once per engine. */
+static int64_t engine_held(const gpap_engine *e) {
+    return e->mem.held() + (e->fs ? e->fs->mem.held() : 0);
 }
 
 /* What every bound counts besides the rows and the caller's own buffers: what a call may still
@@ -879,9 +857,9 @@ struct LaterBytes {
 };
 static LaterBytes exact_terms(const gpap_engine *e) {
     LaterBytes t;
-    t.slice = 32ll * 2 * e->num_vars;
-    t.cols = 8ll * e->num_vars;
-    t.masks = 2ll * 4 * e->nw;
+    t.slice = 32ll * 2 * e->fs->num_vars;
+    t.cols = 8ll * e->fs->num_vars;
+    t.masks = 2ll * 4 * e->fs->nw;
     return t;
 }
 
@@ -900,7 +878,7 @@ static void no_row_message(const gpap_engine *e, const SizeRequest &r, const Siz
     /* The default budget's rule is mem_budget's (calibrate.cpp): say what it is taken of. */
     char memory[160], rsv[32];
     std::snprintf(memory, sizeof memory,
-                  e->mem_source == GpuMemory::DEVICE
+                  e->dev->mem_source == GpuMemory::DEVICE
                       ? "the default budget, the device's free memory less the memory reserve of "
                         "%s,"
                       : "the default budget, a share of the device's total memory less the "
@@ -952,17 +930,17 @@ int32_t engine_batch(gpap_engine *e, int64_t extra_row_bytes, int32_t cap,
     SizeRequest r;
     r.total = m.total;
     r.limit = acct.limit;
-    r.held_other = (e->mem.account ? acct.held : e->mem.held()) - own;
+    r.held_other = (e->mem.account ? acct.held : engine_held(e)) - own;
     const LaterBytes later = exact_terms(e);
-    r.per_row = gpap_row_bytes(e->num_long, e->num_vars, e->trail_cap) + extra_row_bytes +
+    r.per_row = gpap_row_bytes(e->fs->num_long, e->fs->num_vars, e->trail_cap) + extra_row_bytes +
                 later.per_row();
     r.fixed = reserve_bytes + later.once();
-    r.cap = cap == 0 ? default_k_cap(e->driver, e->device_ordinal) : cap;
+    r.cap = cap == 0 ? default_k_cap(e->dev->driver, e->dev->ordinal) : cap;
     r.max_buffer = m.max_buffer;
     /* Each per-row buffer holds the batch's rows, so the widest one meets the device's
      * one-buffer limit first: the engine's own (packed words, bitmap, trail) or the caller's. */
     r.widest = std::max<int64_t>(
-        {4ll * e->num_long, 4ll * e->nw, 4ll * e->trail_cap, extra_row_bytes, 1});
+        {4ll * e->fs->num_long, 4ll * e->fs->nw, 4ll * e->trail_cap, extra_row_bytes, 1});
     switch (m.source) {
         case GpuMemory::DEVICE:
             r.memory = mem_budget(m.free + own + staging, acct.reserve, 1);
@@ -975,7 +953,7 @@ int32_t engine_batch(gpap_engine *e, int64_t extra_row_bytes, int32_t cap,
              * staging and selection lists grow with use, and a lone engine's batch stays a
              * function of the formula and the card, as it was. */
             if (r.limit <= 0) {
-                const int64_t others = e->mem.account ? acct.held - e->mem.held() : 0;
+                const int64_t others = e->mem.account ? acct.held - engine_held(e) : 0;
                 r.memory = mem_budget(std::max<int64_t>(m.free - others, 0), acct.reserve,
                                       kTotalShare);
             }
@@ -1003,7 +981,7 @@ int32_t engine_batch(gpap_engine *e, int64_t extra_row_bytes, int32_t cap,
      * sizing left it). Not on an unmeasured total (OpenCL): there the batch stays a function of
      * the formula and the card, and the share's margin covers what a call keeps. */
     if (keeps && m.source == GpuMemory::DEVICE && s.rows > 0 && e->mem.rows > 0) {
-        const int64_t state_row = gpap_row_bytes(e->num_long, e->num_vars, e->trail_cap);
+        const int64_t state_row = gpap_row_bytes(e->fs->num_long, e->fs->num_vars, e->trail_cap);
         const int64_t room = r.memory - own - staging;
         /* No margin where GPAP_VRAM_BUDGET_MIB set the budget: the cap is a ceiling. */
         const int64_t vram_cap = mem_budget_cap();
