@@ -503,12 +503,13 @@ gpap_status counters_restore(gpap_engine *e, const CounterState &c) {
 namespace {
 
 /* The engine on a new formula until commit(): any other way out, a status or an exception that
- * guard_entry turns into one, puts the old formula back, untouched, and leaves no rows of the
- * new shape, keeping the error message the failure set. */
+ * guard_entry turns into one, puts the old formula back, untouched, with the kernel the engine
+ * had resolved for it, and leaves no rows of the new shape, keeping the error message the
+ * failure set. */
 class FormulaSwap {
   public:
     FormulaSwap(gpap_engine *e, std::shared_ptr<gpap::FormulaState> grown)
-        : e_(e), old_(std::move(e->fs)) {
+        : e_(e), old_(std::move(e->fs)), mode_(e->mode) {
         e_->fs = std::move(grown);
     }
     void commit() {                       /* the old formula goes */
@@ -521,6 +522,7 @@ class FormulaSwap {
         char why[1024];
         std::snprintf(why, sizeof why, "%s", gpap::get_error());
         e_->fs = std::move(old_);
+        e_->mode = mode_;                 /* the reset(1) resolved it for the new formula */
         if (gpap_engine_trim(e_) != GPAP_OK) drop_rows(e_, GPAP_OK);
         set_error("%s", why);
     }
@@ -530,6 +532,7 @@ class FormulaSwap {
   private:
     gpap_engine *e_;
     std::shared_ptr<gpap::FormulaState> old_;
+    gpap_mode mode_;
     bool committed_ = false;
 };
 

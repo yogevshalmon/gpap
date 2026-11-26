@@ -157,15 +157,16 @@ gpap_status gpap_engine_trim(gpap_engine *e);
  * formula unsat). Old clauses keep their indices, so their gpap_sat_rows columns, and the new ones
  * follow; read the counts back from gpap_engine_num_clauses and gpap_engine_num_long. The rows go
  * (a long clause widens every row): afterwards K is 1, as after create. A sampler created on the
- * engine before the add refuses to run. It costs one upload of the new formula per call, however
- * many clauses it adds, so add clauses in batches, not one call per launch. n == 0 does nothing.
- * Refused with nothing changed: GPAP_ERR_ARG for a bad literal or length, or during a queued call;
- * GPAP_ERR_ENVELOPE for a clause longer than the engine's packed split holds. Failed later
- * (GPAP_ERR_MEMORY when the new formula does not fit beside the old one, under a limit or, where
- * free memory is measured, outside the memory reserve; or a device error): the engine keeps its old
- * formula, and its rows may be gone, as after gpap_engine_trim. A sampler made after an add takes
- * the engine's kernel as it finds it: where an earlier sampler pinned one for the old formula, call
- * gpap_engine_set_mode(e, GPAP_MODE_AUTO) first. */
+ * engine before the add refuses to run or to take a batch (gpap_sampler_set_k). It costs one upload
+ * of the new formula per call, however many clauses it adds, so add clauses in batches, not one
+ * call per launch. n == 0 does nothing. Refused with nothing changed: GPAP_ERR_ARG for a bad
+ * literal or length, or during a queued call; GPAP_ERR_ENVELOPE for a clause longer than the
+ * engine's packed split holds. Failed later (GPAP_ERR_MEMORY when the new formula does not fit
+ * beside the old one, under a limit or, where free memory is measured, outside the memory reserve;
+ * or a device error): the engine keeps its old formula, and its rows may be gone, as after
+ * gpap_engine_trim. A sampler made after an add takes the engine's kernel as it finds it: where an
+ * earlier sampler pinned one for the old formula, call gpap_engine_set_mode(e, GPAP_MODE_AUTO)
+ * first. */
 gpap_status gpap_engine_add_clauses(gpap_engine *e, const int32_t *flat_lits,
                                     const int32_t *clause_lens, int32_t n);
 

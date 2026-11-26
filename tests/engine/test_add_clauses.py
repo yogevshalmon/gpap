@@ -331,6 +331,52 @@ def test_an_add_whose_first_row_does_not_fit_puts_the_old_formula_back():
     _assert_same(a, _engine(nv, f0), _sets(rng, nv, 100))
 
 
+def test_a_rolled_back_add_keeps_the_kernel_choice():
+    """The add resets to one row on the grown formula, which on AUTO resolves the kernel for it,
+    then applies what the new clauses force. Failed there, the rollback puts back the kernel the
+    engine had resolved for its old formula too. The limit is one byte below the least this add
+    needs, so it fails at its last allocation, the forced literal's apply, after the reset. K is
+    the first batch past the resident warps, where the old formula, below the WAVE threshold,
+    runs SCALAR and one row WAVE, so the two choices differ."""
+    rng = random.Random(19)
+    nv = 300
+    model = _model(rng, nv)
+    f0 = _planted(rng, nv, 200, [2, 3, 4], model)
+    add = _planted(rng, nv, 3000, [3, 4], model) + [[1 if model[1] else -1]]   # forces a literal
+    K = next((k for k in (4096, 16384) if not _core.dispatch_wave(len(f0), k)), None)
+    if K is None or not _core.dispatch_wave(len(f0), 1):
+        pytest.skip("on this device one row and a full batch take the same kernel")
+
+    def attempt(extra):
+        """(added, the kernel before, the engine): the add under a limit `extra` bytes above
+        the trimmed engine."""
+        gc.collect()
+        a = _engine(nv, f0)
+        a.reset(K)
+        before = a.mode
+        a.trim()
+        _core.set_mem_limit(f"{_core.mem_held(0) + extra}B", 0)
+        try:
+            a.add_clauses(add)
+            return True, before, a
+        except _core.GpapMemoryError:
+            return False, before, a
+        finally:
+            _core.set_mem_limit(None, 0)
+
+    lo, hi = 0, 1 << 26                  # no room fails; 64 MiB is plenty
+    assert attempt(hi)[0] and not attempt(lo)[0]
+    while hi - lo > 1:
+        mid = (lo + hi) // 2
+        if attempt(mid)[0]:
+            hi = mid
+        else:
+            lo = mid
+    ok, before, a = attempt(lo)
+    assert not ok and before == "scalar", "precondition: the full batch runs SCALAR"
+    assert (a.num_clauses, a.mode) == (len(f0), before)
+
+
 def test_a_hundred_adds_leak_nothing():
     """Each add frees the formula it replaced: the device holds the engine's bytes and nothing
     else after every add, and nothing at all once the engine goes. The grown formula is a fresh
@@ -392,7 +438,8 @@ def test_the_faces_read_the_engines_counts_after_an_add():
 def test_a_sampler_refuses_after_its_engine_took_an_add():
     """A sampler is set up for the formula it was made on: the kernel it pins for that clause
     count, and a set_k batch for those rows. Once its engine took clauses, it refuses to run
-    rather than run with them."""
+    rather than run with them, and to take a batch, which would pin the engine's kernel
+    again for the old formula's sampler."""
     rng = random.Random(15)
     nv = 60
     model = _model(rng, nv)
@@ -402,3 +449,7 @@ def test_a_sampler_refuses_after_its_engine_took_an_add():
     a.add_clauses(_planted(rng, nv, 5, [3], model))
     with pytest.raises(_core.GpapError, match="gpap_engine_add_clauses"):
         s.run(10, [(0, 8)], max_chunks=1)
+    mode = a.mode
+    with pytest.raises(_core.GpapError, match="gpap_sampler_set_k.*gpap_engine_add_clauses"):
+        s.set_k(64)
+    assert a.mode == mode, "a refused set_k pins nothing"

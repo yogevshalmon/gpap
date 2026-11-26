@@ -494,6 +494,7 @@ def sample_clauses(nv, clauses, support, device, *, simplify=True, els=True, n_t
             # warm-up failed) is built again.
             if mine_error is not None:
                 log.warning("mining skipped after a device error: %s", mine_error)
+                mine_info = None                # skipped: no record of a mine it does not sample
                 if not plain:
                     _tm = time.perf_counter()
                     smp = _new_sampler(clauses)

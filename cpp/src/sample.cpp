@@ -123,6 +123,17 @@ namespace {
 /* Pin the propagate kernel to the batch the chunks will run, so a short reset elsewhere cannot
  * switch kernels mid-measurement — but only when the choice is ours: an explicit pin is never
  * overridden, and once WE pinned, engine_auto goes 0 so re-pins key off we_pinned_mode. */
+/* A sampler set itself up for the formula its engine had at create (the kernel it pins, a
+ * set_k batch): once gpap_engine_add_clauses has moved it, every call that acts on that
+ * set-up refuses, re-pinning the engine's kernel included. */
+gpap_status refuse_if_stale(const gpap_sampler *s, const char *what) {
+    if (s->e->formula_version == s->formula_version) return GPAP_OK;
+    set_error("%s: the engine took clauses (gpap_engine_add_clauses) after this sampler was "
+              "created, which set itself up for the old formula: create a new sampler (after "
+              "gpap_engine_set_mode(AUTO), if this one pinned the kernel)", what);
+    return GPAP_ERR_ARG;
+}
+
 gpap_status pin_mode(gpap_sampler *s) {
     if (!gpap_engine_auto(s->e)) {
         /* Someone else owns the choice (e->mode is no longer what we left); we_pinned_mode
@@ -218,6 +229,7 @@ extern "C" int32_t gpap_sampler_k(const gpap_sampler *s) { return s ? s->K : 0; 
 
 extern "C" gpap_status gpap_sampler_set_k(gpap_sampler *s, int32_t k) {
     if (!s) { set_error("gpap_sampler_set_k: sampler is NULL"); return GPAP_ERR_ARG; }
+    GPAP_TRY(refuse_if_stale(s, "gpap_sampler_set_k"));
     /* Any k > 0 pins, the sized batch too: every run sizes again, so a pin judged by its value
      * would be lost at the next run. k <= 0 unpins, and the next run sizes the batch. */
     s->pinned = k > 0;
@@ -301,12 +313,7 @@ extern "C" gpap_status gpap_sampler_run(gpap_sampler *s, int64_t n_target,
                   ? "configs is NULL" : "n_configs must be >= 1 (one entry = the pinned mode)");
         return GPAP_ERR_ARG;
     }
-    if (s->e->formula_version != s->formula_version) {
-        set_error("gpap_sampler_run: the engine took clauses (gpap_engine_add_clauses) after this "
-                  "sampler was created, which set itself up for the old formula: create a new "
-                  "sampler (after gpap_engine_set_mode(AUTO), if this one pinned the kernel)");
-        return GPAP_ERR_ARG;
-    }
+    GPAP_TRY(refuse_if_stale(s, "gpap_sampler_run"));
     s->opt = opts ? *opts : gpap_sampler_options{};   /* {0} == NULL == the defaults */
     if (n_configs > kMaxConfigs) {
         set_error("gpap_sampler_run: %d configs (max %d) — the portfolio races configs by "
