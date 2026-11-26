@@ -23,6 +23,26 @@ Both row states are single words updated by ONE op whose old value IS the detect
     ONE load answers free/duplicate/contradiction and in WAVE the push is a tl.atomic_or whose
     RETURN deduplicates (old bit l) and detects contradictions (old bit l^1).
 
+Memory ordering under WAVE (the scalar kernels have no atomics and are not touched by this):
+  * A row's words belong to its program, so its atomics need atomicity and their return
+    values, never ordering against another program: they are `sem="relaxed"`. Triton's default
+    (acq_rel) fences every atomic and empties the SM's L1, which also evicts the occurrence
+    lists every lane reads (docs/findings/KERNEL_AB_FINDINGS.md, "Relaxed atomics").
+  * The fences also ordered the threads of one row against each other, and a barrier does that
+    now. Triton runs scalar code in every thread but stores a scalar from thread 0 alone, while
+    the lanes each push their own literals: thread 0's seeds and decisions, the lanes' atomics
+    and the lanes' trail slots all meet on the same words. `_wave_propagate` holds the
+    barriers, so its callers need none: one before every wave (seeds and decisions before the
+    pushes onto their words: a push that missed a decision's bit would miss a contradiction;
+    trail slots before the lanes read them) and one after the last wave (the atomics before
+    whatever reads or rewrites their words next: a decision scan, the soft risk, a restore).
+    After a barrier every thread of the program sees every write made before it, atomics
+    included; one warp per program makes it cheap.
+  * The queue's job counter is the one atomic rows share. It keeps acq_rel: it runs once per
+    job, and its fence also lands a job's restores before the row takes the next one.
+Remove a barrier and the tests still pass on most runs, while a lost bit gives a wrong answer.
+So a change here gets the identity tests run many times over, on more than one GPU.
+
 `_bcp_fixpoint_kernel` seeds a (K,B) decision tensor and BCPs to fixpoint;
 `_bcp_trajectory_kernel` runs the whole randomized decide+propagate loop. Contract:
 conflict/active flags are exact (fixpoints are confluent) and a non-conflicted row's assignment
@@ -133,6 +153,7 @@ def _wave_propagate(st_row, ab_row, trail_row, occ_off_ptr, occ_mid_ptr, occ_cls
     SUM_MASK: tl.constexpr = (1 << (32 - SHIFT)) - 1
     lanes = tl.arange(0, W)
     while (head < tail) & (conflict == 0):
+        tl.debug_barrier()          # what other threads wrote: seeds, decisions, trail slots
         f = tl.minimum(tail - head, W)
         lm = lanes < f
         lit_v = tl.load(trail_row + head + lanes, mask=lm, other=0)
@@ -158,7 +179,8 @@ def _wave_propagate(st_row, ab_row, trail_row, occ_off_ptr, occ_mid_ptr, occ_cls
             binm = act & (pay_v < 0)
             lngm = act & (pay_v >= 0)
             c_v = pay_v.to(tl.int64)
-            old_v = tl.atomic_add(st_row + c_v, -(1 + (mneg_v << SHIFT)), mask=lngm)
+            old_v = tl.atomic_add(st_row + c_v, -(1 + (mneg_v << SHIFT)), mask=lngm,
+                                  sem="relaxed")
             oldsat_v = old_v & SAT_MASK
             # ---- forced pushes: ONE atomic_or per literal; old word = dedup + contradiction,
             #      binary lanes joining the long-unit lanes, race-free by L2 serialization.
@@ -167,7 +189,7 @@ def _wave_propagate(st_row, ab_row, trail_row, occ_off_ptr, occ_mid_ptr, occ_cls
                 fm, tl.where(binm, pay_v & 0x7FFFFFFF,
                              ((old_v >> SHIFT) - mneg_v) & SUM_MASK), 0)
             bit_v = 1 << (forced_v & 31)
-            oldw_v = tl.atomic_or(ab_row + (forced_v >> 5), bit_v, mask=fm)
+            oldw_v = tl.atomic_or(ab_row + (forced_v >> 5), bit_v, mask=fm, sem="relaxed")
             contra_v = fm & ((oldw_v & (1 << ((forced_v ^ 1) & 31))) != 0)
             conf_v = contra_v | (lngm & (oldsat_v == 1))   # pushed both polarities | emptied a clause
             keep = fm & ((oldw_v & bit_v) == 0) & ~contra_v
@@ -177,6 +199,7 @@ def _wave_propagate(st_row, ab_row, trail_row, occ_off_ptr, occ_mid_ptr, occ_cls
             tail += tl.sum(k32, 0)
             conflict = conflict | (tl.sum(conf_v.to(tl.int32), 0) > 0)
             t0 += W
+    tl.debug_barrier()              # the atomics before what follows: a scan, a risk, a restore
     return head, tail, conflict, nops
 
 @triton.jit
@@ -342,7 +365,8 @@ def _bcp_trajectory_kernel(
                     h_v = (h_v ^ (h_v >> 27)) * -7723592293110705685
                     pol_v = ((h_v >> 13) & 1).to(tl.int32)
                     lit_v = 2 * v_v + pol_v
-                    tl.atomic_or(ab_row + (lit_v >> 5), 1 << (lit_v & 31), mask=take_v)
+                    tl.atomic_or(ab_row + (lit_v >> 5), 1 << (lit_v & 31), mask=take_v,
+                                 sem="relaxed")
                     tl.store(trail_row + tail + rank_v - 1, lit_v, mask=take_v)
                     n_take = tl.sum(take_v.to(tl.int32), 0)
                     tail += n_take
