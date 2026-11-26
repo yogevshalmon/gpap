@@ -123,7 +123,10 @@ of §2 resolve exactly those.
 - **WAVE** pops up to `W = 32` literals, flattens their occ segments (prefix sums + a
   warp-shuffle lower_bound; no shared memory), issues `W` scattered atomics per step, classifies
   each by its return value and compacts the new forced literals onto the trail. Two lanes forcing
-  `l` and `¬l` serialize on the bitmap word; exactly one sees the other's bit.
+  `l` and `¬l` serialize on the bitmap word; exactly one sees the other's bit. The atomics are
+  relaxed: a row belongs to one program, so they need atomicity and their return values, not
+  ordering against other programs. A barrier before each wave and one after the last order the
+  program's own threads (`cpp/kernels/bcp.py`, "Memory ordering under WAVE").
 
 The clause count decides which one runs (`gpap_dispatch_wave` in `cpp/src/calibrate.cpp`,
 resolved inside every `reset`, so every consumer gets it): WAVE when `M ≥ 2048`, or when the
@@ -362,7 +365,7 @@ sampler's warmup rows leave, which under a tight limit would be no row at all (G
 | the assignment bitmap — one `atomic_or` per push | INSIGHTS.md, 2026-07-14 |
 | binary clauses as implication edges; only long clauses carry state | [findings/BINARY_OCC_FINDINGS.md](findings/BINARY_OCC_FINDINGS.md) |
 | the WAVE propagate and its shuffle-based lane schedule | [findings/WAVE_SHUFFLE_FINDINGS.md](findings/WAVE_SHUFFLE_FINDINGS.md) |
-| the `M ≥ 2048` dispatch rule; the wave/scalar ratio by formula size | [findings/KERNEL_AB_FINDINGS.md](findings/KERNEL_AB_FINDINGS.md), INSIGHTS.md 2026-08-18 |
+| the `M ≥ 2048` dispatch rule; the wave/scalar ratio by formula size; WAVE's relaxed atomics | [findings/KERNEL_AB_FINDINGS.md](findings/KERNEL_AB_FINDINGS.md), INSIGHTS.md 2026-11-26 |
 | CLEAN mode | [findings/CLEAN_MODE_FINDINGS.md](findings/CLEAN_MODE_FINDINGS.md), [findings/MINING_FINDINGS.md](findings/MINING_FINDINGS.md) |
 | the queue | [findings/PROBE_QUEUE_FINDINGS.md](findings/PROBE_QUEUE_FINDINGS.md) |
 | the batch model, the cap, and why K is not a throughput lever | [findings/CROSS_GPU_FINDINGS.md](findings/CROSS_GPU_FINDINGS.md), INSIGHTS.md |

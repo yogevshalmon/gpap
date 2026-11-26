@@ -9,6 +9,11 @@ change does not.
 ## Unreleased
 
 ### Engine
+- The WAVE kernel's atomics are relaxed, and two barriers per propagate order a row's threads
+  instead of a GPU-wide fence around every atomic. With WAVE running, the sampler is 1.4 to 1.5
+  times as fast on an A100 and 1.2 times on a T4, and the queued sweeps 1.1 times on the A100;
+  every result is the same ([docs/findings/KERNEL_AB_FINDINGS.md](docs/findings/KERNEL_AB_FINDINGS.md),
+  issue 51). The scalar kernels and the dispatch rule are unchanged.
 - Probe sweeps (`gpap_probe_*`, `LiteralProbe`, mining) and flags-only assumption checks
   (`gpap_check_sets` without assignments or sat counts) run on a job queue, on both backends: a
   few rows of state, each taking set after set and restoring what it touched, so a launch no
