@@ -19,11 +19,14 @@ namespace gpap {
 void set_error(const char *fmt, ...);
 const char *get_error();
 
-/* The share of a device's total memory the default rule takes where free memory cannot be
- * measured (OpenCL): the total stands in for free memory, so this share is the margin for
- * everything GPAP cannot see there. A measured device takes all of its free memory less the
- * reserve (memory.hpp) instead. Defined once so a formula cannot pick a different batch per
- * entry point. */
+/* The share of the default budget on a device that reports only its total memory, not its free
+ * memory: the OpenCL plug (mem_budget's `share`, which engine_batch and gpap_mem_available pass
+ * there). The total stands in for free memory and still counts what is already taken (the
+ * driver's context, other processes, a display), which GPAP cannot see, so this share is the
+ * margin for it. Nowhere else: a CUDA device reports its free memory and takes all of it less the
+ * reserve (share 1, memory.hpp), and under a limit no share applies. The share was not measured
+ * on OpenCL (docs/findings/MEMORY_FINDINGS.md §9). Defined once so a formula cannot pick a
+ * different batch per entry point. */
 constexpr double kTotalShare = 0.80;
 
 /* Guard for packed-derived readouts after a CLEAN launch (engine.cpp; used by readout.cpp). */
@@ -118,7 +121,12 @@ gpap_status engine_require_trajectory(gpap_engine *e);
  * once (the queue's launch buffers); at most `cap` (0 = gpap_default_k_cap, < 0 = none). It
  * records the bound that set the batch (e->bound). 0, the message set, when not even one row
  * fits, the device cannot report its memory or the limit is malformed: the caller fails with
- * e->sizing_status rather than run one row. */
+ * e->sizing_status rather than run one row. `extra_in_staging` says where the per-row bytes go:
+ * true when the caller stages them in staging_a (the decision matrix gpap_apply stages for
+ * probing and checking), false when they get a buffer of their own (the queue's sums). Only the
+ * cut on a measured device under the default budget reads it: there a staged call reuses what
+ * staging_a already holds, but bytes in a buffer of their own are new, and counting them
+ * against staging_a would let the call outgrow the room it was sized for. */
 int32_t engine_batch(gpap_engine *e, int64_t extra_row_bytes, int32_t cap,
                      int64_t reserve_bytes = 0, bool extra_in_staging = true);
 /* Bytes a call's transients may take now on the engine's device: what the limit, or a host's
