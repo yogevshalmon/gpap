@@ -29,6 +29,14 @@ change does not.
   baseline rather than the last chunk.
 - Additive ABI, same soname: `gpap_engine_queue_stats` (launches, sets and the kernel the queue
   ran); in Python, `Engine.queue_stats()` and `queue_mode()`.
+- `gpap_engine_add_clauses` adds clauses to a live engine instead of building a new one (issue
+  65): the engine then answers as one built on all its clauses would, every assumed unit still
+  assumed, and old clauses keep their indices. One upload of the grown formula per call, so it
+  takes clauses in batches. A failed add leaves the old formula whole; the rows go, and a sampler
+  made on the engine before refuses to run. C++ `Engine::add_clauses` and
+  `Prober::add_clauses`; Python `LiteralProbe.add_clauses`. Additive ABI, same soname.
+- Python's `Engine.num_clauses`, `num_long` and `num_vars` read the engine, not the formula it
+  was built from.
 
 ### Memory
 - A memory limit: the most GPU memory GPAP's engines hold on a device, summed over engines

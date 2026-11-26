@@ -115,6 +115,11 @@ The engine:
 - Every device buffer the engine allocates is a `DevBuf`, which counts it on the ledger
   (`cpp/src/memory.hpp`) as formula or rows; a buffer a trim keeps is a `FormulaBuf`. A buffer
   that goes round `DevBuf` is invisible to the memory limit.
+- A formula in use is never written: `gpap_engine_add_clauses` builds a new `FormulaState` beside
+  it and swaps it in, so a failed add leaves the old one whole (`cpp/src/formula_state.cpp`).
+  Only `gpap_assume_units` and `gpap_engine_recache_flush` write a baseline, the engine's own.
+- The `Device` owns the plug, and every `FormulaState` and engine holds it, declared before their
+  buffers: every buffer frees through the plug before the plug goes.
 - On every bound, a call's sizing counts everything the call allocates afterwards
   (`exact_terms` in `cpp/src/engine.cpp`). A new buffer goes there, or
   `tests/engine/test_mem_limit.py` fails under a tight limit or a small default budget. Under a

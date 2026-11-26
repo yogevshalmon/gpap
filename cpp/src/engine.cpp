@@ -217,6 +217,8 @@ extern "C" gpap_status gpap_engine_create(const gpap_formula *f, const gpap_engi
         st = gpap::formula_state_upload(e->dev, f, o.force_shift ? o.force_shift : f->shift,
                                         /*with_init=*/true, &e->fs);
         if (st != GPAP_OK) break;
+        st = gpap::formula_state_keep_host(*e->fs, f);   /* for gpap_engine_add_clauses */
+        if (st != GPAP_OK) break;
         st = e->acc_ops.reserve(e->mem, 8);
         if (st == GPAP_OK) st = e->acc_props.reserve(e->mem, 8);
         if (st == GPAP_OK) st = e->acc_decs.reserve(e->mem, 8);
@@ -456,6 +458,141 @@ extern "C" gpap_status gpap_engine_recache_flush(gpap_engine *e) {
     GPAP_TRY(e->gpu->download(&c0, e->conflict.ptr, 0, 1));
     e->fs->flush_conflict = c0 ? 1 : 0;
     return GPAP_OK;
+}
+
+/* ------------------------------------------------------------------ adding clauses */
+
+namespace {
+
+/* The counters an add leaves alone: its flush is bookkeeping, as create's is, so a caller's
+ * counts (mining's implications and resets) read as if a new engine had been built. */
+struct CounterState {
+    int64_t acc[3] = {0, 0, 0};
+    int64_t host_ops = 0, host_props = 0, host_decs = 0, launches = 0;
+    int64_t resets_full = 0, resets_lite = 0;
+};
+
+gpap_status counters_save(gpap_engine *e, CounterState *c) {
+    GPAP_TRY(e->gpu->download(&c->acc[0], e->acc_ops.ptr, 0, sizeof(int64_t)));
+    GPAP_TRY(e->gpu->download(&c->acc[1], e->acc_props.ptr, 0, sizeof(int64_t)));
+    GPAP_TRY(e->gpu->download(&c->acc[2], e->acc_decs.ptr, 0, sizeof(int64_t)));
+    c->host_ops = e->host_ops;
+    c->host_props = e->host_props;
+    c->host_decs = e->host_decs;
+    c->launches = e->launches;
+    c->resets_full = e->resets_full;
+    c->resets_lite = e->resets_lite;
+    return GPAP_OK;
+}
+
+gpap_status counters_restore(gpap_engine *e, const CounterState &c) {
+    e->host_ops = c.host_ops;
+    e->host_props = c.host_props;
+    e->host_decs = c.host_decs;
+    e->launches = c.launches;
+    e->resets_full = c.resets_full;
+    e->resets_lite = c.resets_lite;
+    GPAP_TRY(e->gpu->upload(e->acc_ops.ptr, &c.acc[0], sizeof(int64_t)));
+    GPAP_TRY(e->gpu->upload(e->acc_props.ptr, &c.acc[1], sizeof(int64_t)));
+    GPAP_TRY(e->gpu->upload(e->acc_decs.ptr, &c.acc[2], sizeof(int64_t)));
+    return GPAP_OK;
+}
+
+}  // namespace
+
+namespace {
+
+/* The engine on a new formula until commit(): any other way out, a status or an exception that
+ * guard_entry turns into one, puts the old formula back, untouched, and leaves no rows of the
+ * new shape, keeping the error message the failure set. */
+class FormulaSwap {
+  public:
+    FormulaSwap(gpap_engine *e, std::shared_ptr<gpap::FormulaState> grown)
+        : e_(e), old_(std::move(e->fs)) {
+        e_->fs = std::move(grown);
+    }
+    void commit() {                       /* the old formula goes */
+        committed_ = true;
+        old_.reset();
+    }
+    ~FormulaSwap() {
+        if (committed_) return;
+        /* A fixed buffer, not a std::string: nothing in a destructor may throw. */
+        char why[1024];
+        std::snprintf(why, sizeof why, "%s", gpap::get_error());
+        e_->fs = std::move(old_);
+        if (gpap_engine_trim(e_) != GPAP_OK) drop_rows(e_, GPAP_OK);
+        set_error("%s", why);
+    }
+    FormulaSwap(const FormulaSwap &) = delete;
+    FormulaSwap &operator=(const FormulaSwap &) = delete;
+
+  private:
+    gpap_engine *e_;
+    std::shared_ptr<gpap::FormulaState> old_;
+    bool committed_ = false;
+};
+
+}  // namespace
+
+/* Validate and plan on the host, then build the new formula beside the old one, propagate what
+ * the new clauses force on top of the old baseline, and swap. The old formula is never written,
+ * so every failure leaves it in place (gpap.h). */
+extern "C" gpap_status gpap_engine_add_clauses(gpap_engine *e, const int32_t *flat_lits,
+                                               const int32_t *clause_lens, int32_t n) {
+    if (!e || n < 0 || (n > 0 && !clause_lens)) {
+        set_error("gpap_engine_add_clauses: %s", !e      ? "engine must not be NULL"
+                                                 : n < 0 ? "n must not be negative"
+                                                         : "clause_lens must not be NULL");
+        return GPAP_ERR_ARG;
+    }
+    if (n == 0) return GPAP_OK;    /* as gpap_assume_units with no literal: nothing changes */
+    GPAP_TRY(refuse_while_queued(e, "gpap_engine_add_clauses"));
+    /* Only empty clauses have no literal to point at, so a NULL flat_lits is theirs: the
+     * builder wants a pointer, and reads nothing through it. */
+    static const int32_t kNoLiteral = 0;
+    if (!flat_lits) {
+        for (int32_t i = 0; i < n; ++i)
+            if (clause_lens[i] != 0) {
+                set_error("gpap_engine_add_clauses: flat_lits is NULL, but clause %d has %d "
+                          "literal(s)", i, clause_lens[i]);
+                return GPAP_ERR_ARG;
+            }
+        flat_lits = &kNoLiteral;
+    }
+    return gpap::guard_entry("gpap_engine_add_clauses", [&]() -> gpap_status {
+        GPAP_TRY(use_ctx(e));
+        /* 1. Check the clauses and plan the grown formula on the host, reading the baseline
+         *    once: a refusal changes nothing. */
+        gpap::FormulaGrowth grow;
+        GPAP_TRY(gpap::formula_growth_plan(*e->fs, flat_lits, clause_lens, n, &grow));
+        /* 2. The rows go: they have the old shape (a new long clause widens every row), and the
+         *    new formula is built in the room they leave. */
+        GPAP_TRY(gpap_engine_trim(e));
+        /* 3. The new formula, beside the old one: a failure leaves nothing of it. */
+        GPAP_TRY(gpap::formula_growth_upload(*e->fs, &grow));
+        /* 4. Propagate what the new clauses force on row 0 over the new formula and make the
+         *    fixpoint its baseline (gpap_assume_units' path), with the counters put back. */
+        CounterState saved;
+        GPAP_TRY(counters_save(e, &saved));
+        FormulaSwap swap(e, std::move(grow.state));
+        gpap_status st = gpap::engine_reset_keeping(e, 1, 1);
+        if (st == GPAP_OK && !e->fs->flush_conflict && !grow.forced.empty()) {
+            st = gpap_engine_apply(e, grow.forced.data(), (int32_t)grow.forced.size());
+            if (st == GPAP_OK) st = gpap_engine_recache_flush(e);
+        }
+        if (st != GPAP_OK) {
+            const std::string why = gpap::get_error();     /* the launch's, not the restore's */
+            (void)counters_restore(e, saved);
+            set_error("%s", why.c_str());
+            return st;                                    /* the swap puts the old formula back */
+        }
+        GPAP_TRY(counters_restore(e, saved));
+        /* 5. Commit: the old formula goes, and a sampler of the old shape refuses from here. */
+        swap.commit();
+        e->formula_version++;
+        return GPAP_OK;
+    });
 }
 
 /* ------------------------------------------------------------------ entry point 1 */

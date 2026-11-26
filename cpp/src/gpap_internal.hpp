@@ -343,6 +343,9 @@ struct FormulaState {
 
     /* Host side of the original-order readout synthesis (the engine drops the formula). */
     std::vector<int32_t> sat_src_host, pair_host;
+    /* The formula as built (no packed initial words), kept for gpap_engine_add_clauses, which
+     * rebuilds it with the new clauses appended instead of downloading the lists. */
+    std::unique_ptr<gpap_formula> host;
 
     FormulaState() = default;
     FormulaState(const FormulaState &) = delete;
@@ -359,6 +362,34 @@ struct FormulaState {
 gpap_status formula_state_upload(const std::shared_ptr<Device> &dev, const gpap_formula *f,
                                  int32_t shift, bool with_init,
                                  std::shared_ptr<FormulaState> *out);
+
+/* Keep a host copy of `f` in F->host, without its packed initial words: the C ABI lets a caller
+ * free the formula after gpap_engine_create, and an add rebuilds from the copy. GPAP_ERR_MEMORY
+ * when the host has no room. */
+gpap_status formula_state_keep_host(FormulaState &F, const gpap_formula *f);
+
+/* A formula grown by clauses, for gpap_engine_add_clauses: planned on the host against the old
+ * state, then uploaded beside it. The old state is read, never written. */
+struct FormulaGrowth {
+    std::unique_ptr<gpap_formula> built;  /* the old clauses, then the new: a rebuild's formula */
+    /* The new baseline: the old one, with the new long clauses' words computed against its
+     * assignment (count and sum of the literals it has not falsified, as the kernels keep
+     * them), and its bitmap unchanged. */
+    std::vector<int32_t> words;
+    std::vector<int32_t> bits;
+    std::vector<int64_t> forced;   /* literals a new clause forces under the old baseline */
+    bool conflict = false;         /* a new clause is false under it, or empty */
+    std::shared_ptr<FormulaState> state;   /* set by formula_growth_upload */
+};
+/* Check the new clauses and plan the grown formula; writes nothing on the device. The clauses go
+ * through the builder alone first, so each is taken as the formula's own clauses were (its
+ * distinct literals, an empty one flagged). GPAP_ERR_ARG for a bad literal or length,
+ * GPAP_ERR_ENVELOPE for a clause longer than the state's packed split holds. */
+gpap_status formula_growth_plan(const FormulaState &old, const int32_t *flat_lits,
+                                const int32_t *clause_lens, int32_t n, FormulaGrowth *g);
+/* Upload the planned formula as a new state on old's device, its baseline the planned one. On
+ * failure nothing of it is left. The caller makes the device current. */
+gpap_status formula_growth_upload(const FormulaState &old, FormulaGrowth *g);
 
 }  // namespace gpap
 
@@ -378,6 +409,9 @@ struct Selection {
 
 struct gpap_engine {
     int32_t K = 0, trail_cap = 0;
+    /* Moved by gpap_engine_add_clauses only, the one change of the formula's shape: a sampler
+     * records it and refuses to run once it has moved (its K and buffers are the old shape's). */
+    int64_t formula_version = 0;
     /* mode is always RESOLVED; env_mode is $GPAP_KERNEL read once (AUTO = unset); auto_mode = 1
        re-resolves mode on every reset(K). */
     gpap_mode mode = GPAP_MODE_SCALAR;

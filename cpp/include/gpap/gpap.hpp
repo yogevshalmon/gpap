@@ -177,7 +177,7 @@ class Engine {
     std::int32_t num_vars() const { return gpap_engine_num_vars(h_); }
     std::int32_t num_clauses() const { return gpap_engine_num_clauses(h_); }
     bool flush_conflict() const { return gpap_engine_flush_conflict(h_) != 0; }
-    /** Device bytes held now, by kind (gpap_mem_kind): FORMULA is built once and kept, ROWS
+    /** Device bytes held now, by kind (gpap_mem_kind): FORMULA is what a trim keeps, ROWS
      *  grows with a batch or a call. What set the last batch: batch_bound(). */
     std::int64_t mem_held(gpap_mem_kind kind = GPAP_MEM_ALL) const {
         return gpap_engine_mem_held(h_, kind);
@@ -185,6 +185,23 @@ class Engine {
     gpap_bound batch_bound() const { return gpap_engine_batch_bound(h_); }
     /** Give the rows back and keep the formula; the next call takes them again. */
     void trim() { check(gpap_engine_trim(h_), "gpap_engine_trim"); }
+
+    /** Add DIMACS clauses to this engine's formula in place of building a new engine: it then
+     *  answers as one built on its clauses plus these would, every assumed unit still assumed.
+     *  Old clauses keep their indices; the rows go (k() is 1 after). One upload of the new
+     *  formula per call, so pass clauses in batches (gpap_engine_add_clauses). */
+    void add_clauses(const std::vector<std::vector<std::int32_t>> &clauses) {
+        if (clauses.empty()) return;
+        std::vector<std::int32_t> flat, lens;
+        lens.reserve(clauses.size());
+        for (const auto &c : clauses) {
+            lens.push_back(static_cast<std::int32_t>(c.size()));
+            flat.insert(flat.end(), c.begin(), c.end());
+        }
+        check(gpap_engine_add_clauses(h_, flat.data(), lens.data(),
+                                      static_cast<std::int32_t>(clauses.size())),
+              "gpap_engine_add_clauses");
+    }
 
     /** Which kernel a batch of `K` rows runs: a pure query; reset() resolves Auto on its own.
      *  The rule is asked of the backend $GPAP_BACKEND names now: this engine's, unless the
@@ -995,6 +1012,14 @@ class Prober {
                                 static_cast<std::int32_t>(units.size())), "gpap_assume_units");
     }
 
+    /** Strengthen the probed formula with entailed clauses in place of a new Prober: later
+     *  sweeps see what a Prober built on the formula plus these would (Engine::add_clauses). */
+    void add_clauses(const std::vector<std::vector<std::int32_t>> &clauses) {
+        engine_.add_clauses(clauses);
+    }
+
+    /** The formula this Prober was built from; add_clauses grows the engine's, whose counts
+     *  engine().num_clauses() gives. */
     const Formula &formula() const { return formula_; }
     Engine &engine() { return engine_; }
 
