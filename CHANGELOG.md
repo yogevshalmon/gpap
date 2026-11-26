@@ -35,6 +35,10 @@ change does not.
   takes clauses in batches. A failed add leaves the old formula whole; the rows go, and a sampler
   made on the engine before refuses to run. C++ `Engine::add_clauses` and
   `Prober::add_clauses`; Python `LiteralProbe.add_clauses`. Additive ABI, same soname.
+- Mining keeps one probe engine for every width, adding a width's clauses to it in place of a
+  rebuild. A device error in stage 2 of a sampling run keeps stage 1's clauses, tested and
+  reported, with the error in the `mined` record's `stage2_error`; and mining's counter reads
+  can no longer raise past its handler (issue 67).
 - Python's `Engine.num_clauses`, `num_long` and `num_vars` read the engine, not the formula it
   was built from.
 

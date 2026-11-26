@@ -151,7 +151,7 @@ re-checks every emitted sample on the GPU. The stats report:
 | `success_rate` | the fraction of trajectories that ended in a solution |
 | `phases` | where the time went; the phases add up to `wall_total_s` |
 | `phases_diag` | time spent on optional self-checks, kept out of every rate |
-| `mined` | clauses found by mining, whether they were kept, the projected gain with its factors (`k_before`/`k_after`, `success_before`/`success_after`), and the probe engines' resets (`resets_full`, `resets_lite`) |
+| `mined` | clauses found by mining, whether they were kept, the projected gain with its factors (`k_before`/`k_after`, `success_before`/`success_after`), the probe engines' resets (`resets_full`, `resets_lite`), and `stage2_error` when a device error stopped stage 2, whose counts are then stage 1's alone |
 | `stop`, `chunk_capped` | why the run ended, and whether a limit cut it short |
 | `engine` | the kernel, the batch size and the packed layout the engine chose |
 
