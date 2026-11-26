@@ -190,7 +190,7 @@ def test_the_cpp_prober_adds_what_it_found(tmp_path):
     added, total, free_after = map(int, m.groups())
     free_before = int(re.search(r"(\d+) free literals", out).group(1))
     assert (added, total) == (3, len(clauses) + 3), out      # the units -1, 3 and -4
-    assert free_after < free_before, out
+    assert free_before > free_after == 2 * (7 - 3), out      # 1, 3, 4 assigned, nothing unsat
 
 
 def test_probe_bounds_an_impossible_width_without_enumerating_it(tmp_path):

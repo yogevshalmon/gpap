@@ -32,13 +32,14 @@ change does not.
 - `gpap_engine_add_clauses` adds clauses to a live engine instead of building a new one (issue
   65): the engine then answers as one built on all its clauses would, every assumed unit still
   assumed, and old clauses keep their indices. One upload of the grown formula per call, so it
-  takes clauses in batches. A failed add leaves the old formula whole; the rows go, and a sampler
-  made on the engine before refuses to run. C++ `Engine::add_clauses` and
-  `Prober::add_clauses`; Python `LiteralProbe.add_clauses`. Additive ABI, same soname.
+  takes clauses in batches. The rows go, and a sampler made on the engine before refuses to run;
+  a refused add changes nothing, and one that fails later keeps the old formula whole. C++
+  `Engine::add_clauses` and `Prober::add_clauses`; Python `LiteralProbe.add_clauses`. Additive
+  ABI, same soname.
 - Mining keeps one probe engine for every width, adding a width's clauses to it in place of a
-  rebuild. A device error in stage 2 of a sampling run keeps stage 1's clauses, tested and
-  reported, with the error in the `mined` record's `stage2_error`; and mining's counter reads
-  can no longer raise past its handler (issue 67).
+  rebuild. A device error in stage 2 of a sampling run, outside its sweeps, keeps stage 1's
+  clauses, tested and reported, with the error in the `mined` record's `stage2_error`; and
+  mining's counter reads can no longer raise past its handler (issue 67).
 - Python's `Engine.num_clauses`, `num_long` and `num_vars` read the engine, not the formula it
   was built from.
 

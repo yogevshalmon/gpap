@@ -676,30 +676,36 @@ def test_a_failed_stage_one_samples_the_original_formula(monkeypatch, fails):
             return build(cls, *a, **kw)
 
         monkeypatch.setattr(GPUSampler, "from_clauses", classmethod(fail_the_second))
-    else:
-        sample, samples = GPUSampler.sample, []
+    # Each sampler's calls, by the models asked of them: a warm-up asks for 1, the timed run 10.
+    sample, samples, last = GPUSampler.sample, [], []
 
-        def fail_the_second(self, *a, **kw):
-            samples.append(1)
-            if len(samples) == 2:                # the rebuilt sampler's warm-up
-                time.sleep(0.5)
-                raise RuntimeError("device error")
-            return sample(self, *a, **kw)
+    def counted(self, n, *a, **kw):
+        samples.append(1)
+        self._asked = getattr(self, "_asked", []) + [n]
+        last[:] = [self]
+        if fails == "rewarm" and len(samples) == 2:     # the rebuilt sampler's warm-up
+            time.sleep(0.5)
+            raise RuntimeError("device error")
+        return sample(self, n, *a, **kw)
 
-        monkeypatch.setattr(GPUSampler, "sample", fail_the_second)
+    monkeypatch.setattr(GPUSampler, "sample", counted)
     info = _gate_run(monkeypatch, [2.0, 1.0])
     assert info["mined"] is None
     assert info["engine"]["M_eff"] == len(_GATE_CLAUSES), "it must sample the formula it was given"
     assert info["n_models"] >= 10
+    assert last[0]._asked[:1] == [1] and len(last[0]._asked) > 1, "warmed before the timed run"
     assert sum(info["phases"].values()) == pytest.approx(info["wall_total_s"], rel=0.05)
 
 
 @pytest.mark.gpu             # its tensors live on the CUDA device
 @pytest.mark.parametrize("fails", ["mine", "rebuild", "warmup"])
-def test_a_failed_stage_two_keeps_stage_one(monkeypatch, fails):
+@pytest.mark.parametrize("scores, kept", [([1.0, 2.0], True), ([2.0, 1.0], False)],
+                         ids=["kept", "reverted"])
+def test_a_failed_stage_two_keeps_stage_one(monkeypatch, fails, scores, kept):
     """Stage 2 is optional on top of stage 1 (GitHub issue 67): a device error in its mining, in
     the sampler rebuild after it, or in that sampler's warm-up keeps stage 1's clauses, puts them
-    through the keep-or-revert test and reports them, with stage 2's failure noted. Before, the
+    through the keep-or-revert test (kept when they score higher, reverted when lower) and
+    reports them, with stage 2's failure noted. Before, the
     handler around both stages reported mining as skipped and sampled stage 1's clauses
     untested. Stage 1's sampler is built again only once stage 2's is gone, as every other
     sampler of the mining block is (test_no_sampler_is_built_while_another_is_alive)."""
@@ -744,14 +750,28 @@ def test_a_failed_stage_two_keeps_stage_one(monkeypatch, fails):
 
         monkeypatch.setattr(GPUSampler, "sample", fail_the_third)
     monkeypatch.setattr(pipeline, "MINE_SECONDS", 60.0)          # stage 2 needs time left over
-    info = _gate_run(monkeypatch, [1.0, 2.0], miner=miner, mine_gate=1.01)  # stuck: stage 2
+    info = _gate_run(monkeypatch, scores, miner=miner, mine_gate=1.01)  # stuck: stage 2
     assert len(calls) == 2, "precondition: stage 2 ran"
     mined = info["mined"]
     assert mined is not None and "device error" in mined["stage2_error"]
-    assert (mined["n_ternary"], mined["kept"]) == (1, True), "stage 1's one clause, kept"
-    assert info["engine"]["M_eff"] == len(_GATE_CLAUSES) + 1, "it samples stage 1's formula"
+    assert (mined["n_ternary"], mined["kept"]) == (1, kept), "stage 1's one clause, tested"
+    assert info["engine"]["M_eff"] == len(_GATE_CLAUSES) + kept, "stage 1's formula, or the original"
     assert alive_at_build == [0] * len(alive_at_build), alive_at_build
     assert sum(info["phases"].values()) == pytest.approx(info["wall_total_s"], rel=0.05)
+
+
+@pytest.mark.gpu             # its tensors live on the CUDA device
+def test_a_skipped_mine_reports_no_record_of_it(monkeypatch):
+    """A device error after the clauses were kept (here the progress callback's, on the "mined"
+    event) skips mining like any other: the run samples the formula it was given and reports no
+    mining record, never a kept one it does not sample."""
+    def progress(event, data):
+        if event == "mined":
+            raise RuntimeError("device error")
+
+    info = _gate_run(monkeypatch, [1.0, 2.0], progress=progress)
+    assert info["mined"] is None
+    assert info["engine"]["M_eff"] == len(_GATE_CLAUSES)
 
 
 @pytest.mark.gpu             # its tensors live on the CUDA device
@@ -1071,7 +1091,7 @@ def test_one_engine_mines_what_a_rebuild_mines(monkeypatch):
         for name, probe in (("rebuild", Rebuilds), ("add", Adds)):
             monkeypatch.setattr(mining, "LiteralProbe", probe)
             res = mine_entailed(n, cls, DEV, max_tuples=budget, seconds=None)
-            out[name] = sorted(map(sorted, res.clauses))
+            out[name] = [list(c) for c in res.clauses]   # in order: the sampler takes them so
         assert adds, f"precondition: a width took clauses in place ({n} variables)"
         assert res.by_width.get(3, 0) > 0, f"precondition: width 3 ran on the grown formula ({n})"
         assert out["add"] == out["rebuild"]
