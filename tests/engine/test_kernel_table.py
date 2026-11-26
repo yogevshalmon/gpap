@@ -91,14 +91,15 @@ def _sass_counts(blob, tmp_path, key):
 
 
 def test_wave_atomics_are_relaxed_and_ordered_by_barriers(tmp_path):
-    """Every WAVE kernel has no fence its scalar twin lacks, and has the two barriers.
+    """Every WAVE kernel has no fence its scalar twin lacks, and exactly two barriers more.
 
     A row's atomics are relaxed (bcp.py's docstring, "Memory ordering under WAVE"): Triton's
     default fences each one GPU-wide and flushes the L1. The scalar twin has no row atomics, so
     whatever fence it has is the job counter's, which keeps its fence. The barriers in
     `_wave_propagate`, one before every wave and one after the last, are what order a row's
     threads instead. A dropped barrier passes the identity tests on most runs, so it is
-    counted here. Fails if an atomic loses `sem="relaxed"` or a barrier goes."""
+    counted here, exactly: a compiler that added barriers of its own to the WAVE kernels would
+    otherwise hide a dropped one. Fails if an atomic loses `sem="relaxed"` or a barrier goes."""
     table = _kernel_table()
     checked = 0
     for key, blob in sorted(table.items()):
@@ -108,7 +109,7 @@ def test_wave_atomics_are_relaxed_and_ordered_by_barriers(tmp_path):
         wave, scalar = (_sass_counts(table[k], tmp_path, k) for k in (key, twin))
         for op in ("MEMBAR", "CCTL.IVALL"):
             assert wave[op] == scalar[op], f"{key}: {wave[op]} {op}, its scalar twin {scalar[op]}"
-        assert wave["BAR.SYNC"] >= scalar["BAR.SYNC"] + 2, \
+        assert wave["BAR.SYNC"] == scalar["BAR.SYNC"] + 2, \
             f"{key}: {wave['BAR.SYNC']} barriers, its scalar twin {scalar['BAR.SYNC']}"
         checked += 1
     assert checked == 12, f"checked {checked} WAVE kernels, expected 12"

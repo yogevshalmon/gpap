@@ -114,7 +114,8 @@ every thread of the program sees every write made before it, atomics included.
 build; their success rates and counts agree too.
 
 **Faster.** The sampler at its default batch, WAVE forced, one configuration pinned, 8 s timed,
-main and the branch alternated (A100: 3 runs each; T4: 2), ratio of medians, branch over main:
+main and the branch alternated (A100: 3 runs each; T4: 2). Per cell the ratio of the medians,
+branch over main; per row the geometric mean of those ratios (cells counted in brackets):
 
 | | A100 b1 | A100 b8 | T4 b1 | T4 b8 |
 |---|---:|---:|---:|---:|
@@ -129,7 +130,7 @@ No cell is below 0.97. As the pilot found, the formulas whose occurrence lists f
 most, and the memory-bound ones (300k clauses after preprocessing) tie. The A100 gains more
 than the T4.
 
-**The queue** (A100 alone on its node, 16 formulas from 0.3M to 4.4M clauses, 1,048,576 tuples
+**The queue** (A100 alone on its node, 16 formulas from 14k to 4.4M clauses, 1,048,576 tuples
 or 262,144 cubes a call, median of 6 calls): probe widths 1 / 2 / 3 at 1.11 / 1.11 / 1.14× main,
 flags-only checks of 8 / 32 literals at 1.07 / 1.09×, 1.10× overall; the calls under 0.1 s vary
 by more than the effect. A build without the two barriers ran at 1.10× as well: they cost

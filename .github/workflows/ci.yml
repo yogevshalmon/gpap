@@ -82,6 +82,14 @@ jobs:
           pip install -e ".[dev]"
           scripts/setup_opencl.sh cpu
           scripts/setup_opencl.sh env | sed -e 's/^export //' -e 's/"//g' >> "$GITHUB_ENV"
+      - name: The kernel table, read off the cubins just built
+        # The host job has no generated table, so these tests skip there. Here they check that no
+        # two keys share a cubin and that every WAVE kernel keeps relaxed atomics and its two
+        # barriers; a skip (no cuobjdump in this triton) fails the step.
+        shell: bash
+        run: |
+          pytest tests/engine/test_kernel_table.py -m "not gpu" -q -rs | tee kernel_table.log
+          if grep -q SKIPPED kernel_table.log; then echo "a kernel-table test skipped"; exit 1; fi
       - name: The OpenCL backend opens a device
         # A test with no device skips, so without this step a broken runtime would pass green.
         env:

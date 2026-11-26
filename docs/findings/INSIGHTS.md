@@ -45,7 +45,7 @@ again before relying on it, or before calling the direction closed.
 - **A WAVE row's atomics are relaxed (2026-11-26).** Triton's default fenced each one GPU-wide
   and flushed the L1; a row belongs to one program, so two barriers per propagate order its
   threads instead. The sampler runs 1.42–1.52× faster on an A100 and 1.17–1.24× on a T4 with
-  WAVE forced, the queue 1.10× on the A100, and no cell slower; the answers are identical to
+  WAVE forced, the queue 1.10× on the A100, and no cell below 0.97; the answers are identical to
   main's on every gate. [KERNEL_AB](KERNEL_AB_FINDINGS.md), "Relaxed atomics"
 - **The dispatch threshold stays at M ≥ 2048 (2026-11-26).** On the relaxed engine WAVE wins
   below it at `b8` but loses on some cells at `b1` (down to 0.58×), and no clause count or simple
