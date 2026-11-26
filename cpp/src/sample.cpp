@@ -132,7 +132,7 @@ gpap_status pin_mode(gpap_sampler *s) {
 }
 
 void rebuild_phases(gpap_sampler *s) {
-    const int32_t N = s->e->num_vars;
+    const int32_t N = s->e->fs->num_vars;
     s->head0.clear();
     s->tail0.clear();
     if (!s->has_support) {
@@ -236,7 +236,7 @@ extern "C" gpap_status gpap_sampler_set_support(gpap_sampler *s, const int32_t *
         return GPAP_ERR_ARG;
     }
     return gpap::guard_entry("gpap_sampler_set_support", [&]() -> gpap_status {
-        const int32_t N = s->e->num_vars;
+        const int32_t N = s->e->fs->num_vars;
         if (n == 0) {
             s->has_support = 0;
             s->mask_sup = s->mask_all;
@@ -277,9 +277,9 @@ extern "C" gpap_status gpap_sampler_set_columns(gpap_sampler *s, const int32_t *
     }
     return gpap::guard_entry("gpap_sampler_set_columns", [&]() -> gpap_status {
         for (int32_t i = 0; i < n; ++i)
-            if (cols[i] < 0 || cols[i] >= s->e->num_vars) {
+            if (cols[i] < 0 || cols[i] >= s->e->fs->num_vars) {
                 set_error("gpap_sampler_set_columns: variable %d out of range [0, %d)",
-                          cols[i], s->e->num_vars);
+                          cols[i], s->e->fs->num_vars);
                 return GPAP_ERR_ARG;
             }
         s->cols.assign(cols, cols + n);             /* takes effect at the next run */
@@ -343,7 +343,7 @@ extern "C" gpap_status gpap_sampler_run(gpap_sampler *s, int64_t n_target,
         s->has_run = 1;
 
         /* Kept-row columns, snapshotted for this run. Empty = every variable. */
-        const int32_t N = s->e->num_vars;
+        const int32_t N = s->e->fs->num_vars;
         std::vector<int32_t> all_cols;
         const int32_t *cols_p = s->cols.data();
         int32_t n_cols = (int32_t)s->cols.size();

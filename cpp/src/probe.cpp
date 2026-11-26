@@ -248,7 +248,7 @@ gpap_status run_sweep(gpap_engine *e, int32_t k, int64_t total, const gpap_probe
     out->k = k;
     out->stats.total = total;
 
-    if (e->flush_conflict || e->has_empty_clause) {
+    if (e->fs->flush_conflict || e->fs->has_empty_clause) {
         /* The formula's own units already conflict, so every set conflicts trivially. */
         out->stats.stop = GPAP_PROBE_UNSAT;
         out->stats.seconds = clock.seconds();
@@ -294,16 +294,16 @@ gpap_status build_pool(gpap_engine *e, const int32_t *pool, int32_t pool_n,
         std::vector<int32_t> lits(static_cast<size_t>(std::max(count, 0)));
         if (count > 0) GPAP_TRY(gpap_free_literals(e, lits.data(), &count));
         out->reserve(lits.size());
-        for (int32_t l : lits) out->push_back(gpap::lit_index_from_dimacs(l, e->num_vars));
+        for (int32_t l : lits) out->push_back(gpap::lit_index_from_dimacs(l, e->fs->num_vars));
         return GPAP_OK;
     }
     out->reserve(static_cast<size_t>(std::max(pool_n, 0)));
     for (int32_t i = 0; i < pool_n; ++i) {
-        const int64_t idx = gpap::lit_index_from_dimacs(pool[i], e->num_vars);
+        const int64_t idx = gpap::lit_index_from_dimacs(pool[i], e->fs->num_vars);
         if (idx < 0) {
             set_error("probe pool: literal %d out of range (formula has %d variables; literals "
                       "are DIMACS, 1..%d or -1..-%d, never 0)",
-                      pool[i], e->num_vars, e->num_vars, e->num_vars);
+                      pool[i], e->fs->num_vars, e->fs->num_vars, e->fs->num_vars);
             return GPAP_ERR_ARG;
         }
         out->push_back(idx);
@@ -316,7 +316,7 @@ gpap_status build_pool(gpap_engine *e, const int32_t *pool, int32_t pool_n,
 extern "C" gpap_status gpap_free_literals(gpap_engine *e, int32_t *out, int32_t *count) {
     if (!e || !count) return GPAP_ERR_ARG;
     const int32_t capacity = out ? *count : 0;      /* IN/OUT: what the caller allocated */
-    const int32_t n = e->num_vars;
+    const int32_t n = e->fs->num_vars;
     std::vector<int8_t> assign(static_cast<size_t>(2) * static_cast<size_t>(std::max(n, 0)));
     if (n > 0) GPAP_TRY(gpap_engine_flushed_assignment(e, assign.data()));
     int32_t found = 0;
@@ -344,10 +344,10 @@ extern "C" gpap_status gpap_assume_units(gpap_engine *e, const int32_t *lits, in
     if (n <= 0) return GPAP_OK;
     std::vector<int64_t> row(static_cast<size_t>(n));
     for (int32_t i = 0; i < n; ++i) {
-        row[static_cast<size_t>(i)] = gpap::lit_index_from_dimacs(lits[i], e->num_vars);
+        row[static_cast<size_t>(i)] = gpap::lit_index_from_dimacs(lits[i], e->fs->num_vars);
         if (row[static_cast<size_t>(i)] < 0) {
             set_error("gpap_assume_units: literal %d out of range (formula has %d variables)",
-                      lits[i], e->num_vars);
+                      lits[i], e->fs->num_vars);
             return GPAP_ERR_ARG;
         }
     }
@@ -369,7 +369,7 @@ extern "C" gpap_status gpap_probe_combinations(gpap_engine *e, const int32_t *po
     GPAP_TRY(build_pool(e, pool, pool_n, &lits));
 
     auto *p = new gpap_probe();
-    const int64_t total = count_candidates(lits, k, o.same_var == 0, e->num_vars);
+    const int64_t total = count_candidates(lits, k, o.same_var == 0, e->fs->num_vars);
     Combinations gen(lits, k, o.same_var == 0);
     const gpap_status rc = run_sweep(
         e, k, total, o,
@@ -388,10 +388,10 @@ extern "C" gpap_status gpap_probe_tuples(gpap_engine *e, const int32_t *tuples, 
     /* Validate the WHOLE matrix before any GPU work: an index past a row's assignment bitmap
      * makes `atomic_or` write into a LATER ROW's words, corrupting a different tuple's answer. */
     for (int64_t i = 0; i < n * k; ++i) {
-        if (gpap::lit_index_from_dimacs(tuples[i], e->num_vars) < 0) {
+        if (gpap::lit_index_from_dimacs(tuples[i], e->fs->num_vars) < 0) {
             set_error("probe tuple: literal %d out of range (formula has %d variables; literals "
                       "are DIMACS, 1..%d or -1..-%d, never 0)",
-                      tuples[i], e->num_vars, e->num_vars, e->num_vars);
+                      tuples[i], e->fs->num_vars, e->fs->num_vars, e->fs->num_vars);
             return GPAP_ERR_ARG;
         }
     }
@@ -404,7 +404,7 @@ extern "C" gpap_status gpap_probe_tuples(gpap_engine *e, const int32_t *tuples, 
             const int64_t take = std::min<int64_t>(want, n - cursor);
             for (int64_t i = 0; i < take; ++i)
                 for (int32_t j = 0; j < k; ++j)
-                    c.push_back(gpap::lit_index_from_dimacs(tuples[(cursor + i) * k + j], e->num_vars));
+                    c.push_back(gpap::lit_index_from_dimacs(tuples[(cursor + i) * k + j], e->fs->num_vars));
             cursor += take;
             return take;
         },
@@ -420,7 +420,7 @@ extern "C" int64_t gpap_probe_count(gpap_engine *e, const int32_t *pool, int32_t
     const gpap_probe_options o = opts ? *opts : kDefaults;
     std::vector<int64_t> lits;
     if (build_pool(e, pool, pool_n, &lits) != GPAP_OK) return 0;
-    return count_candidates(lits, k, o.same_var == 0, e->num_vars);
+    return count_candidates(lits, k, o.same_var == 0, e->fs->num_vars);
 }
 
 extern "C" void gpap_probe_free(gpap_probe *p) { delete p; }

@@ -28,17 +28,17 @@ MemAccount *mem_account(const GpuDriver *driver, int device);
 /* Remember the device's total, which a share ("75%") is taken of. */
 void mem_note_total(MemAccount *a, int64_t total);
 
-/* What a buffer holds, which decides the count it goes on. FORMULA: what the engine builds once
- * and keeps until it is freed (the formula's lists, its flush cache, pair masks, the
- * counters). ROWS: everything that grows with a batch or a call. Two counts, not one, because
- * the two have different sizes and lifetimes: gpap_engine_trim gives back every row byte and
- * keeps every formula byte, and a later split of the engine into a resident formula and row
- * pools moves each count to its own object. ROWS is the default, so a new buffer is a row
- * buffer unless it says otherwise, and a trim that misses it shows. */
+/* What a buffer holds, which decides the count it goes on. FORMULA: what is built once and kept
+ * until it is freed: a formula state's lists, flush cache and soundness pairs, and an engine's
+ * counters, scratch and pair masks. ROWS: everything that grows with a batch or a call. Two
+ * counts, not one, because the two have different sizes and lifetimes: gpap_engine_trim gives
+ * back every row byte and keeps every formula byte. ROWS is the default, so a new buffer is a
+ * row buffer unless it says otherwise, and a trim that misses it shows. */
 enum class MemKind : uint8_t { ROWS = 0, FORMULA = 1 };
 
-/* What one engine's buffers are counted on: its counts by kind, and its device's account. An
- * engine on a host's plug has no account: the host keeps that count (GpuMemory::GRANT). */
+/* What one engine's or one formula state's buffers are counted on: its counts by kind, and its
+ * device's account. One on a host's plug has no account: the host keeps that count
+ * (GpuMemory::GRANT). */
 struct MemHolder {
     Gpu *gpu = nullptr;
     MemAccount *account = nullptr;

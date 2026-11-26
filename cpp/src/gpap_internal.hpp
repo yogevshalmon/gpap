@@ -296,6 +296,72 @@ namespace gpap {
 inline void pack_long_init(const gpap_formula *f, int32_t shift, std::vector<int32_t> &out);
 }  // namespace gpap
 
+namespace gpap {
+
+/* The device an engine runs on: the plug, the library it came from and the ordinal. Counted
+ * (std::shared_ptr): every FormulaState and engine on it holds a reference, so the plug outlives
+ * every buffer allocated through it, whatever order they are freed in. One per engine today
+ * (gpap_engine_create opens it): "one plug per engine" is unchanged. */
+struct Device {
+    std::unique_ptr<Gpu> gpu;
+    const GpuDriver *driver = nullptr;          /* the library `gpu` was opened from */
+    int ordinal = 0;
+    /* The ledger account every holder on this device counts on (memory.hpp); none on a host's
+     * plug, whose host keeps the count. */
+    MemAccount *account = nullptr;
+    GpuMemory::Source mem_source = GpuMemory::TOTAL;   /* what the plug's `free` is */
+};
+
+/* What a formula puts on the device, and its host side: the occurrence lists, the baseline
+ * after the unit flush, the soundness pairs and the readout maps. Counted (std::shared_ptr), and
+ * NEVER WRITTEN ONCE AN ENGINE RUNS ON IT, except its baseline by gpap_assume_units and
+ * gpap_engine_recache_flush, which touch only the engine that owns it: gpap_engine_add_clauses
+ * builds a new one beside it and swaps. Its buffers go on its own holder, under the same device
+ * account as its engine's, so a formula is counted once, whoever runs on it. */
+struct FormulaState {
+    /* Declared first, so it is destroyed last: a buffer below frees itself through its plug. */
+    std::shared_ptr<Device> dev;
+    MemHolder mem;                     /* declared before every buffer, which uncounts itself here */
+
+    int32_t num_vars = 0, num_clauses = 0, nw = 0;
+    int32_t shift = 16;                /* the engine's split: f->shift, or the force_shift pin */
+    int32_t num_long = 0;              /* packed-word (state) clauses; num_clauses stays TOTAL,
+                                          n_pairs = soundness pairs (binaries + units as (u,u)) */
+    int32_t n_pairs = 0;
+    int32_t num_bin = 0;               /* pair indices below this are binary clauses */
+    int64_t total_lits = 0;
+    int32_t max_clause_len = 0;
+    int has_empty_clause = 0;
+    int flush_conflict = 0;
+    int flush_ready = 0;      /* the post-units cache is built (not packed_flushed.ptr) */
+
+    /* FORMULA buffers: the occurrence CSR, the packed initial words (read by the first flush
+     * only), the baseline the flush leaves, and the (2*n_pairs) soundness pairs sound_rows'
+     * binary/unit pass reads. */
+    FormulaBuf occ_off, occ_mid, occ_cls, packed_init, packed_flushed, abits_flushed;
+    FormulaBuf pair_check;
+
+    /* Host side of the original-order readout synthesis (the engine drops the formula). */
+    std::vector<int32_t> sat_src_host, pair_host;
+
+    FormulaState() = default;
+    FormulaState(const FormulaState &) = delete;
+    FormulaState &operator=(const FormulaState &) = delete;
+    /* Makes the device current first: the buffers free themselves on it. */
+    ~FormulaState();
+};
+
+/* Upload `f` as a new FormulaState on `dev`, its packed words in the split `shift` (f->shift,
+ * or a pin, which must fit f), counted on its own holder under the device's account. In this
+ * order: the occurrence CSR, the packed initial words when `with_init`, the soundness pairs; and
+ * the host maps. The baseline is not built: the caller flushes (build_flush_cache) or extends
+ * one (gpap_engine_add_clauses). */
+gpap_status formula_state_upload(const std::shared_ptr<Device> &dev, const gpap_formula *f,
+                                 int32_t shift, bool with_init,
+                                 std::shared_ptr<FormulaState> *out);
+
+}  // namespace gpap
+
 /* One row selection (gpap_select_complete): a device row mask plus, lazily, the ascending
  * selected-row indices readout kernels index through. */
 struct Selection {
@@ -311,22 +377,13 @@ struct Selection {
 };
 
 struct gpap_engine {
-    int32_t num_vars = 0, num_clauses = 0, nw = 0, shift = 16;
-    int32_t num_long = 0;              /* packed-word (state) clauses; num_clauses stays TOTAL,
-                                          n_pairs = soundness pairs (binaries + units as (u,u)) */
-    int32_t n_pairs = 0;
     int32_t K = 0, trail_cap = 0;
-    int64_t total_lits = 0;
-    int32_t max_clause_len = 0;
     /* mode is always RESOLVED; env_mode is $GPAP_KERNEL read once (AUTO = unset); auto_mode = 1
        re-resolves mode on every reset(K). */
     gpap_mode mode = GPAP_MODE_SCALAR;
     gpap_mode env_mode = GPAP_MODE_AUTO;
     int auto_mode = 0;
     int vscan = 1;
-    int has_empty_clause = 0;
-    int flush_conflict = 0;
-    int flush_ready = 0;      /* the post-units cache is built (not packed_flushed.ptr) */
     int64_t launches = 0;
 
     /* CLEAN-mode: leading rows KNOWN equal to packed_flushed. Raised by a full reset or a
@@ -352,15 +409,17 @@ struct gpap_engine {
      * device accumulators by gpap_counters_get. */
     int64_t host_ops = 0, host_props = 0, host_decs = 0;
 
-    /* The device. Declared before every DevBuf so it is destroyed after them: a buffer frees
-     * itself through this plug. */
-    std::unique_ptr<gpap::Gpu> gpu;
-    const gpap::GpuDriver *driver = nullptr;    /* the library `gpu` was opened from */
-    int device_ordinal = 0;
-    /* What this engine's buffers are counted on (memory.hpp). Declared before every DevBuf, as
-     * `gpu` is: a buffer uncounts itself here when it frees. */
+    /* The device, declared before the formula and every DevBuf so it is destroyed after them:
+     * a buffer frees itself through its plug. `gpu` is the plug every call goes through, the
+     * device's own: it never changes for the engine's life. */
+    std::shared_ptr<gpap::Device> dev;
+    gpap::Gpu *gpu = nullptr;
+    /* The formula the rows run on (gpap_internal.hpp, FormulaState). Declared after `dev` and
+     * before this engine's buffers: it outlives them and goes before the device. */
+    std::shared_ptr<gpap::FormulaState> fs;
+    /* What this engine's own buffers are counted on (memory.hpp). Declared before every DevBuf:
+     * a buffer uncounts itself here when it frees. The formula's are on fs->mem. */
     gpap::MemHolder mem;
-    gpap::GpuMemory::Source mem_source = gpap::GpuMemory::TOTAL;   /* what the plug's `free` is */
     gpap_bound bound = GPAP_BOUND_NONE;         /* what set the last batch (engine_batch) */
     /* A sizing found no room beside the row buffers a smaller batch would keep, so the next
      * reset gives them back (ensure_state's `fit`) even under the default budget. Each sizing
@@ -371,14 +430,6 @@ struct gpap_engine {
      * the memory query or the limit that failed. A caller returns it, so a driver error or a
      * malformed limit is not reported as memory. */
     gpap_status sizing_status = GPAP_OK;
-
-    /* formula-resident (never rebuilt): the FORMULA count, which trim keeps */
-    gpap::FormulaBuf occ_off, occ_mid, occ_cls, packed_init, packed_flushed, abits_flushed;
-    gpap::FormulaBuf pair_check;       /* (2*n_pairs) int32 — sound_rows' binary/unit pass */
-
-    /* Host side of the original-order readout synthesis (the engine drops the formula). */
-    std::vector<int32_t> sat_src_host, pair_host;
-    int32_t num_bin = 0;               /* pair indices below this are binary clauses */
 
     /* per-chunk row state */
     gpap::DevBuf packed, abits, active, conflict, trail;

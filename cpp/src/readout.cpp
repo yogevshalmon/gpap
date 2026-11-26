@@ -54,12 +54,12 @@ extern "C" gpap_status gpap_pair_mask_create(gpap_engine *e, const int32_t *vars
     if (!e || !mask_id_out) return GPAP_ERR_ARG;
     GPAP_TRY(engine_use_ctx(e));
     /* Even bit 2v per selected variable; padding pairs beyond N stay 0, so the mask is needed. */
-    std::vector<uint32_t> bits((size_t)e->nw, 0u);
-    const int32_t n = vars ? n_vars : e->num_vars;
+    std::vector<uint32_t> bits((size_t)e->fs->nw, 0u);
+    const int32_t n = vars ? n_vars : e->fs->num_vars;
     for (int32_t i = 0; i < n; ++i) {
         const int32_t v = vars ? vars[i] : i;
-        if (v < 0 || v >= e->num_vars) {
-            set_error("pair mask: variable %d out of range (N=%d)", v, e->num_vars);
+        if (v < 0 || v >= e->fs->num_vars) {
+            set_error("pair mask: variable %d out of range (N=%d)", v, e->fs->num_vars);
             return GPAP_ERR_ARG;
         }
         bits[(size_t)(v >> 4)] |= 1u << (2 * (v & 15));
@@ -85,7 +85,7 @@ extern "C" gpap_status gpap_select_complete(gpap_engine *e, int32_t mask_id, int
 
     GPAP_TRY(e->gpu->run("complete_mask", e->K, 1,
                          {buf(e->abits), buf(*e->pair_masks[(size_t)mask_id]), buf(e->active),
-                          buf(s.mask), i32(e->nw)}));
+                          buf(s.mask), i32(e->fs->nw)}));
     s.rows_valid = false;
     s.selected = true;
     GPAP_TRY(reduce_flags(e, s.mask, e->K, &s.count));
@@ -143,10 +143,10 @@ extern "C" gpap_status gpap_check_sound(gpap_engine *e, int32_t slot, int32_t ma
     GPAP_TRY(e->staging_b.reserve(e->mem, (size_t)n));
     /* Long clauses against their packed words, binary/unit against the bitmap via the
      * (n_pairs, 2) pair list (helpers.py::sound_rows). */
-    const std::string key = "sound_rows.s" + std::to_string(e->shift);
+    const std::string key = "sound_rows.s" + std::to_string(e->fs->shift);
     GPAP_TRY(e->gpu->run(key.c_str(), n, 1,
-                         {buf(e->packed), buf(e->abits), buf(s.rows), i32(e->num_long), i32(e->nw),
-                          buf(e->pair_check), i32(e->n_pairs), buf(e->staging_b)}));
+                         {buf(e->packed), buf(e->abits), buf(s.rows), i32(e->fs->num_long), i32(e->fs->nw),
+                          buf(e->fs->pair_check), i32(e->fs->n_pairs), buf(e->staging_b)}));
     return reduce_flags(e, e->staging_b, n, n_unsound_out);
 }
 
@@ -172,7 +172,7 @@ extern "C" gpap_status gpap_var_bits(gpap_engine *e, int32_t slot, const int32_t
         /* this slice's rows: an input view into the selection's row list */
         GPAP_TRY(e->gpu->run("var_bits", rows, n_cols,
                              {buf(e->abits), buf(s.rows, (size_t)r0 * sizeof(int32_t)),
-                              buf(e->staging_a), buf(e->staging_b), i32(n_cols), i32(e->nw)}));
+                              buf(e->staging_a), buf(e->staging_b), i32(n_cols), i32(e->fs->nw)}));
         GPAP_TRY(e->gpu->download(out_host + (size_t)r0 * n_cols, e->staging_b.ptr, 0,
                                   (size_t)rows * n_cols));
     }
@@ -185,7 +185,7 @@ extern "C" gpap_status gpap_assignment_rows(gpap_engine *e, int32_t slot, int8_t
     GPAP_TRY(engine_use_ctx(e));
     GPAP_TRY(engine_ensure_rows(e, slot));
     Selection &s = e->slots[slot];
-    const int32_t two_n = 2 * e->num_vars;
+    const int32_t two_n = 2 * e->fs->num_vars;
     const int32_t n_rows = std::min(max_rows, s.count);
     if (n_rows == 0 || two_n == 0) return GPAP_OK;
     if (!out_host) return GPAP_ERR_ARG;
@@ -198,7 +198,7 @@ extern "C" gpap_status gpap_assignment_rows(gpap_engine *e, int32_t slot, int8_t
         const int32_t rows = std::min(step, n_rows - r0);
         GPAP_TRY(e->gpu->run("unpack_rows", rows, two_n,
                              {buf(e->abits), buf(s.rows, (size_t)r0 * sizeof(int32_t)),
-                              buf(e->staging_b), i32(two_n), i32(e->nw)}));
+                              buf(e->staging_b), i32(two_n), i32(e->fs->nw)}));
         GPAP_TRY(e->gpu->download(out_host + (size_t)r0 * two_n, e->staging_b.ptr, 0,
                                   (size_t)rows * two_n));
     }
@@ -240,13 +240,13 @@ extern "C" gpap_status gpap_sat_rows(gpap_engine *e, const int32_t *rows, int32_
     if (!e || !rows || !out_host || n_rows < 0) return GPAP_ERR_ARG;
     GPAP_TRY(gpap::engine_reject_if_packed_is_baseline(e, "gpap_sat_rows"));
     GPAP_TRY(engine_use_ctx(e));
-    const int32_t M = e->num_clauses, ML = e->num_long;
-    const uint32_t sat_mask = (1u << e->shift) - 1;
+    const int32_t M = e->fs->num_clauses, ML = e->fs->num_long;
+    const uint32_t sat_mask = (1u << e->fs->shift) - 1;
     /* The bitmap is only read to synthesize binary/unit counts, and that copy is per ROW, so an
      * all-long formula must not pay for it. */
-    const bool need_bits = e->n_pairs > 0;
+    const bool need_bits = e->fs->n_pairs > 0;
     std::vector<int32_t> lw((size_t)ML);
-    std::vector<uint32_t> aw((size_t)(need_bits ? e->nw : 0));
+    std::vector<uint32_t> aw((size_t)(need_bits ? e->fs->nw : 0));
     for (int32_t i = 0; i < n_rows; ++i) {
         if (rows[i] < 0 || rows[i] >= e->K) return GPAP_ERR_ARG;
         if (ML)
@@ -255,22 +255,22 @@ extern "C" gpap_status gpap_sat_rows(gpap_engine *e, const int32_t *rows, int32_
                                       (size_t)ML * sizeof(int32_t)));
         if (need_bits)
             GPAP_TRY(e->gpu->download(aw.data(), e->abits.ptr,
-                                      (size_t)rows[i] * e->nw * sizeof(int32_t),
-                                      (size_t)e->nw * sizeof(int32_t)));
+                                      (size_t)rows[i] * e->fs->nw * sizeof(int32_t),
+                                      (size_t)e->fs->nw * sizeof(int32_t)));
         auto not_falsified = [&](int32_t li) -> int32_t {
             const int32_t neg = li ^ 1;
             return (int32_t)(1u - ((aw[(size_t)(neg >> 5)] >> (neg & 31)) & 1u));
         };
         int32_t *dst = out_host + (size_t)i * M;
         for (int32_t c = 0; c < M; ++c) {
-            const int32_t src = e->sat_src_host[(size_t)c];   /* THE kind/slot map, not a cursor */
+            const int32_t src = e->fs->sat_src_host[(size_t)c];   /* THE kind/slot map, not a cursor */
             if (src >= 0) {
                 dst[c] = (int32_t)((uint32_t)lw[(size_t)src] & sat_mask);
             } else {
                 const int32_t p = -src - 1;
-                dst[c] = not_falsified(e->pair_host[(size_t)(2 * p)]);
-                if (p < e->num_bin)
-                    dst[c] += not_falsified(e->pair_host[(size_t)(2 * p + 1)]);
+                dst[c] = not_falsified(e->fs->pair_host[(size_t)(2 * p)]);
+                if (p < e->fs->num_bin)
+                    dst[c] += not_falsified(e->fs->pair_host[(size_t)(2 * p + 1)]);
             }
         }
     }
@@ -283,7 +283,7 @@ extern "C" gpap_status gpap_packed_rows(gpap_engine *e, const int32_t *rows, int
      * hide sum corruption from the CLEAN-mode gate (tests/engine/test_clean_mode.py). */
     if (!e || !rows || !out_host || n_rows < 0) return GPAP_ERR_ARG;
     GPAP_TRY(engine_use_ctx(e));
-    const int32_t M = e->num_long;
+    const int32_t M = e->fs->num_long;
     for (int32_t i = 0; i < n_rows; ++i) {
         if (rows[i] < 0 || rows[i] >= e->K) return GPAP_ERR_ARG;
         if (M)
@@ -297,10 +297,10 @@ extern "C" gpap_status gpap_packed_rows(gpap_engine *e, const int32_t *rows, int
 extern "C" gpap_status gpap_engine_flushed_assignment(gpap_engine *e, int8_t *out_host) {
     if (!e || !out_host) return GPAP_ERR_ARG;
     GPAP_TRY(engine_use_ctx(e));
-    std::vector<uint32_t> words((size_t)e->nw);
-    GPAP_TRY(e->gpu->download(words.data(), e->abits_flushed.ptr, 0,
-                              (size_t)e->nw * sizeof(uint32_t)));
-    const int32_t two_n = 2 * e->num_vars;
+    std::vector<uint32_t> words((size_t)e->fs->nw);
+    GPAP_TRY(e->gpu->download(words.data(), e->fs->abits_flushed.ptr, 0,
+                              (size_t)e->fs->nw * sizeof(uint32_t)));
+    const int32_t two_n = 2 * e->fs->num_vars;
     for (int32_t l = 0; l < two_n; ++l)
         out_host[l] = (int8_t)((words[(size_t)(l >> 5)] >> (l & 31)) & 1u);
     return GPAP_OK;
