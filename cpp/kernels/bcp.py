@@ -38,9 +38,12 @@ Memory ordering under WAVE (the scalar kernels have no atomics and are not touch
     words next: a decision scan, the soft risk, a restore). After a barrier every thread of the
     program sees every write made before it, atomics included; one warp per program makes it
     cheap.
-  * Between barriers, one thread loads a word another thread stored only inside one scalar
-    phase (a seed after an earlier seed, a decision scan's next word): one warp's accesses to
-    one address, which stay in program order. The scalar kernels rely on the same throughout.
+  * Between barriers, one thread loads a word another thread stored in two places. Inside one
+    scalar phase (a seed after an earlier seed, the serial scan's next word): one warp's
+    accesses to one address, which the hardware keeps in program order; the scalar kernels rely
+    on the same throughout. And in the vector scan, whose next chunk may read a word an earlier
+    take changed: harmless, since `order` names each variable once and a lane reads only its
+    own variable's bits.
   * The queue's job counter is the one atomic rows share. It keeps acq_rel, which costs nothing
     once per job; the barrier after a job's restores is what orders them before the next job.
 Remove a barrier and the tests still pass on most runs, while a lost bit gives a wrong answer.
