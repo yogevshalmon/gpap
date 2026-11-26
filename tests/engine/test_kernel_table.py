@@ -72,6 +72,48 @@ def test_the_trajectory_matrix_matches_the_kernel_guard():
             f"{key} specializes on VSCAN, which that kernel never reads"
 
 
+def _sass_counts(blob, tmp_path, key):
+    """How often a WAVE row's ordering instructions occur in one cubin's machine code: the
+    GPU-wide fence (MEMBAR), the L1 flush that comes with an acquire (CCTL.IVALL) and the
+    program's barrier (BAR.SYNC). cuobjdump ships with triton, beside ptxas."""
+    import subprocess
+    triton = pytest.importorskip("triton")
+    tool = os.path.join(os.path.dirname(triton.__file__), "backends", "nvidia", "bin",
+                        "cuobjdump")
+    if not os.path.exists(tool):
+        pytest.skip("this triton ships no cuobjdump")
+    path = tmp_path / f"{key}.cubin"
+    path.write_bytes(blob)
+    sass = subprocess.run([tool, "-sass", str(path)], capture_output=True, text=True,
+                          check=True).stdout
+    found = re.findall(r"\b(MEMBAR|CCTL\.IVALL|BAR\.SYNC)", sass)
+    return {op: found.count(op) for op in ("MEMBAR", "CCTL.IVALL", "BAR.SYNC")}
+
+
+def test_wave_atomics_are_relaxed_and_ordered_by_barriers(tmp_path):
+    """Every WAVE kernel has no fence its scalar twin lacks, and has the two barriers.
+
+    A row's atomics are relaxed (bcp.py's docstring, "Memory ordering under WAVE"): Triton's
+    default fences each one GPU-wide and flushes the L1. The scalar twin has no row atomics, so
+    whatever fence it has is the job counter's, which keeps its fence. The barriers in
+    `_wave_propagate`, one before every wave and one after the last, are what order a row's
+    threads instead. A dropped barrier passes the identity tests on most runs, so it is
+    counted here. Fails if an atomic loses `sem="relaxed"` or a barrier goes."""
+    table = _kernel_table()
+    checked = 0
+    for key, blob in sorted(table.items()):
+        if ".w1" not in key:
+            continue
+        twin = key.replace(".w1", ".w0").replace(".v1", ".v0")
+        wave, scalar = (_sass_counts(table[k], tmp_path, k) for k in (key, twin))
+        for op in ("MEMBAR", "CCTL.IVALL"):
+            assert wave[op] == scalar[op], f"{key}: {wave[op]} {op}, its scalar twin {scalar[op]}"
+        assert wave["BAR.SYNC"] >= scalar["BAR.SYNC"] + 2, \
+            f"{key}: {wave['BAR.SYNC']} barriers, its scalar twin {scalar['BAR.SYNC']}"
+        checked += 1
+    assert checked == 12, f"checked {checked} WAVE kernels, expected 12"
+
+
 @pytest.mark.gpu
 def test_every_reachable_kernel_key_resolves():
     """The engine never asks for a cubin the build did not emit; a missing key would fail
