@@ -16,6 +16,7 @@ again before relying on it, or before calling the direction closed.
 
 | topic | file |
 |---|---|
+| the WAVE kernel's relaxed atomics, and the dispatch threshold re-measured (2026-11-26) | [KERNEL_AB_FINDINGS.md](KERNEL_AB_FINDINGS.md) |
 | what the default batch takes of a GPU (2026-11-25) | [MEMORY_FINDINGS.md](MEMORY_FINDINGS.md) |
 | the job queue: many sets on few rows (2026-11-20) | [PROBE_QUEUE_FINDINGS.md](PROBE_QUEUE_FINDINGS.md) |
 | the OpenCL backend and the GPU socket (2026-11-13) | [OPENCL_FINDINGS.md](OPENCL_FINDINGS.md) |
@@ -34,7 +35,6 @@ again before relying on it, or before calling the direction closed.
 
 | topic | file | why it is here |
 |---|---|---|
-| WAVE vs scalar by formula size (2026-08-23) | [KERNEL_AB_FINDINGS.md](KERNEL_AB_FINDINGS.md) | the `M ≥ 2048` rule is current; its numbers predate the shuffle schedule |
 | the 2026-08 L4 campaign | [L4_EVAL_FINDINGS.md](L4_EVAL_FINDINGS.md) | superseded by protocol v1.0; its screens survive in `paper_tables.py` |
 | the sampler's development log | [GPU_SAMPLING_FINDINGS.md](GPU_SAMPLING_FINDINGS.md) | the only record of seven retired configurations, judged on the June engine ↻ |
 | GPU inprocessing for CDCL, retired | [ELS_INPROCESSING_FINDINGS.md](ELS_INPROCESSING_FINDINGS.md) | the only record of a deleted subsystem, measured on the pure-PyTorch engine ↻ |
@@ -42,6 +42,15 @@ again before relying on it, or before calling the direction closed.
 
 ## Engine & memory model
 
+- **A WAVE row's atomics are relaxed (2026-11-26).** Triton's default fenced each one GPU-wide
+  and flushed the L1; a row belongs to one program, so two barriers per propagate order its
+  threads instead. The sampler runs 1.42–1.52× faster on an A100 and 1.17–1.24× on a T4 with
+  WAVE forced, the queue 1.10× on the A100, and no cell slower; the answers are identical to
+  main's on every gate. [KERNEL_AB](KERNEL_AB_FINDINGS.md), "Relaxed atomics"
+- **The dispatch threshold stays at M ≥ 2048 (2026-11-26).** On the relaxed engine WAVE wins
+  below it at `b8` but loses on some cells at `b1` (down to 0.58×), and no clause count or simple
+  formula feature separates them; issue 52 stays open for one that does. [KERNEL_AB](KERNEL_AB_FINDINGS.md), "The threshold on the
+  relaxed engine"
 - **More rows than the default batch buy no rate (2026-11-25).** 1.23 times the default batch,
   what fits in free memory less 1 GiB, ran at 0.92–1.10 of its rate on a T4 and an A100, and the
   rate plateaus by about 32 times the resident warps. The driver takes a few MiB beyond GPAP's
@@ -106,9 +115,9 @@ again before relying on it, or before calling the direction closed.
   every chunk: 4.4× per chunk on `b12-c50`. [CLEAN_MODE](CLEAN_MODE_FINDINGS.md)
 - **A default belongs at the ABI, not in a wrapper (2026-08-19).** `GPAP_MODE_AUTO` resolves
   inside `gpap_engine_reset`.
-- **The wave/scalar dispatch keys off M, not the batch (2026-08-18).** ↻ Wave when `M >= 2048`
-  or the batch is under the resident warps; the crossover is to be re-measured on the shuffle
-  engine. [KERNEL_AB](KERNEL_AB_FINDINGS.md)
+- **The wave/scalar dispatch keys off M, not the batch (2026-08-18).** Wave when `M >= 2048`
+  or the batch is under the resident warps. *Re-measured 2026-11-26: see above.*
+  [KERNEL_AB](KERNEL_AB_FINDINGS.md)
 - **Wave and scalar may differ on the counters of conflicted rows, never on models
   (2026-08-18).** Gate on models.
 - **The engine is libgpap, one library for Python and C++ (2026-07-28):** a performance tie with

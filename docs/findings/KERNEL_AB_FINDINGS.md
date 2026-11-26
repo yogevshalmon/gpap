@@ -1,13 +1,18 @@
-# WAVE vs SCALAR propagate kernel — the L4 A/B (2026-08-23)
+# The WAVE kernel: its A/B against scalar, and its memory ordering
 
-> **Reader:** contributors and researchers — the evidence behind the rule that picks the WAVE or the scalar kernel. A dated research log, not a user guide.
+> **Reader:** contributors and researchers — the evidence behind the rule that picks the WAVE or the scalar kernel, and behind the WAVE kernel's relaxed atomics. A dated research log, not a user guide.
 >
-> **Status:** the RULE is current, the NUMBERS are superseded — re-measure before quoting one.
-> The shuffle schedule of 2026-08-27 ([WAVE_SHUFFLE_FINDINGS.md](WAVE_SHUFFLE_FINDINGS.md))
-> moved the crossover down; the bins' ORDER stands, the threshold and the ratios do not.
-> **Measured:** 2026-08-23, NVIDIA L4 (Colab), torch 2.11/cu12.8 — on the pre-shuffle,
-> pre-binary-edge engine.
-> **Rule lives in:** `cpp/src/calibrate.cpp::gpap_dispatch_wave` (WAVE iff M ≥ 2048).
+> **Status:** current. A WAVE row's atomics are relaxed, ordered by barriers ("Relaxed atomics",
+> 2026-11-26). The dispatch rule `M ≥ 2048` stands: re-measured on that engine, no clause-count
+> threshold below it speeds up the small formulas without slowing some ("The threshold on the
+> relaxed engine", 2026-11-26). The L4 tables of 2026-08-23 predate the shuffle schedule
+> ([WAVE_SHUFFLE_FINDINGS.md](WAVE_SHUFFLE_FINDINGS.md)) and both changes: quote no number from
+> them.
+> **Measured:** 2026-08-23, NVIDIA L4 (Colab), the pre-shuffle, pre-binary-edge engine;
+> 2026-11-26, Athena A100-SXM4-40GB and Colab T4, main `15f81f6` against the relaxed kernels.
+> **Rule lives in:** `cpp/src/calibrate.cpp::gpap_dispatch_wave` (WAVE iff M ≥ 2048) and
+> `cpp/kernels/bcp.py` ("Memory ordering under WAVE"), gated by
+> `tests/engine/test_kernel_table.py`.
 
 **Question**: how much faster is the warp-per-row WAVE propagate than the serial-trail SCALAR
 kernel as a function of instance size — the number the paper states beside the dispatch rule.
@@ -76,3 +81,92 @@ a second calibration constant.
 - Mining is off here, so absolute rates are not the headline rates; only the ratio is the result.
 - Absolute rates on low-success instances are draw-noisy (±40%), hence the model floor.
 - Only the L4 numbers are tabulated; the 4080 bins agree.
+
+## Relaxed atomics (2026-11-26, issue 51)
+
+**What changed.** Triton's default atomic is `acq_rel` at GPU scope: a fence before
+(`MEMBAR.ALL.GPU`, `ERRBAR`) and an L1 flush after (`CCTL.IVALL`), around every clause update and
+every bitmap push. A row belongs to one program, so its atomics need only atomicity and their
+return values: they are `sem="relaxed"` now. The fences also ordered the threads of a row
+against each other (thread 0's seeds and decisions, the lanes' pushes onto the same bitmap
+words, the trail slots the lanes write and read), so `_wave_propagate` holds two barriers
+instead: one before every wave and one after the last. The queue's job counter, the one atomic
+rows share, keeps its fence. The scalar kernels have no atomics and are unchanged.
+
+**The machine code** (cuobjdump of every cubin, sm_80). The 10 scalar kernels are the same
+instructions as main's. Every WAVE kernel lost its `MEMBAR` and `CCTL.IVALL` and gained two
+`BAR.SYNC`; the queue keeps its counter's two. The October pilot (branch `xor_count_kernel`,
+`1ba39ee`, `ABLATION_FINDINGS.md` §4 there) measured 1.42× at the kernel level with the decision
+scan's bitmap reads moved to L2 and no barriers. Here the barriers took that place: after one,
+every thread of the program sees every write made before it, atomics included.
+
+**Same answers.** Data and drivers: `$GPAP_RESULTS/relaxed_20261126/`.
+
+| check | A100 | T4 |
+|---|---|---|
+| suites on the branch | CUDA 833, host 616, experiments 210, NVIDIA OpenCL 687 passed | CUDA 792, host 575, experiments 209 passed |
+| the identity tests (propagation, queue, CLEAN, core) | 5 more runs, all passed | 5 more runs, all passed |
+| stress: WAVE against scalar on 6 random families and 8 sampling CNFs, both packed splits: apply, CLEAN, trajectories (b1, b8, soft), queued checks, probe widths 1 and 2 | 15 rounds, 3,645 checks, 0 differ | 4 rounds, 972 checks, 0 differ |
+| main against the branch, 68 cells, WAVE forced, batch 4,096 for 6 chunks, every model hashed and re-checked | 272 pairs (b8, b1, s1, soft) identical | 136 pairs (b8, b1) identical |
+| probe sweeps, flags-only checks and `gpap mine`, 26 SAT Competition 2024 formulas and 10 cells | identical conflicts and mined clauses | — |
+
+55 of the A100 pairs and 27 of the T4's are hard cells where 6 chunks find no model in either
+build; their success rates and counts agree too.
+
+**Faster.** The sampler at its default batch, WAVE forced, one configuration pinned, 8 s timed,
+main and the branch alternated (A100: 3 runs each; T4: 2), ratio of medians, branch over main:
+
+| | A100 b1 | A100 b8 | T4 b1 | T4 b8 |
+|---|---:|---:|---:|---:|
+| all cells | **1.52×** (65) | **1.42×** (62) | **1.24×** (22) | **1.17×** (20) |
+| range | 0.99–2.01 | 0.98–2.17 | 1.00–1.39 | 0.99–1.36 |
+| M < 2k (engine's clauses) | 1.51× | 1.37× | 1.32× | 1.27× |
+| 2k–20k | 1.61× | 1.52× | 1.23× | 1.18× |
+| 20k–100k | 1.34× | 1.27× | 1.13× | 0.99× |
+| > 100k | 1.00× | 1.00× | 1.00× | 1.00× |
+
+No cell is below 0.97. As the pilot found, the formulas whose occurrence lists fit in L1 gain
+most, and the memory-bound ones (300k clauses after preprocessing) tie. The A100 gains more
+than the T4.
+
+**The queue** (A100 alone on its node, 16 formulas from 0.3M to 4.4M clauses, 1,048,576 tuples
+or 262,144 cubes a call, median of 6 calls): probe widths 1 / 2 / 3 at 1.11 / 1.11 / 1.14× main,
+flags-only checks of 8 / 32 literals at 1.07 / 1.09×, 1.10× overall; the calls under 0.1 s vary
+by more than the effect. A build without the two barriers ran at 1.10× as well: they cost
+nothing measurable.
+
+## The threshold on the relaxed engine (2026-11-26, issue 52)
+
+`eval/profiling/kernel_ab.py` on the relaxed kernels, the 68 cells as CNFs, scalar against WAVE
+forced, validation first (identical models at a pinned batch on every cell, both GPUs), 8 s (A100)
+or 6 s (T4) timed, 2 runs each. WAVE over scalar on the cells below the threshold (M here is the
+CNF's clause count; the rule reads the engine's, after preprocessing, and picks scalar on all of
+these):
+
+| cell | M | T4 b1 | A100 b1 | T4 b8 | A100 b8 |
+|---|---:|---:|---:|---:|---:|
+| epfl ctrl | 549 | 1.59 | 1.36 | 1.94 | 1.54 |
+| c432 | 748 | **0.72** | **0.89** | 1.85 | 1.69 |
+| epfl int2float | 788 | 1.71 | 1.76 | 2.08 | 1.66 |
+| epfl router | 802 | **0.58** | **0.66** | 1.36 | 1.46 |
+| tableBasedAddition | 961 | 0.98 | **0.91** | **0.76** | 1.00 |
+| polynomial | 1,027 | 1.67 | 1.65 | 2.41 | 2.22 |
+| epfl dec | 1,169 | 0.97 | **0.64** | 0.99 | 1.00 |
+| c880 | 1,410 | **0.88** | 1.11 | 2.13 | 2.21 |
+| registerlesSwap | 1,493 | 1.36 | 1.41 | 2.00 | 1.76 |
+
+At `b8` WAVE wins on 8 of the 9 on both cards. At `b1`, the configuration with one decision a
+round and so the thinnest wavefront, it loses on 4 to 5 of them, by up to 0.58×. No feature
+read off the formula separates the losers: router and int2float have 2.9 and 3.4 occurrences per
+literal and 64% and 66% binary clauses, and run at 0.6× and 1.7×. Above the threshold the rule
+already picks WAVE where `b1` loses (epfl adder 0.58–0.64×, priority 0.83–0.86×), as it did
+before the change. So any clause-count threshold below 2048 slows some cells: the rule stays,
+and issue 52 stays open for a predictor that separates them. One that would capture the `b8`
+gain reads the decisions per round as well as M (WAVE for a trajectory of 8 decisions at any M);
+the dispatch rule does not do that today (CONTRIBUTING.md, "Kernel dispatch is decided once"),
+and tableBasedAddition would still lose at `b8` on the T4.
+
+Chunked checks that read assignments (the other caller of the rule, `check_sets` with
+`assignments=True`, CUDA and NVIDIA OpenCL, 8,192 sets of 4 and 16 literals on 55 cells) agree
+exactly between the kernels; at 2 to 20 ms a call their timing is noise and decides nothing.
+
