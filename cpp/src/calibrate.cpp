@@ -23,7 +23,8 @@ constexpr int32_t kBatchRowsPerWarp = 64;
  * default budget). */
 constexpr int32_t kBatchCapUnknownWarps = 262144;
 
-/* Clause count at or above which the warp-wide WAVE propagate beats the scalar one; measured,
+/* Clause count from which the warp-wide WAVE propagate runs instead of the scalar one. WAVE
+ * also wins below it on many formulas, but no lower count avoids slowing some; measured,
  * docs/findings/KERNEL_AB_FINDINGS.md. See gpap_dispatch_wave for why the variable is M. */
 constexpr int32_t kWaveMinClauses = 2048;
 

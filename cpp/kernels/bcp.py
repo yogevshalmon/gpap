@@ -32,14 +32,17 @@ Memory ordering under WAVE (the scalar kernels have no atomics and are not touch
     now. Triton runs scalar code in every thread but stores a scalar from thread 0 alone, while
     the lanes each push their own literals: thread 0's seeds and decisions, the lanes' atomics
     and the lanes' trail slots all meet on the same words. `_wave_propagate` holds the
-    barriers, so its callers need none: one before every wave (seeds and decisions before the
-    pushes onto their words: a push that missed a decision's bit would miss a contradiction;
-    trail slots before the lanes read them) and one after the last wave (the atomics before
-    whatever reads or rewrites their words next: a decision scan, the soft risk, a restore).
-    After a barrier every thread of the program sees every write made before it, atomics
-    included; one warp per program makes it cheap.
-  * The queue's job counter is the one atomic rows share. It keeps acq_rel: it runs once per
-    job, and its fence also lands a job's restores before the row takes the next one.
+    barriers: one before every wave (seeds and decisions before the pushes onto their words: a
+    push that missed a decision's bit would miss a contradiction; trail slots before the lanes
+    read them) and one after the last wave (the atomics before whatever reads or rewrites their
+    words next: a decision scan, the soft risk, a restore). After a barrier every thread of the
+    program sees every write made before it, atomics included; one warp per program makes it
+    cheap.
+  * Between barriers, one thread loads a word another thread stored only inside one scalar
+    phase (a seed after an earlier seed, a decision scan's next word): one warp's accesses to
+    one address, which stay in program order. The scalar kernels rely on the same throughout.
+  * The queue's job counter is the one atomic rows share. It keeps acq_rel, which costs nothing
+    once per job; the barrier after a job's restores is what orders them before the next job.
 Remove a barrier and the tests still pass on most runs, while a lost bit gives a wrong answer.
 So a change here gets the identity tests run many times over, on more than one GPU.
 
