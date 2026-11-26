@@ -67,6 +67,11 @@ mirrored by the C++ tiers in [`cpp/include/gpap/gpap.hpp`](../cpp/include/gpap/g
 2. **Fused trajectory sampling** — `run_trajectory(...)`: the whole randomized
    decide+propagate loop in one launch per chunk.
 
+The formula an engine runs on can grow in place: `LiteralProbe.add_clauses(clauses)` (and the
+private `_core.Engine.add_clauses`) adds DIMACS clauses, and the probe then answers as one built
+on all of them would, every `assume`d unit still assumed. It costs one upload of the grown
+formula per call, so pass clauses in batches ([ENGINE.md](ENGINE.md) §3).
+
 Everything else is readout. Hot paths use the selection API (`make_pair_mask` +
 `select_complete` + `var_bits` / `check_sound` — counts and small matrices cross the bus, never
 row state); the tensor-shaped accessors (`assignment`, `conflict`, `active`) are copies for

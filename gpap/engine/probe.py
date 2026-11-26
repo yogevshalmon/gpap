@@ -113,6 +113,13 @@ class LiteralProbe:
         the device sizes as if this one held none; the next sweep takes them again."""
         self._engine.trim()
 
+    def add_clauses(self, clauses) -> None:
+        """Strengthen the probed formula with entailed DIMACS clauses in place of building a new
+        probe: later sweeps see what a probe built on the formula plus these would, every
+        `assume`d unit still assumed (Engine.add_clauses). The probe's counters run on."""
+        self._engine.add_clauses(clauses)
+        self._refresh()
+
     def _refresh(self) -> None:
         self.unsat = bool(self._engine.flush_conflict)
         self._free = self._engine.free_literals()

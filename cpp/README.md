@@ -152,6 +152,12 @@ more sets than the queue has rows: a few rows, each taking set after set
 ([`docs/ENGINE.md`](../docs/ENGINE.md) §6b). The second reads each set's row afterwards, so it
 runs one row per set. Probing (`gpap::Prober`) runs on the queue too.
 
+`prober.add_clauses(found)` (over `engine.add_clauses`, C `gpap_engine_add_clauses`) adds clauses
+a sweep proved to the formula in place, instead of building a new engine: later sweeps see what a
+Prober built on the grown formula would, every assumed unit still assumed. One upload of the
+grown formula per call, so add clauses in batches ([`docs/ENGINE.md`](../docs/ENGINE.md) §3);
+[`examples/probe.cpp`](examples/probe.cpp) does it when given `add`.
+
 ## Getting answers out: the selection API
 
 `gpap::Sampler` does all of this for you; read it if you drive `gpap::Engine`. A chunk ends with K
@@ -202,7 +208,8 @@ helper kernels in [kernels/helpers.py](kernels/helpers.py).
 
 `include/gpap/gpap.h` is the C ABI, the stable boundary and all a C consumer needs;
 `include/gpap/gpap.hpp` is tier 1 over tier 2. Each rule has one home in `src/`: `formula.cpp`
-(DIMACS, occurrence CSR, packed word), `engine.cpp` (state, the two entry points), `sample.cpp`
+(DIMACS, occurrence CSR, packed word), `formula_state.cpp` (the formula on the device, and
+how an add grows it), `engine.cpp` (state, the two entry points), `sample.cpp`
 (the sampling loop), `check.cpp` (the checker's chunk loop), `probe.cpp` (paged k-subset probing),
 `calibrate.cpp` (memory model, K sizing, wave/scalar dispatch), `readout.cpp` (selections),
 `gpu_api.hpp` (the GPU socket), `gpu_cuda.cpp` (cubins and launches), `gpu_opencl.cpp` (the

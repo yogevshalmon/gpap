@@ -92,6 +92,21 @@ flowchart TD
 Construction runs the unit clauses to fixpoint once, at K=1; every row of every chunk starts
 from that state, so `reset(K)` is a broadcast of one cached row, never a per-chunk propagation.
 
+**The formula and the rows.** Inside an engine, what the formula puts on the device (the
+occurrence lists, the baseline the flush leaves, the soundness pairs) is a formula state of its
+own; the rows are the engine's; and the plug belongs to a device object that every formula
+state and engine holds, so it outlives every buffer (`cpp/src/gpap_internal.hpp`). A formula in
+use is never written, except its baseline, which `gpap_assume_units` and
+`gpap_engine_recache_flush` move for the one engine that owns it. `gpap_engine_add_clauses`
+builds the grown formula beside it, from the
+clauses the engine keeps on the host plus the new ones, extends the baseline (the new clauses'
+words read off its assignment, and what they force propagated on row 0), and swaps it in. The
+engine then answers as one built on all the clauses would, every assumed unit still assumed:
+old clauses keep their indices and the new ones follow. Its rows go, since a long clause widens
+every row, and a sampler made on it before refuses to run. An add costs one upload of the new
+formula, so it takes clauses in batches: mining adds a width's clauses to its one probe engine
+instead of building another (GitHub issue 65).
+
 **Entry point 1 — batched assumption checking.** Each row receives its own assumed literals and
 is propagated to fixpoint in one launch. `check_sets` wraps it for any number of sets (the chunk
 loop is `cpp/src/check.cpp`, shared by both faces), and the probe (`cpp/src/probe.cpp`) feeds it
@@ -316,7 +331,8 @@ the same moment in two threads can both pass the check before either allocates.
 
 What GPAP holds is counted, buffer by buffer, where it allocates (`DevBuf`, `cpp/src/memory.hpp`),
 in two kinds: the formula, which an engine builds once and keeps, and rows, which grow with a
-batch or a call. `gpap info` prints the limit in force and what a new engine's rows would be
+batch or a call. A formula's buffers are counted on a holder of their own (§3), once, whatever
+runs on it. `gpap info` prints the limit in force and what a new engine's rows would be
 sized against and the reserve; `gpap_mem_held` / `gpap_mem_peak` (Python `gpap.engine.memory()`)
 report what GPAP holds on a device, and a sampling run's stats carry `batch_bound`, `mem_limit`,
 `mem_reserve` and `mem_peak`. The count is not the driver's own context and kernel code, nor memory the caller

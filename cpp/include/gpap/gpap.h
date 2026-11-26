@@ -138,7 +138,7 @@ typedef enum {
     GPAP_BOUND_PIN = 8      /* the caller pinned the batch (a chunk, a probe batch, set_k) */
 } gpap_bound;
 gpap_bound gpap_engine_batch_bound(const gpap_engine *e);
-/* Device bytes this engine holds now, by kind: FORMULA is what it builds once and keeps (the
+/* Device bytes this engine holds now, by kind: FORMULA is what it keeps through a trim (the
  * formula, its flush cache, pair masks, counters), ROWS what grows with a batch or a call. */
 typedef enum { GPAP_MEM_ALL = 0, GPAP_MEM_FORMULA = 1, GPAP_MEM_ROWS = 2 } gpap_mem_kind;
 int64_t gpap_engine_mem_held(const gpap_engine *e, gpap_mem_kind kind);
@@ -148,6 +148,26 @@ int64_t gpap_engine_mem_held(const gpap_engine *e, gpap_mem_kind kind);
  * as if this one held no rows: a live sampler while mining runs. GPAP_ERR_ARG during a queued
  * call. A refused reset leaves an engine in the same state. */
 gpap_status gpap_engine_trim(gpap_engine *e);
+
+/* Add `n` clauses (DIMACS literals, `flat_lits` the n clauses back to back, `clause_lens` their
+ * lengths; flat_lits may be NULL when every clause is empty) to the engine's formula, in place of
+ * building a new engine: the engine then answers as a new engine on its clauses and these would,
+ * with every unit given to gpap_assume_units since still assumed. Each clause is taken as the
+ * formula's own were (a unit is a clause, a repeated literal counts once, an empty clause makes the
+ * formula unsat). Old clauses keep their indices, so their gpap_sat_rows columns, and the new ones
+ * follow; read the counts back from gpap_engine_num_clauses and gpap_engine_num_long. The rows go
+ * (a long clause widens every row): afterwards K is 1, as after create. A sampler created on the
+ * engine before the add refuses to run. It costs one upload of the new formula per call, however
+ * many clauses it adds, so add clauses in batches, not one call per launch. n == 0 does nothing.
+ * Refused with nothing changed: GPAP_ERR_ARG for a bad literal or length, or during a queued call;
+ * GPAP_ERR_ENVELOPE for a clause longer than the engine's packed split holds. Failed later
+ * (GPAP_ERR_MEMORY when the new formula does not fit beside the old one, under a limit or, where
+ * free memory is measured, outside the memory reserve; or a device error): the engine keeps its old
+ * formula, and its rows may be gone, as after gpap_engine_trim. A sampler made after an add takes
+ * the engine's kernel as it finds it: where an earlier sampler pinned one for the old formula, call
+ * gpap_engine_set_mode(e, GPAP_MODE_AUTO) first. */
+gpap_status gpap_engine_add_clauses(gpap_engine *e, const int32_t *flat_lits,
+                                    const int32_t *clause_lens, int32_t n);
 
 /* The GPU backend. The engine reaches the device through one internal interface with a plug per
  * GPU library: "cuda" (the default, the reference and the fast path) and "opencl" (the fixpoint

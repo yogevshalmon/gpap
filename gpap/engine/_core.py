@@ -238,6 +238,7 @@ def _declare(lib: ctypes.CDLL) -> None:
         ("gpap_engine_mem_held", [c_void_p, c_int], c_int64),
         ("gpap_engine_batch_bound", [c_void_p], c_int),
         ("gpap_engine_trim", [c_void_p], c_int),
+        ("gpap_engine_add_clauses", [c_void_p, _I32P, _I32P, c_int32], c_int),
         ("gpap_resident_warps", [c_int], c_int32),
         ("gpap_dispatch_wave", [c_int32, c_int32, c_int], c_int32),
         ("gpap_probe_combinations",
@@ -279,6 +280,20 @@ def check(status: int, what: str) -> None:
     detail = load().gpap_last_error().decode(errors="replace")
     cls = {3: EnvelopeError, 6: GpapMemoryError}.get(status, GpapError)
     raise cls(status, what, detail)
+
+
+def _flatten_clauses(clauses) -> "tuple[np.ndarray, np.ndarray]":
+    """(flat, lens): DIMACS clauses back to back as int32, and their lengths, the layout
+    gpap_formula_from_clauses and gpap_engine_add_clauses take."""
+    lens = np.fromiter((len(c) for c in clauses), dtype=np.int32, count=len(clauses))
+    flat = np.empty(int(lens.sum()), dtype=np.int32)
+    i = 0
+    for c in clauses:
+        n = len(c)
+        if n:
+            flat[i:i + n] = c
+            i += n
+    return flat, lens
 
 
 def _p(arr: np.ndarray, ct):
@@ -517,15 +532,7 @@ class Formula:
     @classmethod
     def from_clauses(cls, num_vars: int, clauses) -> "Formula":
         lib = load()
-        lens = np.fromiter((len(c) for c in clauses), dtype=np.int32, count=len(clauses))
-        total = int(lens.sum())
-        flat = np.empty(total, dtype=np.int32)
-        i = 0
-        for c in clauses:
-            n = len(c)
-            if n:
-                flat[i:i + n] = c
-                i += n
+        flat, lens = _flatten_clauses(clauses)
         h = c_void_p()
         check(lib.gpap_formula_from_clauses(num_vars, _p(flat, c_int32), _p(lens, c_int32),
                                             len(clauses), byref(h)), "build formula")
@@ -619,18 +626,36 @@ class Engine:
         self._K = 0
         self._masks: dict = {}
 
+    # The counts come from the ENGINE, never from `self._f`: add_clauses grows the engine's
+    # formula, and every readout sized from a count (check_sets' sat counts, sat_rows,
+    # packed_rows) must match the formula the rows run on.
     @property
     def num_vars(self) -> int:
-        return int(self._f.info.num_vars)
+        return int(load().gpap_engine_num_vars(self._h))
 
     @property
     def num_clauses(self) -> int:
-        return int(self._f.info.num_clauses)
+        return int(load().gpap_engine_num_clauses(self._h))
 
     @property
     def num_long(self) -> int:
         """Packed-word (length >= 3) clauses: the per-row state width, packed_rows' M."""
-        return int(self._f.info.num_long)
+        return int(load().gpap_engine_num_long(self._h))
+
+    def add_clauses(self, clauses) -> None:
+        """Add DIMACS clauses to this engine's formula in place of building a new engine: it then
+        answers as an engine built on its clauses plus these would, every unit assumed since
+        still assumed. Each clause counts as the formula's own do (a unit is a clause); old
+        clauses keep their indices and the new ones follow. The rows go (K is 1 after), and a
+        Sampler made on this engine before refuses to run. One upload of the new formula per
+        call, so pass clauses in batches. `self._f` stays the formula the engine was built
+        from."""
+        clauses = [list(c) for c in clauses]
+        if not clauses:
+            return
+        flat, lens = _flatten_clauses(clauses)
+        check(load().gpap_engine_add_clauses(self._h, _p(flat, c_int32), _p(lens, c_int32),
+                                             len(clauses)), "add clauses")
 
     @property
     def shift(self) -> int:

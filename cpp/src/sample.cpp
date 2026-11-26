@@ -82,6 +82,10 @@ double seconds_between(std::chrono::steady_clock::time_point a,
 /* One sampler: borrowed engine + decision phases + per-config buckets. Opaque to callers. */
 struct gpap_sampler {
     gpap_engine *e = nullptr;
+    /* The engine's formula version at create: the kernel it pins is chosen for that formula's
+     * clause count and a set_k batch for its rows, so a run refuses once
+     * gpap_engine_add_clauses has moved it (gpap_engine::formula_version). */
+    int64_t formula_version = 0;
     gpap_sampler_options opt{};          /* the current run's knobs */
     int32_t k_cap = 0;
 
@@ -169,6 +173,7 @@ extern "C" gpap_status gpap_sampler_create(gpap_engine *e, int64_t seed, int32_t
         GPAP_TRY(gpap::engine_require_trajectory(e));
         gpap_sampler *s = new gpap_sampler();
         s->e = e;
+        s->formula_version = e->formula_version;
         s->k_cap = k_cap;
         s->rng.seed((uint64_t)seed);
         s->bandit_rng.seed((uint64_t)seed ^ kBanditSeedXor);
@@ -294,6 +299,12 @@ extern "C" gpap_status gpap_sampler_run(gpap_sampler *s, int64_t n_target,
     if (!s || !configs || n_configs < 1) {
         set_error("gpap_sampler_run: %s", !s ? "sampler is NULL" : !configs
                   ? "configs is NULL" : "n_configs must be >= 1 (one entry = the pinned mode)");
+        return GPAP_ERR_ARG;
+    }
+    if (s->e->formula_version != s->formula_version) {
+        set_error("gpap_sampler_run: the engine took clauses (gpap_engine_add_clauses) after this "
+                  "sampler was created, which set itself up for the old formula: create a new "
+                  "sampler (after gpap_engine_set_mode(AUTO), if this one pinned the kernel)");
         return GPAP_ERR_ARG;
     }
     s->opt = opts ? *opts : gpap_sampler_options{};   /* {0} == NULL == the defaults */

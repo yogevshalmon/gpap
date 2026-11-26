@@ -144,9 +144,9 @@ def test_cpp_assumption_checker():
 
 # ------------------------------------------------------------------ gpap::Prober
 
-def _probe(cnf: Path, width: int):
+def _probe(cnf: Path, width: int, *extra: str):
     need_binary(PROBE_BIN)
-    r = subprocess.run([str(PROBE_BIN), str(cnf), str(width)],
+    r = subprocess.run([str(PROBE_BIN), str(cnf), str(width), *extra],
                        capture_output=True, text=True, timeout=300)
     assert r.returncode == 0, f"gpap_probe failed:\n{r.stdout}\n{r.stderr}"
     return r.stdout
@@ -173,6 +173,24 @@ def test_probe_finds_the_same_failed_literals_as_python(tmp_path):
     # nothing here.
     assert cpp_units == py_units == {-1, 3, -4}, (cpp_units, py_units)
     assert "exhaustive" in out, "a complete width-1 sweep must report itself as a proof"
+
+
+def test_the_cpp_prober_adds_what_it_found(tmp_path):
+    """Prober::add_clauses (Engine::add_clauses over gpap_engine_add_clauses) grows the engine's
+    formula in place: with `add`, the example adds the units its sweep proved, and the engine
+    then counts them as clauses and has fewer free literals."""
+    clauses = [[-1, 2], [-1, -2], [3, 4], [-4, 5], [-4, -5], [6, 7]]
+    cnf = tmp_path / "f.cnf"
+    cnf.write_text("p cnf 7 %d\n" % len(clauses)
+                   + "".join(" ".join(map(str, c)) + " 0\n" for c in clauses))
+    out = _probe(cnf, 1, "add")
+    m = re.search(r"added (\d+) clause\(s\): the engine now has (\d+) clauses, "
+                  r"(\d+) free literals", out)
+    assert m, out
+    added, total, free_after = map(int, m.groups())
+    free_before = int(re.search(r"(\d+) free literals", out).group(1))
+    assert (added, total) == (3, len(clauses) + 3), out      # the units -1, 3 and -4
+    assert free_after < free_before, out
 
 
 def test_probe_bounds_an_impossible_width_without_enumerating_it(tmp_path):

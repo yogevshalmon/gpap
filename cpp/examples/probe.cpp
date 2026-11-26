@@ -1,22 +1,24 @@
 /* gpap::Prober — BCP-probe every k-subset of a literal set.
  *
- *   build/gpap_probe formula.cnf [width]
+ *   build/gpap_probe formula.cnf [width [add]]
  *
  * Assuming a set of literals and propagating to a conflict PROVES the formula entails the
  * negation of that set — a clause. Sweeping every k-subset of a pool therefore finds every
  * entailed clause of width k that propagation alone can see: at k=1 the backbone, at k=2 the
  * binary implications, and so on. This is the primitive; deciding which pools and widths are
- * worth sweeping is an application's job (see gpap.mining on the Python side).
+ * worth sweeping is an application's job (see gpap.mining on the Python side). With `add`, the
+ * clauses found are added to the prober's formula in place, as mining does between widths.
  */
 #include <gpap/gpap.hpp>
 
 #include <cstdio>
 #include <cstdlib>
 #include <string>
+#include <vector>
 
 int main(int argc, char **argv) {
     if (argc < 2) {
-        std::fprintf(stderr, "usage: %s formula.cnf [width]\n", argv[0]);
+        std::fprintf(stderr, "usage: %s formula.cnf [width [add]]\n", argv[0]);
         return 2;
     }
     const std::int32_t width = argc > 2 ? std::atoi(argv[2]) : 1;
@@ -64,6 +66,17 @@ int main(int argc, char **argv) {
             std::printf(")\n");
         }
         if (r.size() > 10) std::printf("  ... and %lld more\n", static_cast<long long>(r.size() - 10));
+
+        // Strengthen the formula with what the sweep proved, in place: the next sweep on this
+        // Prober sees what a Prober built on the strengthened formula would, without a rebuild.
+        if (argc > 3 && std::string(argv[3]) == "add" && r.size() > 0) {
+            std::vector<std::vector<std::int32_t>> found;
+            for (std::int64_t i = 0; i < r.size(); ++i) found.push_back(r.clause(i));
+            prober.add_clauses(found);
+            std::printf("added %lld clause(s): the engine now has %d clauses, %zu free literals\n",
+                        static_cast<long long>(found.size()), prober.engine().num_clauses(),
+                        prober.free_literals().size());
+        }
     } catch (const gpap::Error &e) {
         std::fprintf(stderr, "gpap error: %s\n", e.what());
         return 1;
