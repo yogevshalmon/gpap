@@ -244,6 +244,23 @@ def test_mine_stats_record_the_probe_resets(tmp_path):
     assert d["resets_full"] > 0 and d["resets_lite"] > 0, d
 
 
+def test_the_mining_line_says_when_stage_two_failed(capsys):
+    """A device error in mining's stage 2 keeps stage 1's clauses (pipeline.py), and the console
+    says so under the mining line, whose counts are then stage 1's alone; also when stage 1
+    found nothing. No line without the error."""
+    from gpap.cli import _sample_progress
+    report = _sample_progress(None)
+    mined = {"n_units": 1, "n_binary": 0, "n_ternary": 0, "seconds": 0.5, "kept": True,
+             "gain": None, "k_before": None, "support_size": None,
+             "stage2_error": "device error"}
+    report("mined", mined)
+    report("mined", {**mined, "n_units": 0})
+    out = capsys.readouterr().out
+    assert out.count("mining stage 2 stopped after a device error: device error") == 2, out
+    report("mined", {**mined, "stage2_error": None})
+    assert "stage 2" not in capsys.readouterr().out
+
+
 @pytest.mark.gpu
 def test_the_mining_line_prints_both_factors_of_its_gain(tmp_path, capsys):
     """The keep-or-revert score is K x completion rate, so a gain of 1.00x alone cannot say which

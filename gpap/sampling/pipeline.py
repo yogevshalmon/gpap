@@ -358,49 +358,86 @@ def sample_clauses(nv, clauses, support, device, *, simplify=True, els=True, n_t
         # set is unchanged; whether the sampler gets faster is what the keep-if-it-helps gate
         # below decides. Skipped on tiny formulas unless `mine=True` (MINING_FINDINGS.md).
         if mine is True or (mine == "auto" and smp.M >= MINE_MIN_CLAUSES):
+            # For the handler below: whether `smp` is still the un-mined, warmed (so reseeded)
+            # sampler, and the step running now (its phase in `step`, its start in `_tm`), so
+            # a failed step's time is billed to its own phase, once.
+            mine_error, plain, step = None, True, None
             try:
                 # Stage 1 mines the backbone plus the affordable wide widths; stage 2 forces
                 # the wide widths only if the instance is still stuck after the units are in.
-                _tm = time.perf_counter()
+                step, _tm = "mine", time.perf_counter()
                 score_before = _mine_score(smp, w)       # what we have to beat to keep the clauses
                 k_before = smp.K
                 mine_deadline = _tm + MINE_SECONDS      # one budget, shared by both stages
                 _free_rows_for_mining(smp)
                 mi = mine_entailed(nv, clauses, device, pool=_support_literals(support),
                                    max_tuples=STAGE1_MAX_TUPLES, seconds=MINE_SECONDS)
-                phases["mine"] = time.perf_counter() - _tm
+                phases["mine"], step = time.perf_counter() - _tm, None
                 learned = list(mi.clauses)
                 stuck = w["best_success"] < mine_gate
                 if learned:
                     # Rebuild on the augmented formula and re-warm: the stuck signal and the score.
-                    _tm = time.perf_counter()
+                    plain, step, _tm = False, "rebuild", time.perf_counter()
                     smp = _new_sampler(clauses + learned)
-                    phases["rebuild"] = time.perf_counter() - _tm
-                    _tm = time.perf_counter()
+                    phases["rebuild"], step = time.perf_counter() - _tm, None
+                    step, _tm = "recheck", time.perf_counter()
                     warm = _warmup(smp)                 # post-units: the stuck signal AND the score
                     stuck = warm["best_success"] < mine_gate
-                    phases["recheck"] = time.perf_counter() - _tm
+                    phases["recheck"], step = time.perf_counter() - _tm, None
                 left = mine_deadline - time.perf_counter()
+                stage2_error = None
                 if stuck and left > 0.25:               # no floor: an exhausted budget stays spent
-                    _tm = time.perf_counter()
-                    _free_rows_for_mining(smp)
-                    mi2 = mine_entailed(nv, clauses + learned, device, pool=_support_literals(support),
-                                        max_tuples=STAGE2_MAX_TUPLES, seconds=left)
-                    phases["mine"] += time.perf_counter() - _tm
-                    if mi2.clauses:
-                        learned = learned + list(mi2.clauses)
-                        _tm = time.perf_counter()
-                        smp = _new_sampler(clauses + learned)
-                        phases["rebuild"] = (phases.get("rebuild", 0.0)
-                                             + time.perf_counter() - _tm)
-                        _tm = time.perf_counter()
-                        warm = _warmup(smp)             # re-score: stage 2 changed the formula
-                        phases["recheck"] = phases.get("recheck", 0.0) + time.perf_counter() - _tm
-                    for width, n in mi2.by_width.items():
-                        mi.by_width[width] = mi.by_width.get(width, 0) + n
-                    mi.seconds += mi2.seconds
-                    mi.resets_full += mi2.resets_full
-                    mi.resets_lite += mi2.resets_lite
+                    # Stage 2 is optional on top of stage 1, so a device error in it keeps stage
+                    # 1's clauses and their keep-or-revert test below, instead of discarding
+                    # both in the handler around them (GitHub issue 67). Each step names its phase
+                    # in `step` and restarts `_tm`, so a failed step's time goes to its own phase.
+                    learned1, replaced = learned, False
+                    step, _tm = "mine", time.perf_counter()
+                    try:
+                        _free_rows_for_mining(smp)
+                        mi2 = mine_entailed(nv, clauses + learned, device,
+                                            pool=_support_literals(support),
+                                            max_tuples=STAGE2_MAX_TUPLES, seconds=left)
+                        phases["mine"] += time.perf_counter() - _tm
+                        step = None
+                        if mi2.clauses:
+                            learned = learned + list(mi2.clauses)
+                            step, _tm = "rebuild", time.perf_counter()
+                            replaced, plain = True, False   # from here `smp` is not stage 1's
+                            smp = _new_sampler(clauses + learned)
+                            phases["rebuild"] = (phases.get("rebuild", 0.0)
+                                                 + time.perf_counter() - _tm)
+                            step, _tm = "recheck", time.perf_counter()
+                            warm = _warmup(smp)         # re-score: stage 2 changed the formula
+                            phases["recheck"] = (phases.get("recheck", 0.0)
+                                                 + time.perf_counter() - _tm)
+                            step = None
+                        for width, n in mi2.by_width.items():
+                            mi.by_width[width] = mi.by_width.get(width, 0) + n
+                        mi.seconds += mi2.seconds
+                        mi.resets_full += mi2.resets_full
+                        mi.resets_lite += mi2.resets_lite
+                    except RuntimeError as e:
+                        if step is not None:
+                            phases[step] = phases.get(step, 0.0) + time.perf_counter() - _tm
+                        step, stage2_error = None, str(e)
+                    # Recovered outside the handler, which only keeps the message: inside it, the
+                    # exception's traceback holds the failed frames, and with them a stage-2
+                    # sampler or engine, alive through the rebuild below.
+                    if stage2_error is not None:
+                        log.warning("mining stage 2 stopped after a device error, keeping stage "
+                                    "1's clauses: %s", stage2_error)
+                        learned = learned1
+                        if replaced:            # stage 2's sampler, or none: stage 1's again
+                            step, _tm = "rebuild", time.perf_counter()
+                            smp = _new_sampler(clauses + learned)
+                            phases["rebuild"] = (phases.get("rebuild", 0.0)
+                                                 + time.perf_counter() - _tm)
+                            step, _tm = "recheck", time.perf_counter()
+                            warm = _warmup(smp)
+                            phases["recheck"] = (phases.get("recheck", 0.0)
+                                                 + time.perf_counter() - _tm)
+                            step = None
                 # Keep the clauses unless they lost. `K x success` is the models-per-chunk proxy,
                 # and only a clause of width >= 3 can cost K: it adds a packed word per row, while
                 # units fold into the flush and binaries are implication edges. Without one, only
@@ -413,14 +450,15 @@ def sample_clauses(nv, clauses, support, device, *, simplify=True, els=True, n_t
                 wide = any(len(c) >= 3 for c in learned)
                 # No baseline when the un-mined warmup completed nothing: keep the clauses.
                 if wide and score_before > 0 and score_after < score_before:
-                    _tm = time.perf_counter()
+                    step, _tm = "rebuild", time.perf_counter()
                     smp = _new_sampler(clauses)
                     phases["rebuild"] = phases.get("rebuild", 0.0) + time.perf_counter() - _tm
                     # Re-warm: every other route into the timed run went through `_warmup`, and
                     # a reverted run must not pay first-touch cost inside the measurement.
-                    _tm = time.perf_counter()
+                    step, _tm = "recheck", time.perf_counter()
                     _warmup(smp)
                     phases["recheck"] = phases.get("recheck", 0.0) + time.perf_counter() - _tm
+                    plain, step = True, None
                     log.info("mining reverted: %d clauses did not pay (%.2fx projected)",
                              len(learned), score_after / score_before if score_before else 0.0)
                     learned = []
@@ -435,7 +473,9 @@ def sample_clauses(nv, clauses, support, device, *, simplify=True, els=True, n_t
                              "success_before": w["best_success"],
                              "success_after": success_after,
                              # resets of mining's probe engines (CLEAN_MODE_FINDINGS.md)
-                             "resets_full": mi.resets_full, "resets_lite": mi.resets_lite}
+                             "resets_full": mi.resets_full, "resets_lite": mi.resets_lite,
+                             # why stage 2 added nothing, when a device error stopped it
+                             "stage2_error": stage2_error}
                 # `smp` is now the sampler the timed run will use (kept or reverted), so the
                 # active support here is the FINAL one. It is not merely smaller: the rebuild
                 # re-runs simplification and ELS over the augmented formula, which fixes support
@@ -444,8 +484,17 @@ def sample_clauses(nv, clauses, support, device, *, simplify=True, els=True, n_t
                 _report("mined", {**mine_info,
                                   "support_size": _active_support(smp)})
             except RuntimeError as e:   # mining is an optimization — never let it kill the run
-                log.warning("mining skipped after a device error: %s", e)
-                if smp is None:         # a rebuild failed after it had dropped the old sampler
+                if step is not None:
+                    phases[step] = phases.get(step, 0.0) + time.perf_counter() - _tm
+                mine_error = str(e)
+            # Recovered outside the handler, as stage 2 is: inside it, the traceback holds the
+            # failed frames, and with them a half-built sampler's engine, through the rebuild.
+            # Mining reports itself skipped, so the run samples the formula it was given, from a
+            # warmed and reseeded sampler: anything else (a mined sampler, none, or one whose
+            # warm-up failed) is built again.
+            if mine_error is not None:
+                log.warning("mining skipped after a device error: %s", mine_error)
+                if not plain:
                     _tm = time.perf_counter()
                     smp = _new_sampler(clauses)
                     phases["rebuild"] = phases.get("rebuild", 0.0) + time.perf_counter() - _tm

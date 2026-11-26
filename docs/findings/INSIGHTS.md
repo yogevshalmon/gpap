@@ -139,6 +139,9 @@ again before relying on it, or before calling the direction closed.
 
 ## Sampler, mining and uniformity
 
+- **Mining keeps one probe engine (2026-11-26):** a width's clauses added to it in place mine
+  what a rebuilt engine mined (clause sets and implications, 29 CNFs, three cards) in the same
+  total time. [MINING](MINING_FINDINGS.md), "One probe engine, clauses added in place"
 - **Mining keeps units, binaries and ties (2026-11-17).** Rebuilt samplers had been sized beside
   the old one, and the one-order trial read noise as a loss: 9 of 60 instances flip to keep, the
   rest are unchanged. [MINING](MINING_FINDINGS.md), "Keep-or-revert, measured fairly"
@@ -201,6 +204,10 @@ again before relying on it, or before calling the direction closed.
 
 ## Measurement methodology (the traps that actually bit)
 
+- **Python's collector moves per-instance times (2026-11-26):** two builds that allocate
+  differently put its full passes on different instances, 0.5–3× swings that repeat within
+  one script; compare totals, or A/B with it disabled. [MINING](MINING_FINDINGS.md), "One
+  probe engine, clauses added in place"
 - **The batch is not part of the seed:** pin the batch and one config before comparing counts
   across runs; same-seed repeats measure timing noise only.
 - **A 30 s run cannot rank two builds (2026-08-18):** ↻ the bandit is a coin flip there;

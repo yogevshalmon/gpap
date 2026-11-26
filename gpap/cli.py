@@ -232,8 +232,13 @@ def _sample_progress(args):
                 print_now(_UNSAT_LINE)
         elif event == "mined":
             n = d["n_units"] + d["n_binary"] + d["n_ternary"]
+            # Stage 2 stopped by a device error: the counts are stage 1's alone (pipeline.py).
+            stage2 = (f"  mining stage 2 stopped after a device error: {d['stage2_error']}"
+                      if d.get("stage2_error") else None)
             if not n:
                 print_now(f"  mined nothing in {d['seconds']:.1f}s")
+                if stage2:
+                    print_now(stage2)
                 return
             # Whether the clauses were KEPT is the point of the line: width >= 3 finds shrink K,
             # so a mine that found plenty can still be reverted. `gain` is the projected
@@ -258,6 +263,8 @@ def _sample_progress(args):
                 verdict += f"; {act:,} of {report.said_support:,} support vars active after mining"
             print_now(f"  mined {d['n_units']} units / {d['n_binary']} binary / {d['n_ternary']} "
                   f"ternary in {d['seconds']:.1f}s ({verdict})")
+            if stage2:
+                print_now(stage2)
     report.said_unsat = False
     report.said_support = report.said_active = None
     return report

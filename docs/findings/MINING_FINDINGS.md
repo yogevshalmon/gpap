@@ -3,11 +3,12 @@
 > **Reader:** contributors and researchers — the evidence behind entailed-clause mining. A dated research log, not a user guide.
 >
 > **Status:** settled — shipped 2026-08-19/21; the keep-or-revert test revised 2026-11-17.
-> **Measured:** 2026-08-19 to 2026-08-21, 2026-11-17 ("Keep-or-revert, measured fairly") and
-> 2026-11-18 ("Rebuilding the probe engine"), RTX 4080 Laptop
-> unless a section says otherwise (one L4 validation run).
+> **Measured:** 2026-08-19 to 2026-08-21, 2026-11-17 ("Keep-or-revert, measured fairly"),
+> 2026-11-18 ("Rebuilding the probe engine") and 2026-11-25/26 ("One probe engine", also a T4
+> and an A100), RTX 4080 Laptop unless a section says otherwise (one L4 validation run).
 > **Rule lives in:** `gpap/mining.py`, `gpap/sampling/pipeline.py` (`STAGE1_MAX_TUPLES`,
-> `MINE_MIN_CLAUSES`, `MINE_SECONDS`, the keep-or-revert test), `cpp/src/probe.cpp`.
+> `MINE_MIN_CLAUSES`, `MINE_SECONDS`, the keep-or-revert test), `cpp/src/probe.cpp`,
+> `cpp/src/formula_state.cpp` (the add).
 > **Gated by:** `tests/mining/test_mining.py`, including `test_mining_is_kernel_invariant`.
 > **Record only:** the "follow-ups, deliberately not built" table.
 
@@ -167,8 +168,9 @@ unused; the `derivable` level's `_derivable_mask` moved into `gpap/mining.py`.
   widths are instance-specific (b09-c25 gets 4 ternaries worth 1.4x; s386-c25 18 binaries).
 - Widths must be mined in order on the strengthened formula: width 3 against the original formula
   found 4 ternaries instead of 7 on b03-c25. `mine_entailed` rebuilds after any width that proved
-  something; units are folded in place (`LiteralProbe.assume()`), which took one large unroll
-  from 532 s to seconds.
+  something (since 2026-11-26 it adds the clauses to its one probe engine instead: "One probe
+  engine, clauses added in place"); units are folded in place (`LiteralProbe.assume()`), which
+  took one large unroll from 532 s to seconds.
 - Candidate generation was a bottleneck (2026-08-14): pure-Python enumeration cost 2.9–3.7x the
   GPU probe it fed; vectorised it is 525x faster (60,900 pairs: 857 ms → 1.6 ms), e2e 4.07x /
   7.06x / 5.30x on s386 / b03 / b09 with identical clause sets.
@@ -276,3 +278,35 @@ old one first made mining 1.5-1.8× slower where it rebuilds (10.sk_1_46, Proces
 engine alive, the CUDA primary context is released and the next build creates it again (66 ms,
 against 0.5 ms with another engine alive). The sampling pipeline's rebuilds do not pay this,
 because torch holds the context there.
+
+> Since 2026-11-26 mining builds no second engine: "One probe engine, clauses added in place"
+> below. The context cost above still holds for any engine built while no other is alive.
+
+## One probe engine, clauses added in place (2026-11-26)
+
+GitHub issues 65 and 67. Colab T4, Athena A100-SXM4-40GB and RTX 4080 Laptop (WSL2). Data and
+scripts: `$GPAP_RESULTS/formula_rows_t4_20261125/` and `$GPAP_RESULTS/formula_rows_r2_20261125/`
+(`scripts/`, one folder per card).
+
+`mine_entailed` keeps one probe engine for every width and adds a width's clauses to it
+(`gpap_engine_add_clauses`) where it used to build the next engine on the grown formula.
+
+- **The same mining.** With `seconds=None` and the pipeline's stage-1 budgets, so that the work
+  budget alone stops each sweep, all 29 `benchmarks/sampling` CNFs mine identical clause sets
+  with identical implication counts on each of the three cards. With mining on, `gpap sample`
+  mines the same numbers of units, binaries and ternaries and makes the same keep decision on
+  all 10 CNFs tried, on each card.
+- **The same time, in total.** Best of three processes per instance, the 29 instances sum to
+  6.19 s rebuilding against 6.15 s with one engine on the A100, and 2.97 s against 3.09 s on the
+  4080. On the T4 the geometric mean of the per-instance ratios is 1.02.
+- **Per-instance swings are Python's collector, not the add.** Single instances move by 0.5–3×
+  either way, repeatably within one script, and different instances move in a different
+  script. The two paths allocate different numbers of Python objects, so the cyclic collector's
+  full passes land on different instances. With the collector disabled, one run of the 29
+  instances on the 4080 sums to 2.558 s rebuilding against 2.549 s with one engine, and every
+  instance is within 0.83–1.23× (the widest on instances under 60 ms). The collector is about
+  14% of mining's wall on main there (2.97 s, best of three, against 2.56 s in one run with it
+  off): a lead, not built.
+
+Rule: mining strengthens its one probe engine in place (`gpap/mining.py`); the add is
+`cpp/src/formula_state.cpp`.

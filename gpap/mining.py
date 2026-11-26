@@ -59,7 +59,7 @@ class MiningResult:
     #: clauses removed because propagation already derives them (`drop="derivable"` only).
     derivable: int = 0
     seconds: float = 0.0
-    #: resets of every probe engine built, as gpap_engine_reset_stats counts them (gpap.h).
+    #: resets of the probe engine (one per call), as gpap_engine_reset_stats counts them (gpap.h).
     resets_full: int = 0
     resets_lite: int = 0
 
@@ -145,6 +145,7 @@ def mine_entailed(num_vars: int, clauses: list, device, *, pool: list | None = N
     except BaseException:
         _release(device)
         raise
+    built = len(current)        # clauses of `current` the probe's engine already holds
     try:
         if on_plan is not None:
             # UPPER BOUNDS, exact only for the first width run: width 1's units narrow the
@@ -182,32 +183,29 @@ def mine_entailed(num_vars: int, clauses: list, device, *, pool: list | None = N
                     f"({w.stopped or 'incomplete'}) — clauses found are still entailed, but this "
                     f"width was NOT searched exhaustively")
             # Each width STRENGTHENS the formula the next one probes. Units are folded in place
-            # by `assume`; wider clauses need the rebuild, and skipping it costs real clauses.
+            # by `assume`; wider clauses are added to the same engine, which then probes what an
+            # engine built on `current` would (gpap_engine_add_clauses): one engine for every
+            # width, so no second engine is built beside it and no context churns. Everything
+            # `current` gained since the engine last took clauses goes in, the assumed units
+            # too, so its formula is exactly `current`, as a rebuild's was. Skipping it costs
+            # real clauses.
             if found and width > 1 and width < max(widths):
-                # Build first, then bank the old engine and swap. A failed build leaves `probe`
-                # unbanked for `finally` to bank once; and the old engine stays alive through the
-                # build, so the GPU context is not torn down and created again in between
-                # (MINING_FINDINGS.md, "Rebuilding the probe engine"). The swap leaves no second
-                # name on the new engine: `del probe` must free it. The old engine gives its
-                # rows back first and keeps its context: under a memory limit its last sweep
-                # filled the limit, and the new formula would fit beside nothing (issue 76).
-                # Without a limit nothing changes, since the old engine goes before the new one
-                # sizes a batch.
-                probe.trim()
-                rebuilt = LiteralProbe(num_vars, current, device)
-                res.implications += probe.implications
-                _bank_resets(res, probe)
-                probe, rebuilt = rebuilt, None
+                probe.add_clauses(current[built:])
+                built = len(current)
+        # Last in the try: a device error here is handled below, and nothing after it can
+        # raise, so the handler below only ever runs with the counts not yet banked.
+        _bank(res, probe)
     except RuntimeError as e:
         # Mining is an OPTIMIZATION: every clause already proven stays valid, so a mid-tier CUDA
         # failure abandons the rest rather than failing the caller's job.
+        # The message, not the exception: a handler that keeps log records would keep its
+        # traceback, and with it the probe engine, alive past `del probe` below.
         log.warning("mining stopped after a device error, keeping %d proven clause(s): %s",
-                    len(res.clauses), e)
+                    len(res.clauses), str(e))
         res.skipped[-1] = f"device error: {e}"
+        _bank(res, probe, after_error=True)
     finally:
-        if probe is not None:
-            _bank_resets(res, probe)                # a host read: banked even if the next raises
-            res.implications += probe.implications
+        # No device read here: one that raised would escape the handler above (GitHub issue 67).
         del probe
         _release(device)
 
@@ -416,11 +414,22 @@ def _mine_width(probe: LiteralProbe, width: int, pool, budget: ProbeBudget, max_
     return _WidthResult(found, r.exhausted, r.total, r.probed, 1, r.stopped)
 
 
-def _bank_resets(res: MiningResult, probe) -> None:
-    """Add a probe engine's resets to the result before the engine goes: they are its own."""
+def _bank(res: MiningResult, probe, *, after_error: bool = False) -> None:
+    """Add the probe engine's resets and implications to the result, once, before it goes. The
+    resets are a host read and the implications a device read; both are read before either is
+    added, so a read that raises banks nothing twice. After a device error the implications may
+    not be readable: then they are not known, and the resets are banked alone rather than the
+    error escaping the handler (GitHub issue 67)."""
     full, lite = probe.reset_stats()
+    try:
+        implications = probe.implications
+    except RuntimeError:
+        if not after_error:
+            raise
+        implications = 0
     res.resets_full += full
     res.resets_lite += lite
+    res.implications += implications
 
 
 def _release(device) -> None:

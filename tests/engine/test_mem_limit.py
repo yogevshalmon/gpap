@@ -922,7 +922,7 @@ def test_a_pinned_batch_reports_the_pin():
 
 def _binary_rich_formula():
     """A formula whose width-2 probe proves binary clauses: (a|b|c) and (a|b|~c) entail (a|b),
-    so mining strengthens the formula and rebuilds its probe engine before width 3."""
+    so mining strengthens the formula, adding them to its probe engine before width 3."""
     rng = random.Random(7)
     nv, clauses, near = 4000, [], list(range(1, 201))
     for _ in range(150):
@@ -936,10 +936,11 @@ def _binary_rich_formula():
 
 
 @pytest.mark.gpu
-def test_mining_rebuilds_its_probe_under_a_limit():
-    """Mining rebuilds its probe engine between widths while the old one is alive; under a
-    limit the old one's rows fill it, so it gives them back first (mining.py). The limited run
-    mines what the unlimited one does, width 3 included, and stays under the limit."""
+def test_mining_adds_to_its_probe_under_a_limit():
+    """Mining adds a width's clauses to its probe engine, which builds the grown formula
+    beside the old one; under a limit the rows of the last sweep fill it, so the add gives them
+    back first (gpap_engine_add_clauses). The limited run mines what the unlimited one does,
+    width 3 included, and stays under the limit."""
     import torch
 
     from gpap.mining import mine_entailed
@@ -953,17 +954,18 @@ def test_mining_rebuilds_its_probe_under_a_limit():
                             max_tuples={1: 0, 2: 1_000_000, 3: 40_000}, seconds=60)
         runs[limit] = (dict(res.by_width), dict(res.skipped), _core.mem_peak(0))
     (free_by, _, _), (cap_by, cap_skipped, cap_peak) = runs[None], runs["16M"]
-    assert free_by.get(2, 0) > 0, "precondition: width 2 found binaries, so mining rebuilt"
+    assert free_by.get(2, 0) > 0, "precondition: width 2 found binaries, so mining added them"
     assert cap_by == free_by and -1 not in cap_skipped, cap_skipped
     assert cap_peak <= 16 << 20
 
 
 @pytest.mark.gpu
 def test_mining_hands_back_every_byte_it_took():
-    """Mining frees its probe engines before it returns, also when the device refuses the first
-    one: GPAP then holds what it held before, with no collector run in between. A probe engine
-    kept alive past the call (a reference cycle, a traceback) would hold its rows, and under a
-    limit the next component would size against them."""
+    """Mining frees its probe engine before it returns, also when the device refuses it:
+    GPAP then holds what it held before, with no collector run in between, the formulas its
+    adds replaced included. A probe engine kept alive past the call (a reference cycle, a
+    traceback) would hold its rows, and under a limit the next component would size against
+    them."""
     import torch
 
     from gpap.mining import mine_entailed
@@ -971,7 +973,7 @@ def test_mining_hands_back_every_byte_it_took():
     before = _settled_held()
     res = mine_entailed(nv, clauses, torch.device("cuda"), pool=pool, widths=(1, 2, 3),
                         max_tuples={1: 0, 2: 1_000_000, 3: 40_000}, seconds=60)
-    assert res.by_width.get(2, 0) > 0, "precondition: width 2 found binaries, so mining rebuilt"
+    assert res.by_width.get(2, 0) > 0, "precondition: width 2 found binaries, so mining added them"
     assert _core.mem_held(0) == before
     _core.set_mem_limit(before + (64 << 10), 0)          # below the formula's own buffers
     with pytest.raises(MemoryError):
